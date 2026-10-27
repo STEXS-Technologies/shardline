@@ -26,7 +26,8 @@ impl Drop for ClientProcess {
 
 /// Run a native client with a deadline, without logging arguments or credentials.
 /// On Unix, clean up its entire process group, including recursive lazy fetches.
-/// Other platforms terminate the immediate child only.
+/// On Linux, the immediate client is also killed if its calling test thread dies.
+/// Non-Unix platforms terminate the immediate child only.
 ///
 /// Temporary output files prevent a full stdout/stderr pipe from deadlocking
 /// the deadline loop. A timeout returns `TimedOut` rather than a passing result.
@@ -66,6 +67,28 @@ fn run_client(command: &mut Command, timeout: Duration, stdin: Stdio) -> io::Res
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: getpid has no preconditions and does not modify process state.
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: the child hook calls only Linux process-control syscalls and
+        // constructs an I/O error on failure; it takes no locks or allocations
+        // on the successful path between fork and exec.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // The caller may have died between fork and installing the
+                // death signal. Do not launch an unowned client in that race.
+                if libc::getppid() != parent {
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                Ok(())
+            });
+        }
     }
     let mut process = ClientProcess {
         child: command.spawn()?,
@@ -164,5 +187,81 @@ mod tests {
             !marker.exists(),
             "timed-out client's descendant escaped cleanup"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "subprocess entry for parent death regression"]
+    fn parent_death_fixture() {
+        let marker = std::env::var_os("SHARDLINE_NATIVE_PARENT_DEATH_MARKER")
+            .expect("parent-death marker required");
+        native_client_output(
+            Command::new("sh")
+                .args([
+                    "-c",
+                    "printf '%s' \"$$\" > \"$1\"; exec sleep 30",
+                    "fixture",
+                ])
+                .arg(marker),
+            Duration::from_secs(40),
+        )
+        .expect("parent should be killed before the client completes");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn abrupt_parent_death_stops_native_client() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let marker = directory.path().join("client-pid");
+        let mut parent = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "client_process::tests::parent_death_fixture",
+                "--ignored",
+            ])
+            .env("SHARDLINE_NATIVE_PARENT_DEATH_MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let startup_deadline = Instant::now() + Duration::from_secs(5);
+        let client = loop {
+            if let Ok(contents) = std::fs::read_to_string(&marker)
+                && let Ok(pid) = contents.parse::<libc::pid_t>()
+            {
+                break pid;
+            }
+            if Instant::now() >= startup_deadline {
+                drop(parent.kill());
+                drop(parent.wait());
+                return Err(io::Error::other("native client did not start"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        parent.kill()?;
+        parent.wait()?;
+        let shutdown_deadline = Instant::now() + Duration::from_secs(2);
+        let stopped = loop {
+            let status = std::fs::read_to_string(format!("/proc/{client}/stat"));
+            let stopped = match status {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                Ok(status) => status
+                    .rsplit_once(") ")
+                    .is_some_and(|(_, fields)| fields.starts_with('Z')),
+                Err(_) => false,
+            };
+            if stopped || Instant::now() >= shutdown_deadline {
+                break stopped;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Clean up the owned client even when exercising the unfixed behavior.
+        if !stopped {
+            // SAFETY: the PID was emitted by this test's private child fixture.
+            unsafe { libc::kill(client, libc::SIGKILL) };
+            return Err(io::Error::other(
+                "native client survived abrupt test-parent termination",
+            ));
+        }
+        Ok(())
     }
 }
