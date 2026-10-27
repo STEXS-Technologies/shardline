@@ -1837,7 +1837,38 @@ Clippy, both actual 512 MiB stock-client SIGKILL recovery scenarios and both
 actual-v1.12.1 native upgrade/rollback scenarios on local and PostgreSQL/MinIO
 storage. Per-member mutation rejection and cancellation tests remain enabled.
 
-#### Current qualified runtime control
+#### Matched-build upstream comparison
+
+An October 27 control compares Shardline `82f52d53` with unmodified upstream
+xet-core `629562cd9fc37432317eb57811faf13a6935c601`. Both binaries use the
+same compiler and release settings: optimization level 3, thin LTO, one codegen
+unit, abort-on-panic, no debug information, stripped symbols and frame pointers.
+The stock hf_xet 1.7.0/Hub 2.2.0 fixture uses the same 512 MiB incompressible
+file and 256 KiB tail edit as the successful whole-upload control above.
+Order is upstream/Shardline/Shardline/upstream, with fresh client processes and
+caches, identical CPU affinity and local filesystem storage. All eight complete
+downloads passed independent SHA-256 checks; no competing compilation was
+detected. An earlier attempt detected competing compilation and its timings
+were rejected.
+
+| Measurement | Shardline | Upstream local CAS |
+| --- | ---: | ---: |
+| Initial upload | 6.35–6.48 s | 1.14–1.16 s |
+| Upload after edit | 0.72–0.75 s | 0.27–0.30 s |
+| Complete initial download, including client SHA-256 | 0.67–0.69 s | 0.86–1.03 s |
+| Initial-upload server peak RSS | 50–52 MiB | 207 MiB |
+| Initial retained file lengths | 1,087,992,784 B | 538,731,316 B |
+
+Matching build settings does not equalize persistence contracts: upstream's
+development CAS has weaker synchronization guarantees, while Shardline retains
+decoded chunk copies for released-reader compatibility. These results establish
+neither upload parity nor storage parity. The upload gap remains approximately
+5.6 times in these samples. This shared host also runs the preserved aging
+retention fixture; two observations per implementation do not establish
+production Hugging Face performance, isolated-host performance, p95/p99 latency,
+physical device savings or SSD lifetime.
+
+#### Earlier runtime control with different build profiles
 
 An October 27 control uses Shardline `9f3d47dc` and unmodified upstream
 xet-core `629562cd9fc37432317eb57811faf13a6935c601`, with stock hf_xet 1.7.0
