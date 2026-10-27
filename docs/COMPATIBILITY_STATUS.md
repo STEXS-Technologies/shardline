@@ -61,6 +61,10 @@ local roots and shared durable backends. After the original HTTP server and its
 startup workers stop, the peer serves a cold clone, accepts an incremental native
 upload and preserves historical checkout. The test confirms the original endpoint
 is unreachable. This qualifies shared-backend takeover on one host.
+Both real-Hub cases also truncate a successful Git publication reply. The stock
+client reports failure while the accepted ref remains visible; retry succeeds
+without another Xorb or shard upload. The remote case retries through the peer
+after stopping the original Hub, then verifies cold-cloned and historical bytes.
 
 ### Tier Definitions
 

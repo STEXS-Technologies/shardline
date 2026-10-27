@@ -1,6 +1,7 @@
 //! Independently rooted Hub nodes sharing only the configured durable backends.
 use super::*;
-use std::sync::atomic::AtomicUsize;
+use axum::response::IntoResponse;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 pub(super) const SIGNING_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
 
@@ -10,6 +11,8 @@ pub(super) struct Counts {
     pub(super) shards: Arc<AtomicUsize>,
     pub(super) basic: Arc<AtomicUsize>,
     pub(super) downloads: Arc<AtomicUsize>,
+    pub(super) lose_git_reply: Arc<AtomicBool>,
+    pub(super) dropped_git_replies: Arc<AtomicUsize>,
 }
 
 struct Server(tokio::task::JoinHandle<Result<(), std::io::Error>>);
@@ -76,6 +79,8 @@ impl HubNode {
                 let counts = counts.clone();
                 async move {
                     let path = request.uri().path();
+                    let publication =
+                        request.method() == Method::POST && path.ends_with("/git-receive-pack");
                     if request.method() == Method::POST && path.starts_with("/v1/xorbs/") {
                         counts.xorbs.fetch_add(1, Ordering::Relaxed);
                     }
@@ -90,7 +95,32 @@ impl HubNode {
                     if request.method() == Method::GET && path.starts_with("/lfs/objects/") {
                         counts.downloads.fetch_add(1, Ordering::Relaxed);
                     }
-                    next.run(request).await
+                    let mut response = next.run(request).await;
+                    if publication
+                        && response.status().is_success()
+                        && counts.lose_git_reply.swap(false, Ordering::SeqCst)
+                    {
+                        // Read only the bounded Git status, after the real
+                        // receive-pack handler has finished durable publication.
+                        let body = std::mem::replace(response.body_mut(), Body::empty());
+                        let Ok(bytes) = axum::body::to_bytes(body, 65536).await else {
+                            return StatusCode::BAD_GATEWAY.into_response();
+                        };
+                        let accepted = b"ok refs/heads/main\n";
+                        assert!(
+                            bytes.windows(accepted.len()).any(|part| part == accepted),
+                            "fault injection requires a successful main publication report"
+                        );
+                        counts.dropped_git_replies.fetch_add(1, Ordering::SeqCst);
+                        response.headers_mut().remove(CONTENT_LENGTH);
+                        *response.body_mut() = Body::from_stream(futures_util::stream::iter([
+                            Ok(Bytes::from_static(b"000")),
+                            Err(std::io::Error::other(
+                                "injected lost native Git publication reply",
+                            )),
+                        ]));
+                    }
+                    response
                 }
             },
         ));

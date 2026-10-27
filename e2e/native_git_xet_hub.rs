@@ -5,6 +5,7 @@ use shardline_server_core::{AuthProvider, LocalHmacProvider};
 use std::sync::atomic::Ordering;
 
 mod fixture;
+mod lost_reply;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stock_git_xet_push_and_cold_clone_use_the_real_hub_control_plane() -> Result<(), TestError>
@@ -64,6 +65,8 @@ async fn exercise(
         shards,
         basic,
         downloads,
+        lose_git_reply,
+        dropped_git_replies,
     } = counts;
     // git-xet obtains its Hub bearer token through Git's credential helper;
     // Git's http.extraHeader alone is not inherited by that token exchange.
@@ -127,11 +130,12 @@ async fn exercise(
         ["checkout", "-B", "main", "FETCH_HEAD"],
     )?;
     let expected = seeded_bytes(9 * 1024 * 1024, 67);
-    write_commit_and_push_asset(
+    lost_reply::publish_without_reply(
         writer.path(),
         writer_home.path(),
         &expected,
-        "native Hub Xet upload",
+        &lose_git_reply,
+        &dropped_git_replies,
     )?;
     assert!(
         xorbs.load(Ordering::Relaxed) > 0,
@@ -190,6 +194,7 @@ async fn exercise(
             ["config", "lfs.url", &format!("{peer_remote}/info/lfs")],
         )?;
     }
+    lost_reply::retry_committed(writer.path(), writer_home.path(), &xorbs, &shards)?;
     let downloads_before = downloads.load(Ordering::Relaxed);
     create_dir_all(reader_home.path().join(".config"))?;
     let mut install = Command::new("git-xet");
