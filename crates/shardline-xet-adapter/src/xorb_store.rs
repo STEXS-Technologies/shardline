@@ -36,10 +36,14 @@ mod encoding;
 mod file_preparation;
 mod member_read;
 mod normalization;
+mod owned_preparation;
 pub use member_read::read_verified_xorb_chunk;
 pub use normalization::{
     normalize_owned_uploaded_xorb_file, normalize_owned_uploaded_xorb_file_with_checkpoint,
     normalize_uploaded_xorb_file,
+};
+pub use owned_preparation::{
+    PreparedXorbFile, prepare_owned_xorb_file_with_checkpoint, store_prepared_xorb_file,
 };
 
 #[derive(Debug)]
@@ -333,6 +337,15 @@ async fn store_xorb_file_with_resources<R: Send + 'static>(
         ))
     })
     .await?;
+    store_prepared_file_with_resources(object_store, expected_hash, prepared, resources).await
+}
+
+async fn store_prepared_file_with_resources<R: Send + 'static>(
+    object_store: &ServerObjectStore,
+    expected_hash: &str,
+    prepared: file_preparation::PreparedFile,
+    resources: R,
+) -> Result<StoredXorbUpload, XetAdapterError> {
     let file_preparation::PreparedFile {
         normalized,
         mut file,

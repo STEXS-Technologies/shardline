@@ -1776,6 +1776,59 @@ in the workload rather than hidden by full-download throughput.
 
 ### Upstream local CAS reference comparison
 
+#### Owned validation across upload phases
+
+A subsequent candidate based on `04ddedff` carries an opaque, owned validation
+result from native upload identity preparation into storage. It retains staged
+file ownership, cancellation/admission, footerless normalization, member hash
+checks during rereads and final serialized-object verification before immutable
+publication. Existing storage formats, decoded chunk copies and synchronization
+remain unchanged. The existing public upload entry points remain available.
+
+Using the same optimized build profile, 512 MiB incompressible corpus, 256 KiB
+tail edit, stock hf_xet 1.7.0 and CPU affinity as the comparison below, the order
+was previous/candidate/candidate/previous. All eight downloads passed independent
+SHA-256 verification. No local build or qualification test overlapped the timed
+comparison; this remains a shared-host measurement.
+
+| Measurement | Previous staged-validation build | Owned-validation candidate |
+| --- | ---: | ---: |
+| Initial-upload process read characters | 3.783 GB | 3.246 GB |
+| Initial upload | 6.25–7.58 s | 6.30–6.55 s |
+| Initial-upload server peak RSS | 50–51 MiB | 48–51 MiB |
+| Initial retained file lengths | 1,087,903,184 B | 1,087,903,184 B |
+
+The approximately 537 MB (14.2%) reduction is in logical process reads, including
+file and socket reads, not physical device reads. Upload timings overlap and
+do not establish a throughput speedup. Process-accounted writes varied in both
+directions; these runs establish neither lower disk writes nor increased SSD
+lifetime. Backend API request savings and reduced retained storage are not
+claimed for this change.
+
+A separate upstream/candidate/candidate/upstream sequence used the same corpus
+and unmodified upstream xet-core `629562cd9fc37432317eb57811faf13a6935c601`:
+
+| Measurement | Owned-validation candidate | Upstream local CAS |
+| --- | ---: | ---: |
+| Initial upload | 6.80–6.87 s | 1.15–1.21 s |
+| Upload after edit | 0.70–0.71 s | 0.28–0.33 s |
+| Complete download, including client SHA-256 | 0.64–0.81 s | 0.94–1.17 s |
+| Initial-upload server peak RSS | 48–49 MiB | 221–235 MiB |
+| Initial retained file lengths | 1,087,903,184 B | 538,725,364 B |
+
+All eight downloads in this second sequence also verified. Upstream's local
+development server has weaker synchronization guarantees and is not Hugging
+Face's production service. This is not a production parity, cost or tail-latency
+result. Shardline still has substantial upload and duplicate-storage gaps.
+
+Qualification passed 392 adapter tests, 24 doctests, seven server cancellation
+and identity tests, seven configured PostgreSQL/local retry cases, strict
+server/adapter Clippy, both 512 MiB stock-client process-cut scenarios and two
+actual-v1.12.1 native upgrade/rollback scenarios. New mutation tests reject both
+changed member payloads and changed footers after preparation, and explicitly
+cover footerless persistence and abandonment cleanup. The full release and
+supported-client matrices remain separate requirements.
+
 #### Canonical staged-validation comparison
 
 On October 27, an optimized candidate based on `ee44af54` removed the second

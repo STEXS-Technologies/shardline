@@ -75,6 +75,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   preparation and the storage digest, avoiding repeated validation and a
   separate checksum scan while retaining footerless normalization, cancellation
   and final immutable-write verification.
+- Carry owned native Xet file validation from upload identity preparation into
+  persistence, reducing repeated reads while retaining member verification,
+  immutable publication checks and existing storage formats.
 - Reuse related native Xet containers in bounded, repository-scoped dedup replies,
   reducing retransmission and backend work for partially overlapping versions
   while preserving member authorization and remote-delete coordination.

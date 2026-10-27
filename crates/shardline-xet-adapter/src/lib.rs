@@ -109,8 +109,9 @@ pub use xorb::{
     validate_serialized_xorb_footer, validate_serialized_xorb_with_data,
 };
 pub use xorb_store::{
-    canonical_uploaded_xorb_file_length, canonical_uploaded_xorb_length, normalize_serialized_xorb,
-    store_owned_xorb_file, store_uploaded_xorb, store_uploaded_xorb_file,
+    PreparedXorbFile, canonical_uploaded_xorb_file_length, canonical_uploaded_xorb_length,
+    normalize_serialized_xorb, prepare_owned_xorb_file_with_checkpoint, store_owned_xorb_file,
+    store_prepared_xorb_file, store_uploaded_xorb, store_uploaded_xorb_file,
     store_uploaded_xorb_with_metrics, store_xorb_bytes_with_resources,
     visit_stored_xorb_chunk_hashes, visit_stored_xorb_chunk_hashes_if_present,
     xorb_chunks_cache_hash_from_key_if_present, xorb_hash_from_object_key_if_present,

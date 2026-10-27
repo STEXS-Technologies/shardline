@@ -101,20 +101,18 @@ async fn successful_native_normalization_preserves_owned_staging_and_updates_int
     let (input, source) = staged(&wire);
     let (output, length) = xorb_length(&hash, input, &pool).await.unwrap();
     assert!(source.exists(), "owned staging was unnecessarily replaced");
-    let StagedRequestBody::File {
-        file,
-        length: staged_length,
-        hash: body_hash,
-    } = output
-    else {
+    let PreparedNativeXorb::File(file) = output else {
         panic!("normalization must keep file-backed ownership");
     };
     let output_path = file.path().to_path_buf();
     assert_eq!(output_path, source);
     assert_eq!(std::fs::read(&output_path).unwrap(), canonical);
     assert_eq!(length, u64::try_from(canonical.len()).unwrap());
-    assert_eq!(staged_length, length);
-    assert_eq!(body_hash.as_bytes(), blake3::hash(&canonical).as_bytes());
+    assert_eq!(file.length(), length);
+    assert_eq!(
+        file.integrity().hash().as_bytes(),
+        blake3::hash(&canonical).as_bytes()
+    );
     drop(file);
     assert!(!output_path.exists(), "normalization leaked its output");
     assert!(pool.try_acquire().is_some());
@@ -127,13 +125,16 @@ async fn canonical_native_identity_keeps_staging_bytes_and_digest_unchanged() {
     let (_, canonical, hash) = crate::test_fixtures::footerless_xorb().unwrap();
     let (input, source) = staged(&canonical);
     let (output, length) = xorb_length(&hash, input, &pool).await.unwrap();
-    let StagedRequestBody::File { file, hash, .. } = output else {
+    let PreparedNativeXorb::File(file) = output else {
         panic!("canonical upload lost file-backed ownership");
     };
     assert_eq!(file.path(), source);
     assert_eq!(std::fs::read(file.path()).unwrap(), canonical);
     assert_eq!(length, u64::try_from(canonical.len()).unwrap());
-    assert_eq!(hash.as_bytes(), blake3::hash(&canonical).as_bytes());
+    assert_eq!(
+        file.integrity().hash().as_bytes(),
+        blake3::hash(&canonical).as_bytes()
+    );
     drop(file);
     assert!(!source.exists());
 }
@@ -149,11 +150,14 @@ async fn already_normalized_staging_repairs_the_earlier_footerless_identity() {
         *hash = shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&wire).as_bytes());
     }
     let (output, length) = xorb_length(&expected, input, &pool).await.unwrap();
-    let StagedRequestBody::File { file, hash, .. } = output else {
+    let PreparedNativeXorb::File(file) = output else {
         panic!("canonical upload lost file-backed ownership");
     };
     assert_eq!(length, u64::try_from(canonical.len()).unwrap());
-    assert_eq!(hash.as_bytes(), blake3::hash(&canonical).as_bytes());
+    assert_eq!(
+        file.integrity().hash().as_bytes(),
+        blake3::hash(&canonical).as_bytes()
+    );
     assert_eq!(std::fs::read(file.path()).unwrap(), canonical);
 }
 
