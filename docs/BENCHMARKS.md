@@ -2416,6 +2416,29 @@ checks passed, but fewer syscalls did not demonstrate faster ingestion or less
 disk writing. The prototype was removed. These shared-host observations do
 not establish a regression, SSD lifetime savings or native Xet parity.
 
+#### Local staged-upload duplicate read accounting
+
+An October 27 Linux thread-I/O regression measured an 8 MiB temporary-file
+upload on the same filesystem as the object store. Fresh publication read
+8,388,710 bytes. An identical retry previously read 25,165,935 bytes: candidate
+verification followed by reading both files again for comparison. Verifying
+the existing object against the expected BLAKE3 digest and length instead
+reduced the retry to 16,777,327 bytes, approximately 33% fewer process-accounted
+read bytes. Fresh publication remains one complete read. Both paths retain
+anchored publication and durability checks.
+
+Reproduce on Linux:
+
+```bash
+cargo test --locked -p shardline-storage --lib \
+  local_temporary_upload_reads_each_candidate_and_existing_object_once -- --nocapture
+```
+
+These `/proc/thread-self/io` counters include cached reads and small
+measurement overhead. They do not measure physical device reads, writes,
+NAND wear, native-client throughput or production latency. Hashing the existing
+object replaces byte comparison; no end-to-end speedup is established here.
+
 #### Intermediate October 27 upload comparison
 
 The checksummed optimized `4af923c9` executable was compared with the preceding

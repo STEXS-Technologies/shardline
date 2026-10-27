@@ -73,7 +73,6 @@ pub fn link_temporary_file_if_absent(
     temporary: &Path,
     verified_source: &File,
     integrity: &ObjectIntegrity,
-    temporary_bytes: Option<&[u8]>,
 ) -> Result<PutOutcome, LocalObjectStoreError> {
     ensure_parent_directories_are_not_symlinked(root, path)?;
     match hard_link_verified_file_if_absent(root, path, temporary, verified_source, Some(integrity))
@@ -83,7 +82,7 @@ pub fn link_temporary_file_if_absent(
             Ok(PutOutcome::Inserted)
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            let outcome = existing_object_outcome(root, path, verified_source, temporary_bytes);
+            let outcome = existing_object_outcome(root, path, integrity);
             remove_temporary_file(temporary)?;
             outcome
         }
@@ -116,16 +115,11 @@ pub fn link_temporary_file_if_absent(
 pub fn existing_object_outcome(
     root: &Path,
     path: &Path,
-    verified_source: &File,
-    temporary_bytes: Option<&[u8]>,
+    integrity: &ObjectIntegrity,
 ) -> Result<PutOutcome, LocalObjectStoreError> {
     verify_existing_object_durable(root, path, |anchored_path| {
         let existing = open_existing_object_file(anchored_path)?;
-        if let Some(temporary_bytes) = temporary_bytes {
-            ensure_file_matches_bytes(existing.try_clone()?, temporary_bytes)?;
-        } else {
-            ensure_files_match(existing.try_clone()?, verified_source.try_clone()?)?;
-        }
+        verify_open_file_integrity(&existing, integrity)?;
         Ok::<File, LocalObjectStoreError>(existing)
     })?;
     Ok(PutOutcome::AlreadyExists)

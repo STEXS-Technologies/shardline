@@ -176,6 +176,42 @@ fn local_temporary_publication_rejects_source_mutation_before_link() {
     assert!(!store.path_for_key(&key).exists());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn local_temporary_upload_reads_each_candidate_and_existing_object_once() {
+    fn read_characters() -> u64 {
+        fs::read_to_string("/proc/thread-self/io")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("rchar:")?.trim().parse().ok())
+            .unwrap()
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(root.path().to_path_buf()).unwrap();
+    let key = ObjectKey::parse("xorbs/default/read-amplification.xorb").unwrap();
+    let bytes = vec![73_u8; 8 * 1024 * 1024];
+    let length = bytes.len() as u64;
+    let integrity = ObjectIntegrity::new(super::util::chunk_hash(&bytes), length);
+    for (expected, maximum_reads) in [
+        (PutOutcome::Inserted, length * 3 / 2),
+        (PutOutcome::AlreadyExists, length * 5 / 2),
+    ] {
+        let source = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+        fs::write(source.path(), &bytes).unwrap();
+        let before = read_characters();
+        let outcome = store
+            .put_temporary_file_if_absent(&key, source.path(), &integrity)
+            .unwrap();
+        let reads = read_characters() - before;
+        eprintln!("local staged upload: outcome={outcome:?}, bytes={length}, rchar={reads}");
+        assert_eq!(outcome, expected);
+        assert!(
+            reads < maximum_reads,
+            "unexpected read amplification: {reads}"
+        );
+    }
+}
+
 #[test]
 fn local_object_store_rejects_integrity_mismatch_and_out_of_bounds_range() {
     let storage = shardline_test_support::TempStorage::new();
@@ -1642,68 +1678,56 @@ fn local_list_flat_namespace_rejects_start_after_outside_prefix() {
     ));
 }
 
-// ── existing_object_outcome with temporary_bytes ──────────────────────────
+// ── existing_object_outcome verifies the expected digest and length ───────
 
 #[test]
-fn local_existing_object_outcome_with_temporary_bytes_matches() {
+fn local_existing_object_outcome_matches_expected_integrity() {
     let storage = shardline_test_support::TempStorage::new();
     let path = storage.path().join("target.bin");
     std::fs::write(&path, b"exact match").unwrap();
-    let temp = storage.path().join("temp.bin");
-    std::fs::write(&temp, b"temp data").unwrap();
     let result = super::io::existing_object_outcome(
         storage.path(),
         &path,
-        &std::fs::File::open(&temp).unwrap(),
-        Some(b"exact match"),
+        &ObjectIntegrity::new(super::util::chunk_hash(b"exact match"), 11),
     );
     assert!(result.is_ok());
 }
 
 #[test]
-fn local_existing_object_outcome_with_temporary_bytes_mismatch() {
+fn local_existing_object_outcome_rejects_wrong_digest() {
     let storage = shardline_test_support::TempStorage::new();
     let path = storage.path().join("target2.bin");
     std::fs::write(&path, b"exact match").unwrap();
-    let temp = storage.path().join("temp2.bin");
-    std::fs::write(&temp, b"temp data").unwrap();
     let result = super::io::existing_object_outcome(
         storage.path(),
         &path,
-        &std::fs::File::open(&temp).unwrap(),
-        Some(b"wrong bytes"),
+        &ObjectIntegrity::new(super::util::chunk_hash(b"wrong bytes"), 11),
     );
     assert!(result.is_err());
 }
 
 #[test]
-fn local_existing_object_outcome_without_temporary_bytes_matches() {
+fn local_existing_object_outcome_accepts_empty_object() {
     let storage = shardline_test_support::TempStorage::new();
     let path = storage.path().join("target3.bin");
-    std::fs::write(&path, b"same content").unwrap();
-    let temp = storage.path().join("temp3.bin");
-    std::fs::write(&temp, b"same content").unwrap();
+    std::fs::write(&path, b"").unwrap();
     let result = super::io::existing_object_outcome(
         storage.path(),
         &path,
-        &std::fs::File::open(&temp).unwrap(),
-        None,
+        &ObjectIntegrity::new(super::util::chunk_hash(b""), 0),
     );
     assert!(result.is_ok());
 }
 
 #[test]
-fn local_existing_object_outcome_without_temporary_bytes_mismatch() {
+fn local_existing_object_outcome_rejects_wrong_length() {
     let storage = shardline_test_support::TempStorage::new();
     let path = storage.path().join("target4.bin");
     std::fs::write(&path, b"existing data").unwrap();
-    let temp = storage.path().join("temp4.bin");
-    std::fs::write(&temp, b"different data").unwrap();
     let result = super::io::existing_object_outcome(
         storage.path(),
         &path,
-        &std::fs::File::open(&temp).unwrap(),
-        None,
+        &ObjectIntegrity::new(super::util::chunk_hash(b"different data"), 14),
     );
     assert!(result.is_err());
 }

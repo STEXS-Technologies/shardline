@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Verify duplicate local staged uploads against the existing object's digest,
+  avoiding a second read of the candidate while retaining length, content and
+  durability checks.
 - Persist native Xet payloads once as verified Xorb containers, removing redundant
   decoded chunk writes. Existing data stays readable; new native chunk reads
   require upgraded readers, so upgrade all replicas before accepting new writes.

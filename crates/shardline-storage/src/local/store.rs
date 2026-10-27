@@ -197,14 +197,7 @@ impl LocalObjectStore {
         let path = self.key_path(key);
         // The installation helper validates the same parent immediately before
         // publication; do not repeat that complete walk at this boundary.
-        io::link_temporary_file_if_absent(
-            &self.root,
-            &path,
-            temporary,
-            &verified_source,
-            integrity,
-            None,
-        )
+        io::link_temporary_file_if_absent(&self.root, &path, temporary, &verified_source, integrity)
     }
 
     /// Copies an existing object to a new key if the destination is absent.
