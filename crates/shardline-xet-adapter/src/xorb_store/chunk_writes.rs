@@ -98,17 +98,17 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
             return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
         }
         packed_end = next_end;
-        let integrity = ObjectIntegrity::new(chunk_hash(&data), length);
-        let identity = (actual_hash, integrity);
-        let shared_identity = (actual_hash, integrity.hash(), length);
+        let identity = (actual_hash, length);
         // Copies share the first pending immutable write. Every
         // source member was still decoded and authenticated above, and success
         // still waits for that write below. Retain at most 128 identities and
         // no payload bytes. Beyond that bound, consecutive copies still share
         // work; other members safely use the normal immutable-storage path.
         // This state belongs only to this upload, never to a later retry.
-        let repeated =
-            previous_member == Some(identity) || shared_members.contains(&shared_identity);
+        // Native identity was recomputed from this payload above. Reusing its
+        // pending write requires no second, generic storage checksum. Compute
+        // that checksum only for payloads actually submitted to storage.
+        let repeated = previous_member == Some(identity) || shared_members.contains(&identity);
         previous_member = Some(identity);
         if repeated {
             // Repeated members no longer fill the pending-write queue. Keep
@@ -117,8 +117,9 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
             continue;
         }
         if shared_members.len() < MAX_SHARED_MEMBERS {
-            shared_members.insert(shared_identity);
+            shared_members.insert(identity);
         }
+        let integrity = ObjectIntegrity::new(chunk_hash(&data), length);
         let key = chunk_object_key_local(&xet_hash_hex_string(descriptor.hash()))?;
         pending_bytes = pending_bytes
             .checked_add(length)
