@@ -432,6 +432,12 @@ cluster fails instead of qualifying a replacement local stack. Explicitly select
 the ignored kind smoke test also requires non-empty API and transfer endpoints;
 missing configuration fails instead of returning success without deployment checks.
 
+An October 27 Linux kind run at `61f11191` built the standard Docker image and
+verified split API/transfer traffic with deployed PostgreSQL, MinIO and Redis.
+Checks passed before and after replacing one pod per role, including persisted
+data and native Xet sparse edits. Build caches were reused; this qualifies that
+local rollout/recovery scenario, not cold-install time or multi-host scaling.
+
 The live GitHub/Gitea bridge test is explicitly ignored by default because it
 requires external credentials and test repositories. Selecting it explicitly
 requires its clients and complete configuration; missing prerequisites
