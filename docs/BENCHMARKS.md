@@ -2416,6 +2416,47 @@ checks passed, but fewer syscalls did not demonstrate faster ingestion or less
 disk writing. The prototype was removed. These shared-host observations do
 not establish a regression, SSD lifetime savings or native Xet parity.
 
+#### Intermediate October 27 upload comparison
+
+The checksummed optimized `4af923c9` executable was compared with the preceding
+`74406a92` executable and upstream xet-core
+`629562cd9fc37432317eb57811faf13a6935c601`. Release settings and frame-pointer
+flags match. Stock Hub 2.2.0/hf_xet 1.7.0 used one 512 MiB incompressible corpus
+and a 256 KiB tail edit, fresh client processes/caches, local filesystem storage
+and identical one-CPU server affinity. Order was baseline/candidate/upstream/
+upstream/candidate/baseline. All twelve complete downloads passed independent
+SHA-256 verification; the monitor observed no compiler during the campaign.
+
+| Measurement | Shardline `4af923c9` | Upstream local CAS |
+| --- | ---: | ---: |
+| Initial upload | 3.63–4.82 s (106–141 MiB/s) | 1.05–1.06 s (481–489 MiB/s) |
+| Cold-client tail-edit upload | 0.647–0.661 s | 0.268–0.276 s |
+| Initial complete download, including client SHA-256 | 0.68–1.14 s | 0.88–1.26 s |
+| Initial-upload server CPU | 1.21–1.29 s | 0.86–0.87 s |
+| Initial-upload server peak RSS | 44,100–44,352 KiB | 211,392–212,068 KiB |
+| Initial retained file lengths, including metadata/journals | 550,890,136 B | 538,716,820 B |
+
+The preceding Shardline binary took 4.49–4.77 seconds for initial uploads;
+the overlapping ranges and two observations per executable do not establish a
+speed improvement. Shardline still trails upstream upload speed in this control.
+Its initial retained total is approximately 2.26% larger. After the edit, both
+Shardline executables retain identical totals of 551,158,971 bytes, including
+537,597,299 bytes in ten Xorbs. Metadata and reusable journals remain included.
+Process-accounted initial-upload writes were 558–559 MB versus approximately
+538 MB upstream; these counters do not establish physical NAND wear.
+
+This remains a shared-host observation with weaker durability in the upstream
+development CAS, not hosted Hugging Face throughput, production scaling,
+tail latency or a causal regression against older benchmark campaigns. Only
+6.8 GiB of filesystem space remained when checked after the campaign; storage
+pressure is another uncontrolled factor. Completed payload copies were
+checksummed before reclamation, while results and binary/corpus identities
+were retained. Server
+RSS excludes client memory. The gap between server CPU and elapsed time is not
+an attribution of that time to any particular storage or synchronization call.
+The later memory-backed preparation change `e4429182` is not in this frozen
+executable; these measurements must not be presented as final-head results.
+
 #### Reusing serialized validation reads
 
 An earlier control compared runtime `84cc1a97` with a candidate that derives
