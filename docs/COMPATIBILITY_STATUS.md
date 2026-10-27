@@ -223,6 +223,12 @@ cases passed with verified downloads. This checks older native clients against
 the upgraded server; it does not imply that an unchanged older Shardline server
 can read newly written copy-free member locations, or qualify all Hub workflows.
 
+Copy-free storage also passes a 1 GiB Hub transfer through separate API and
+transfer roles on local storage with hf_xet 1.5.2, 1.6.0 and 1.7.0. These checks
+include cold native downloads, cancellation and two concurrent verified slow
+HTTP readers. Server/test peak RSS stayed below 117 MiB; client memory is
+excluded. This does not establish upload-speed parity or remote load capacity.
+
 The mixed-client recovery gate separately pairs `hf_xet` 1.7.0 with 1.5.2
 and 1.6.0. After each of the same six 512 MiB upload interruptions, both
 clients retry through independent replacement replicas sharing PostgreSQL and
