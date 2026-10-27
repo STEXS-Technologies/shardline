@@ -43,7 +43,8 @@ pub use normalization::{
     normalize_uploaded_xorb_file,
 };
 pub use owned_preparation::{
-    PreparedXorbFile, prepare_owned_xorb_file_with_checkpoint, store_prepared_xorb_file,
+    PreparedXorbFile, prepare_owned_xorb_file_with_checkpoint, store_prepared_xorb_container,
+    store_prepared_xorb_file,
 };
 
 #[derive(Debug)]
@@ -346,6 +347,28 @@ async fn store_prepared_file_with_resources<R: Send + 'static>(
     prepared: file_preparation::PreparedFile,
     resources: R,
 ) -> Result<StoredXorbUpload, XetAdapterError> {
+    persist_prepared_file(
+        object_store,
+        expected_hash,
+        prepared,
+        resources,
+        MemberPersistence::StandaloneCompatibilityCopies,
+    )
+    .await
+}
+
+enum MemberPersistence {
+    StandaloneCompatibilityCopies,
+    ContainerOnly,
+}
+
+async fn persist_prepared_file<R: Send + 'static>(
+    object_store: &ServerObjectStore,
+    expected_hash: &str,
+    prepared: file_preparation::PreparedFile,
+    resources: R,
+    members: MemberPersistence,
+) -> Result<StoredXorbUpload, XetAdapterError> {
     let file_preparation::PreparedFile {
         normalized,
         mut file,
@@ -355,13 +378,17 @@ async fn store_prepared_file_with_resources<R: Send + 'static>(
         length: canonical_length,
     } = prepared;
     let resources = std::sync::Arc::new(std::sync::Mutex::new((normalized, resources)));
-    let stored_bytes = chunk_writes::store_with_resources(
-        object_store,
-        &mut file,
-        &validated,
-        std::sync::Arc::clone(&resources),
-    )
-    .await?;
+    let stored_bytes = if matches!(members, MemberPersistence::StandaloneCompatibilityCopies) {
+        chunk_writes::store_with_resources(
+            object_store,
+            &mut file,
+            &validated,
+            std::sync::Arc::clone(&resources),
+        )
+        .await?
+    } else {
+        0
+    };
     let key = xorb_object_key(expected_hash)?;
     tracing::debug!(xorb_hash = expected_hash, "persisting verified Xorb");
     let store = object_store.clone();

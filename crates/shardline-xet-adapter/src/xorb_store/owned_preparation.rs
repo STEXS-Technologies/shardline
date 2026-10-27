@@ -7,8 +7,9 @@ mod tests;
 
 /// An owned, fully verified native container ready for immutable persistence.
 /// The validation result cannot be constructed or changed by callers. Storage
-/// still rechecks decoded members and the final serialized object; this is not
-/// a cache of the health of an already published object.
+/// rechecks the serialized digest before publication; compatibility-copy writes
+/// also recheck decoded members. This is not a cache of the health of an already
+/// published object.
 pub struct PreparedXorbFile {
     expected_hash: String,
     staging: tempfile::NamedTempFile,
@@ -80,6 +81,37 @@ pub async fn store_prepared_xorb_file<R: Send + 'static>(
         &expected_hash,
         prepared,
         (staging, resources),
+    )
+    .await
+}
+
+/// Persist only the authenticated container, without standalone decoded chunks.
+///
+/// The caller must publish verified member discovery metadata before promising
+/// independent chunk reads. Readers that require standalone chunk objects cannot
+/// read those members. This method does not change the compatibility behavior of
+/// [`store_prepared_xorb_file`]. The serialized digest is rechecked during durable
+/// immutable publication, including any mutation after preparation. Staging and
+/// admission remain owned until started synchronous writes finish.
+///
+/// # Errors
+/// Returns source mutation, immutable-storage or retained-container validation errors.
+pub async fn store_prepared_xorb_container<R: Send + 'static>(
+    objects: &ServerObjectStore,
+    file: PreparedXorbFile,
+    resources: R,
+) -> Result<StoredXorbUpload, XetAdapterError> {
+    let PreparedXorbFile {
+        expected_hash,
+        staging,
+        prepared,
+    } = file;
+    super::persist_prepared_file(
+        objects,
+        &expected_hash,
+        prepared,
+        (staging, resources),
+        super::MemberPersistence::ContainerOnly,
     )
     .await
 }

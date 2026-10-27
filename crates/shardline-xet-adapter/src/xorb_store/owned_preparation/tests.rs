@@ -6,6 +6,8 @@ use shardline_xet_core::xorb_object::{
 };
 use std::io::Write;
 
+mod container_only;
+
 fn source() -> (String, Vec<u8>, tempfile::NamedTempFile) {
     let serialized = SerializedXorbObject::from_xorb_with_compression(
         build_raw_xorb(2, ChunkSize::Fixed(65536)),
