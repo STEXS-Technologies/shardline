@@ -2372,7 +2372,8 @@ initial download, edited upload and edited download respectively. These are
 stock-client observations, separate from Shardline cgroup memory, and do not
 establish a concurrent-client memory ceiling.
 
-Consecutive identical members within one uploaded Xorb now share the first
+The first repeated-member optimization made consecutive identical members
+within one uploaded Xorb share the first
 immutable chunk write. Every member is still decoded and checked against its
 native hash, offsets, length and storage digest; success waits for persistence.
 The reuse state holds one identity pair and ends with the upload. A controlled
@@ -2394,6 +2395,25 @@ shard publication, using a frozen pre-change binary and the updated debug
 binary. It establishes request counts, not comparable CPU, memory or latency.
 Stock clients may deduplicate repetitions before constructing an Xorb; these
 figures must not be applied to all native uploads or annual storage bills.
+
+A subsequent change also shares nonconsecutive repetitions within an upload,
+retaining at most 128 identity triples (native hash, storage digest and length)
+and no decoded payloads. Every occurrence is still decoded and authenticated;
+all required writes must complete before success. Once the set fills, other
+identities use the normal storage path, with consecutive repetition sharing
+retained. The set is discarded after each upload, so retries verify storage
+again. No persisted format, chunk-copy requirement or durability rule changes.
+
+For 128 alternating A/B members of 4 KiB each, a real PostgreSQL/MinIO HTTP
+comparison reduced initial-upload requests from 133 to seven and unchanged
+retry requests from 129 to three. Each phase avoided 126 standalone-chunk GETs
+and 504 KiB of backend response bytes. Both versions retained the same three
+objects totaling 539,768 bytes. Independent backend reads verified both chunk
+copies and the complete Xorb. This compares a frozen optimized previous binary
+with the updated debug binary: it establishes request counts, not a latency,
+CPU or memory improvement. Unique-data uploads do not receive this saving.
+Tests cover the identity-set limit, mutation of a repeated occurrence, failed
+and cancelled persistence, and retry after six actual process-kill boundaries.
 
 Run the stock Hub/Xet client against disposable PostgreSQL and MinIO:
 

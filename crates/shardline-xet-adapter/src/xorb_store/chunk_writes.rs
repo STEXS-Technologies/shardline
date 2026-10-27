@@ -5,6 +5,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 
 const MAX_PENDING: usize = 4;
 const MAX_PENDING_BYTES: u64 = 256 * 1024;
+const MAX_SHARED_MEMBERS: usize = 128;
 
 #[cfg(test)]
 mod tests;
@@ -43,6 +44,7 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
     let mut packed_end = 0_u64;
     let mut stored = 0_u64;
     let mut previous_member = None;
+    let mut shared_members = std::collections::HashSet::new();
     // Both local jobs and remote requests share the decoded byte budget.
     // Local cancellation aborts queued jobs; running writes retain admission.
     let max_pending = MAX_PENDING;
@@ -98,17 +100,25 @@ pub(super) async fn store_with_resources<R: Read + Seek, A: Send + 'static>(
         packed_end = next_end;
         let integrity = ObjectIntegrity::new(chunk_hash(&data), length);
         let identity = (actual_hash, integrity);
-        // Consecutive copies share the first pending immutable write. Every
+        let shared_identity = (actual_hash, integrity.hash(), length);
+        // Copies share the first pending immutable write. Every
         // source member was still decoded and authenticated above, and success
-        // still waits for that write below. This constant-size state belongs
-        // only to this upload; subsequent uploads verify storage afresh.
-        if previous_member == Some(identity) {
+        // still waits for that write below. Retain at most 128 identities and
+        // no payload bytes. Beyond that bound, consecutive copies still share
+        // work; other members safely use the normal immutable-storage path.
+        // This state belongs only to this upload, never to a later retry.
+        let repeated =
+            previous_member == Some(identity) || shared_members.contains(&shared_identity);
+        previous_member = Some(identity);
+        if repeated {
             // Repeated members no longer fill the pending-write queue. Keep
             // cancellation and executor fairness between their decoded frames.
             tokio::task::yield_now().await;
             continue;
         }
-        previous_member = Some(identity);
+        if shared_members.len() < MAX_SHARED_MEMBERS {
+            shared_members.insert(shared_identity);
+        }
         let key = chunk_object_key_local(&xet_hash_hex_string(descriptor.hash()))?;
         pending_bytes = pending_bytes
             .checked_add(length)

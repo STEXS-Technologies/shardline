@@ -136,36 +136,69 @@ async fn ready(client: &reqwest::Client, base: &str, child: &mut Process) -> Res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_xorb_retry_survives_sigkill_at_every_durable_boundary() -> Result {
-    qualify_native_retry(1).await
+    qualify_native_retry(1, false).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeated_native_members_survive_sigkill_at_every_durable_boundary() -> Result {
-    qualify_native_retry(128).await
+    qualify_native_retry(128, false).await
 }
 
-async fn qualify_native_retry(repetitions: usize) -> Result {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interleaved_native_members_survive_sigkill_at_every_durable_boundary() -> Result {
+    qualify_native_retry(128, true).await
+}
+
+async fn qualify_native_retry(repetitions: usize, interleaved: bool) -> Result {
     use shardline_index::UploadIntentStore;
     use std::os::unix::process::ExitStatusExt;
     let content = b"verified native process interruption payload";
     let chunk = compute_data_hash(content);
+    let alternate: Vec<_> = content.iter().map(|byte| byte ^ 0x20).collect();
+    let alternate_hash = compute_data_hash(&alternate);
     let content_length = u64::try_from(content.len())?;
-    let members = vec![(chunk, content_length); repetitions];
+    let members: Vec<_> = (0..repetitions)
+        .map(|index| {
+            (
+                if interleaved && index % 2 == 1 {
+                    alternate_hash
+                } else {
+                    chunk
+                },
+                content_length,
+            )
+        })
+        .collect();
     let identity = xorb_hash(&members);
     let hash = shardline_server::test_fixtures::xet_hash_hex(&identity);
-    let boundaries = (1..=repetitions)
-        .map(|count| {
+    let boundaries = members
+        .iter()
+        .enumerate()
+        .map(|(index, (member_hash, _))| {
             Ok((
-                chunk,
+                *member_hash,
                 content_length
-                    .checked_mul(u64::try_from(count)?)
+                    .checked_mul(u64::try_from(
+                        index.checked_add(1).ok_or("chunk count overflow")?,
+                    )?)
                     .ok_or("chunk boundary overflow")?,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
+    let payload: Vec<_> = members
+        .iter()
+        .flat_map(|(member_hash, _)| {
+            if *member_hash == alternate_hash {
+                alternate.as_slice()
+            } else {
+                content.as_slice()
+            }
+        })
+        .copied()
+        .collect();
     let bytes = serialized_xorb_object_from_components(
         &identity,
-        content.repeat(repetitions),
+        payload,
         boundaries,
         CompressionScheme::None,
     )?
@@ -251,6 +284,17 @@ async fn qualify_native_retry(repetitions: usize) -> Result {
                 .join(format!("chunks/{}/{chunk_hash}", &chunk_hash[..2])),
         )?;
         assert_eq!(stored_member, content, "old-reader chunk copy at {cut}");
+        if interleaved {
+            let alternate_hex = shardline_server::test_fixtures::xet_hash_hex(&alternate_hash);
+            let stored_alternate = std::fs::read(
+                root.path()
+                    .join(format!("chunks/{}/{alternate_hex}", &alternate_hex[..2])),
+            )?;
+            assert_eq!(
+                stored_alternate, alternate,
+                "second old-reader chunk copy at {cut}"
+            );
+        }
         let index = shardline_index::LocalIndexStore::new(root.path().to_owned())?;
         let original = index
             .intent_by_id(&intent)
