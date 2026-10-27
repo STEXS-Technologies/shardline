@@ -2226,9 +2226,41 @@ remain open; the latest download timings do not support a general advantage.
 The reference's weaker local synchronization contract, shared-host limitations
 and distinction from Hugging Face production still apply.
 
+The October 27 repeat on `85e225ca` used matched release profiles for both
+servers (optimization level 3, thin LTO, one code-generation unit, aborting
+panics, stripped symbols and frame pointers). Stock hf_xet 1.7.0 used the same
+512 MiB incompressible fixture and 256 KiB tail edit, with fresh client
+processes/caches and upstream/Shardline/Shardline/upstream ordering. All eight
+downloads passed SHA-256. A first run overlapped compilation and was excluded
+from timing conclusions; the repeat observed no competing compilation or
+qualification tests.
+
+| Direct-CAS operation | Shardline `85e225ca` seconds | Upstream local reference seconds |
+| --- | ---: | ---: |
+| Initial upload | 5.94–7.79 | 1.15–1.36 |
+| Initial full download, including SHA-256 | 0.64–0.77 | 0.84–1.06 |
+| Tail-edit upload from a cold client | 0.68–0.74 | 0.27–0.29 |
+| Edited full download, including SHA-256 | 0.66–0.72 | 0.83–0.92 |
+
+Initial retained lengths were 1,087,992,784 bytes for Shardline and 538,731,316
+for upstream; after the edit, 1,088,534,296 and 538,495,004 bytes respectively.
+Initial-upload server peak RSS was 49,192–50,908 KiB versus
+211,124–211,824 KiB. These are server measurements, separate from client
+memory. Upload speed and retained-storage parity remain open. The two download
+observations do not establish general superiority, production performance,
+tail latency or scale-out efficiency. The same weaker reference persistence
+contract and shared-host qualifications apply.
+
+For those initial uploads, Linux server-process `write_bytes` increased by
+1,656,995,840–1,722,712,064 bytes for Shardline and
+537,808,896–537,890,816 bytes for upstream. This accounting includes temporary
+and filesystem writes; it is not physical NVMe NAND wear or a backend-inclusive
+cost estimate. Reducing persisted bytes alone would not establish that the
+remaining ingestion I/O amplification has been removed.
+
 #### Reusing serialized validation reads
 
-A subsequent control compared runtime `84cc1a97` with a candidate that derives
+An earlier control compared runtime `84cc1a97` with a candidate that derives
 the serialized storage digest from bytes already read by native Xorb validation.
 It hashes only a contiguous prefix, then reads any remaining suffix in order;
 footer-first probes, backward seeks and overlapping reads cannot reorder or
