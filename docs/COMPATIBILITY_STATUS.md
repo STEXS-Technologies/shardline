@@ -216,6 +216,13 @@ tests run a server subprocess built from the current library; they do not
 replace released-binary upgrade tests or qualify every split-role and
 competing-replica failure scenario.
 
+These six-cut tests were repeated after enabling copy-free native storage and
+buffered shard validation, for both local storage and PostgreSQL/MinIO, with
+`hf_xet` 1.5.2 and 1.6.0 (Hub 1.25.1 environments). All 24 interruption/retry
+cases passed with verified downloads. This checks older native clients against
+the upgraded server; it does not imply that an unchanged older Shardline server
+can read newly written copy-free member locations, or qualify all Hub workflows.
+
 The mixed-client recovery gate separately pairs `hf_xet` 1.7.0 with 1.5.2
 and 1.6.0. After each of the same six 512 MiB upload interruptions, both
 clients retry through independent replacement replicas sharing PostgreSQL and
