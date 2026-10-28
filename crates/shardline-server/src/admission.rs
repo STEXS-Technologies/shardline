@@ -7,7 +7,7 @@ use crate::ServerConfigError;
 
 mod blocking;
 mod bytes;
-pub(crate) use blocking::{blocking_work, blocking_work_with_permit};
+pub(crate) use blocking::{blocking_work, blocking_work_with_buffer, blocking_work_with_permit};
 pub(crate) use blocking::{cancellable_work_with_permit, cancellable_work_with_setup};
 pub(crate) use bytes::retain_bytes;
 

@@ -77,13 +77,16 @@ async fn public_upload_packs_before_eof_and_cancellation_releases_batch_admissio
         "a bounded container must persist before the whole upload reaches EOF"
     );
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(10), pool.acquire())
+        tokio::time::timeout(std::time::Duration::from_millis(10), pool.acquire_buffer())
             .await
             .is_err(),
         "the pending raw batch must retain admission"
     );
+    crate::admission::blocking_work(&pool, || Ok(()))
+        .await
+        .unwrap();
     drop(upload);
-    let _released = tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire())
+    let _released = tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire_buffer())
         .await
         .unwrap()
         .unwrap();

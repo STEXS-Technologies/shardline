@@ -68,7 +68,7 @@ impl PackedProtocolUpload {
         if self.batch_permit.is_none() {
             self.batch_permit = Some(
                 self.work_pool
-                    .acquire()
+                    .acquire_buffer()
                     .await
                     .map_err(|error| ServerError::Io(std::io::Error::other(error)))?,
             );
@@ -94,11 +94,12 @@ impl PackedProtocolUpload {
         let raw_bytes = u64::try_from(self.pending_bytes)?;
         self.pending_bytes = 0;
         // Keep raw ownership for fallback without cloning a second raw batch.
-        // The permit covers raw accumulation, CPU work, read-back and fallback.
+        // Buffer admission covers accumulation, read-back and fallback.
+        // Execution is acquired separately for each blocking operation.
         // A cancelled running worker retains it until its buffers are dropped.
         let permit = self.batch_permit.take().ok_or(ServerError::Overflow)?;
         let ((raw, packed), permit) =
-            crate::admission::blocking_work_with_permit(permit, move || {
+            crate::admission::blocking_work_with_buffer(&self.work_pool, permit, move || {
                 let raw = RecoverableXorbBatch::new(chunks);
                 let packed = raw.pack();
                 Ok((raw, packed))
@@ -131,16 +132,19 @@ impl PackedProtocolUpload {
                         .map_err(ServerError::from),
                     ServerObjectStore::Local(store) => {
                         let store = store.clone();
-                        let (result, retained) =
-                            crate::admission::blocking_work_with_permit(_permit, move || {
+                        let (result, retained) = crate::admission::blocking_work_with_buffer(
+                            &self.work_pool,
+                            _permit,
+                            move || {
                                 Ok(local_store::store_verified(
                                     &store,
                                     &key,
                                     &serialized,
                                     &integrity,
                                 ))
-                            })
-                            .await?;
+                            },
+                        )
+                        .await?;
                         _permit = retained;
                         result
                     }
@@ -150,10 +154,14 @@ impl PackedProtocolUpload {
                 if stored.as_ref().is_err_and(encoding::is_encoding_conflict) {
                     let store = self.store.clone();
                     let ((retained_packed, reused), retained_permit) =
-                        crate::admission::blocking_work_with_permit(_permit, move || {
-                            let reused = encoding::reuse_retained(&store, &mut packed);
-                            Ok((packed, reused))
-                        })
+                        crate::admission::blocking_work_with_buffer(
+                            &self.work_pool,
+                            _permit,
+                            move || {
+                                let reused = encoding::reuse_retained(&store, &mut packed);
+                                Ok((packed, reused))
+                            },
+                        )
                         .await?;
                     _permit = retained_permit;
                     packed = retained_packed;

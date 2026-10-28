@@ -107,6 +107,23 @@ pub(crate) async fn blocking_work_with_permit<T: Send + 'static, P: Send + 'stat
     Ok((result?, retained_permit))
 }
 
+/// Charges execution only while processing an already-admitted buffer. Both
+/// guards follow queued/running work if the requesting future is cancelled.
+pub(crate) async fn blocking_work_with_buffer<T: Send + 'static, P: Send + 'static>(
+    pool: &BoundedPool,
+    buffer: P,
+    work: impl FnOnce() -> Result<T, ServerError> + Send + 'static,
+) -> Result<(T, P), ServerError> {
+    let execution = pool
+        .acquire()
+        .await
+        .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
+    let (result, (buffer, execution)) =
+        blocking_work_with_permit((buffer, execution), work).await?;
+    drop(execution);
+    Ok((result, buffer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +134,38 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         },
     };
+
+    #[tokio::test]
+    async fn cancelled_buffer_worker_keeps_both_charges_until_completion() {
+        let pool = BoundedPool::new(NonZeroUsize::MIN);
+        let buffer = pool.acquire_buffer().await.unwrap();
+        let worker_pool = pool.clone();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(async move {
+            blocking_work_with_buffer(&worker_pool, buffer, move || {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+                Ok(())
+            })
+            .await
+        });
+        running.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(pool.try_acquire().is_none());
+        assert_eq!(pool.available_buffer_permits(), 0);
+        resume.send(()).unwrap();
+        let _execution = tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        let _buffer =
+            tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire_buffer())
+                .await
+                .unwrap()
+                .unwrap();
+    }
 
     #[tokio::test]
     async fn cancelled_running_worker_observes_signal_before_next_unit() {
