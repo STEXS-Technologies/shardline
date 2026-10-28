@@ -71,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Release native Xet verification execution capacity between incoming frames,
+  retaining bounded body memory and final publication admission so idle clients
+  do not occupy verification slots.
 - Carry immutable verified upload bodies through shared local/S3 storage,
   avoiding a duplicate native Xet payload hash while retaining existing-object
   conflict checks and durable publication.

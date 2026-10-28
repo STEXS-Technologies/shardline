@@ -9,8 +9,8 @@ pub(crate) struct NativeBody {
 }
 
 enum VerificationInput {
-    Frame(axum::body::Bytes),
-    Complete,
+    Frame(axum::body::Bytes, OwnedSemaphorePermit),
+    Complete(OwnedSemaphorePermit),
 }
 
 pub(crate) async fn read_native_body(
@@ -21,9 +21,10 @@ pub(crate) async fn read_native_body(
     Ok(NativeBody { bytes, admission })
 }
 
-/// One admitted verifier consumes a one-frame queue while the async reader
+/// One memory-admitted verifier consumes a one-frame queue while the async reader
 /// receives subsequent bytes. Only an explicit, successfully checked EOF can
 /// produce a prepared publication; disconnect/cancellation closes the queue.
+/// Execution admission travels with ready frames, never idle network waits.
 pub(crate) async fn prepare_native_xorb(
     reader: &mut RequestBodyReader,
     hash: &str,
@@ -37,17 +38,17 @@ pub(crate) async fn prepare_native_xorb(
     ServerError,
 > {
     let admission = super::buffer_admission::acquire().await?;
-    let worker = pool
-        .acquire()
-        .await
-        .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
     let maximum = reader.bounded_memory_limit()?;
     let mut state = shardline_xet_adapter::IncrementalXorbMemory::new(hash, maximum)?;
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<VerificationInput>(1);
     let receive = async move {
         while let Some(bytes) = reader.next_bytes().await? {
+            let worker = pool
+                .acquire()
+                .await
+                .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
             sender
-                .send(VerificationInput::Frame(bytes))
+                .send(VerificationInput::Frame(bytes, worker))
                 .await
                 .map_err(|_error| {
                     ServerError::Io(std::io::Error::new(
@@ -56,8 +57,12 @@ pub(crate) async fn prepare_native_xorb(
                     ))
                 })?;
         }
+        let worker = pool
+            .acquire()
+            .await
+            .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
         sender
-            .send(VerificationInput::Complete)
+            .send(VerificationInput::Complete(worker))
             .await
             .map_err(|_error| {
                 ServerError::Io(std::io::Error::new(
@@ -67,16 +72,18 @@ pub(crate) async fn prepare_native_xorb(
             })?;
         Ok::<(), ServerError>(())
     };
-    let verify = crate::admission::cancellable_work_with_permit(worker, move |cancel| {
+    // The fixed aggregate body admission bounds these persistent blocking
+    // receivers too. Do not spawn another blocking task for every network frame.
+    let verify = crate::admission::cancellable_work_with_permit(admission, move |cancel| {
         loop {
             cancel.check()?;
             match receiver.blocking_recv() {
-                Some(VerificationInput::Frame(bytes)) => {
+                Some(VerificationInput::Frame(bytes, _worker)) => {
                     state = state.push(&bytes, &|| cancel.check_io())?;
                 }
-                Some(VerificationInput::Complete) => {
+                Some(VerificationInput::Complete(worker)) => {
                     let prepared = state.finish(&|| cancel.check_io())?;
-                    return Ok((prepared, admission));
+                    return Ok((prepared, worker));
                 }
                 None => {
                     return Err(ServerError::Io(std::io::Error::new(
@@ -90,7 +97,7 @@ pub(crate) async fn prepare_native_xorb(
     tokio::pin!(receive, verify);
     // Stop receiving immediately when verification fails, even if the client
     // leaves its stream open. Reader errors cancel running verification.
-    let ((prepared, retained_admission), retained_worker) = tokio::select! {
+    let ((prepared, retained_worker), retained_admission) = tokio::select! {
         verified = &mut verify => {
             let verified = verified?;
             receive.await?;
@@ -176,8 +183,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_incremental_reader_unblocks_waiting_worker() {
+    async fn verified_eof_retains_execution_through_publication() {
         let pool = BoundedPool::new(NonZeroUsize::MIN);
+        let packed =
+            super::super::xorb_packer::pack_chunks_into_xorb(&[(vec![42; 65536], 0)]).unwrap();
+        let mut reader = RequestBodyReader::from_body(
+            axum::body::Body::from(packed.serialized.clone()),
+            NonZeroUsize::new(packed.serialized.len()).unwrap(),
+        )
+        .unwrap();
+        let (prepared, length, resources) =
+            prepare_native_xorb(&mut reader, &packed.xorb_hash_hex, &pool)
+                .await
+                .unwrap();
+        assert_eq!(prepared.length(), length);
+        assert!(pool.try_acquire().is_none(), "publication remains admitted");
+        drop(prepared);
+        assert!(pool.try_acquire().is_none());
+        drop(resources);
+        assert!(pool.try_acquire().is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_incremental_reader_releases_execution_and_cancels_cleanly() {
+        let pool = BoundedPool::new(NonZeroUsize::MIN);
+        let owned_pool = pool.clone();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let stream = futures_util::StreamExt::chain(
+            futures_util::stream::iter([Ok(Bytes::from_static(b"\0"))]),
+            futures_util::stream::once(async move {
+                started.send(()).unwrap();
+                std::future::pending().await
+            }),
+        );
+        let caller = tokio::spawn(async move {
+            let mut reader = RequestBodyReader::from_stream(stream);
+            prepare_native_xorb(&mut reader, &"00".repeat(32), &owned_pool).await
+        });
+        waiting.await.unwrap();
+        let unrelated = tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire())
+            .await
+            .expect("an idle upload must not monopolize verification execution")
+            .unwrap();
+        assert!(
+            !caller.is_finished(),
+            "the original client is still connected"
+        );
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        drop(unrelated);
+        let _released = tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_frame_waits_for_execution_does_not_consume_capacity() {
+        let pool = BoundedPool::new(NonZeroUsize::MIN);
+        let held = pool.acquire().await.unwrap();
         let owned_pool = pool.clone();
         let (started, waiting) = tokio::sync::oneshot::channel();
         let stream = futures_util::StreamExt::chain(
@@ -191,10 +255,17 @@ mod tests {
             let mut reader = RequestBodyReader::from_stream(stream);
             prepare_native_xorb(&mut reader, &"00".repeat(32), &owned_pool).await
         });
-        waiting.await.unwrap();
-        assert!(pool.try_acquire().is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("memory-admitted input may wait for execution without occupying it")
+            .unwrap();
         caller.abort();
         assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        assert!(
+            pool.try_acquire().is_none(),
+            "another operation still owns capacity"
+        );
+        drop(held);
         let _released = tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire())
             .await
             .unwrap()
