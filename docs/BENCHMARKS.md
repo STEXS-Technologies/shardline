@@ -3475,6 +3475,38 @@ was changed as a result of this investigation. The previously reported clean
 upload timings remain the throughput evidence; upstream parity is not claimed
 for servers with different verification and durability contracts.
 
+### Rejected native member-index batching
+
+Further instrumentation of the same native workload attributed the initial
+metadata callback to about 19.3 ms of descriptor/member-index staging, 15.8 ms
+of database commit, 0.49 ms of connection/transaction setup, and 0.41 ms of
+file/mapping/identity updates. Database commit includes WAL writes and sync;
+its entire duration must not be described as sync latency.
+
+Two detached Rust prototypes attempted to reduce per-member SQL execution:
+one used `json_each` over the already validated serialized descriptor; the other
+used prepared 64-member `VALUES` batches. Both retained structural validation,
+conflict handling, the complete member index and the existing transaction/sync
+behavior. PostgreSQL's existing batch implementation was unchanged.
+
+The isolated publication benchmark replayed the captured ten descriptors and
+8,195 members into fresh initialized local databases on CPUs 0–1. Each variant
+ran eight times per block, in baseline/candidate/candidate/baseline order.
+Initialization was outside the timed interval; every committed index was read
+back and compared against all expected Xorb/hash/index tuples.
+
+| Implementation | Descriptor staging median across blocks | Complete publication median across blocks |
+| --- | ---: | ---: |
+| Existing prepared single-row insertion | 19.2–19.4 ms | 35.3–35.7 ms |
+| JSON batch prototype | 30.7–30.9 ms | 47.0–47.3 ms |
+| 64-member VALUES prototype | 71.8–72.1 ms | 88.0–88.4 ms |
+
+These component measurements do not establish full-upload throughput. Both
+prototypes were slower and were discarded without changing release code.
+Reducing SQL statement count alone did not improve this SQLite workload.
+This follow-up establishes no additional safe upload-speed gain; existing
+verification and durability remain intact.
+
 ### Rejected decoded-buffer ownership experiment
 
 An experiment transferred decoded buffers directly into HTTP responses instead
