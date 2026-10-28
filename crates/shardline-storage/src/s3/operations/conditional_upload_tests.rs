@@ -551,7 +551,14 @@ fn large_copy_aborts_failed_completion_without_unconditional_retry() {
 async fn minio_large_copy_completion_is_conditional_and_signed() {
     use shardline_test_support::DockerLocalStack;
 
-    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+    // This contract uses tiny payloads to exercise conditional multipart wire
+    // behavior, not disk durability or throughput. Keep its disposable provider
+    // independent of the host volume's free-space reserve.
+    let Some(stack) = DockerLocalStack::builder()
+        .with_minio_tmpfs()
+        .start()
+        .unwrap()
+    else {
         eprintln!("skipping conditional multipart provider test: Docker is unavailable");
         return;
     };

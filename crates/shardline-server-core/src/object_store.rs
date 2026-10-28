@@ -204,6 +204,23 @@ impl ObjectStore for ServerObjectStore {
         }
     }
 
+    fn put_verified_if_absent(
+        &self,
+        key: &ObjectKey,
+        body: shardline_storage::VerifiedObjectBody,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, Self::Error> {
+        match self {
+            Self::Local(store) => Ok(ObjectStore::put_verified_if_absent(
+                store, key, body, integrity,
+            )?),
+            Self::S3(store) => Ok(ObjectStore::put_verified_if_absent(
+                store, key, body, integrity,
+            )?),
+            Self::Blackhole => Ok(PutOutcome::Inserted),
+        }
+    }
+
     fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
         match self {
             Self::Local(store) => Ok(ObjectStore::read_range(store, key, range)?),

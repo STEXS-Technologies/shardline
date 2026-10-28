@@ -3305,6 +3305,106 @@ arrives in the final shard, so hashing HTTP arrival order is not an equivalent
 file-identity check. Future registration optimizations must preserve current
 source authentication and final SHA-256, including on cold caches and replicas.
 
+### Adjacent registration terms
+
+Cached, adjacent terms from the same Xorb can share one authenticated range
+read. Individual term lengths, member hashes, logical order and final file
+SHA-256 remain verified. Gaps, overlap and backwards jumps remain separate.
+An adapter S3 fixture reduces three reads to two; an actual MinIO test verifies
+equivalent whole and 128-term layouts with distinct 64 KiB members. These are
+request-count and correctness results, not evidence of cold-upload speed parity.
+
+A matched optimized 512 MiB control on two server CPUs, using the same stock
+Hub/Xet clients and complete verified downloads, measured:
+
+| Upload | Previous optimized binary | Adjacent-term candidate | Upstream local test CAS |
+| --- | ---: | ---: | ---: |
+| Initial | 1.001–1.016 s | 1.031–1.033 s | 0.786–0.806 s |
+| Tail edit | 0.406–0.424 s | 0.444–0.449 s | 0.279–0.291 s |
+
+Two runs per binary are insufficient to establish a small regression, but these
+results demonstrate no throughput benefit on this fixture and do not establish
+parity. The candidate binary SHA-256 was
+`32931583a8add1e3b5be29d3d5a11fa94690a587971d773003102561cbc401fb`.
+The harness observed no competing compiler. An earlier contaminated run was
+excluded. This remains a local-backend comparison with the simulation's different
+verification/durability contract, not a production-service performance claim.
+
+
+### Native upload foundation audit
+
+A further 512 MiB audit used CPU sampling and a separate syscall trace against
+the optimized candidate and upstream commit
+`629562cd9fc37432317eb57811faf13a6935c601`. Symbolized binaries were checked
+against their benchmark binaries: their executable `.text` sections match.
+Both complete original and edited downloads verified SHA-256. Profiling and
+tracing runs locate costs; their elapsed times are not throughput qualification.
+
+| Observation during initial upload | Shardline | Upstream local test CAS |
+| --- | ---: | ---: |
+| Process file-read bytes (`rchar`, not physical disk reads) | 552,964,015 | 394,049 |
+| SHA-256 sampled CPU cycles | 18.5% | No full-file SHA-256 registration pass |
+| BLAKE3 sampled CPU cycles | 23.0% | 6.8% in separate symbolized capture |
+| File/directory sync calls in separate trace | 194 `fsync` | 1 database `fdatasync` |
+
+These percentages are CPU attribution, not additive elapsed-time savings.
+Upstream's sampled memory-copy share was larger, not smaller. Its handler
+collects and copies the upload, reconstructs the footer and member hashes, then
+writes the object. It does not reread the stored file during shard registration.
+Its `SafeFileCreator::close` flushes and renames without explicitly syncing the
+object and directory; its redb publication does issue a database sync.
+
+Shardline's BLAKE3 stacks identify three distinct paths: incremental ingress,
+storage's `put_if_absent` recheck of the same owned serialized bytes, and
+registration authentication of stored members. The storage recheck is eliminated
+for prepared native uploads through an immutable verified-body type shared by
+protocols and storage. An unchecked digest argument would not
+establish that the published bytes are the verified bytes. Existing-object
+conflict verification must remain intact.
+
+The sync trace also identifies repeated root/ancestor-directory synchronization,
+in addition to object publication and SQLite WAL syncs. Reusing an established
+durable directory anchor may reduce that work, but simply skipping sync for an
+existing directory is unsafe when another writer has created it without yet
+making its name durable. Replacement, retry and crash tests are required.
+
+The largest serialized phase remains final registration: the previously traced
+264 ms versus 2 ms includes current-source member authentication and file-order
+SHA-256. File order arrives in the shard after Xorb upload. Removing that check,
+hashing arrival order or treating chunk hashes as composable SHA-256 states
+would change the integrity contract. The audit therefore identifies specific
+removable work without establishing that its removal alone reaches parity.
+
+### Immutable verified-body publication
+
+Native preparation now seals the serialized bytes and their BLAKE3 commitment
+in a shared storage type. Local and S3 publication check that bound commitment
+without hashing the same owned buffer again. Ordinary writes still verify their
+payloads; existing-object comparison, conditional creation, source authentication,
+file SHA-256 and durability syncs remain. The public storage trait has an
+additive default method, leaving existing adapter implementations valid.
+There is no storage-format, configuration or existing-data migration change.
+
+A clean paired 512 MiB upload comparison on two server CPUs measured:
+
+| Upload | Before verified bodies | Verified-body candidate | Upstream local test CAS |
+| --- | ---: | ---: | ---: |
+| Initial, two runs | 1.015 / 1.055 s | 0.986 / 1.022 s | 0.844 / 0.931 s |
+| Tail edit, two runs | 0.446 / 0.418 s | 0.434 / 0.420 s | 0.283 / 0.269 s |
+
+The observed initial-upload median improves by about 3%; two repetitions do not
+establish a general performance guarantee. Server upload CPU accounting fell
+from 110 / 120 ticks to 102 / 106 ticks. All complete downloads verified SHA-256,
+and both pairs retained identical hashes and lengths for all ten Xorbs
+(537,597,299 bytes). No competing compiler was observed; an earlier contaminated
+campaign was excluded. The candidate SHA-256 was
+`2172e8d82bd093be8ab3a20da4547642f53cb97452557704338cb52c869b6f0b`.
+
+This removes measured duplicate work but does not establish upstream parity.
+Directory synchronization is unchanged. Actual 1.12.1 local and PostgreSQL/MinIO
+native upload, upgrade and rollback tests pass against this candidate. The
+disposable MinIO migration fixture uses tmpfs; it qualifies protocol/content
+compatibility and does not establish physical-disk durability or hardware wear.
 
 ### Rejected decoded-buffer ownership experiment
 

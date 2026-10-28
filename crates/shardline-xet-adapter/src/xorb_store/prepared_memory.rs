@@ -4,8 +4,7 @@ use super::{
     PutOutcome, ServerObjectStore, StoredXorbUpload, ValidatedXorb, XetAdapterError, blocking,
     canonicalize_uploaded_xorb, encoding, parse_xet_hash_hex, xorb_object_key,
 };
-use shardline_server_core::chunk_hash;
-use shardline_storage::{ObjectBody, ObjectIntegrity};
+use shardline_storage::{ObjectIntegrity, VerifiedObjectBody};
 
 mod incremental;
 mod owned;
@@ -16,7 +15,7 @@ pub use owned::prepare_owned_xorb_memory_with_checkpoint;
 /// replace the bytes or construct a validation result independently of them.
 pub struct PreparedXorbMemory {
     expected_hash: String,
-    bytes: Vec<u8>,
+    bytes: VerifiedObjectBody,
     validated: ValidatedXorb,
     integrity: ObjectIntegrity,
 }
@@ -41,18 +40,18 @@ pub fn prepare_xorb_memory(
 ) -> Result<PreparedXorbMemory, XetAdapterError> {
     let (bytes, validated) =
         canonicalize_uploaded_xorb(parse_xet_hash_hex(expected_hash)?, uploaded)?;
-    let length = u64::try_from(bytes.len())?;
-    let integrity = ObjectIntegrity::new(chunk_hash(bytes.as_ref()), length);
+    let bytes = VerifiedObjectBody::from_vec(bytes.into_owned());
+    let integrity = bytes.integrity();
     Ok(PreparedXorbMemory {
         expected_hash: expected_hash.to_owned(),
-        bytes: bytes.into_owned(),
+        bytes,
         validated,
         integrity,
     })
 }
 
 /// Publish owned prepared bytes while retaining admission through synchronous
-/// storage work. Storage rechecks their serialized digest before publication;
+/// storage work. Storage checks the bound immutable commitment before publication;
 /// conflicting encodings still require complete verification of retained bytes.
 ///
 /// # Errors
@@ -66,10 +65,10 @@ pub async fn store_prepared_xorb_memory<R: Send + 'static>(
     let length = prepared.length();
     let store = objects.clone();
     let outcome = blocking::cancellable_write(resources, move || {
-        let result = shardline_storage::ObjectStore::put_if_absent(
+        let result = shardline_storage::ObjectStore::put_verified_if_absent(
             &store,
             &key,
-            ObjectBody::from_vec(prepared.bytes),
+            prepared.bytes,
             &prepared.integrity,
         );
         encoding::resolve_conflict(&store, &key, &prepared.validated, result)

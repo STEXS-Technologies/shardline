@@ -8,6 +8,9 @@ use crate::{
 use shardline_protocol::RepositoryScope;
 use shardline_server_core::{ServerObjectStore, ShardMetadataLimits};
 
+#[cfg(all(test, feature = "docker"))]
+mod remote_tests;
+
 pub(crate) async fn prepare_native_shard(
     staged: NativeBody,
     objects: ServerObjectStore,

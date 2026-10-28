@@ -232,7 +232,7 @@ async fn corrupt_retained_encoding_is_not_reused() {
 async fn minio_equivalent_native_encoding_reuses_retained_container() {
     let stack = tokio::task::spawn_blocking(|| {
         shardline_test_support::DockerLocalStack::builder()
-            .with_minio()
+            .with_minio_tmpfs()
             .start()
             .unwrap()
             .expect("encoding qualification requires Docker MinIO")

@@ -1,5 +1,5 @@
 //! Own native request bytes and check cancellation between validation reads.
-use super::{ObjectIntegrity, PreparedXorbMemory, XetAdapterError, chunk_hash, parse_xet_hash_hex};
+use super::{PreparedXorbMemory, VerifiedObjectBody, XetAdapterError, parse_xet_hash_hex};
 use crate::{checkpoint_reader::CheckpointReader, validate_serialized_xorb};
 use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer_from_reader;
 use std::io::Cursor;
@@ -72,7 +72,8 @@ pub fn prepare_owned_xorb_memory_with_checkpoint(
         }
     };
     checkpoint()?;
-    let integrity = ObjectIntegrity::new(chunk_hash(&bytes), u64::try_from(bytes.len())?);
+    let bytes = VerifiedObjectBody::from_vec(bytes);
+    let integrity = bytes.integrity();
     checkpoint()?;
     Ok(PreparedXorbMemory {
         expected_hash: expected_hash.to_owned(),

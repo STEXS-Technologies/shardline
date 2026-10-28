@@ -319,6 +319,34 @@ impl LocalObjectStore {
     }
 }
 
+impl LocalObjectStore {
+    fn put_authenticated_bytes(
+        &self,
+        key: &ObjectKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, LocalObjectStoreError> {
+        let path = self.key_path(key);
+        metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
+        // This observation only selects the path. Reuse still opens the file
+        // through its pinned parent and compares every byte before syncing.
+        // Do not open and immediately discard another handle just to test
+        // whether the target exists.
+        if object_file_metadata(&path)?.is_some() {
+            verify_existing_object_durable(&self.root, &path, |anchored_path| {
+                let file = open_existing_object_file(anchored_path)?;
+                ensure_file_matches_bytes(file.try_clone()?, body)?;
+                Ok::<File, LocalObjectStoreError>(file)
+            })?;
+            return Ok(PutOutcome::AlreadyExists);
+        }
+
+        match put_bytes_if_absent(&self.root, &path, body).map_err(LocalObjectStoreError::Io)? {
+            PutBytesIfAbsentOutcome::Inserted => Ok(PutOutcome::Inserted),
+            PutBytesIfAbsentOutcome::AlreadyExists => Ok(PutOutcome::AlreadyExists),
+        }
+    }
+}
+
 impl ObjectStore for LocalObjectStore {
     type Error = LocalObjectStoreError;
 
@@ -329,27 +357,22 @@ impl ObjectStore for LocalObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, Self::Error> {
         verify_integrity(body.as_slice(), integrity)?;
-        let path = self.key_path(key);
-        metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
-        // This observation only selects the path. Reuse still opens the file
-        // through its pinned parent and compares every byte before syncing.
-        // Do not open and immediately discard another handle just to test
-        // whether the target exists.
-        if object_file_metadata(&path)?.is_some() {
-            verify_existing_object_durable(&self.root, &path, |anchored_path| {
-                let file = open_existing_object_file(anchored_path)?;
-                ensure_file_matches_bytes(file.try_clone()?, body.as_slice())?;
-                Ok::<File, LocalObjectStoreError>(file)
-            })?;
-            return Ok(PutOutcome::AlreadyExists);
-        }
+        self.put_authenticated_bytes(key, body.as_slice())
+    }
 
-        match put_bytes_if_absent(&self.root, &path, body.as_slice())
-            .map_err(LocalObjectStoreError::Io)?
-        {
-            PutBytesIfAbsentOutcome::Inserted => Ok(PutOutcome::Inserted),
-            PutBytesIfAbsentOutcome::AlreadyExists => Ok(PutOutcome::AlreadyExists),
+    fn put_verified_if_absent(
+        &self,
+        key: &ObjectKey,
+        body: crate::VerifiedObjectBody,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, Self::Error> {
+        if body.integrity().length() != integrity.length() {
+            return Err(LocalObjectStoreError::IntegrityLengthMismatch);
         }
+        if body.integrity().hash() != integrity.hash() {
+            return Err(LocalObjectStoreError::IntegrityHashMismatch);
+        }
+        self.put_authenticated_bytes(key, &body)
     }
 
     fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {

@@ -313,7 +313,7 @@ async fn prepared_memory_owns_canonical_bytes_and_preserves_idempotent_replay() 
         let key = xorb_object_key(&hash).unwrap();
         assert_eq!(
             std::fs::read(objects.local_path_for_key(&key).unwrap()).unwrap(),
-            expected
+            expected.to_vec()
         );
         let replay = prepare_xorb_memory(&hash, &expected).unwrap();
         let stored = store_prepared_xorb_memory(&objects, replay, ())
@@ -350,7 +350,9 @@ async fn streamed_commitment_rejects_post_validation_changes_and_allows_clean_re
                 16
             };
             // Inject a fault after validation; public callers cannot mutate it.
-            prepared.bytes[position] ^= 1;
+            let mut changed = prepared.bytes.to_vec();
+            changed[position] ^= 1;
+            prepared.bytes = VerifiedObjectBody::from_vec(changed);
             let root = tempfile::tempdir().unwrap();
             let objects = ServerObjectStore::local(root.path()).unwrap();
             assert!(
@@ -370,7 +372,7 @@ async fn streamed_commitment_rejects_post_validation_changes_and_allows_clean_re
                     .unwrap()
                     .was_inserted
             );
-            assert_eq!(std::fs::read(path).unwrap(), expected);
+            assert_eq!(std::fs::read(path).unwrap(), expected.to_vec());
         }
     }
 }
@@ -389,7 +391,9 @@ async fn publication_rechecks_prepared_memory_digest_and_rejects_bad_identity() 
         prepare_owned_xorb_memory_with_checkpoint(&hash, serialized.serialized_data, &|| Ok(()))
             .unwrap();
     // Internal fault injection: no public operation exposes mutable bytes.
-    prepared.bytes[16] ^= 1;
+    let mut changed = prepared.bytes.to_vec();
+    changed[16] ^= 1;
+    prepared.bytes = VerifiedObjectBody::from_vec(changed);
     let root = tempfile::tempdir().unwrap();
     let objects = ServerObjectStore::local(root.path()).unwrap();
     assert!(

@@ -1,6 +1,7 @@
 //! Authenticate complete members as transport frames arrive. No publication
 //! result exists until EOF, footer/root checks and the serialized commitment.
-use super::{ObjectIntegrity, PreparedXorbMemory, XetAdapterError, parse_xet_hash_hex};
+use super::{PreparedXorbMemory, XetAdapterError, parse_xet_hash_hex};
+use shardline_storage::VerifiedBodyBuilder;
 use shardline_xet_core::{
     merklehash::{compute_data_hash, xorb_hash},
     xorb_object::{
@@ -15,8 +16,7 @@ use std::io::Cursor;
 pub struct IncrementalXorbMemory {
     expected_hash: String,
     maximum: usize,
-    bytes: Vec<u8>,
-    serialized_hasher: blake3::Hasher,
+    bytes: VerifiedBodyBuilder,
     position: usize,
     info: XorbObjectInfoV1,
     footer: bool,
@@ -33,8 +33,7 @@ impl IncrementalXorbMemory {
         Ok(Self {
             expected_hash: expected_hash.to_owned(),
             maximum,
-            bytes: Vec::new(),
-            serialized_hasher: blake3::Hasher::new(),
+            bytes: VerifiedBodyBuilder::default(),
             position: 0,
             info: XorbObjectInfoV1::default(),
             footer: false,
@@ -81,7 +80,6 @@ impl IncrementalXorbMemory {
                 .map_err(|_error| XetAdapterError::InvalidSerializedXorb)?;
         }
         self.bytes.extend_from_slice(frame);
-        self.serialized_hasher.update(frame);
         while !self.footer
             && !self.full_validation
             && self
@@ -181,7 +179,7 @@ impl IncrementalXorbMemory {
         if self.full_validation {
             return super::prepare_owned_xorb_memory_with_checkpoint(
                 &self.expected_hash,
-                self.bytes,
+                self.bytes.into_vec(),
                 checkpoint,
             );
         }
@@ -215,7 +213,7 @@ impl IncrementalXorbMemory {
                 // Historical footers need the established legacy interpretation.
                 return super::prepare_owned_xorb_memory_with_checkpoint(
                     &self.expected_hash,
-                    self.bytes,
+                    self.bytes.into_vec(),
                     checkpoint,
                 );
             }
@@ -247,33 +245,22 @@ impl IncrementalXorbMemory {
             self.bytes
                 .try_reserve_exact(footer_length)
                 .map_err(|_error| XetAdapterError::InvalidSerializedXorb)?;
-            let received_length = self.bytes.len();
-            let canonical = XorbObject::serialize_given_info(&mut self.bytes, self.info)
+            XorbObject::serialize_given_info(&mut self.bytes, self.info)
                 .map_err(super::super::normalization::normalization_error)?
-                .0;
-            self.serialized_hasher.update(
-                self.bytes
-                    .get(received_length..)
-                    .ok_or(XetAdapterError::InvalidSerializedXorb)?,
-            );
-            canonical
+                .0
         };
         checkpoint()?;
         let expected = parse_xet_hash_hex(&self.expected_hash)?;
         let length = u64::try_from(self.bytes.len())?;
         let validated = crate::xorb::metadata_from_verified_xorb(expected, length, &canonical)?;
-        // Carry the commitment accumulated with incoming frames and any
-        // generated footer. Storage still checks the final immutable bytes.
-        let integrity = ObjectIntegrity::new(
-            shardline_protocol::ShardlineHash::from_bytes(
-                *self.serialized_hasher.finalize().as_bytes(),
-            ),
-            length,
-        );
+        // Seal exactly the bytes accumulated and authenticated by storage's
+        // builder, including any generated footer. No mutable bytes escape.
+        let bytes = self.bytes.finish();
+        let integrity = bytes.integrity();
         checkpoint()?;
         Ok(PreparedXorbMemory {
             expected_hash: self.expected_hash,
-            bytes: self.bytes,
+            bytes,
             validated,
             integrity,
         })

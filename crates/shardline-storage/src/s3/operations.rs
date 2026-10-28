@@ -1019,6 +1019,21 @@ impl ObjectStore for S3ObjectStore {
         self.block_on_result(self.put_verified_bytes(key, body.into_bytes(), integrity))
     }
 
+    fn put_verified_if_absent(
+        &self,
+        key: &ObjectKey,
+        body: crate::VerifiedObjectBody,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, Self::Error> {
+        if body.integrity().length() != integrity.length() {
+            return Err(S3ObjectStoreError::IntegrityLengthMismatch);
+        }
+        if body.integrity().hash() != integrity.hash() {
+            return Err(S3ObjectStoreError::IntegrityHashMismatch);
+        }
+        self.block_on_result(self.put_verified_bytes(key, body.into_bytes(), integrity))
+    }
+
     fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
         let location = self.location_for_key(key)?;
         let external_range = validated_external_range(range)?;

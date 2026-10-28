@@ -267,7 +267,7 @@ async fn released_native_xet_upgrade_and_rollback_preserve_old_and_new_content()
 async fn released_remote_native_xet_upgrade_and_rollback_preserve_identities() {
     let services = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
-        .with_minio()
+        .with_minio_tmpfs()
         .start()
         .expect("remote native migration services")
         .expect("remote native migration requires Docker");

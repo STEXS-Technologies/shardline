@@ -71,6 +71,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Carry immutable verified upload bodies through shared local/S3 storage,
+  avoiding a duplicate native Xet payload hash while retaining existing-object
+  conflict checks and durable publication.
+- Coalesce adjacent cached-Xorb registration terms into one authenticated range
+  read while checking each term length and the final file SHA-256.
 - Reuse bounded, verified SHA-256 prefix states for native Xet registration of
   overlapping files, retaining source authentication and final identity checks.
 - Overlap native Xet member authentication and file hashing when CPU admission
@@ -81,8 +86,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   retaining verified hard-link publication and existing crash cleanup instead
   of copying from a separate system-temporary filesystem.
 - Accumulate native Xorb serialized commitments while receiving frames,
-  avoiding a complete preparation scan at EOF while retaining final storage
-  digest verification.
+  avoiding a complete preparation scan at EOF while binding the final storage
+  commitment to immutable owned bytes.
 - Reuse source validation for consecutive ordered file terms during native
   shard registration, avoiding repeated member decoding while preserving
   full-file SHA-256, range checks and repeated/out-of-order content.

@@ -37,6 +37,30 @@ pub(super) fn ordered_source_terms(
     terms.get(..end).ok_or(XetAdapterError::Overflow)
 }
 
+/// One authenticated range can serve adjacent logical terms without fetching
+/// gaps or changing the logical byte order. Repetitions/backwards jumps stay
+/// separate, even when they refer to the same immutable container.
+pub(super) fn contiguous_source_terms(
+    terms: &[FileDataSequenceEntry],
+) -> Result<&[FileDataSequenceEntry], XetAdapterError> {
+    let Some((first, tail)) = terms.split_first() else {
+        return Ok(terms);
+    };
+    let mut end = first.chunk_index_end;
+    let mut count = 1_usize;
+    for next in tail {
+        if next.xorb_hash != first.xorb_hash
+            || next.chunk_index_start != end
+            || next.chunk_index_end <= next.chunk_index_start
+        {
+            break;
+        }
+        end = next.chunk_index_end;
+        count = count.checked_add(1).ok_or(XetAdapterError::Overflow)?;
+    }
+    terms.get(..count).ok_or(XetAdapterError::Overflow)
+}
+
 /// Keep at most one pinned local source, rather than a reconstructed file.
 /// Remote sources stream their initial validation and any subsequent ranges.
 #[derive(Default)]

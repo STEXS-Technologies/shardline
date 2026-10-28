@@ -850,9 +850,30 @@ fn build_file_records_with_cache(
             let packed_end = xorb_info.packed_end(range_end)?;
             verification::verify_term_length(segment, &xorb_info.verified_chunks)?;
             if segment_index >= digested_through {
-                digest.begin_terms(std::slice::from_ref(segment));
-                digest.update(file_digests, object_store, segment, xorb_info, checkpoint)?;
+                let contiguous = file_digests::contiguous_source_terms(
+                    file_info
+                        .segments
+                        .get(segment_index..)
+                        .ok_or(XetAdapterError::Overflow)?,
+                )?;
+                // Validate every constituent length before hashing the combined
+                // range. A forged split must not hide behind a valid total.
+                let mut combined = segment.clone();
+                for next in contiguous.iter().skip(1) {
+                    checkpoint()?;
+                    verification::verify_term_length(next, &xorb_info.verified_chunks)?;
+                    combined.unpacked_segment_bytes = combined
+                        .unpacked_segment_bytes
+                        .checked_add(next.unpacked_segment_bytes)
+                        .ok_or(XetAdapterError::Overflow)?;
+                    combined.chunk_index_end = next.chunk_index_end;
+                }
+                digest.begin_terms(contiguous);
+                digest.update(file_digests, object_store, &combined, xorb_info, checkpoint)?;
                 digest.finish_terms();
+                digested_through = segment_index
+                    .checked_add(contiguous.len())
+                    .ok_or(XetAdapterError::Overflow)?;
             }
             let length = segment.unpacked_segment_bytes;
             chunks.push(FileChunkRecord {
@@ -1183,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn member_reference_collection_reuses_the_original_s3_validation_read() {
+    fn member_reference_collection_and_cached_terms_reuse_s3_reads() {
         use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
@@ -1196,7 +1217,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let serialized = SerializedXorbObject::from_xorb_with_compression(
-            build_raw_xorb(1, ChunkSize::Fixed(256)),
+            build_raw_xorb(2, ChunkSize::Fixed(256)),
             CompressionScheme::None,
             true,
         )
@@ -1298,17 +1319,21 @@ mod tests {
             .unwrap();
             let info = MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(
-                    file_hash(&[(hash, 256_u64); 2]),
-                    2_u64,
+                    file_hash(&[(compute_data_hash(&[0_u8; 256]), 256_u64); 4]),
+                    3_u64,
                     false,
                     verify_sha256,
                 ),
-                segments: vec![FileDataSequenceEntry::new(hash, 256_u64, 0_u64, 1_u64); 2],
+                segments: vec![
+                    FileDataSequenceEntry::new(hash, 512, 0, 2),
+                    FileDataSequenceEntry::new(hash, 256, 0, 1),
+                    FileDataSequenceEntry::new(hash, 256, 1, 2),
+                ],
                 verification: Vec::new(),
                 metadata_ext: if verify_sha256 {
                     use sha2::{Digest, Sha256};
                     Some(super::FileMetadataExt::new(
-                        MerkleHash::from_hex(&format!("{:x}", Sha256::digest([0_u8; 512])))
+                        MerkleHash::from_hex(&format!("{:x}", Sha256::digest([0_u8; 1024])))
                             .unwrap(),
                     ))
                 } else {
@@ -1319,12 +1344,11 @@ mod tests {
             let shard = serialize_test_shard(
                 vec![info],
                 vec![MDBXorbInfo {
-                    metadata: XorbChunkSequenceHeader::new(hash, 1, 256),
-                    chunks: vec![XorbChunkSequenceEntry::new(
-                        compute_data_hash(&[0_u8; 256]),
-                        256,
-                        0,
-                    )],
+                    metadata: XorbChunkSequenceHeader::new(hash, 2, 512),
+                    chunks: vec![
+                        XorbChunkSequenceEntry::new(compute_data_hash(&[0_u8; 256]), 256, 0),
+                        XorbChunkSequenceEntry::new(compute_data_hash(&[0_u8; 256]), 256, 256),
+                    ],
                 }],
             );
             let mut descriptors = Vec::new();
@@ -1353,7 +1377,7 @@ mod tests {
             assert_eq!(
                 reads.1,
                 1_usize.saturating_add(usize::from(verify_sha256)),
-                "one full validation plus an exact range for repeated file bytes"
+                "one full validation plus one combined authenticated range for adjacent cached terms"
             );
             if collect_members {
                 assert_eq!(references.len(), 1);

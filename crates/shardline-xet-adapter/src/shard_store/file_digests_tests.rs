@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+mod cached_terms;
 mod ordered_terms;
 use sha2::{Digest, Sha256};
 use shardline_protocol::RepositoryProvider;
