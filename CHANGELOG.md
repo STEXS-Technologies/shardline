@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Keep authenticated range response buffers charged through transport slices
+  while releasing decoding execution slots during I/O and reader pauses.
 - Release native Xet verification execution capacity between incoming frames,
   retaining bounded body memory and final publication admission so idle clients
   do not occupy verification slots.

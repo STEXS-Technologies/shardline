@@ -378,15 +378,21 @@ async fn large_packed_ranges_authenticate_members_without_fetching_unselected_pa
         crate::download_stream::file_record_byte_stream(store, record, spanning, pool.clone())
             .await
             .unwrap();
-    assert!(
-        pool.try_acquire().is_none(),
+    assert_eq!(
+        pool.available_buffer_permits(),
+        0,
         "slow-reader buffers remain admitted"
+    );
+    assert!(
+        pool.try_acquire().is_some(),
+        "reader pauses release execution"
     );
     drop(stream);
     assert!(
         pool.try_acquire().is_some(),
         "cancellation releases admission"
     );
+    assert_eq!(pool.available_buffer_permits(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

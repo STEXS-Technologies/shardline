@@ -14,24 +14,10 @@ pub(super) async fn acquire() -> Result<OwnedSemaphorePermit, ServerError> {
         .map_err(|error| ServerError::Io(std::io::Error::other(error)))
 }
 
-struct AdmittedBytes<P> {
-    bytes: Vec<u8>,
-    _admission: P,
-}
-
-impl<P> AsRef<[u8]> for AdmittedBytes<P> {
-    fn as_ref(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
 /// Slices/clones and storage jobs retain admission with the payload itself.
 /// Accept a shared guard when the raw batch and transport overlap in lifetime.
 pub(super) fn into_bytes(bytes: Vec<u8>, admission: impl Send + 'static) -> axum::body::Bytes {
-    axum::body::Bytes::from_owner(AdmittedBytes {
-        bytes,
-        _admission: admission,
-    })
+    crate::admission::retain_bytes(bytes, admission)
 }
 
 #[cfg(test)]

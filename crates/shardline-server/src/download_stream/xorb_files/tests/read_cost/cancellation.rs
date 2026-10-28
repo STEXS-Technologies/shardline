@@ -56,13 +56,25 @@ async fn cancelled_footer_and_member_gets_release_admission_without_waiting_for_
         tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
             .await
             .expect("reader must reach the selected backend phase");
-        assert!(pool.try_acquire().is_none(), "pending GET remains admitted");
+        assert_eq!(
+            pool.available_buffer_permits(),
+            0,
+            "pending GET retains its buffer charge"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::admission::blocking_work(&pool, || Ok(())),
+        )
+        .await
+        .expect("a stalled provider GET must not monopolize execution")
+        .unwrap();
         task.abort();
         assert!(matches!(task.await, Err(error) if error.is_cancelled()));
         assert!(
             pool.try_acquire().is_some(),
             "cancel must release admission before provider resumes"
         );
+        assert_eq!(pool.available_buffer_permits(), 1);
         resume.notify_one();
         let mut output = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -83,6 +95,7 @@ async fn cancelled_footer_and_member_gets_release_admission_without_waiting_for_
         assert_eq!(actual, payload[..4096]);
         drop(output);
         assert!(pool.try_acquire().is_some());
+        assert_eq!(pool.available_buffer_permits(), 1);
     }
     // The response has already yielded its first verified member. Cancellation
     // must also work while its next body poll waits for a later member GET.
@@ -106,12 +119,14 @@ async fn cancelled_footer_and_member_gets_release_admission_without_waiting_for_
     tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
         .await
         .expect("later member must reach backend");
-    assert!(pool.try_acquire().is_none());
+    assert_eq!(pool.available_buffer_permits(), 0);
+    assert!(pool.try_acquire().is_some());
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
     assert!(
         pool.try_acquire().is_some(),
         "partial response cancellation releases admission"
     );
+    assert_eq!(pool.available_buffer_permits(), 1);
     resume.notify_one();
 }

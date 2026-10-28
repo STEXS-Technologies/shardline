@@ -10,7 +10,7 @@ use shardline_storage::{AsyncObjectStore, ObjectKey};
 use shardline_xet_adapter::{
     AuthenticatedXorbFooter, decode_authenticated_xorb_chunk, validate_serialized_xorb_footer,
 };
-use std::io;
+use std::{io, sync::Arc};
 use tokio::sync::OwnedSemaphorePermit;
 
 const MAX_FOOTER_BYTES: u64 = 16 * 1024 * 1024;
@@ -33,8 +33,9 @@ struct State {
     key: ObjectKey,
     footer: AuthenticatedXorbFooter,
     selections: std::vec::IntoIter<Selection>,
-    // Retained through storage awaits, blocking decode and slow-reader backpressure.
-    permit: OwnedSemaphorePermit,
+    pool: BoundedPool,
+    // Retained by metadata, blocking jobs and transport-owned response slices.
+    memory: Arc<OwnedSemaphorePermit>,
 }
 
 pub(super) async fn file_stream(
@@ -69,10 +70,11 @@ pub(super) async fn file_stream(
     {
         return Ok(None);
     }
-    let permit = pool
-        .acquire()
-        .await
-        .map_err(|error| ServerError::Io(io::Error::other(error)))?;
+    let memory = Arc::new(
+        pool.acquire_buffer()
+            .await
+            .map_err(|error| ServerError::Io(io::Error::other(error)))?,
+    );
     let key = crate::xet_adapter::xorb_object_key(&first.hash)?;
     let Some((trailer, total)) = AsyncObjectStore::read_suffix(&store, &key, 8).await? else {
         return Ok(None);
@@ -96,7 +98,11 @@ pub(super) async fn file_stream(
     .await?;
     let expected = parse_xet_hash_hex(&first.hash)?;
     let record = record.clone();
-    let (authenticated, permit) = blocking_work_with_permit(permit, move || {
+    let worker = pool
+        .acquire()
+        .await
+        .map_err(|error| ServerError::Io(io::Error::other(error)))?;
+    let (authenticated, _) = blocking_work_with_permit((memory.clone(), worker), move || {
         let Some(footer) = validate_serialized_xorb_footer(&bytes, total, expected)? else {
             return Ok(None);
         };
@@ -112,7 +118,8 @@ pub(super) async fn file_stream(
         key,
         footer,
         selections: selections.into_iter(),
-        permit,
+        pool,
+        memory,
     };
     let mut output = Box::pin(stream::try_unfold(state, next));
     // Check the first selected payload before callers send success headers.
@@ -187,16 +194,24 @@ async fn next(mut state: State) -> Result<Option<(Bytes, State)>, ServerError> {
     .map_err(|_range| invalid())?;
     let packed = AsyncObjectStore::read_range(&state.store, &state.key, range).await?;
     let footer = state.footer;
-    let ((footer, bytes), permit) = blocking_work_with_permit(state.permit, move || {
+    let worker = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|error| ServerError::Io(io::Error::other(error)))?;
+    let memory = state.memory.clone();
+    let ((footer, bytes), _) = blocking_work_with_permit((memory.clone(), worker), move || {
         let decoded = decode_authenticated_xorb_chunk(&footer, selection.index, &packed)?;
         let selected = decoded
             .data()
             .get(selection.start..selection.end)
             .ok_or_else(invalid)?;
-        Ok((footer, Bytes::copy_from_slice(selected)))
+        Ok((
+            footer,
+            crate::admission::retain_bytes(selected.to_vec(), memory),
+        ))
     })
     .await?;
     state.footer = footer;
-    state.permit = permit;
     Ok(Some((bytes, state)))
 }

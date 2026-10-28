@@ -76,6 +76,7 @@ async fn authenticated_ranges_on_real_minio_preserve_full_reads_and_member_integ
             "range offset={start} logical_bytes=4096 full_backend_bytes={full_bytes} partial_backend_bytes={partial_bytes} full_gets=1 partial_gets=3"
         );
     }
+    qualify_idle_reader(&store, &record, &payload[..4096]).await;
     let reordered = file(vec![terms[63].clone(), terms[0].clone(), terms[63].clone()]);
     // This small logical file intentionally retains the legacy one-GET policy.
     assert_eq!(
@@ -142,4 +143,43 @@ async fn authenticated_ranges_on_real_minio_preserve_full_reads_and_member_integ
         .await
         .is_err()
     );
+}
+
+async fn qualify_idle_reader(store: &ServerObjectStore, record: &FileRecord, expected: &[u8]) {
+    use crate::admission::{BoundedPool, blocking_work};
+    use futures_util::StreamExt;
+    use std::{num::NonZeroUsize, time::Duration};
+    let pool = BoundedPool::new(NonZeroUsize::MIN);
+    let mut response = crate::download_stream::authenticated_range::file_stream(
+        store.clone(),
+        record,
+        ByteRange::new(0, 4095).unwrap(),
+        pool.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let first = response.next().await.unwrap().unwrap();
+    assert_eq!(first.as_ref(), expected);
+    assert_eq!(pool.available_buffer_permits(), 0);
+    tokio::time::timeout(Duration::from_secs(5), blocking_work(&pool, || Ok(())))
+        .await
+        .expect("a paused authenticated response must not occupy execution")
+        .unwrap();
+    drop(response);
+    assert_eq!(
+        pool.available_buffer_permits(),
+        0,
+        "transport still owns bytes"
+    );
+    let retained = first.slice(0..1);
+    drop(first);
+    assert_eq!(
+        pool.available_buffer_permits(),
+        0,
+        "slices retain actual admission"
+    );
+    assert_eq!(retained.as_ref(), &expected[..1]);
+    drop(retained);
+    assert_eq!(pool.available_buffer_permits(), 1);
 }

@@ -6,8 +6,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::ServerConfigError;
 
 mod blocking;
+mod bytes;
 pub(crate) use blocking::{blocking_work, blocking_work_with_permit};
 pub(crate) use blocking::{cancellable_work_with_permit, cancellable_work_with_setup};
+pub(crate) use bytes::retain_bytes;
 
 /// Largest capacity representable by batch permit counts and Tokio's semaphore.
 pub(crate) fn maximum_counted_capacity() -> usize {
@@ -139,6 +141,7 @@ impl WeightedAdmission {
 #[derive(Debug, Clone)]
 pub struct BoundedPool {
     inner: Arc<Semaphore>,
+    retained_buffers: Arc<Semaphore>,
     capacity: u32,
 }
 
@@ -175,6 +178,7 @@ impl BoundedPool {
         })?;
         Ok(Self {
             inner: Arc::new(Semaphore::new(max_concurrent.get())),
+            retained_buffers: Arc::new(Semaphore::new(max_concurrent.get())),
             capacity: cap,
         })
     }
@@ -189,6 +193,19 @@ impl BoundedPool {
     /// blocking job while queued. The running job must own the returned permit.
     pub(crate) async fn acquire(&self) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
         self.inner.clone().acquire_owned().await
+    }
+
+    /// Separately bounds retained, individually size-limited buffers. Hold this
+    /// charge with the actual bytes while releasing execution between jobs.
+    pub(crate) async fn acquire_buffer(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        self.retained_buffers.clone().acquire_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_buffer_permits(&self) -> usize {
+        self.retained_buffers.available_permits()
     }
 
     /// Returns the number of currently available permits.
