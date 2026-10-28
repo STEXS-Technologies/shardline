@@ -30,6 +30,12 @@ Stopping the producer releases its resources, but bytes already handed to the
 HTTP transport retain their buffer charges until their last owner drops them.
 This is a response-producer deadline, not a TCP acknowledgement deadline.
 
+The built-in HTTP server also closes connections with an outstanding socket
+write that makes no progress for five minutes. Closing the connection releases
+its transport-held buffers. Idle keep-alive connections do not start this timer,
+and progressing writes renew it. Applications that serve Shardline's router
+through their own HTTP server must enforce socket write deadlines there.
+
 ## High Availability
 
 Shardline availability depends on three layers:

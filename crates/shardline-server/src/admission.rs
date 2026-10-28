@@ -289,6 +289,10 @@ pub mod timeouts {
     /// Maximum interval without nonempty response data. This is an idle limit,
     /// not a limit on total transfer duration or a TCP acknowledgement timer.
     pub(crate) const RESPONSE_IDLE: Duration = Duration::from_secs(300);
+
+    /// Maximum stall while a connection has an outstanding socket write.
+    /// Idle keep-alive connections and progressing writes do not expire here.
+    pub(crate) const WRITE_IDLE: Duration = Duration::from_secs(300);
 }
 
 /// Admission metrics counters tracked via atomics (used when prometheus metrics are unavailable).

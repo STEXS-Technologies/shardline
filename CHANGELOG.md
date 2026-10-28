@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Close built-in HTTP connections after five minutes of stalled socket writes,
+  releasing transport-held buffers while allowing progressing transfers to continue.
 - Stop idle response producers after five minutes without nonempty body data,
   including when a client stops reading; progressing transfers can run longer.
 - Release packing execution slots while uploads accumulate data or wait on

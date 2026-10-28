@@ -8,6 +8,7 @@ mod operational;
 mod protocol_routes;
 mod response_idle;
 mod shard_progress;
+mod transport;
 #[cfg(test)]
 pub(crate) use protocol_routes::oci::test_helpers::build_oci_postgres_test_cluster;
 mod provider;
@@ -779,6 +780,7 @@ where
             tracing::warn!(%error, "failed to enable TCP_NODELAY on incoming connection");
         }
     });
+    let listener = transport::WriteIdleListener::new(listener, timeouts::WRITE_IDLE);
     let serve = serve_http(listener, app).with_graceful_shutdown(graceful_shutdown);
     let result = if let Some(timeout) = shutdown_timeout {
         tokio::select! {
