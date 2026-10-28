@@ -25,11 +25,18 @@ use shardline_storage::{
 };
 use tokio::io::AsyncWriteExt;
 
+#[cfg(unix)]
+mod local_staging;
+#[cfg(unix)]
+pub(crate) use local_staging::local_resumable_staging_file;
+
 use crate::error::{IndexError, ObjectStoreError};
 use crate::{
     ObjectStorageAdapter, ServerConfig, ServerError, ServerFrontend, chunk_store::chunk_object_key,
     server_frontend::append_referenced_term_bytes, upload_ingest::RequestBodyReader,
 };
+
+mod local_range;
 
 #[cfg(test)]
 type LocalObjectReadHook = Box<dyn FnOnce() + Send>;
@@ -333,18 +340,18 @@ fn verified_s3_part_stream(
     ))
 }
 
-/// Streams durable LFS PATCH ranges directly from S3, including zero-filled
-/// gaps between disjoint ranges. Local deployments return `None` and retain
-/// their filesystem-backed sparse assembly path.
-pub(crate) async fn s3_lfs_parts_reader(
+/// Streams ordered durable LFS PATCH ranges, including zero-filled gaps,
+/// without materializing the assembled file. Later generations win overlaps.
+/// The caller must verify the complete logical stream's SHA-256 before publish.
+pub(crate) async fn lfs_parts_reader(
     object_store: &ServerObjectStore,
     parts: &[ResumableSessionPart],
     total: u64,
-) -> Result<Option<RequestBodyReader>, ServerError> {
-    let ServerObjectStore::S3(store) = object_store else {
-        return Ok(None);
-    };
-    let store = store.clone();
+) -> Result<RequestBodyReader, ServerError> {
+    if matches!(object_store, ServerObjectStore::Blackhole) {
+        return Err(ServerError::NotFound);
+    }
+    let store = object_store.clone();
     let mut ranges = parts
         .iter()
         .map(|part| {
@@ -368,10 +375,11 @@ pub(crate) async fn s3_lfs_parts_reader(
         end: u64,
         key: ObjectKey,
         object_start: u64,
+        object_length: u64,
     }
     enum Segment {
         Zeroes(u64),
-        Object(ObjectKey, ByteRange),
+        Object(ObjectKey, ByteRange, u64),
     }
     let mut pieces: BTreeMap<u64, Piece> = BTreeMap::new();
     for (_generation, range, key) in ranges {
@@ -401,6 +409,7 @@ pub(crate) async fn s3_lfs_parts_reader(
                         end: start,
                         key: piece.key.clone(),
                         object_start: piece.object_start,
+                        object_length: piece.object_length,
                     },
                 );
             }
@@ -415,6 +424,7 @@ pub(crate) async fn s3_lfs_parts_reader(
                             .object_start
                             .checked_add(end.checked_sub(piece.start).ok_or(ServerError::Overflow)?)
                             .ok_or(ServerError::Overflow)?,
+                        object_length: piece.object_length,
                     },
                 );
             }
@@ -426,6 +436,10 @@ pub(crate) async fn s3_lfs_parts_reader(
                 end,
                 key,
                 object_start: 0,
+                object_length: range
+                    .end_exclusive()
+                    .checked_sub(range.start())
+                    .ok_or(ServerError::Overflow)?,
             },
         );
     }
@@ -453,6 +467,7 @@ pub(crate) async fn s3_lfs_parts_reader(
             piece.key,
             ByteRange::new(piece.object_start, object_end)
                 .map_err(|_error| ServerError::Overflow)?,
+            piece.object_length,
         ));
         cursor = cursor.max(piece.end);
     }
@@ -487,18 +502,24 @@ pub(crate) async fn s3_lfs_parts_reader(
                             },
                         ))
                     }
-                    Segment::Object(key, range) => Box::pin(
-                        store
-                            .stream_range(&key, range)
-                            .await?
-                            .map(|chunk| chunk.map_err(ServerError::from)),
-                    ),
+                    Segment::Object(key, range, object_length) => match &store {
+                        ServerObjectStore::S3(remote) => Box::pin(
+                            remote
+                                .stream_range(&key, range)
+                                .await?
+                                .map(|chunk| chunk.map_err(ServerError::from)),
+                        ),
+                        ServerObjectStore::Local(_) => {
+                            Box::pin(local_range::stream(&store, &key, object_length, range).await?)
+                        }
+                        ServerObjectStore::Blackhole => return Err(ServerError::NotFound),
+                    },
                 };
                 Ok::<BodyStream, ServerError>(body)
             }
         })
         .try_flatten();
-    Ok(Some(RequestBodyReader::from_stream(stream)))
+    Ok(RequestBodyReader::from_stream(stream))
 }
 
 /// Streams a bounded durable upload part directly into S3 remote staging,
@@ -609,7 +630,16 @@ pub(crate) async fn stage_bytes_content_addressed(
     prefix: &str,
     bytes: &[u8],
 ) -> Result<(ObjectKey, ObjectIntegrity), ServerError> {
-    let digest = blake3::hash(bytes);
+    stage_owned_bytes_content_addressed(object_store, prefix, Bytes::copy_from_slice(bytes)).await
+}
+
+/// Retain shared payload ownership and its admission through storage workers.
+pub(crate) async fn stage_owned_bytes_content_addressed(
+    object_store: &ServerObjectStore,
+    prefix: &str,
+    bytes: Bytes,
+) -> Result<(ObjectKey, ObjectIntegrity), ServerError> {
+    let digest = blake3::hash(&bytes);
     let key = ObjectKey::parse(&format!("{prefix}/{}", hex::encode(digest.as_bytes())))
         .map_err(|_error| ServerError::InvalidPath)?;
     let integrity = ObjectIntegrity::new(
@@ -621,7 +651,7 @@ pub(crate) async fn stage_bytes_content_addressed(
     shardline_storage::AsyncObjectStore::put_if_absent(
         object_store,
         &key,
-        ObjectBody::from_slice(bytes),
+        ObjectBody::from_bytes(bytes),
         &integrity,
     )
     .await?;

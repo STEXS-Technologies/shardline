@@ -112,7 +112,10 @@ impl BoundedObjectSink {
     fn spill_to_temporary(&mut self) -> Result<(), IoError> {
         let mut temporary = NamedTempFile::new()?;
         temporary.write_all(&self.memory)?;
-        self.memory.clear();
+        // The scratch file now owns these bytes. Release the allocation too:
+        // retaining capacity keeps the full memory budget charged throughout
+        // the remaining remote transfer even though it is no longer used.
+        self.memory = Vec::new();
         self.temporary = Some(temporary);
         Ok(())
     }
@@ -1163,11 +1166,25 @@ mod bounded_object_sink_tests {
         assert!(sink.temporary.is_none());
         sink.write_all(b"ef").unwrap();
         assert!(sink.temporary.is_some());
+        assert_eq!(sink.memory.capacity(), 0, "spilled reads must release RAM");
 
         let mut object = sink.into_object().unwrap();
         assert!(matches!(object, MaterializedObject::Temporary(_)));
         let mut actual = Vec::new();
         object.read_to_end(&mut actual).unwrap();
         assert_eq!(actual, b"abcdef");
+    }
+
+    #[test]
+    fn dropping_a_spilled_object_removes_its_scratch_file() {
+        let mut sink = BoundedObjectSink::new(4).unwrap();
+        sink.write_all(b"abcd").unwrap();
+        sink.write_all(b"efgh").unwrap();
+        let scratch = sink.temporary.as_ref().unwrap().path().to_owned();
+        assert!(scratch.exists());
+        let object = sink.into_object().unwrap();
+        assert!(scratch.exists());
+        drop(object);
+        assert!(!scratch.exists());
     }
 }

@@ -987,7 +987,7 @@ async fn file_upload_owner_loss_during_publication_returns_a_fresh_request_error
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_upload_recovery_preserves_each_durable_boundary() {
+async fn native_upload_recovery_preserves_each_named_boundary() {
     use shardline_cas::{UploadLifecycleBoundary as Boundary, arm_upload_interruption};
     use shardline_index::{UploadIntentState, UploadIntentStore};
     for boundary in [
@@ -1036,9 +1036,11 @@ async fn native_upload_recovery_preserves_each_durable_boundary() {
         let expected = match boundary {
             Boundary::AfterIntentCreated => UploadIntentState::Created,
             Boundary::AfterStoring | Boundary::AfterObjectWork => UploadIntentState::Storing,
-            Boundary::AfterStored => UploadIntentState::Stored,
-            Boundary::AfterMetadataCommitted => UploadIntentState::MetadataCommitted,
-            Boundary::AfterVisible => UploadIntentState::Visible,
+            // Completion events share one transaction after domain publication;
+            // these hooks observe the same committed Visible state.
+            Boundary::AfterStored | Boundary::AfterMetadataCommitted | Boundary::AfterVisible => {
+                UploadIntentState::Visible
+            }
         };
         assert_eq!(
             fixture

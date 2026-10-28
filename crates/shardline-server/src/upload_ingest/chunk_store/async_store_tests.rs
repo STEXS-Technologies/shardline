@@ -90,13 +90,10 @@ async fn only_fully_verified_existing_s3_chunks_can_skip_packing_read_back() {
         packed_end: compressed.len() as u64,
     }];
     let cache = SharedReadCache::default();
-    let (fresh, _) = super::put_if_absent_with_verified_cache(
-        &store,
-        ChunkBuffer::Pooled(raw.clone()),
-        Some(&cache),
-    )
-    .await
-    .unwrap();
+    let (fresh, _) =
+        super::put_if_absent_with_verified_cache(&store, ChunkBuffer(raw.clone()), Some(&cache))
+            .await
+            .unwrap();
     assert!(fresh.inserted);
     let saved = std::mem::take(&mut *cache.lock().unwrap());
     let mut reader = DurableUploadChunks::with_cache(store.clone(), 1, saved);
@@ -106,13 +103,10 @@ async fn only_fully_verified_existing_s3_chunks_can_skip_packing_read_back() {
     mode.store(1, Ordering::SeqCst);
     // A second server starts without the first server's existence hints.
     let store = ServerObjectStore::s3(config).unwrap();
-    let (existing, _) = super::put_if_absent_with_verified_cache(
-        &store,
-        ChunkBuffer::Pooled(raw.clone()),
-        Some(&cache),
-    )
-    .await
-    .unwrap();
+    let (existing, _) =
+        super::put_if_absent_with_verified_cache(&store, ChunkBuffer(raw.clone()), Some(&cache))
+            .await
+            .unwrap();
     assert!(!existing.inserted);
     let saved = std::mem::take(&mut *cache.lock().unwrap());
     // A cache miss would fail: the blackhole has nothing to read back.
@@ -121,7 +115,7 @@ async fn only_fully_verified_existing_s3_chunks_can_skip_packing_read_back() {
 
     mode.store(2, Ordering::SeqCst);
     assert!(
-        super::put_if_absent_with_verified_cache(&store, ChunkBuffer::Pooled(raw), Some(&cache),)
+        super::put_if_absent_with_verified_cache(&store, ChunkBuffer(raw), Some(&cache),)
             .await
             .is_err()
     );
@@ -179,9 +173,10 @@ async fn cancelled_s3_chunk_write_does_not_continue_existing_object_validation()
             ),
     )
     .unwrap();
-    let upload = tokio::spawn(async move {
-        put_if_absent_pooled_chunk_buffer(&store, ChunkBuffer::Pooled(raw)).await
-    });
+    let upload =
+        tokio::spawn(
+            async move { put_if_absent_pooled_chunk_buffer(&store, ChunkBuffer(raw)).await },
+        );
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), received.recv())
             .await

@@ -1,25 +1,21 @@
 //! Bounded parsing and authentication for S3 browser form uploads.
 
-use std::{io, path::Path, time::SystemTime};
+use std::time::SystemTime;
 
+use crate::S3SigningIdentity;
 use axum::{
-    body::Body,
     extract::Request,
     http::{HeaderMap, HeaderName, HeaderValue, header::AUTHORIZATION},
 };
-use bytes::Bytes;
-use futures_util::stream;
 use shardline_s3_adapter::{
     S3Error, SigV4Credential, SigV4PostPolicyAuth, verify_sigv4_post_policy,
 };
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::S3SigningIdentity;
+mod payload;
 
 const MAX_FORM_FIELDS: usize = 64;
 const MAX_FORM_FIELD_BYTES: usize = 20 * 1024;
 const MAX_FORM_OVERHEAD_BYTES: u64 = 1024 * 1024;
-const BODY_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Authenticated, validated fields retained for the bucket-level handler.
 #[derive(Clone)]
@@ -29,19 +25,18 @@ pub(crate) struct S3PostObjectForm {
     pub(super) payload_headers: HeaderMap,
     pub(super) success_status: u16,
     pub(super) success_redirect: Option<String>,
+    pub(super) validation: payload::PostValidation,
 }
 
-/// Authenticates a SigV4 POST policy, bounds and spools its file part, and
+/// Authenticates a SigV4 POST policy and streams its bounded file part, and
 /// replaces the multipart request body with a stream of the file bytes.
 ///
-/// The file part must be last, as required by S3 POST forms. It is spooled to
-/// an anonymous temporary file under the server root rather than held in
-/// memory. No object-store or index write occurs until the policy and all form
-/// conditions pass.
-pub(super) async fn authenticate_and_spool(
+/// The file part must be last. Field authorization precedes ingestion; complete
+/// size and trailing-form validation precede successful EOF and publication.
+/// Failed bodies may leave unreferenced immutable chunks for ordinary GC.
+pub(super) async fn authenticate_and_stream(
     request: Request,
     identities: &[S3SigningIdentity],
-    root: &Path,
     max_file_bytes: u64,
 ) -> Result<Request, S3Error> {
     if request.headers().contains_key(AUTHORIZATION) || request.uri().query().is_some() {
@@ -92,52 +87,16 @@ pub(super) async fn authenticate_and_spool(
             let (identity, policy) = authenticate_policy_fields(&fields, identities)?;
             let fields = expand_filename(&fields, &submitted_file_name);
             policy.validate_form_fields(&fields, &bucket)?;
-            let policy_max_file_bytes = policy.maximum_file_size()?.unwrap_or(max_file_bytes);
-            let effective_max_file_bytes = max_file_bytes.min(policy_max_file_bytes);
-            let mut output =
-                tokio::fs::File::from_std(tempfile::tempfile_in(root).map_err(io_to_s3)?);
-            let mut file_size = 0u64;
-            while let Some(chunk) = field
-                .chunk()
-                .await
-                .map_err(|_error| S3Error::invalid_argument("Invalid uploaded file part"))?
-            {
-                file_size = file_size
-                    .checked_add(u64::try_from(chunk.len()).map_err(|_error| S3Error::internal())?)
-                    .ok_or_else(S3Error::internal)?;
-                if file_size > effective_max_file_bytes {
-                    if file_size > max_file_bytes {
-                        return Err(entity_too_large());
-                    }
-                    return Err(S3Error::access_denied());
-                }
-                output.write_all(&chunk).await.map_err(io_to_s3)?;
-            }
-            output.flush().await.map_err(io_to_s3)?;
-            output
-                .seek(std::io::SeekFrom::Start(0))
-                .await
-                .map_err(io_to_s3)?;
-            drop(field);
-            policy.validate_form(&fields, &bucket, file_size)?;
-            if multipart
-                .next_field()
-                .await
-                .map_err(|_error| S3Error::invalid_argument("Invalid trailing multipart form"))?
-                .is_some()
-            {
-                return Err(S3Error::invalid_argument("The S3 file field must be last"));
-            }
             let verified = build_form(&fields)?;
-            let stream = stream::try_unfold(output, |mut input| async move {
-                let mut buffer = vec![0u8; BODY_CHUNK_BYTES];
-                let read = input.read(&mut buffer).await?;
-                if read == 0 {
-                    return Ok::<Option<(Bytes, tokio::fs::File)>, io::Error>(None);
-                }
-                buffer.truncate(read);
-                Ok(Some((Bytes::from(buffer), input)))
-            });
+            let validated_payload = payload::validated_body(
+                field,
+                multipart,
+                policy,
+                fields,
+                bucket,
+                max_file_bytes,
+                verified.validation.clone(),
+            )?;
             request_parts.headers = axum::http::HeaderMap::new();
             request_parts.headers.insert(
                 AUTHORIZATION,
@@ -145,10 +104,7 @@ pub(super) async fn authenticate_and_spool(
                     .map_err(|_error| S3Error::access_denied())?,
             );
             request_parts.extensions.insert(verified);
-            return Ok(Request::from_parts(
-                request_parts,
-                Body::from_stream(stream),
-            ));
+            return Ok(Request::from_parts(request_parts, validated_payload));
         }
 
         if fields.len() >= MAX_FORM_FIELDS {
@@ -330,6 +286,7 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
         payload_headers,
         success_status,
         success_redirect,
+        validation: payload::PostValidation::default(),
     })
 }
 
@@ -413,8 +370,4 @@ fn entity_too_large() -> S3Error {
         message: "Your proposed upload exceeds the maximum allowed object size".to_owned(),
         status: axum::http::StatusCode::PAYLOAD_TOO_LARGE,
     }
-}
-
-fn io_to_s3(error: io::Error) -> S3Error {
-    S3Error::from(crate::ServerError::Io(error))
 }

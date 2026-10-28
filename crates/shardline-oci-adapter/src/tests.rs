@@ -15,6 +15,86 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
+
+#[test]
+fn cancelled_owned_append_and_tail_keep_payload_until_queued_writer_finishes() {
+    use std::sync::Arc;
+    struct Payload {
+        bytes: Vec<u8>,
+        dropped: Arc<AtomicBool>,
+    }
+    impl AsRef<[u8]> for Payload {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    impl Drop for Payload {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+    for tail in [false, true] {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = temp_root();
+        let session = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let path = if tail {
+            crate::upload_tail_path(root.path(), session)
+        } else {
+            crate::upload_body_path(root.path(), session)
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if !tail {
+            std::fs::write(&path, b"").unwrap();
+        }
+        runtime.block_on(async {
+            let (release, wait) = std::sync::mpsc::channel();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+            });
+            ready.await.unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let bytes = Bytes::from_owner(Payload {
+                bytes: b"retained payload".to_vec(),
+                dropped: dropped.clone(),
+            });
+            let operation = async {
+                if tail {
+                    super::write_upload_tail(root.path(), session, bytes).await
+                } else {
+                    super::append_upload_bytes_owned(root.path(), session, bytes)
+                        .await
+                        .map(|_| ())
+                }
+            };
+            let mut operation = Box::pin(operation);
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(
+                    operation.as_mut().poll(cx).is_pending()
+                ))
+                .await
+            );
+            drop(operation);
+            assert!(!dropped.load(Ordering::Acquire));
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !dropped.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"retained payload");
+        });
+    }
+}
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -2687,7 +2767,7 @@ async fn write_upload_tail_io_error_on_remove_direct() {
     tokio::fs::create_dir_all(&tail_dir).await.unwrap();
 
     // write_upload_tail with empty bytes → fs::remove_file on a directory → EISDIR
-    let result = super::write_upload_tail(root.path(), session_id, b"").await;
+    let result = super::write_upload_tail(root.path(), session_id, Bytes::new()).await;
     assert!(
         result.is_err(),
         "expected error when tail path is a directory"

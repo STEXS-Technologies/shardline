@@ -431,7 +431,17 @@ unmodified Hub 2.2.0/hf_xet 1.7.0 uploads. It passes regular and native-Xet
 Parquet reads on local storage and PostgreSQL/MinIO, with combined or split
 API/transfer listeners on one host. It verifies selected payload bytes,
 aggregates, actual `206` responses, ETag-matched ranges, `304`/`412` conditions
-and rejection of anonymous reads. Run all four configurations explicitly:
+and rejection of anonymous reads. The same four layouts also pass with uploads
+from Hub 1.25.1 paired with hf_xet 1.5.2 or 1.6.0. The analytical interpreter
+is separate from the `hf` launcher's environment, so older upload clients do
+not need DuckDB or PyArrow installed in their own environment.
+
+Each layout additionally uses real curl to read and compare an authenticated
+4 KiB range from both regular and native-Xet files. Curl follows at most three
+redirects and receives authorization through stdin. Required-client mode fails
+when curl is unavailable; its absence does not count as a passing qualification.
+These checks establish the tested byte and HTTP behavior, not latency or
+multi-host scaling. Run all four configurations explicitly:
 
 ```bash
 SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo test --manifest-path e2e/Cargo.toml \

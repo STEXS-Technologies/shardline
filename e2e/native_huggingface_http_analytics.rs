@@ -48,6 +48,10 @@ async fn exercise_analytical_ranges(
         assert!(!required, "remote analytical qualification requires hf");
         return Ok(());
     }
+    if !command_available("curl") {
+        assert!(!required, "remote analytical qualification requires curl");
+        return Ok(());
+    }
     if !native_client_policy::require_available("hf_xet", python_package_available("hf_xet")) {
         assert!(!required, "remote analytical qualification requires hf_xet");
         return Ok(());
@@ -169,6 +173,18 @@ api.upload_file(path_or_fileobj=source, path_in_repo=source.name, repo_id='team/
             with source.open('rb') as expected:
                 expected.seek(1)
                 assert response.read() == expected.read(4096)
+        stage = 'native_curl_range' if native else 'regular_curl_range'
+        # Feed authentication through stdin instead of placing credentials in
+        # argv or failure diagnostics. Exercise curl's own HTTP transport.
+        curl_headers = ('Authorization: Bearer ' + token + '\nRange: bytes=1-4096\nIf-Range: ' + etag + '\n').encode()
+        curl = subprocess.run(
+            ['curl', '--silent', '--show-error', '--fail', '--location', '--max-redirs', '3', '--max-time', '30',
+             '--header', '@-', '--url', url], input=curl_headers,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=35)
+        assert curl.returncode == 0, 'curl range failed with exit ' + str(curl.returncode)
+        with source.open('rb') as expected:
+            expected.seek(1)
+            assert curl.stdout == expected.read(4096), 'curl returned incorrect range bytes'
         stage = 'native_range_query' if native else 'regular_range_query'
         result = connection.execute('SELECT id, payload FROM read_parquet(?) WHERE id IN (3, 2050) ORDER BY id', [url]).fetchall()
         assert result == [(i, hashlib.sha256(str(i).encode()).digest()) for i in [3, 2050]]

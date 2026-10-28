@@ -7,6 +7,11 @@ use super::{
 use shardline_server_core::chunk_hash;
 use shardline_storage::{ObjectBody, ObjectIntegrity};
 
+mod incremental;
+mod owned;
+pub use incremental::IncrementalXorbMemory;
+pub use owned::prepare_owned_xorb_memory_with_checkpoint;
+
 /// Owned canonical bytes and their complete validation result. Callers cannot
 /// replace the bytes or construct a validation result independently of them.
 pub struct PreparedXorbMemory {

@@ -10,9 +10,11 @@ pub enum UploadLifecycleBoundary {
     AfterStoring,
     /// Object-store work returned success, before the `Stored` state commit.
     AfterObjectWork,
-    /// The durable intent advanced to `Stored`.
+    /// The `Stored` event is durable. Completion batching may already have
+    /// advanced the intent through `Visible` at this observation point.
     AfterStored,
-    /// The durable intent advanced to `MetadataCommitted`.
+    /// The `MetadataCommitted` event is durable. Completion batching may already
+    /// have advanced the intent through `Visible` at this observation point.
     AfterMetadataCommitted,
     /// The durable intent advanced to `Visible`.
     AfterVisible,

@@ -21,13 +21,15 @@ use crate::error::XetAdapterError;
 mod authenticated_footer;
 mod legacy_footer;
 mod range;
+pub(crate) mod streaming;
 pub use authenticated_footer::{
     AuthenticatedXorbFooter, decode_authenticated_xorb_chunk, validate_serialized_xorb_footer,
 };
 pub use range::try_for_each_serialized_xorb_chunk_range;
 
 /// Maximum total unpacked (decompressed) bytes accepted for a single serialized
-/// xorb, checked BEFORE any decompression happens.
+/// xorb. Seek-based validation checks the footer before decompression; forward
+/// streaming validation checks the cumulative declared length before each member.
 ///
 /// A chunk header's `uncompressed_length` is capped at `MAX_CHUNK_SIZE`
 /// (16 MiB), but nothing previously bounded the *sum* across all chunks of a
@@ -35,8 +37,8 @@ pub use range::try_for_each_serialized_xorb_chunk_range;
 /// i.e. ~16 GiB of decompressed output (a decompression bomb that exhausts
 /// memory or amplifies storage). A legitimately serialized xorb holds at most
 /// one `XORB_BLOCK_SIZE` (16 MiB) of unpacked data, so 4 GiB is ~256x headroom
-/// for any legitimate multi-block upload while rejecting multi-GiB bombs before
-/// allocation or decompression work.
+/// for legitimate multi-block uploads. Both paths reject a member that would
+/// exceed the aggregate cap before allocating its decoded output.
 pub const MAX_XORB_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Validated metadata for one chunk inside a serialized xorb.
@@ -330,6 +332,20 @@ pub(crate) fn validate_serialized_xorb_with_data_and_visitor<R: Read + Seek>(
     let decoded = validated.decoded;
     let validated = validated.xorb;
     let total_length = reader.seek(SeekFrom::End(0))?;
+    Ok((
+        metadata_from_verified_xorb(expected_hash, total_length, &validated)?,
+        decoded,
+    ))
+}
+
+/// Convert independently authenticated members/root and canonical metadata.
+/// This does not authenticate an untrusted client footer. Call only after full
+/// validation or generation from decoded members whose native root was checked.
+pub(crate) fn metadata_from_verified_xorb(
+    expected_hash: ShardlineHash,
+    total_length: u64,
+    validated: &XorbObject,
+) -> Result<ValidatedXorb, XorbParseError> {
     let packed_content_length = validated
         .get_contents_length()
         .map_err(|error| map_core_error(&error))?;
@@ -346,7 +362,7 @@ pub(crate) fn validate_serialized_xorb_with_data_and_visitor<R: Read + Seek>(
     let mut unpacked_start = 0_u64;
 
     for index in 0..num_chunks {
-        let (packed_end, unpacked_end, hash) = validated_chunk_footer_at(&validated, index)?;
+        let (packed_end, unpacked_end, hash) = validated_chunk_footer_at(validated, index)?;
         if packed_end <= packed_start || unpacked_end <= unpacked_start {
             return Err(XorbInvalidFormatError::NonMonotonicChunkBoundaries.into());
         }
@@ -365,15 +381,12 @@ pub(crate) fn validate_serialized_xorb_with_data_and_visitor<R: Read + Seek>(
         return Err(XorbInvalidFormatError::PackedContentLengthMismatch.into());
     }
 
-    Ok((
-        ValidatedXorb::new(
-            expected_hash,
-            total_length,
-            packed_content_length,
-            unpacked_start,
-            chunks,
-        ),
-        decoded,
+    Ok(ValidatedXorb::new(
+        expected_hash,
+        total_length,
+        packed_content_length,
+        unpacked_start,
+        chunks,
     ))
 }
 

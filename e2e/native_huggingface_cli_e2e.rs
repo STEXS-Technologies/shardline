@@ -1414,6 +1414,126 @@ async fn verify_plain_xet_downloads(
     );
     let etag = format!("\"{}\"", hex::encode(Sha256::digest(content)));
     let total = content.len();
+    let head = client
+        .head(&url)
+        .bearer_auth(&runtime.model_token)
+        // Discovery must use configured public URLs, even behind an untrusted
+        // request attempting to redirect client credentials to another host.
+        .header(reqwest::header::HOST, "untrusted.invalid")
+        .header("X-Forwarded-Host", "untrusted.invalid")
+        .header("X-Forwarded-Proto", "https")
+        .header("Forwarded", "host=untrusted.invalid;proto=https")
+        .send()
+        .await?;
+    assert_eq!(head.status(), reqwest::StatusCode::OK);
+    assert_eq!(head.headers()["etag"], etag);
+    assert_eq!(head.headers()["content-length"], total.to_string());
+    assert_eq!(head.headers()["x-linked-size"], total.to_string());
+    assert_eq!(
+        head.headers()["x-linked-etag"],
+        hex::encode(Sha256::digest(content)),
+        "Hub linked ETag must identify the logical file bytes"
+    );
+    let xet_hash = head
+        .headers()
+        .get("x-xet-hash")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Xet-backed resolve HEAD omitted X-Xet-Hash")?;
+    assert_eq!(xet_hash.len(), 64, "X-Xet-Hash must be a 64-character hex identity");
+    assert!(
+        xet_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "X-Xet-Hash must be lowercase hexadecimal: {xet_hash}"
+    );
+    let response_origin = reqwest::Url::parse(&runtime.base_url)?.origin();
+    let refresh = head
+        .headers()
+        .get("x-xet-refresh-route")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Xet-backed resolve HEAD omitted X-Xet-Refresh-Route")?;
+    let refresh_url = reqwest::Url::parse(refresh)?;
+    assert_eq!(
+        refresh_url.origin(),
+        response_origin,
+        "Xet refresh route must remain on Shardline's configured origin"
+    );
+    let repo_path = repository.split('/').collect::<Vec<_>>();
+    assert_eq!(repo_path.len(), 2, "expected owner/repository identity");
+    let refresh_segments = refresh_url
+        .path_segments()
+        .ok_or("Xet refresh URL has no path segments")?
+        .collect::<Vec<_>>();
+    assert_eq!(
+        refresh_segments.get(..5),
+        Some(&[
+            "api",
+            "models",
+            repo_path[0],
+            repo_path[1],
+            "xet-read-token",
+        ][..]),
+        "Xet refresh route must be scoped to this model repository"
+    );
+    let commit = refresh_segments
+        .get(5)
+        .ok_or("Xet refresh route is not bound to an immutable commit")?;
+    assert_eq!(refresh_segments.len(), 6);
+    assert_eq!(
+        head.headers()["x-repo-commit"].to_str()?,
+        *commit,
+        "Xet refresh scope and Hub resolve must identify the same commit"
+    );
+    assert_eq!(commit.len(), 40, "Xet refresh must use the immutable Git commit");
+    assert!(
+        commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "Xet refresh commit must be lowercase hexadecimal: {commit}"
+    );
+    let links = head
+        .headers()
+        .get("link")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Xet-backed resolve HEAD omitted discovery links")?;
+    let mut auth_link = None;
+    let mut reconstruction_link = None;
+    for link in links.split(',') {
+        let (target, relation) = link
+            .trim()
+            .split_once(';')
+            .ok_or("malformed Hub Xet discovery link")?;
+        let target = target
+            .trim()
+            .strip_prefix('<')
+            .and_then(|value| value.strip_suffix('>'))
+            .ok_or("malformed Hub Xet discovery link target")?;
+        let relation = relation.trim();
+        let slot = match relation {
+            "rel=\"xet-auth\"" => &mut auth_link,
+            "rel=\"xet-reconstruction-info\"" => &mut reconstruction_link,
+            other => panic!("unexpected or malformed Xet discovery relation: {other}"),
+        };
+        assert!(slot.replace(target.to_owned()).is_none(), "duplicate {relation}");
+        assert_eq!(
+            reqwest::Url::parse(target)?.origin(),
+            response_origin,
+            "Hub Xet discovery must remain on Shardline's configured origin"
+        );
+    }
+    let auth_link = auth_link.ok_or("missing Xet auth Link relation")?;
+    assert_eq!(auth_link, refresh, "Xet auth Link and refresh header differ");
+    let reconstruction_link = reconstruction_link.ok_or("missing Xet reconstruction Link relation")?;
+    let reconstruction_url = reqwest::Url::parse(&reconstruction_link)?;
+    let reconstruction_segments = reconstruction_url
+        .path_segments()
+        .ok_or("Xet reconstruction URL has no path segments")?
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reconstruction_segments,
+        ["v1", "reconstructions", xet_hash],
+        "Xet reconstruction link must name the exact X-Xet-Hash"
+    );
     for (field, start, end) in [
         ("bytes=65530-65549", 65530, 65550),
         ("bytes=-19", total - 19, total),

@@ -57,7 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   control, content disposition/encoding/language/type and expiry on full `200`
   responses; reject unsupported override parameters rather than ignoring them.
 - Support signed path-style S3 browser `PostObject` uploads with policy-condition
-  checks, `${filename}` expansion, bounded temporary spooling, user metadata,
+  checks, `${filename}` expansion, bounded streaming, user metadata,
   Content-MD5 and CRC32/CRC32C/SHA-1/SHA-256 checksums, using atomic object
   publication; honor successful-upload redirects with bucket, expanded key and
   ETag query parameters.
@@ -71,6 +71,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Reuse bounded, verified SHA-256 prefix states for native Xet registration of
+  overlapping files, retaining source authentication and final identity checks.
+- Overlap native Xet member authentication and file hashing when CPU admission
+  has spare capacity, retaining sequential verification under saturation.
+- Combine final CAS upload-state commits in SQLite and PostgreSQL after durable
+  object and domain-metadata publication, retaining every recovery evidence event.
+- Stage Unix durable-local S3 multipart parts on the object-store filesystem,
+  retaining verified hard-link publication and existing crash cleanup instead
+  of copying from a separate system-temporary filesystem.
+- Accumulate native Xorb serialized commitments while receiving frames,
+  avoiding a complete preparation scan at EOF while retaining final storage
+  digest verification.
+- Reuse source validation for consecutive ordered file terms during native
+  shard registration, avoiding repeated member decoding while preserving
+  full-file SHA-256, range checks and repeated/out-of-order content.
+- Stream remote shard-registration verification without scratch files,
+  authenticating complete containers and subsequent selected-range reads while
+  retaining complete-file SHA-256 and legacy container support.
+- Retain shared packing admission with encoded S3 payloads until transport
+  releases them, including after request cancellation. Carry the same ownership
+  through compressed individual-chunk fallback payloads while preserving raw
+  buffer reuse after storage releases its references.
+- Release buffered object-read memory when validation switches to scratch
+  storage, retaining exact bytes and automatic scratch cleanup.
+- Stream durable local LFS PATCH ranges through the shared ordered reader,
+  avoiding full-file assembly copies while retaining overlap ordering and
+  complete-file SHA-256 verification before publication.
+- Stream authenticated S3 browser-form payloads without full-file scratch or
+  memory buffering, retaining policy, checksum and trailing-form checks before
+  object publication.
+- Pack public local uploads incrementally in bounded admitted batches, removing
+  the full-upload scratch copy while preserving standalone chunk access,
+  verified fallback and existing response accounting.
+- Keep local Bazel action-cache request validation in shared admitted memory,
+  removing disposable staging files while retaining conditional publication
+  and complete-byte storage verification.
+- Keep OCI ranged-request validation in admitted memory, avoiding disposable
+  local staging files while preserving validation before durable session append.
+  Buffered OCI and native Xet requests share process-wide memory admission.
+- Buffer native Xet Xorb and shard requests in admitted memory without temporary
+  request files, retaining size limits, verification and durable publication.
+  Share two buffer slots per process through validation and storage so queued
+  requests and cancelled workers cannot create unbounded upload buffering.
 - Buffer small native Xet preparation reads within a fixed 64 KiB per worker,
   retaining content verification and cancellation checks.
 - Verify duplicate local staged uploads against the existing object's digest,
@@ -94,16 +137,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Reuse the original PostgreSQL request session for native Xorb deletion guards,
   avoiding extra metadata checkouts while retaining pending-delete fencing and
   lost-owner rejection.
-- Reuse canonical native Xet validation and its serialized reads for staged
-  preparation and the storage digest, avoiding repeated validation and a
-  separate checksum scan while retaining footerless normalization, cancellation
-  and final immutable-write verification.
-- Carry owned native Xet file validation from upload identity preparation into
-  persistence, reducing repeated reads while retaining member verification,
-  immutable publication checks and existing storage formats.
-- Retain verified canonical bytes for memory-backed native Xet uploads from
-  identity preparation through storage, avoiding repeated normalization and
-  content validation while retaining final storage-digest verification.
+- Carry verified native Xet bytes and metadata from preparation into storage,
+  avoiding repeated normalization and content validation. Preserve footerless
+  and file-based compatibility, cancellation, final storage-digest verification
+  and existing formats.
 - Reuse related native Xet containers in bounded, repository-scoped dedup replies,
   reducing retransmission and backend work for partially overlapping versions
   while preserving member authorization and remote-delete coordination.
@@ -422,6 +459,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Security
 
+- Bind both Hub repository-creation routes to the token's exact repository or an
+  explicit grant for its owner namespace, rejecting unauthorized creation before
+  metadata lookup or publication. Thanks to Jannes Stubbemann (@stubbi, openxet)
+  for privately reporting the cross-namespace creation vulnerability.
 - Cap newly issued Xet download URLs at their authorizing credential's expiry,
   retaining the 15-minute upper bound and rejecting already expired credentials.
 - Reject expired Xet download requests with missing or invalid credentials

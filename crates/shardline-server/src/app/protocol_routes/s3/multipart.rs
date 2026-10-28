@@ -703,6 +703,23 @@ async fn durable_s3_upload_part(
         }
         shardline_server_core::ServerObjectStore::Local(_)
         | shardline_server_core::ServerObjectStore::Blackhole => {
+            #[cfg(unix)]
+            let (temporary, anchor) = match &store {
+                shardline_server_core::ServerObjectStore::Local(local) => {
+                    let prefix = format!("staging/resumable/s3/{upload_id}/{part_number}");
+                    let (temporary, anchor) =
+                        crate::object_store::local_resumable_staging_file(local, &prefix)
+                            .map_err(io_to_s3)?;
+                    (temporary, Some(anchor))
+                }
+                shardline_server_core::ServerObjectStore::Blackhole => {
+                    (tempfile::NamedTempFile::new().map_err(io_to_s3)?, None)
+                }
+                shardline_server_core::ServerObjectStore::S3(_) => {
+                    return Err(S3Error::internal());
+                }
+            };
+            #[cfg(not(unix))]
             let temporary = tempfile::NamedTempFile::new().map_err(io_to_s3)?;
             let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(io_to_s3)?);
             let mut hasher = blake3::Hasher::new();
@@ -730,6 +747,16 @@ async fn durable_s3_upload_part(
             let path = temporary.path().to_path_buf();
             let durable_key = staging_key.clone();
             tokio::task::spawn_blocking(move || {
+                // A detached writer must own the staging file and pinned
+                // directory until verified publication finishes.
+                let _temporary = temporary;
+                #[cfg(unix)]
+                if let Some(anchor) = &anchor {
+                    shardline_storage::ensure_parent_path_matches_anchor(
+                        anchor,
+                        "staging parent changed",
+                    )?;
+                }
                 store.put_content_addressed_file(&durable_key, &path, &integrity)
             })
             .await

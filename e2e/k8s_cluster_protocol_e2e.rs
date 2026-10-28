@@ -246,6 +246,7 @@ struct MetadataInventory {
     version_records: i64,
     reconstructions: i64,
     xorbs: i64,
+    xorb_members: i64,
     dedupe_shards: i64,
 }
 
@@ -281,12 +282,12 @@ struct AssetRun {
     first_metrics: xet_data::deduplication::DeduplicationMetrics,
     second_metrics: xet_data::deduplication::DeduplicationMetrics,
     latest_version: StoredVersionIdentity,
-    first_chunk_delta: u64,
-    second_chunk_delta: u64,
+    first_member_delta: u64,
+    second_member_delta: u64,
     first_total_byte_delta: u64,
     second_total_byte_delta: u64,
-    first_chunk_byte_delta: u64,
-    second_chunk_byte_delta: u64,
+    first_xorb_byte_delta: u64,
+    second_xorb_byte_delta: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -396,6 +397,7 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
         },
     )
     .await?;
+    let before_stats = read_server_stats(&client, &config.base_url, &read_token).await?;
 
     let upload_root = tempfile::tempdir()?;
     let download_root = tempfile::tempdir()?;
@@ -474,7 +476,12 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
     let stats_after_second = read_server_stats(&client, &config.base_url, &read_token).await?;
 
     assert_eq!(asset_runs.len(), 3);
-    assert!(stats_after_second.chunks > 0);
+    assert_eq!(stats_after_second.chunks, before_stats.chunks);
+    assert_eq!(
+        after_second_storage.chunk_objects,
+        before_storage.chunk_objects
+    );
+    assert_eq!(after_second_storage.chunk_bytes, before_storage.chunk_bytes);
     assert!(stats_after_second.files >= u64::try_from(asset_runs.len())?);
     assert!(after_second_storage.xorb_objects > before_storage.xorb_objects);
     assert!(after_second_storage.shard_objects > before_storage.shard_objects);
@@ -491,15 +498,15 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
         assert!(asset_run.second_metrics.deduped_chunks > 0);
         assert!(asset_run.second_metrics.new_bytes < asset_run.second_metrics.total_bytes);
         assert!(asset_run.second_metrics.new_bytes < asset_run.first_metrics.new_bytes);
-        assert!(asset_run.first_chunk_delta > 0);
-        assert!(asset_run.second_chunk_delta > 0);
-        assert!(asset_run.second_chunk_delta < asset_run.first_chunk_delta);
+        assert!(asset_run.first_member_delta > 0);
+        assert!(asset_run.second_member_delta > 0);
+        assert!(asset_run.second_member_delta < asset_run.first_member_delta);
         assert!(asset_run.first_total_byte_delta > 0);
         assert!(asset_run.second_total_byte_delta > 0);
         assert!(asset_run.second_total_byte_delta < asset_run.first_total_byte_delta);
-        assert!(asset_run.first_chunk_byte_delta > 0);
-        assert!(asset_run.second_chunk_byte_delta > 0);
-        assert!(asset_run.second_chunk_byte_delta < asset_run.first_chunk_byte_delta);
+        assert!(asset_run.first_xorb_byte_delta > 0);
+        assert!(asset_run.second_xorb_byte_delta > 0);
+        assert!(asset_run.second_xorb_byte_delta < asset_run.first_xorb_byte_delta);
     }
 
     clear_proxy_observations(&proxy_state.observations)?;
@@ -674,6 +681,24 @@ async fn exercise_asset_scenario(
     assert!(after_second_storage.shard_objects > after_first_storage.shard_objects);
     assert!(after_second_storage.xorb_bytes > after_first_storage.xorb_bytes);
     assert!(after_second_storage.shard_bytes > after_first_storage.shard_bytes);
+    // Native members remain in verified Xorbs; uploads must not manufacture
+    // standalone decoded copies, including when the cluster has legacy data.
+    assert_eq!(
+        after_first_storage.chunk_objects,
+        previous_snapshot.storage.chunk_objects
+    );
+    assert_eq!(
+        after_second_storage.chunk_objects,
+        after_first_storage.chunk_objects
+    );
+    assert_eq!(
+        after_first_storage.chunk_bytes,
+        previous_snapshot.storage.chunk_bytes
+    );
+    assert_eq!(
+        after_second_storage.chunk_bytes,
+        after_first_storage.chunk_bytes
+    );
 
     Ok(AssetRun {
         scenario,
@@ -684,15 +709,15 @@ async fn exercise_asset_scenario(
         first_metrics,
         second_metrics,
         latest_version,
-        first_chunk_delta: checked_u64_delta(
-            after_first_storage.chunk_objects,
-            previous_snapshot.storage.chunk_objects,
-            "first upload chunk object delta",
+        first_member_delta: checked_u64_delta(
+            u64::try_from(after_first_metadata.xorb_members)?,
+            u64::try_from(previous_snapshot.metadata.xorb_members)?,
+            "first upload verified Xorb member delta",
         )?,
-        second_chunk_delta: checked_u64_delta(
-            after_second_storage.chunk_objects,
-            after_first_storage.chunk_objects,
-            "second upload chunk object delta",
+        second_member_delta: checked_u64_delta(
+            u64::try_from(after_second_metadata.xorb_members)?,
+            u64::try_from(after_first_metadata.xorb_members)?,
+            "second upload verified Xorb member delta",
         )?,
         first_total_byte_delta: checked_u64_delta(
             after_first_storage.total_bytes,
@@ -704,15 +729,15 @@ async fn exercise_asset_scenario(
             after_first_storage.total_bytes,
             "second upload total object byte delta",
         )?,
-        first_chunk_byte_delta: checked_u64_delta(
-            after_first_storage.chunk_bytes,
-            previous_snapshot.storage.chunk_bytes,
-            "first upload chunk byte delta",
+        first_xorb_byte_delta: checked_u64_delta(
+            after_first_storage.xorb_bytes,
+            previous_snapshot.storage.xorb_bytes,
+            "first upload Xorb byte delta",
         )?,
-        second_chunk_byte_delta: checked_u64_delta(
-            after_second_storage.chunk_bytes,
-            after_first_storage.chunk_bytes,
-            "second upload chunk byte delta",
+        second_xorb_byte_delta: checked_u64_delta(
+            after_second_storage.xorb_bytes,
+            after_first_storage.xorb_bytes,
+            "second upload Xorb byte delta",
         )?,
     })
 }
@@ -867,6 +892,10 @@ async fn metadata_inventory(pool: &PgPool) -> Result<MetadataInventory, TestErro
             .fetch_one(pool)
             .await
             .map_err(|error| IoError::other(format!("count stored objects: {error}")))?,
+        xorb_members: query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_xet_chunks")
+            .fetch_one(pool)
+            .await
+            .map_err(|error| IoError::other(format!("count verified Xorb members: {error}")))?,
         dedupe_shards: query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_dedupe_shards")
             .fetch_one(pool)
             .await

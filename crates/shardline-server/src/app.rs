@@ -1437,6 +1437,9 @@ async fn request_timeout_middleware(
 mod tests;
 
 #[cfg(test)]
+mod shutdown_upload_tests;
+
+#[cfg(test)]
 mod e2e_tests;
 
 #[cfg(test)]

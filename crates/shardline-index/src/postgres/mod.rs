@@ -16,6 +16,7 @@ mod tree_store;
 mod types;
 mod upload_intent_ownership;
 mod upload_recovery_guard;
+mod upload_transitions;
 mod xet_xorb;
 pub(crate) use record_store::{admit_record_conversion, run_record_conversion};
 

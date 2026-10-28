@@ -44,6 +44,7 @@ mod dedup;
 mod file_digests;
 #[cfg(test)]
 mod file_digests_tests;
+mod streaming_source;
 mod verification;
 pub use dedup::{
     dedup_xorb_candidates, recover_dedup_xorb_descriptor,
@@ -110,6 +111,49 @@ pub fn prepare_uploaded_shard_with_checkpoint<R: Read + Seek>(
     limits: ShardMetadataLimits,
     checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
 ) -> Result<PreparedShardUpload, XetAdapterError> {
+    prepare_shard(
+        reader,
+        object_store,
+        repository_scope,
+        limits,
+        checkpoint,
+        false,
+    )
+}
+
+/// Overlap SHA-256 with source authentication using an independently admitted
+/// CPU worker. The caller must supply and retain its admission token; this
+/// function releases it only after all digest workers have stopped.
+///
+/// # Errors
+/// Returns verification, storage, limit or checkpoint errors without publication.
+pub fn prepare_uploaded_shard_with_digest_worker<R: Read + Seek, P: Send>(
+    reader: &mut R,
+    object_store: &ServerObjectStore,
+    repository_scope: Option<&RepositoryScope>,
+    limits: ShardMetadataLimits,
+    checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
+    permit: P,
+) -> Result<PreparedShardUpload, XetAdapterError> {
+    let _permit = permit;
+    prepare_shard(
+        reader,
+        object_store,
+        repository_scope,
+        limits,
+        checkpoint,
+        true,
+    )
+}
+
+fn prepare_shard<R: Read + Seek>(
+    reader: &mut R,
+    object_store: &ServerObjectStore,
+    repository_scope: Option<&RepositoryScope>,
+    limits: ShardMetadataLimits,
+    checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
+    parallel_digest: bool,
+) -> Result<PreparedShardUpload, XetAdapterError> {
     let mut references = HashSet::new();
     let mut descriptors = Vec::new();
     let preparation = parse_shard_records_with_checkpoint(
@@ -119,7 +163,10 @@ pub fn prepare_uploaded_shard_with_checkpoint<R: Read + Seek>(
         limits,
         Some(&mut references),
         Some(&mut descriptors),
-        checkpoint,
+        VerificationWork {
+            checkpoint,
+            parallel_digest,
+        },
     );
     checkpoint()?;
     let normalized = preparation?;
@@ -365,8 +412,17 @@ fn parse_shard_records_from_reader<R: Read + Seek>(
         limits,
         member_references,
         descriptors,
-        &|| Ok(()),
+        VerificationWork {
+            checkpoint: &|| Ok(()),
+            parallel_digest: false,
+        },
     )
+}
+
+#[derive(Clone, Copy)]
+struct VerificationWork<'work> {
+    checkpoint: &'work (dyn Fn() -> std::io::Result<()> + Sync),
+    parallel_digest: bool,
 }
 
 fn parse_shard_records_with_checkpoint<R: Read + Seek>(
@@ -376,8 +432,9 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
     limits: ShardMetadataLimits,
     member_references: Option<&mut HashSet<ObjectKey>>,
     descriptors: Option<&mut Vec<shardline_index::XetXorbDescriptor>>,
-    checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
+    work: VerificationWork<'_>,
 ) -> Result<NormalizedShardUpload, XetAdapterError> {
+    let checkpoint = work.checkpoint;
     checkpoint()?;
     shard_reader
         .seek(std::io::SeekFrom::Start(0))
@@ -390,6 +447,7 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
     validate_referenced_xorb_count(&bounded_shard.file_infos, limits.max_xorbs().get())?;
     let mut xorb_cache = HashMap::new();
     let mut file_digests = file_digests::FileDigestVerifier::default();
+    file_digests.parallel_digest = work.parallel_digest;
     let mut member_references = member_references;
 
     for file_info in &bounded_shard.file_infos {
@@ -730,11 +788,18 @@ fn build_file_records_with_cache(
             .metadata_ext
             .as_ref()
             .map(|metadata| metadata.sha256.hex());
-        let mut digest = file_digests::FileDigest::new(expected_sha256, repository_scope.is_some());
+        let mut digest = file_digests::FileDigest::with_scope(expected_sha256, repository_scope);
+        digest.enable_parallel(
+            file_digests.parallel_digest
+                && file_info.segments.iter().any(|term| {
+                    term.unpacked_segment_bytes >= file_digests::MIN_PARALLEL_SOURCE_BYTES
+                }),
+        );
         let mut offset = 0_u64;
         let mut chunks = Vec::with_capacity(file_info.segments.len());
+        let mut digested_through = 0;
 
-        for segment in &file_info.segments {
+        for (segment_index, segment) in file_info.segments.iter().enumerate() {
             checkpoint()?;
             let hash = segment.xorb_hash.hex();
             let range_start = segment.chunk_index_start;
@@ -745,12 +810,19 @@ fn build_file_records_with_cache(
                 );
             }
 
-            let mut digested_during_validation = false;
             let xorb_info = if let Some(info) = xorb_cache.get(&hash) {
                 info
             } else {
                 // Drop the previous spool before materializing another source.
                 file_digests.release_source();
+                let ordered = file_digests::ordered_source_terms(
+                    file_info
+                        .segments
+                        .get(segment_index..)
+                        .ok_or(XetAdapterError::Overflow)?,
+                )?;
+                let mut remaining = ordered;
+                digest.begin_terms(ordered);
                 let (loaded, source) = load_xorb_range_info_with_visitor(
                     object_store,
                     &hash,
@@ -758,11 +830,14 @@ fn build_file_records_with_cache(
                     checkpoint,
                     &mut |member, data| {
                         checkpoint()?;
-                        digest.update_validating_member(segment, member, data);
+                        digest.update_validating_terms(&mut remaining, member, data);
                         Ok(())
                     },
                 )?;
-                digested_during_validation = true;
+                digest.finish_terms();
+                digested_through = segment_index
+                    .checked_add(ordered.len())
+                    .ok_or(XetAdapterError::Overflow)?;
                 file_digests.retain_verified_source(&hash, source);
                 xorb_cache.insert(hash.clone(), loaded);
                 xorb_cache
@@ -774,8 +849,10 @@ fn build_file_records_with_cache(
             let packed_start = xorb_info.packed_start(range_start)?;
             let packed_end = xorb_info.packed_end(range_end)?;
             verification::verify_term_length(segment, &xorb_info.verified_chunks)?;
-            if !digested_during_validation {
+            if segment_index >= digested_through {
+                digest.begin_terms(std::slice::from_ref(segment));
                 digest.update(file_digests, object_store, segment, xorb_info, checkpoint)?;
+                digest.finish_terms();
             }
             let length = segment.unpacked_segment_bytes;
             chunks.push(FileChunkRecord {
@@ -881,7 +958,13 @@ fn load_xorb_range_info_with_source(
     object_store: &ServerObjectStore,
     hash_hex: &str,
     member_references: Option<&mut HashSet<ObjectKey>>,
-) -> Result<(XorbRangeInfo, shardline_server_core::MaterializedObject), XetAdapterError> {
+) -> Result<
+    (
+        XorbRangeInfo,
+        Option<shardline_server_core::MaterializedObject>,
+    ),
+    XetAdapterError,
+> {
     load_xorb_range_info_with_checkpoint(object_store, hash_hex, member_references, &|| Ok(()))
 }
 
@@ -890,7 +973,13 @@ fn load_xorb_range_info_with_checkpoint(
     hash_hex: &str,
     member_references: Option<&mut HashSet<ObjectKey>>,
     checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
-) -> Result<(XorbRangeInfo, shardline_server_core::MaterializedObject), XetAdapterError> {
+) -> Result<
+    (
+        XorbRangeInfo,
+        Option<shardline_server_core::MaterializedObject>,
+    ),
+    XetAdapterError,
+> {
     load_xorb_range_info_with_visitor(
         object_store,
         hash_hex,
@@ -905,10 +994,38 @@ fn load_xorb_range_info_with_visitor(
     hash_hex: &str,
     member_references: Option<&mut HashSet<ObjectKey>>,
     checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
-    visitor: &mut dyn FnMut(u64, &[u8]) -> std::io::Result<()>,
-) -> Result<(XorbRangeInfo, shardline_server_core::MaterializedObject), XetAdapterError> {
+    visitor: &mut (dyn FnMut(u64, &[u8]) -> std::io::Result<()> + Send),
+) -> Result<
+    (
+        XorbRangeInfo,
+        Option<shardline_server_core::MaterializedObject>,
+    ),
+    XetAdapterError,
+> {
     checkpoint()?;
     let key = xorb_object_key(hash_hex)?;
+    if let ServerObjectStore::S3(store) = object_store {
+        let validated = streaming_source::validate(
+            store,
+            &key,
+            parse_xet_hash_hex(hash_hex)?,
+            checkpoint,
+            visitor,
+        )?;
+        if let Some(references) = member_references {
+            for chunk in validated.chunks() {
+                let hash = shardline_index::xet_hash_hex_string(chunk.hash());
+                references.insert(shardline_server_core::chunk_object_key(&hash)?);
+            }
+        }
+        return Ok((
+            XorbRangeInfo {
+                total_length: validated.total_length(),
+                verified_chunks: validated.chunks().to_vec(),
+            },
+            None,
+        ));
+    }
     let source =
         object_store.materialize_bounded_object_if_present_with_checkpoint(&key, 0, checkpoint);
     checkpoint()?;
@@ -946,7 +1063,7 @@ fn load_xorb_range_info_with_visitor(
             total_length: validated.total_length(),
             verified_chunks: validated.chunks().to_vec(),
         },
-        reader,
+        Some(reader),
     ))
 }
 
@@ -1134,13 +1251,29 @@ mod tests {
                     } else {
                         heads += 1;
                     }
-                    if get {
-                        write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Mon, 12 Oct 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n", body.len().saturating_sub(1), body.len(), body.len()).unwrap();
+                    let range = request.lines().find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("range: bytes=")
+                            .map(str::to_owned)
+                    });
+                    let (start, end) = range
+                        .as_ref()
+                        .map(|range| {
+                            let (start, end) = range.split_once('-').unwrap();
+                            (
+                                start.parse::<usize>().unwrap(),
+                                end.parse::<usize>().unwrap(),
+                            )
+                        })
+                        .unwrap_or_else(|| (0, body.len().saturating_sub(1)));
+                    let selected = body.get(start..=end).unwrap();
+                    if get && range.is_some() {
+                        write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Mon, 12 Oct 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n", body.len(), selected.len()).unwrap();
                     } else {
                         write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Mon, 12 Oct 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n", body.len()).unwrap();
                     }
                     if get {
-                        stream.write_all(&body).unwrap();
+                        stream.write_all(selected).unwrap();
                     }
                 }
                 Ok((heads, gets))
@@ -1218,8 +1351,9 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
             let reads = server.join().unwrap().unwrap();
             assert_eq!(
-                reads.1, 1,
-                "a repeated xorb reference must share its validation read"
+                reads.1,
+                1_usize.saturating_add(usize::from(verify_sha256)),
+                "one full validation plus an exact range for repeated file bytes"
             );
             if collect_members {
                 assert_eq!(references.len(), 1);
@@ -1228,12 +1362,13 @@ mod tests {
             }
             outcomes.push((parsed.records, reads));
         }
-        let first = outcomes.first().unwrap();
-        let last = outcomes.last().unwrap();
-        assert_eq!(
-            first, last,
-            "collecting references must preserve records and S3 read counts"
-        );
+        for pair in outcomes.as_chunks::<2>().0 {
+            assert_eq!(
+                pair.first(),
+                pair.last(),
+                "collecting references must preserve records and S3 read counts"
+            );
+        }
     }
 
     #[test]

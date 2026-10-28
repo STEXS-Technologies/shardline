@@ -12,7 +12,7 @@ use crate::{
     download_stream::{
         ServerByteStream, VerifiedXorb, object_byte_stream, prepare_xorb_byte_range,
     },
-    upload_ingest::{RequestBodyReader, stage_xorb_with_spill, store_admitted_xorb},
+    upload_ingest::{RequestBodyReader, prepare_native_xorb, store_admitted_xorb},
     xet_adapter::{XorbUploadResponse, resolve_dedupe_shard_object, xorb_object_key},
 };
 
@@ -46,16 +46,9 @@ impl LocalBackend {
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
         let object_store = self.object_store();
-        let staged = stage_xorb_with_spill(&mut body).await?;
-        let (staged, body_length) =
-            crate::upload_identity::xorb_length(expected_hash, staged, &self.stream_work_pool)
-                .await?;
+        let (staged, body_length, permit) =
+            prepare_native_xorb(&mut body, expected_hash, &self.stream_work_pool).await?;
         let intent_id = crate::upload_identity::xorb(expected_hash, body_length);
-        let permit = self
-            .stream_work_pool
-            .acquire()
-            .await
-            .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
             intent_id.clone(),

@@ -408,7 +408,8 @@ async fn s3_post_object(
             precondition: Some(&form.payload_headers),
         },
     )
-    .await?;
+    .await
+    .map_err(|error| form.validation.take_error().unwrap_or(error))?;
     let mut response = if let Some(redirect) = form.success_redirect.as_deref() {
         let location = post_object_redirect(
             redirect,

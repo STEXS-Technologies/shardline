@@ -260,7 +260,7 @@ def main():
         results["trace_validation"] = deployment.trace.validate()
         results["limitations"] = [
             "One shared-host replica, sequential operations, warm server and cold clients.",
-            "Immediate retained bytes include compatibility copies; no retention-expired GC claim.",
+            "Retained bytes are measured before retention-expired GC; no later reclamation claim.",
             "Trace bytes include protocol overhead; SQL WAL is not physical disk wear.",
             "No cloud price, production scaling, tail-latency or power-loss claim."]
         (args.output / "result.json").write_text(json.dumps(results, indent=2) + "\n")

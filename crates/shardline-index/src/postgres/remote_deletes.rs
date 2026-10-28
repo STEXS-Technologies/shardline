@@ -996,11 +996,34 @@ mod tests {
                     .bind(&keys)
             };
             let mut acquire = Box::pin(statement.execute(&mut *publication));
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(100), &mut acquire)
+            // Observe the actual wait rather than assuming all preceding SQL
+            // and advisory locks finish within a fixed scheduling interval.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        result = &mut acquire => panic!(
+                            "publication completed before the reference-slot blocker: {result:?}"
+                        ),
+                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    }
+                    let waiting: bool = query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1
+                         AND locktype='advisory' AND classid=1397507140
+                         AND objid::bigint=$2 AND objsubid=2
+                         AND mode='ShareLock' AND NOT granted)",
+                    )
+                    .bind(pid)
+                    .bind(i64::from(blocked_slot))
+                    .fetch_one(&pool)
                     .await
-                    .is_err()
-            );
+                    .unwrap();
+                    if waiting {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("publication did not reach the blocked reference slot");
             let slots: Vec<i64> = query_scalar(
                 "SELECT objid::bigint FROM pg_locks WHERE pid=$1 AND locktype='advisory'
                  AND classid=1397507140 AND objsubid=2 AND mode='ShareLock' AND granted

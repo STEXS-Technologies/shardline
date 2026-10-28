@@ -170,6 +170,35 @@ async fn remote_boundaries(encoding: RetryEncoding, interleaved: bool) -> Result
             container_with_compression(byte, CompressionScheme::None, interleaved)?;
         let intent_id = format!("xorb-v2-{hash}-{}", bytes.len());
         let key = shardline_xet_adapter::xorb_object_key(&hash)?;
+        // Alternate real legacy layouts with fresh copy-free storage. New
+        // native uploads must preserve old copies, not manufacture them.
+        let has_legacy_members = matches!(cut, "created" | "stored" | "visible");
+        let member_seeds = if interleaved {
+            vec![byte, byte ^ 0x80]
+        } else {
+            vec![byte]
+        };
+        if has_legacy_members {
+            for seed in &member_seeds {
+                let content = vec![*seed; 128 * 1024];
+                let member_hex =
+                    shardline_server::test_fixtures::xet_hash_hex(&compute_data_hash(&content));
+                let member_key = shardline_storage::ObjectKey::parse(&format!(
+                    "{}/{member_hex}",
+                    &member_hex[..2]
+                ))?;
+                remote.objects.put_if_absent(
+                    &member_key,
+                    shardline_storage::ObjectBody::from_slice(&content),
+                    &shardline_storage::ObjectIntegrity::new(
+                        shardline_protocol::ShardlineHash::from_bytes(
+                            *blake3::hash(&content).as_bytes(),
+                        ),
+                        u64::try_from(content.len())?,
+                    ),
+                )?;
+            }
+        }
         let root = tempfile::tempdir()?;
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -214,9 +243,9 @@ async fn remote_boundaries(encoding: RetryEncoding, interleaved: bool) -> Result
         let expected = match cut {
             "created" => UploadIntentState::Created,
             "storing" | "object" => UploadIntentState::Storing,
-            "stored" => UploadIntentState::Stored,
-            "committed" => UploadIntentState::MetadataCommitted,
-            "visible" => UploadIntentState::Visible,
+            // Domain persistence precedes one atomic completion/evidence batch.
+            // All three post-completion hooks observe its committed final state.
+            "stored" | "committed" | "visible" => UploadIntentState::Visible,
             _ => return Err("unknown boundary".into()),
         };
         assert_eq!(paused.state(), expected, "durable state at {cut}");
@@ -375,23 +404,24 @@ async fn remote_boundaries(encoding: RetryEncoding, interleaved: bool) -> Result
             after_rejection, actual,
             "mismatching retry changed bytes at {cut}"
         );
-        // The unchanged predecessor reads standalone decoded copies. Both
-        // identities must survive takeover, including a different encoding
-        // winning the concurrent retry race.
-        for seed in if interleaved {
-            vec![byte, byte ^ 0x80]
-        } else {
-            vec![byte]
-        } {
+        // Existing standalone members remain byte-exact through takeover,
+        // including a different encoding winning the concurrent retry race.
+        // Fresh uploads remain copy-free; old readers must be upgraded before
+        // new native writes, as required by the documented rollout contract.
+        for seed in member_seeds {
             let content = vec![seed; 128 * 1024];
             let member_hex =
                 shardline_server::test_fixtures::xet_hash_hex(&compute_data_hash(&content));
             let member_key =
                 shardline_storage::ObjectKey::parse(&format!("{}/{member_hex}", &member_hex[..2]))?;
-            let (mut stored_member, _) = remote
+            let stored_member = remote
                 .objects
-                .materialize_bounded_object_if_present(&member_key, 0)?
-                .ok_or("missing legacy member")?;
+                .materialize_bounded_object_if_present(&member_key, 0)?;
+            if !has_legacy_members {
+                assert!(stored_member.is_none(), "new standalone copy after {cut}");
+                continue;
+            }
+            let (mut stored_member, _) = stored_member.ok_or("lost seeded legacy member")?;
             let mut decoded = Vec::new();
             stored_member.read_to_end(&mut decoded)?;
             assert_eq!(decoded, content, "legacy member bytes after {cut}");

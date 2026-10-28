@@ -32,12 +32,11 @@ use shardline_index::{
     CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumablePartRange,
     ResumableSession, ResumableSessionProtocol, ResumableSessionState,
 };
-use shardline_protocol::{ShardlineHash, TokenScope};
+use shardline_protocol::TokenScope;
 use shardline_server_core::AuthorizedRepository;
 
 use futures_util::StreamExt;
-use shardline_storage::{DeleteOutcome, ObjectIntegrity, ObjectKey};
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
+use shardline_storage::{DeleteOutcome, ObjectKey};
 
 use super::lfs_patch_evidence;
 use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
@@ -48,10 +47,7 @@ use crate::{
     admission::weights,
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
-    object_store::{
-        materialize_object_to_file, open_local_object_for_read, s3_lfs_parts_reader,
-        stage_bytes_content_addressed,
-    },
+    object_store::{lfs_parts_reader, stage_bytes_content_addressed},
     overflow::checked_add,
     protocol_support::scope_namespace,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
@@ -1776,89 +1772,19 @@ async fn durable_lfs_patch_object(
     if !lfs_ranges_cover_total(&claimed_parts, total)? {
         return Err(ServerError::LfsPatchRangeNotSatisfiable);
     }
-    let _stored = if let Some(reader) =
-        s3_lfs_parts_reader(&state.backend.object_store(), &claimed_parts, total).await?
+    let reader = lfs_parts_reader(&state.backend.object_store(), &claimed_parts, total).await?;
+    let _stored = match state
+        .backend
+        .put_sha256_addressed_object_stream_if_absent(object_key, oid, reader)
+        .await
     {
-        match state
-            .backend
-            .put_sha256_addressed_object_stream_if_absent(object_key, oid, reader)
-            .await
-        {
-            Ok(stored) => stored,
-            Err(ServerError::ExpectedBodyHashMismatch) => {
-                reopen_lfs_session_after_digest_failure(state, &session_id, claimed.fence_epoch())
-                    .await?;
-                return Err(ServerError::ExpectedBodyHashMismatch);
-            }
-            Err(error) => return Err(error),
-        }
-    } else {
-        let temporary = tempfile::tempdir()?;
-        let assembled_path = temporary.path().join("assembled");
-        let mut assembled = tokio::fs::File::create(&assembled_path).await?;
-        assembled.set_len(total).await?;
-        for part in &claimed_parts {
-            let part_range = part
-                .range()
-                .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
-            let key =
-                ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
-            let mut input = if let Some(file) =
-                open_local_object_for_read(&state.backend.object_store(), &key, part.size_bytes())
-                    .await?
-            {
-                file
-            } else {
-                let path = temporary.path().join(format!("part-{}", part.generation()));
-                materialize_object_to_file(
-                    &state.backend.object_store(),
-                    &key,
-                    part.size_bytes(),
-                    &path,
-                )
-                .await?;
-                tokio::fs::File::open(path).await?
-            };
-            assembled.seek(SeekFrom::Start(part_range.start())).await?;
-            if tokio::io::copy(&mut input, &mut assembled).await? != part.size_bytes() {
-                return Err(ServerError::ObjectStore(
-                    crate::error::ObjectStoreError::StoredLengthMismatch,
-                ));
-            }
-        }
-        assembled.flush().await?;
-        drop(assembled);
-
-        let mut input = tokio::fs::File::open(&assembled_path).await?;
-        let mut sha256 = Sha256::new();
-        let mut blake3 = blake3::Hasher::new();
-        let mut observed = 0_u64;
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        loop {
-            let read = input.read(&mut buffer).await?;
-            if read == 0 {
-                break;
-            }
-            let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
-            sha256.update(bytes);
-            blake3.update(bytes);
-            observed = observed
-                .checked_add(u64::try_from(read)?)
-                .ok_or(ServerError::Overflow)?;
-        }
-        if observed != total || hex::encode(sha256.finalize()) != oid {
+        Ok(stored) => stored,
+        Err(ServerError::ExpectedBodyHashMismatch) => {
             reopen_lfs_session_after_digest_failure(state, &session_id, claimed.fence_epoch())
                 .await?;
             return Err(ServerError::ExpectedBodyHashMismatch);
         }
-        let object_integrity = ObjectIntegrity::new(
-            ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
-            observed,
-        );
-        state
-            .backend
-            .put_sha256_addressed_object_file(object_key, oid, &assembled_path, &object_integrity)
-            .await?
+        Err(error) => return Err(error),
     };
     if !state
         .backend
@@ -2158,7 +2084,10 @@ mod tests {
             object_store,
         )
         .await
-        .ok()?;
+        .expect("configured PostgreSQL LFS fixture must initialize");
+        crate::apply_database_migrations(&backend.gc_barrier_pool)
+            .await
+            .expect("configured PostgreSQL LFS fixture migrations must apply");
         Some(Arc::new(AppState {
             config,
             role: ServerRole::All,

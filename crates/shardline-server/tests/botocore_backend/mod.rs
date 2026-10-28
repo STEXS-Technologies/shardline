@@ -4,6 +4,18 @@ mod range_restart;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires native AWS CLI and owned PostgreSQL/MinIO"]
+async fn native_aws_multipart_resume_with_owned_postgres_and_minio() {
+    let (_services, database, storage) = fixture("aws-multipart-resume").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        exercise_native_aws_resume(Some(&database), Some(storage)),
+    )
+    .await
+    .expect("remote AWS multipart resume deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires native AWS CLI and owned PostgreSQL/MinIO"]
 async fn native_aws_presigned_get_stays_on_shardline_with_remote_storage() {
     let (_services, database, storage) = fixture("aws-presigned-shardline-only").await;
     tokio::time::timeout(

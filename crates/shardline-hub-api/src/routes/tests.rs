@@ -1166,6 +1166,15 @@ fn make_write_alice_auth_state() -> (tempfile::TempDir, HubState) {
 fn make_scoped_alice_auth_state(
     scope: shardline_protocol::TokenScope,
 ) -> (tempfile::TempDir, HubState) {
+    make_scoped_alice_auth_state_with_creation(scope, false)
+}
+
+/// Like `make_scoped_alice_auth_state`, with the issuer's explicit grant to
+/// create repositories in Alice's namespace.
+fn make_scoped_alice_auth_state_with_creation(
+    scope: shardline_protocol::TokenScope,
+    namespace_creation: bool,
+) -> (tempfile::TempDir, HubState) {
     use shardline_protocol::{
         RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as ProtoScope,
     };
@@ -1173,6 +1182,7 @@ fn make_scoped_alice_auth_state(
 
     struct AliceProvider {
         scope: ProtoScope,
+        namespace_creation: bool,
     }
     impl AuthProvider for AliceProvider {
         fn verify_token(
@@ -1183,7 +1193,11 @@ fn make_scoped_alice_auth_state(
                 .map_err(|_err| AuthError::InvalidToken)?;
             let claims = TokenClaims::new("issuer", "alice", self.scope, repo, u64::MAX)
                 .map_err(|_err| AuthError::InvalidToken)?;
-            Ok(claims)
+            Ok(if self.namespace_creation {
+                claims.with_namespace_repository_creation()
+            } else {
+                claims
+            })
         }
         fn mint_token(
             &self,
@@ -1211,7 +1225,10 @@ fn make_scoped_alice_auth_state(
     let state = HubState {
         store,
         object_store,
-        auth: Some(HubAuth::new(Box::new(AliceProvider { scope }))),
+        auth: Some(HubAuth::new(Box::new(AliceProvider {
+            scope,
+            namespace_creation,
+        }))),
         http_client: None,
         webhook_secret_cipher: None,
         public_base_url: "http://127.0.0.1:8080".to_owned(),
@@ -5123,6 +5140,123 @@ async fn repo_create_conflict_own_repo_keeps_full_body() {
             .is_some_and(|url| url.ends_with("/alice/own")),
         "own-repo conflict body should keep the repository URL: {json:?}"
     );
+}
+
+#[tokio::test]
+async fn repo_creation_requires_exact_scope_or_explicit_namespace_grant() {
+    use shardline_protocol::TokenScope;
+
+    let (_td, state) = make_write_alice_auth_state();
+    let write_repo = |name: &str| RepoCreateRequest {
+        repo_type: RepoType::Model,
+        name: name.to_owned(),
+        organization: None,
+        private: true,
+        visibility: None,
+    };
+
+    // A repository-scoped write token cannot squat a different namespace or
+    // create a sibling merely because its existing repository belongs to Alice.
+    for name in ["bob/new-private", "alice/new-sibling"] {
+        let result = repo_create(
+            State(state.clone()),
+            alice_headers(),
+            test_repo(&state, &alice_headers()),
+            Json(write_repo(name)),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(HubApiError::Forbidden)),
+            "{name}: {result:?}"
+        );
+        assert!(state.store.get_repo(name).unwrap().is_none());
+    }
+
+    // The explicit signed grant permits sibling creation only in the token's
+    // owner namespace; it does not authorize cross-namespace creation.
+    let (_granted_td, granted) =
+        make_scoped_alice_auth_state_with_creation(TokenScope::Write, true);
+    let created = repo_create(
+        State(granted.clone()),
+        alice_headers(),
+        test_repo(&granted, &alice_headers()),
+        Json(write_repo("alice/new-sibling")),
+    )
+    .await
+    .unwrap();
+    let (status, body) = decode_creation_response(created).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], "alice/new-sibling");
+
+    let cross_namespace = repo_create(
+        State(granted.clone()),
+        alice_headers(),
+        test_repo(&granted, &alice_headers()),
+        Json(write_repo("bob/still-forbidden")),
+    )
+    .await;
+    assert!(matches!(cross_namespace, Err(HubApiError::Forbidden)));
+    assert!(
+        granted
+            .store
+            .get_repo("bob/still-forbidden")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn type_specific_repo_creation_uses_the_same_namespace_boundary() {
+    use shardline_protocol::TokenScope;
+
+    let (_td, state) = make_write_alice_auth_state();
+    for namespace in ["bob", "alice"] {
+        let result = repo_create_type(
+            State(state.clone()),
+            default_headers(),
+            test_repo(&state, &alice_headers()),
+            Path(("models".into(), namespace.into(), "new-repo".into())),
+            Json(serde_json::json!({"private": true})),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(HubApiError::Forbidden)),
+            "{namespace}: {result:?}"
+        );
+        assert!(
+            state
+                .store
+                .get_repo(&format!("{namespace}/new-repo"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    let (_granted_td, granted) =
+        make_scoped_alice_auth_state_with_creation(TokenScope::Write, true);
+    let created = repo_create_type(
+        State(granted.clone()),
+        default_headers(),
+        test_repo(&granted, &alice_headers()),
+        Path(("models".into(), "alice".into(), "new-repo".into())),
+        Json(serde_json::json!({"private": true})),
+    )
+    .await
+    .unwrap();
+    let (status, body) = decode_creation_response(created).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], "alice/new-repo");
+
+    let cross_namespace = repo_create_type(
+        State(granted.clone()),
+        default_headers(),
+        test_repo(&granted, &alice_headers()),
+        Path(("models".into(), "bob".into(), "new-repo".into())),
+        Json(serde_json::json!({"private": true})),
+    )
+    .await;
+    assert!(matches!(cross_namespace, Err(HubApiError::Forbidden)));
+    assert!(granted.store.get_repo("bob/new-repo").unwrap().is_none());
 }
 
 // ------------------------------------------------------------------

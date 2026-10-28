@@ -52,3 +52,41 @@ fn optional_local_missing_hf_keeps_existing_behavior() {
     .unwrap();
     assert!(output.status.success());
 }
+
+#[cfg(unix)]
+#[test]
+fn required_analytical_missing_curl_fails_instead_of_passing() {
+    if !super::command_available("hf") {
+        return;
+    }
+    let hf = shardline_test_support::native_client_output(
+        Command::new("which").arg("hf"),
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+    assert!(hf.status.success(), "prerequisite contract requires installed hf");
+    let hf = String::from_utf8(hf.stdout).unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(hf.trim(), tools.path().join("hf")).unwrap();
+    let output = shardline_test_support::native_client_output(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native_huggingface_http_analytics::duckdb_queries_authenticated_regular_and_xet_hub_ranges",
+            ])
+            .env("PATH", tools.path())
+            .env("SHARDLINE_REQUIRE_NATIVE_CLIENTS", "1"),
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(!output.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        diagnostic.contains("required native client curl is missing or cannot run"),
+        "unexpected child failure: {diagnostic}"
+    );
+}

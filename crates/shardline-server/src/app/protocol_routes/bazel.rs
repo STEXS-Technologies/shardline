@@ -14,7 +14,7 @@ use crate::{
     admission::weights,
     bazel_cache_object_key,
     object_store::put_reader_if_absent_s3,
-    upload_ingest::{RequestBodyReader, stage_body_to_tempfile},
+    upload_ingest::{RequestBodyReader, stage_bounded_body},
 };
 
 use super::{AppState, authorize, direct_object_response, direct_object_response_from_snapshot};
@@ -160,16 +160,12 @@ pub(crate) async fn bazel_put_ac(
     {
         return Ok(StatusCode::NO_CONTENT);
     }
-    let (temporary, length, body_hash) = stage_body_to_tempfile(&mut body).await?;
+    let bytes = stage_bounded_body(&mut body).await?.into_bytes();
     // Action Cache keys identify actions, not the serialized action result.
     // Unlike CAS, the action key is therefore not expected to hash the body.
     let _stored = state
         .backend
-        .put_object_file_if_absent(
-            &object_key,
-            temporary.path(),
-            &shardline_storage::ObjectIntegrity::new(body_hash, length),
-        )
+        .put_object_owned_bytes_if_absent(&object_key, bytes)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -715,6 +711,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body.as_ref(), content.as_slice());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac_interrupted_body_is_not_published_and_large_retry_is_verified() {
+        let (state, _tmp) = build_test_state().await;
+        let app = bazel_router(state);
+        let uri = format!("/v1/bazel/cache/ac/{}", "d".repeat(64));
+        let content = vec![0x5a; 512 * 1024 + 17];
+        let interrupted = futures_util::stream::iter([
+            Ok(bytes::Bytes::copy_from_slice(&content[..300 * 1024])),
+            Err(std::io::Error::other("interrupted action result")),
+        ]);
+        let failed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&uri)
+                    .body(Body::from_stream(interrupted))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(!failed.status().is_success());
+        let absent = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+        let retry = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&uri)
+                    .body(Body::from(content.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::NO_CONTENT);
+        let downloaded = app
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(downloaded.status(), StatusCode::OK);
+        let downloaded = axum::body::to_bytes(downloaded.into_body(), content.len())
+            .await
+            .unwrap();
+        assert_eq!(downloaded.as_ref(), content);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -15,8 +15,7 @@ use crate::{
     model::UploadFileResponse,
     object_store::reconstruct_file_record_bytes,
     upload_ingest::{
-        FileUploadIngestor, RequestBodyReader, UploadStorage, stage_body_with_spill,
-        upload_attempt_id,
+        FileUploadIngestor, RequestBodyReader, UploadStorage, read_native_body, upload_attempt_id,
     },
     validation::validate_identifier,
     xet_adapter::{FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response},
@@ -255,14 +254,13 @@ impl LocalBackend {
             self.chunk_size,
             expected_sha256.is_some(),
             self.upload_max_in_flight_chunks,
+            &self.packing_work_pool,
         );
         if matches!(storage, UploadStorage::ProtocolContainers) {
             ingestor =
                 ingestor.with_packed_protocol_storage(&object_store, &self.packing_work_pool);
         }
-        while let Some(bytes) = body.next_bytes().await? {
-            ingestor.ingest_body_chunk(&object_store, &bytes).await?;
-        }
+        ingestor.ingest_body(&object_store, &mut body).await?;
 
         async {
             let (record, response) = ingestor
@@ -318,9 +316,9 @@ impl LocalBackend {
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
         let object_store = self.object_store();
-        let staged = stage_body_with_spill(&mut body).await?;
-        let body_length = staged.length();
-        let body_hash = staged.hash();
+        let staged = read_native_body(&mut body).await?;
+        let body_length = u64::try_from(staged.bytes.len())?;
+        let body_hash = shardline_server_core::chunk_hash(&staged.bytes);
         let body_hash_hex = hex::encode(body_hash.as_bytes());
         let (intent_id, reliability_repository) =
             crate::upload_identity::native_shard(&body_hash_hex, repository_scope)?;

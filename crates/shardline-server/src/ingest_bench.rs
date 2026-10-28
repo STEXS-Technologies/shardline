@@ -54,6 +54,7 @@ pub async fn ingest_without_storage_with_parallelism(
         chunk_size,
         expected_sha256.is_some(),
         max_in_flight_chunks,
+        &crate::admission::ExecutionPools::default_sizes().hashing,
     );
     ingestor.ingest_body_chunk(&object_store, &body).await?;
     let (_record, response) = ingestor

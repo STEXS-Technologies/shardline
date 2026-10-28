@@ -2302,6 +2302,14 @@ impl UploadIntentStore for super::PostgresIndexStore {
         Ok(true)
     }
 
+    async fn transition_intent_batch_with_events(
+        &self,
+        intent_id: &str,
+        transitions: &[(UploadIntentState, LifecycleEvent)],
+    ) -> Result<bool, Self::Error> {
+        super::upload_transitions::commit(self, intent_id, transitions).await
+    }
+
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
         let row = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
             "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE intent_id = $1"

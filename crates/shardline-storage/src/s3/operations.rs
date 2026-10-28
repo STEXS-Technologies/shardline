@@ -439,6 +439,20 @@ impl S3ObjectStore {
         range: ByteRange,
         output: &mut File,
     ) -> Result<(), S3ObjectStoreError> {
+        self.copy_range_to_writer(key, range, output)
+    }
+
+    /// Copies an exact byte range to a streaming verifier or other writer.
+    /// No complete response buffer or temporary file is allocated.
+    ///
+    /// # Errors
+    /// Returns storage, writer or exact-response-length errors.
+    pub fn copy_range_to_writer<W: Write + Send>(
+        &self,
+        key: &ObjectKey,
+        range: ByteRange,
+        output: &mut W,
+    ) -> Result<(), S3ObjectStoreError> {
         let expected = range.len().ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
         self.block_on_result(async {
             let mut stream = self.stream_range(key, range).await?;
@@ -502,18 +516,14 @@ impl S3ObjectStore {
         })
     }
 
-    /// Reads an object into memory only when the response declares it is within
-    /// `maximum_memory_length`; larger objects are streamed to `output` using
-    /// the same GET. Returns the observed length and either the bounded bytes or
-    /// `None` when the object was written to the file.
-    ///
-    /// This lets callers avoid scratch-file payload writes for small objects
-    /// without a size-probe request or a second GET for large objects.
+    /// Copies an object directly to a writer using one GET, without allocating
+    /// a complete response buffer or a temporary file. Returns its observed
+    /// length, or `None` when the object does not exist.
     ///
     /// # Errors
     ///
-    /// Returns an error when the GET fails or the streamed length disagrees
-    /// with response metadata.
+    /// Returns an error when the GET or writer fails, or the streamed length
+    /// disagrees with response metadata.
     pub fn copy_object_to_writer_if_present<W: Write + Send>(
         &self,
         key: &ObjectKey,

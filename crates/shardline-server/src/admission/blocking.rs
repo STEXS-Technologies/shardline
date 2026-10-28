@@ -94,10 +94,11 @@ pub(crate) async fn cancellable_work_with_setup<S: Send + 'static, T: Send + 'st
 
 /// Keeps already-admitted buffers charged through blocking work and its caller's
 /// subsequent asynchronous storage. Cancellation cannot release running work.
-pub(crate) async fn blocking_work_with_permit<T: Send + 'static>(
-    permit: tokio::sync::OwnedSemaphorePermit,
+/// The guard may be shared with transport-owned buffers; the last owner releases it.
+pub(crate) async fn blocking_work_with_permit<T: Send + 'static, P: Send + 'static>(
+    permit: P,
     work: impl FnOnce() -> Result<T, ServerError> + Send + 'static,
-) -> Result<(T, tokio::sync::OwnedSemaphorePermit), ServerError> {
+) -> Result<(T, P), ServerError> {
     let job = tokio::task::spawn_blocking(move || (work(), permit));
     let _abort = AbortBlockingJob(job.abort_handle());
     let (result, retained_permit) = job

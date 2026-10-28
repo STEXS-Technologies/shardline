@@ -72,6 +72,7 @@ mod fault_injection;
 mod limits;
 pub mod paths;
 mod reachability;
+mod upload_completion;
 
 pub use coordinator::CasCoordinator;
 pub use error::CasError;

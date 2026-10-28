@@ -59,6 +59,7 @@ mod xorb_visit;
 
 pub use shard_store::{
     PreparedShardUpload, prepare_uploaded_shard, prepare_uploaded_shard_with_checkpoint,
+    prepare_uploaded_shard_with_digest_worker,
 };
 pub use shard_store::{
     dedup_xorb_candidates, recover_dedup_xorb_descriptor,
@@ -109,11 +110,12 @@ pub use xorb::{
     validate_serialized_xorb_footer, validate_serialized_xorb_with_data,
 };
 pub use xorb_store::{
-    PreparedXorbFile, PreparedXorbMemory, canonical_uploaded_xorb_file_length,
-    canonical_uploaded_xorb_length, normalize_serialized_xorb,
-    prepare_owned_xorb_file_with_checkpoint, prepare_xorb_memory, store_owned_xorb_file,
-    store_prepared_xorb_file, store_prepared_xorb_memory, store_uploaded_xorb,
-    store_uploaded_xorb_file, store_uploaded_xorb_with_metrics, store_xorb_bytes_with_resources,
+    IncrementalXorbMemory, PreparedXorbFile, PreparedXorbMemory,
+    canonical_uploaded_xorb_file_length, canonical_uploaded_xorb_length, normalize_serialized_xorb,
+    prepare_owned_xorb_file_with_checkpoint, prepare_owned_xorb_memory_with_checkpoint,
+    prepare_xorb_memory, store_owned_xorb_file, store_prepared_xorb_file,
+    store_prepared_xorb_memory, store_uploaded_xorb, store_uploaded_xorb_file,
+    store_uploaded_xorb_with_metrics, store_xorb_bytes_with_resources,
     visit_stored_xorb_chunk_hashes, visit_stored_xorb_chunk_hashes_if_present,
     xorb_chunks_cache_hash_from_key_if_present, xorb_hash_from_object_key_if_present,
     xorb_object_key,

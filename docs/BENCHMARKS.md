@@ -2997,6 +2997,315 @@ for this workflow, with unchanged chunk, Xorb and shard lengths and about
 scratch writes or decoded legacy copies, and is not evidence of upstream upload
 or storage parity.
 
+### Remote registration without scratch copies
+
+An October 27, 2026 shared-host comparison used release binaries, stock
+Hub 2.2.0/hf_xet 1.7.0 and fresh PostgreSQL/MinIO deployments in
+before/after/after/before order. Each uploaded a 36 MiB incompressible file,
+then a version with a 256 KiB tail edit. All eight cold downloads verified
+SHA-256. The candidate binary's SHA-256 starts with `8b18fcfb2c2d`;
+the earlier candidate's starts with `30f01a074112`.
+
+| Measurement | Earlier candidate | Streaming registration |
+| --- | ---: | ---: |
+| Unique upload: S3 requests | 48 | 48 |
+| Edited upload: S3 requests | 27 | 27 |
+| Unique upload: server read syscall bytes | 37,808,473 | 1 |
+| Unique upload: server write syscall bytes | 75,640,006–75,640,972 | 37,857,770–37,857,938 |
+| Unique upload: process-accounted storage write bytes | 37,781,504 | 0 |
+| Edited upload: process-accounted storage write bytes | 38,125,568 | 0 |
+| Cold full download: process-accounted storage write bytes | 37,781,504 | 37,781,504 |
+
+The upload path no longer writes and rereads a complete registration source.
+The full-download source copy remains. Xorb and shard object counts and lengths
+are identical; small differences in other metadata bytes are not payload savings.
+SQL statement WAL also matches within one byte: 480,815–480,816 bytes for the
+unique upload and 55,484–55,485 for the edit.
+
+Server counters come from `/proc/PID/io`, separately from the stock client and
+backend containers. Read/write syscall bytes include operations beyond files;
+process-accounted storage writes are not measured NAND writes. Cgroup block-I/O
+observations do not establish the same physical-write reduction. These results
+therefore demonstrate fewer internal copies, not longer SSD lifetime or lower
+S3 request charges. Revisited registration terms can still add range GETs.
+
+A separate six-lane 512 MiB comparison verified all twelve downloads, but its
+monitor caught unrelated compiler activity. Its throughput timings are excluded;
+this change does not yet establish faster uploads or native Xet speed parity.
+
+### Remaining local native-upload costs
+
+An October 27 diagnostic profiled a 512 MiB upload with the same stock client
+against Shardline and the pinned upstream local test CAS. The symbol-enabled
+Shardline executable had an identical machine-code section to the release
+candidate above. All original and edited downloads verified SHA-256. Profiling
+and syscall tracing introduce overhead; these runs are attribution evidence,
+not new qualified throughput measurements or a production-service comparison.
+
+| Synchronization during the initial upload | Shardline | Upstream local test CAS |
+| --- | ---: | ---: |
+| Calls | 234 `fsync` | 1 `fdatasync` |
+| Summed thread time | 2.030 s | 0.018 s |
+
+Within Shardline, eight Xorb temporary-file syncs accounted for approximately
+1.078 seconds and 53 SQLite WAL syncs for 0.922 seconds. Seventy syncs of
+ancestors above the data root accounted for only 0.006 seconds. Thread times
+can overlap and must not be added to infer elapsed upload time or predicted
+savings. The upstream test CAS flushes and renames object files without the
+equivalent file/directory synchronization; it is not the hosted Hugging Face
+service and does not establish that service's durability contract.
+
+The separate CPU profile attributed approximately 29% of sampled cycles
+inclusively to shard record construction and referenced-Xorb validation.
+BLAKE3 and SHA-256 together accounted for approximately 40% of self cycles.
+Inclusive stacks overlap; their percentages cannot be summed. This identifies
+registration verification and durable publication as remaining costs, without
+justifying removal of full-file SHA-256 or durable object acknowledgement.
+
+At the time of this profile, the shared CAS coordinator persisted each upload lifecycle transition
+separately, including `Stored`, `MetadataCommitted` and `Visible` after object
+work returns. Combining applicable final transitions while retaining their
+evidence was an optimization candidate, not qualified by this
+measurement. Changes must preserve interrupted-upload recovery, concurrent
+duplicate attempts, historical evidence and callers with distinct metadata
+publication boundaries.
+
+A subsequent SQLite change removes a separate connection and blocking-task hop
+from each explicit upload-state transition: reading the current row, verifying
+its evidence and updating it now share one immediate transaction. It retains
+every lifecycle commit, `synchronous=FULL`, and the existing evidence format.
+This reduces repeated connection setup; it does not reduce the sync count above.
+An alternating six-lane release comparison then completed with no observed
+compiler overlap and all twelve downloads verified. The previous binary was
+`8b18fcfb2c2d`; the new binary was `575f98bc9adf`. Each server used the same one
+logical CPU and each operation used a fresh stock-client cache.
+
+| 512 MiB initial upload | Previous Shardline | One-connection transition | Upstream local test CAS |
+| --- | ---: | ---: | ---: |
+| Completed upload seconds, two observations | 2.004 / 2.911 | 2.791 / 3.949 | 1.063 / 1.046 |
+| Server CPU ticks, two observations | 115 / 115 | 116 / 116 | 87 / 85 |
+| Retained file bytes | 550,890,136 | 550,890,136 | 538,716,820 |
+
+These observations do not demonstrate a speed improvement. New-file elapsed
+times vary substantially despite nearly identical Shardline CPU time; the
+connection change does not address durable payload syncs or reduce lifecycle
+commit count. Edited-file uploads took 0.645–0.671 seconds previously and
+0.645–0.666 seconds after the change, with unchanged retained bytes of
+551,158,971. Those overlapping ranges also do not establish a speed gain.
+The upstream edited-file control took 0.268–0.272 seconds and has different
+durability, identity-verification and retention behavior. These are shared-host
+local-adapter observations, not production throughput or equivalent-guarantee
+parity. Cold client caches do not imply cold filesystem caches.
+
+A later implementation combines `Stored`, `MetadataCommitted` and `Visible`
+in one SQLite/PostgreSQL transaction after the coordinator's object and domain
+metadata work succeeds. Every ordered evidence event is retained, with the same
+encoding and normal durability settings. Older/custom adapters retain a default
+sequential implementation, and completion tolerates a concurrent older writer
+advancing an intermediate state. Measurements above predate this later change.
+
+A release comparison of `575f98bc9adf` against the batched candidate
+`2040f5afcd57` verified all twelve downloads with no observed compiler overlap.
+The unchanged 512 MiB corpus, fresh client caches, one server CPU and alternating
+six-lane order match the preceding test.
+
+| Measurement | Before batching | Batched completion |
+| --- | ---: | ---: |
+| Initial upload seconds, two observations | 1.350 / 1.374 | 1.338 / 1.323 |
+| Initial upload server CPU ticks | 117 / 118 | 115 / 114 |
+| Edited upload seconds | 0.666 / 0.626 | 0.657 / 0.627 |
+| Initial upload sync calls, separate traced diagnostic | 234 | 194 |
+| SQLite WAL sync calls, traced diagnostic | 53 | 33 |
+
+This shows fewer synchronization calls and a small new-file improvement in this
+shared-host run; two observations do not establish a general throughput gain.
+Edited timings overlap. The upstream local test CAS took 1.034 / 1.040 seconds
+for the initial upload, so native parity remains unproven. Its guarantees still
+differ as described above. Earlier slower Shardline observations demonstrate
+that elapsed results vary with the storage/host window; they must not be used
+to attribute the entire cross-run difference to batching.
+
+The final Xorb and shard inventories have identical object counts, lengths and
+SHA-256 digests before and after batching. Retained SQLite WAL was 593,280 bytes
+smaller after both uploads; payload storage was unchanged. This is not a measured
+NAND-write reduction, SSD-lifetime estimate or S3-charge reduction. Tracing adds
+overhead, and summed synchronization duration did not improve in that diagnostic;
+sync-count reduction alone is not a latency measurement.
+
+An additional current-source CPU diagnostic used a symbol-enabled release
+build (`cad2fd791395`) and the same stock client and 512 MiB corpus. All four
+original/edited downloads across Shardline and the upstream control verified
+SHA-256. Registration and referenced-container validation accounted for about
+29% of inclusive sampled cycles; local `put_if_absent` accounted for about 22%.
+SHA-256 accounted for 19.76% of self cycles and the principal BLAKE3 routine
+for 23.76%. Inclusive percentages overlap with hashing and must not be summed.
+These identify verification and persistence as continuing CPU costs, rather
+than proving a single function explains the elapsed-time gap.
+
+This symbol-enabled executable did not have an identical machine-code section
+to the frozen throughput candidate. Its profile is therefore a separate
+current-source diagnostic, not exact attribution of the earlier measured
+binary. Profiling timings are excluded from throughput claims; CPU samples
+also do not measure time waiting for durable storage synchronization.
+
+Source inspection of the pinned upstream simulation's `upload_shard` confirms
+it parses and reserializes shard metadata, stores it, and registers its indexes;
+that method does not reconstruct the referenced payload to verify the complete
+file's SHA-256. Shardline does. In the additional diagnostic, initial-upload
+server CPU was 111 ticks for Shardline versus 88 for that reference; the edited
+upload used 35 versus zero observed ticks. SHA-256's sampled cost is consistent
+with a substantial part of this CPU difference, but does not prove a complete
+wall-time decomposition. The reference remains useful for protocol overhead
+comparison, not equivalent-guarantee production speed certification.
+
+A separate local mechanism probe compared hashing a 32 MiB buffer before one
+write with hashing 1 MiB pieces while writing, followed by file synchronization
+in both cases. Three alternating 12-pair runs using BLAKE3 1.8.4 had median
+times of 18.24/17.27, 18.37/17.01 and 18.20/17.97 milliseconds respectively.
+Every persisted buffer matched the source. This excludes Shardline's anchored
+publication, directory synchronization and concurrent workloads; it does not
+justify a production upload-speed claim or weakening the final storage check.
+No production write-path change was made on this evidence alone.
+
+### Verified SHA-256 prefix reuse
+
+A bounded process-local cache reuses genuine SHA-256 states from previously
+verified file prefixes. Keys bind repository scope and ordered Xorb roots,
+member ranges and lengths. A cache hit still authenticates the source members
+and checks the final file identity. Failed verification does not publish states.
+The cache holds at most 1,024 states, with at most 16 pending states per file;
+it stores no payload buffers and introduces no persisted format changes.
+Restart, eviction or another replica simply requires normal hashing again.
+
+Two alternating six-lane comparisons used stock Hub 2.2.0/hf_xet 1.7.0, the
+same 512 MiB corpus and 256 KiB tail edit, fresh client caches and one server
+CPU. All 24 complete downloads verified SHA-256; no compiler overlap was
+observed. The baseline executable starts with `652c4319016b`, the candidate
+with `ec7559d08a25`. Four observations per implementation gave:
+
+| Measurement | Before reuse | Prefix reuse |
+| --- | ---: | ---: |
+| Initial upload seconds | 1.299–1.345 | 1.294–1.326 |
+| Edited upload seconds | 0.620–0.673 | 0.420–0.447 |
+| Edited upload server CPU ticks | 35–36 | 16 |
+| Initial-upload peak server RSS, KiB | 165,468–166,560 | 170,860–175,000 |
+| Retained bytes after both uploads | 550,565,691 | 550,565,691 |
+
+Median edited-upload elapsed time fell approximately 31%; initial timings
+overlap. Read syscall bytes remain approximately 543 MB for the edited upload:
+source authentication still runs, so this is a CPU improvement, not reduced
+backend I/O. Peak RSS was 4–9 MiB higher in these observations; the measurements
+do not isolate its cause or establish concurrent-memory behavior. Do not infer
+unchanged process memory merely from the small bounded cache.
+
+The upstream local test CAS took 1.017–1.024 seconds initially and
+0.256–0.308 seconds for edits. Shardline remains slower. This comparison retains
+the different durability and file-verification guarantees described above; it
+does not demonstrate production-service parity, multi-replica cache benefits,
+or improvements across every frontend. A process restart cannot depend on this
+disposable cache for correctness.
+
+A separate pressure run exercised 16 simultaneous distinct 128 MiB files and
+their tail-edited versions, using four server CPU quota and a hard 1 GiB memory
+limit with swap disabled. Two baseline and two candidate lanes completed all
+128 uploads and 128 cold, SHA-256-verified downloads without OOM. Upload peak
+RSS was 180,552–182,208 KiB before reuse and 183,352–184,188 KiB with reuse.
+The edited-phase high-water mark also includes the preceding verified original
+downloads. These are observed bounds for this workload, not arbitrary-concurrency
+guarantees. Unrelated compilation overlapped the run, so all pressure-run timing
+results are excluded. Fixture cleanup required a permission repair after the
+first verified lane; its successful result was retained before continuing.
+
+The paired-run inventories also separate remaining storage costs after the
+original and edited files. Both implementations retained ten Xorb identities:
+
+| Retained file bytes | Shardline | Upstream local test CAS |
+| --- | ---: | ---: |
+| Serialized Xorbs, excluding upstream tag sidecars | 537,597,299 | 537,531,499 |
+| Shard objects | 528,560 | 396,604 |
+| Main metadata database | 5,332,992 | 548,864 |
+| SQLite WAL and shared-memory files | 7,106,840 | Not applicable |
+| Xorb tag sidecars | Not applicable | 300 |
+| Total | 550,565,691 | 538,477,267 |
+
+The 12,088,424-byte total difference is mostly database/WAL footprint. The
+Xorb difference is 65,800 bytes, approximately 0.012% of the reference Xorb
+bytes, rather than another decoded payload copy. This is one small workload;
+it does not prove storage parity across corpora. WAL allocation, checkpointing
+and database page reuse differ from live logical metadata size, so this total
+must not be extrapolated linearly into storage cost per TB or treated as
+post-retention/GC steady-state usage.
+
+### Overlapping native upload verification
+
+Native shard registration can overlap member authentication with whole-file
+SHA-256 when an additional slot is immediately available from the existing
+blocking-work admission limit. It never waits for that second slot: one-CPU
+and saturated requests retain sequential verification. Sources below 8 MiB
+remain sequential. The helper uses two queued 64 KiB blocks and is joined
+before its admission token is released, including cancellation and failure.
+Final file identity and current-source authentication checks remain required.
+
+An alternating six-lane stock Hub 2.2.0/hf_xet 1.7.0 comparison used the same
+512 MiB corpus and tail edit, two server CPUs, fresh client caches and binaries
+`ec7559d08a25` (before) and `115109a48c52` (after). Initial uploads took
+1.127–1.156 seconds before and 1.047–1.067 seconds after: approximately 7.4%
+less median elapsed time. Total server CPU increased from 115–116 to 120–122
+ticks. Edited-upload timings overlapped, 0.430–0.437 versus 0.427–0.440 seconds.
+This is an elapsed-time gain from parallel work, not reduced CPU cost.
+
+A separate one-CPU control retained the sequential path: initial times
+overlapped at 1.283–1.322 versus 1.301–1.320 seconds. All 24 full downloads
+across these comparisons verified SHA-256, with no compiler overlap observed.
+Adapter verification tests, cancellation/retry, admission-release tests and
+strict workspace linting also passed; these do not constitute full release
+qualification or a measurement of saturated cluster throughput.
+
+The upstream local test CAS still took 0.815–0.830 seconds initially in the
+two-CPU comparison. Its durability and file-identity verification differ as
+described above. Native speed parity remains unproven, and this result must
+not be advertised as an improvement across all frontends.
+
+Current-source recovery qualification also exercised stock hf_xet 1.7.0 with
+512 MiB files: all six named durable crash points passed for Xorb storage and
+shard registration, on local storage and PostgreSQL/MinIO replica takeover
+(four targeted tests, 24 scenarios). A separate mixed 1.7.0/1.5.2 upload-retry
+test passed its six crash points. Successful retries downloaded and verified
+the complete file. A post-publication registration can remain explicitly
+unresolved when the stock retry does not resend its original request; this
+does not establish that the original request completed. These drills exercise
+durable publication boundaries, not SIGKILL inside the SHA worker or complete
+release qualification. Worker cancellation and final identity have separate
+adapter tests.
+
+### Native upload request-phase attribution
+
+A streaming-proxy diagnostic traced a stock 512 MiB upload and tail edit
+against the retained candidate `115109a48c52` and pinned upstream local test
+CAS. Both original and edited downloads verified SHA-256 on both servers.
+The proxy adds copying and connection overhead: these observations locate
+phases and are not qualified throughput or transfer-parity measurements.
+
+| Initial-upload phase | Shardline | Upstream local test CAS |
+| --- | ---: | ---: |
+| First Xorb request to last completed Xorb response | 579 ms | 624 ms |
+| Complete `/v2/shards` request and response | 264 ms | 2 ms |
+
+Shardline returned registration response headers in about 0.5 ms, but the
+response body completed only after verification. Header latency would hide
+the expensive phase. Edited-file registration took 127 ms versus 1 ms.
+The Xorb window includes concurrent client work and must not be calculated
+by summing individual request durations.
+
+This diagnostic places the remaining delay in final registration, consistent
+with the CPU profile and source: Shardline authenticates current source members
+and verifies the complete file SHA-256; the pinned simulation CAS registers
+shard metadata without that whole-file verification. Initial file ordering
+arrives in the final shard, so hashing HTTP arrival order is not an equivalent
+file-identity check. Future registration optimizations must preserve current
+source authentication and final SHA-256, including on cold caches and replicas.
+
+
 ### Rejected decoded-buffer ownership experiment
 
 An experiment transferred decoded buffers directly into HTTP responses instead

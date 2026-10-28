@@ -25,8 +25,33 @@ pub async fn append_s3_multipart_upload_bytes<B: OciBackend>(
     root: &Path,
     backend: &B,
     session_id: &str,
-    mut session: OciUploadSession,
+    session: OciUploadSession,
     bytes: &[u8],
+) -> Result<(OciUploadSession, u64), OciAdapterError> {
+    validate_upload_session_id(session_id)?;
+    if !session.use_s3_multipart {
+        return Err(OciAdapterError::NotFound);
+    }
+    append_s3_multipart_upload_bytes_owned(
+        root,
+        backend,
+        session_id,
+        session,
+        Bytes::copy_from_slice(bytes),
+    )
+    .await
+}
+
+/// Append shared bytes, retaining their owner in every outstanding part/tail write.
+///
+/// # Errors
+/// Returns the same session, storage and persistence errors as borrowed append.
+pub async fn append_s3_multipart_upload_bytes_owned<B: OciBackend>(
+    root: &Path,
+    backend: &B,
+    session_id: &str,
+    mut session: OciUploadSession,
+    bytes: Bytes,
 ) -> Result<(OciUploadSession, u64), OciAdapterError> {
     validate_upload_session_id(session_id)?;
     if !session.use_s3_multipart {
@@ -44,13 +69,13 @@ pub async fn append_s3_multipart_upload_bytes<B: OciBackend>(
 
     ensure_s3_upload_started(root, backend, session_id, &mut session).await?;
     let mut tail = read_upload_tail(root, session_id).await?;
-    tail.extend_from_slice(bytes);
+    tail.extend_from_slice(&bytes);
     let total_length = {
         let multipart = session
             .s3_multipart
             .as_mut()
             .ok_or(OciAdapterError::NotFound)?;
-        multipart.sha256_state.update(bytes)?;
+        multipart.sha256_state.update(&bytes)?;
         multipart.total_length =
             shardline_server_core::checked_add(multipart.total_length, u64::try_from(bytes.len())?)
                 .map_err(|_e| OciAdapterError::Overflow)?;
@@ -65,17 +90,55 @@ pub async fn append_s3_multipart_upload_bytes<B: OciBackend>(
                     &temporary_object_key,
                     &upload_id,
                     multipart.uploaded_part_ids.len(),
-                    Bytes::from(part_bytes),
+                    retain_source(part_bytes, bytes.clone()),
                 )
                 .await?;
             multipart.uploaded_part_ids.push(part_id);
         }
         multipart.total_length
     };
-    write_upload_tail(root, session_id, &tail).await?;
+    write_upload_tail(root, session_id, retain_source(tail, bytes)).await?;
     session.last_touched_unix_seconds = unix_now_seconds_checked()?;
     persist_upload_session(root, session_id, &session).await?;
     Ok((session, total_length))
+}
+
+struct RetainedPart {
+    bytes: Vec<u8>,
+    _source: Bytes,
+}
+impl AsRef<[u8]> for RetainedPart {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+fn retain_source(bytes: Vec<u8>, source: Bytes) -> Bytes {
+    Bytes::from_owner(RetainedPart {
+        bytes,
+        _source: source,
+    })
+}
+
+pub(crate) async fn write_upload_tail(
+    root: &Path,
+    session_id: &str,
+    bytes: Bytes,
+) -> Result<(), OciAdapterError> {
+    validate_upload_session_id(session_id)?;
+    let path = upload_tail_path(root, session_id);
+    tokio::task::spawn_blocking(move || {
+        if bytes.is_empty() {
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(OciAdapterError::Io(error)),
+            }
+        } else {
+            std::fs::write(path, &bytes).map_err(OciAdapterError::Io)
+        }
+    })
+    .await
+    .map_err(OciAdapterError::BlockingTask)?
 }
 
 /// # Errors
@@ -259,21 +322,4 @@ pub(crate) async fn read_upload_tail(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(OciAdapterError::Io(error)),
     }
-}
-
-pub(crate) async fn write_upload_tail(
-    root: &Path,
-    session_id: &str,
-    bytes: &[u8],
-) -> Result<(), OciAdapterError> {
-    validate_upload_session_id(session_id)?;
-    let path = upload_tail_path(root, session_id);
-    if bytes.is_empty() {
-        match fs::remove_file(&path).await {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(OciAdapterError::Io(error)),
-        }
-    }
-    fs::write(path, bytes).await.map_err(OciAdapterError::Io)
 }

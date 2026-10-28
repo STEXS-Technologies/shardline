@@ -387,20 +387,24 @@ mod lib_tests {
         let protected_key = ObjectKey::parse("staging/resumable/lfs/live/1/hash").unwrap();
         let replaced_key = ObjectKey::parse("staging/resumable/lfs/live/1/old-hash").unwrap();
         let terminal_key = ObjectKey::parse("staging/resumable/s3/terminal/1/hash").unwrap();
+        let receiving_key =
+            ObjectKey::parse("staging/resumable/s3/terminal/1/receiving-orphan").unwrap();
         put_test_staging_object(&object_store, &protected_key, b"live");
         put_test_staging_object(&object_store, &replaced_key, b"old");
         put_test_staging_object(&object_store, &terminal_key, b"terminal");
+        put_test_staging_object(&object_store, &receiving_key, b"partial");
         let protected = HashSet::from([protected_key.as_str().to_owned()]);
 
         let report = reclaim_unprotected_resumable_staging_objects(&object_store, &protected, true)
             .await
             .unwrap();
-        assert_eq!(report.scanned_objects, 3);
+        assert_eq!(report.scanned_objects, 4);
         assert_eq!(report.protected_objects, 1);
-        assert_eq!(report.reclaimed_objects, 2);
-        assert_eq!(report.reclaimed_bytes, 11);
+        assert_eq!(report.reclaimed_objects, 3);
+        assert_eq!(report.reclaimed_bytes, 18);
         assert!(shardline_storage::ObjectStore::contains(&object_store, &protected_key).unwrap());
         assert!(!shardline_storage::ObjectStore::contains(&object_store, &replaced_key).unwrap());
         assert!(!shardline_storage::ObjectStore::contains(&object_store, &terminal_key).unwrap());
+        assert!(!shardline_storage::ObjectStore::contains(&object_store, &receiving_key).unwrap());
     }
 }

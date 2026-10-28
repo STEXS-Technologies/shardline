@@ -9,7 +9,8 @@ use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use shardline_xet_core::{
     merklehash::{compute_data_hash, xorb_hash},
     xorb_object::{
-        CompressionScheme, xorb_format_test_utils::serialized_xorb_object_from_components,
+        CompressionScheme, XorbObject,
+        xorb_format_test_utils::serialized_xorb_object_from_components,
     },
 };
 use std::{
@@ -90,15 +91,22 @@ async fn native_upload_child() -> Result {
             _ => return Err("invalid process cut".into()),
         };
         let intent = std::env::var("SHARDLINE_TEST_NATIVE_PROCESS_INTENT")?;
-        Some(if intent == "stock-client-xorb" {
-            shardline_cas::arm_upload_process_pause_for_prefix(
-                "xorb-v2-".to_owned(),
-                boundary,
-                root.join("reached"),
-            )
-        } else {
-            shardline_cas::arm_upload_process_pause(intent, boundary, root.join("reached"))
-        })
+        Some(
+            if intent == "stock-client-xorb" || intent == "stock-client-shard" {
+                shardline_cas::arm_upload_process_pause_for_prefix(
+                    if intent == "stock-client-xorb" {
+                        "xorb-v2-"
+                    } else {
+                        "shard-v2-"
+                    }
+                    .to_owned(),
+                    boundary,
+                    root.join("reached"),
+                )
+            } else {
+                shardline_cas::arm_upload_process_pause(intent, boundary, root.join("reached"))
+            },
+        )
     } else {
         None
     };
@@ -278,21 +286,26 @@ async fn qualify_native_retry(repetitions: usize, interleaved: bool) -> Result {
                 .join(format!("chunks/xorbs/default/{}/{hash}.xorb", &hash[..2])),
         )?;
         assert_eq!(stored, bytes, "persisted Xorb at {cut}");
-        let chunk_hash = shardline_server::test_fixtures::xet_hash_hex(&chunk);
-        let stored_member = std::fs::read(
-            root.path()
-                .join(format!("chunks/{}/{chunk_hash}", &chunk_hash[..2])),
-        )?;
-        assert_eq!(stored_member, content, "old-reader chunk copy at {cut}");
-        if interleaved {
-            let alternate_hex = shardline_server::test_fixtures::xet_hash_hex(&alternate_hash);
-            let stored_alternate = std::fs::read(
-                root.path()
-                    .join(format!("chunks/{}/{alternate_hex}", &alternate_hex[..2])),
-            )?;
-            assert_eq!(
-                stored_alternate, alternate,
-                "second old-reader chunk copy at {cut}"
+        // Native ingestion persists the verified container, not a redundant
+        // decoded copy of each member. Validate every member and the aggregate
+        // commitment after restart; shard publication establishes indexed reads
+        // separately and has its own process-recovery qualification.
+        assert!(
+            XorbObject::validate_xorb_object(&mut std::io::Cursor::new(&stored), &identity,)?
+                .is_some(),
+            "recovered Xorb integrity at {cut}"
+        );
+        for member_hash in [chunk, alternate_hash]
+            .into_iter()
+            .take(if interleaved { 2 } else { 1 })
+        {
+            let member_hex = shardline_server::test_fixtures::xet_hash_hex(&member_hash);
+            assert!(
+                !root
+                    .path()
+                    .join(format!("chunks/{}/{member_hex}", &member_hex[..2],))
+                    .exists(),
+                "unexpected redundant member copy at {cut}"
             );
         }
         let index = shardline_index::LocalIndexStore::new(root.path().to_owned())?;

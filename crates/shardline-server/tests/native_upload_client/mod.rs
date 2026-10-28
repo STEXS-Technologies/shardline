@@ -6,6 +6,7 @@ use std::io::{BufWriter, Write};
 
 mod mixed;
 mod prerequisites;
+mod registration;
 mod small;
 
 pub(super) const REMOTE_FIELDS: [&str; 7] = [
@@ -190,6 +191,21 @@ where
     I: UploadIntentStore,
     I::Error: std::error::Error + 'static,
 {
+    interrupted_client_for_prefix(root, index, environment, cut, peer_python, "xorb-v2-").await
+}
+
+async fn interrupted_client_for_prefix<I>(
+    root: &Path,
+    index: I,
+    environment: &[(&str, String)],
+    cut: &str,
+    peer_python: Option<&Path>,
+    prefix: &str,
+) -> Result
+where
+    I: UploadIntentStore,
+    I::Error: std::error::Error + 'static,
+{
     use std::os::unix::process::ExitStatusExt;
     let available = shardline_test_support::native_client_output(
         Command::new("python").args(["-c", "from hf_xet import XetSession"]),
@@ -215,8 +231,12 @@ where
         u64::MAX,
     )?)?;
     let http = reqwest::Client::new();
-    let mut server =
-        start_with_environment(root, address, Some((cut, "stock-client-xorb")), environment)?;
+    let target = match prefix {
+        "xorb-v2-" => "stock-client-xorb",
+        "shard-v2-" => "stock-client-shard",
+        _ => return Err("unsupported native interruption target".into()),
+    };
+    let mut server = start_with_environment(root, address, Some((cut, target)), environment)?;
     ready(&http, &base, &mut server).await?;
     let mut uploading = client(&source, &base, &token, &working.path().join("interrupted"))?;
     let interrupted = tokio::time::timeout(Duration::from_secs(90), async {
@@ -229,15 +249,16 @@ where
                 .into());
             }
             if let Ok(intent_id) = std::fs::read_to_string(root.join("reached"))
-                && intent_id.starts_with("xorb-v2-")
+                && intent_id.starts_with(prefix)
                 && let Some(intent) = index.intent_by_id(&intent_id).await?
             {
                 let expected = match cut {
                     "created" => UploadIntentState::Created,
                     "storing" | "object" => UploadIntentState::Storing,
-                    "stored" => UploadIntentState::Stored,
-                    "committed" => UploadIntentState::MetadataCommitted,
-                    "visible" => UploadIntentState::Visible,
+                    // Completion records all three events in one transaction.
+                    // These retained named hooks observe the same commit, not
+                    // three independently durable intermediate states.
+                    "stored" | "committed" | "visible" => UploadIntentState::Visible,
                     _ => return Err("invalid stock-client interruption boundary".into()),
                 };
                 assert_eq!(intent.state(), expected, "durable state at {cut}");
@@ -308,6 +329,19 @@ where
         .intent_by_id(interrupted.intent_id())
         .await?
         .ok_or("lost intent history")?;
+    // Once shard metadata committed, a cold stock retry can discover the
+    // published file and omit the original registration request entirely.
+    // Its request bytes are not stored as an immutable shard object. Recovery
+    // must retain the inconclusive Storing evidence, not invent completion.
+    if prefix == "shard-v2-" && cut == "object" && original.state() == UploadIntentState::Storing {
+        assert_eq!(original.object_key(), interrupted.object_key());
+        assert_eq!(original.object_hash(), interrupted.object_hash());
+        assert_eq!(original.object_length(), interrupted.object_length());
+        eprintln!(
+            "stock 512 MiB file verified after shard publication SIGKILL; original request remains explicitly unresolved"
+        );
+        return Ok(());
+    }
     assert!(matches!(
         original.state(),
         UploadIntentState::Failed | UploadIntentState::Visible
@@ -322,6 +356,6 @@ where
                 && intent.object_length() == interrupted.object_length()),
         "the exact interrupted immutable object must become visible on retry"
     );
-    eprintln!("stock 512 MiB client recovered after SIGKILL at {cut}");
+    eprintln!("stock 512 MiB client recovered after SIGKILL at {prefix}{cut}");
     Ok(())
 }

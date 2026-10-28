@@ -197,7 +197,7 @@ fn footerless_input(
     clippy::wildcard_enum_match_arm,
     reason = "CoreError is non-exhaustive; unknown parser errors must remain invalid input"
 )]
-fn normalization_error(error: CoreError) -> XetAdapterError {
+pub(super) fn normalization_error(error: CoreError) -> XetAdapterError {
     match error {
         // A truncated client frame is invalid input. Quota, disk, permission,
         // and other storage failures must remain server errors, so clients can

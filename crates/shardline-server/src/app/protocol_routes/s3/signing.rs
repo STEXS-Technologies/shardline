@@ -1,7 +1,6 @@
 //! Opt-in signing identities; legacy token clients keep their existing path.
 use std::{
     io,
-    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -25,7 +24,6 @@ use crate::{S3SigningIdentity, ServerConfig, app::AppState};
 struct SigningState {
     identities: Arc<Vec<S3SigningIdentity>>,
     control_body_limit: usize,
-    root_dir: PathBuf,
     max_upload_bytes: u64,
 }
 
@@ -40,7 +38,6 @@ pub(crate) fn protect(
         SigningState {
             identities: Arc::new(config.s3_signing_identities.clone()),
             control_body_limit: config.max_request_body_bytes().get(),
-            root_dir: config.root_dir().to_path_buf(),
             max_upload_bytes: config.s3_max_part_bytes().get(),
         },
         authenticate,
@@ -53,10 +50,9 @@ async fn authenticate(
     next: Next,
 ) -> Result<Response, S3Error> {
     if is_post_object_form(&request) {
-        let request = super::post_object::authenticate_and_spool(
+        let request = super::post_object::authenticate_and_stream(
             request,
             &state.identities,
-            &state.root_dir,
             state.max_upload_bytes,
         )
         .await?;

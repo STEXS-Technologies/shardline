@@ -11,6 +11,8 @@ mod native_xet;
 #[cfg(feature = "docker")]
 mod packed_ranges;
 mod postgres;
+#[cfg(unix)]
+mod shutdown_cutover;
 
 struct LocalServer {
     child: std::process::Child,

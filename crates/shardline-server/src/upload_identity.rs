@@ -8,10 +8,11 @@ mod tests;
 
 pub(crate) const SCOPE_PREFIX: &str = "scope-json-v1:";
 
-pub(crate) enum PreparedNativeXorb {
-    Memory(Box<shardline_xet_adapter::PreparedXorbMemory>),
-    File(Box<shardline_xet_adapter::PreparedXorbFile>),
-}
+pub(crate) type PreparedNativeXorb = shardline_xet_adapter::PreparedXorbMemory;
+pub(crate) type NativeUploadResources = (
+    tokio::sync::OwnedSemaphorePermit,
+    tokio::sync::OwnedSemaphorePermit,
+);
 
 /// Track the validated request representation separately from historical raw
 /// wire-length identities. Footerless and normalized retries share this identity.
@@ -21,45 +22,32 @@ pub(crate) fn xorb(hash: &str, canonical_length: u64) -> String {
     format!("xorb-v2-{hash}-{canonical_length}")
 }
 
+#[cfg(test)]
 pub(crate) async fn xorb_length(
     hash: &str,
-    staged: crate::upload_ingest::StagedXorbBody,
+    staged: crate::upload_ingest::NativeBody,
     pool: &crate::admission::BoundedPool,
-) -> Result<(PreparedNativeXorb, u64), ServerError> {
+) -> Result<(PreparedNativeXorb, u64, NativeUploadResources), ServerError> {
     let hash = hash.to_owned();
-    crate::admission::cancellable_work_with_setup(
-        pool,
-        || staged,
-        move |staged, cancel| prepare_staged_xorb(&hash, staged, &|| cancel.check_io()),
-    )
-    .await
-}
-
-fn prepare_staged_xorb(
-    hash: &str,
-    staged: crate::upload_ingest::StagedXorbBody,
-    checkpoint: &dyn Fn() -> std::io::Result<()>,
-) -> Result<(PreparedNativeXorb, u64), ServerError> {
-    checkpoint()?;
-    let (staged, canonical_length) = match staged {
-        crate::upload_ingest::StagedRequestBody::Memory { bytes, .. } => {
-            let prepared = shardline_xet_adapter::prepare_xorb_memory(hash, &bytes)?;
-            let canonical_length = prepared.length();
-            (
-                PreparedNativeXorb::Memory(Box::new(prepared)),
-                canonical_length,
-            )
-        }
-        crate::upload_ingest::StagedRequestBody::File { file, .. } => {
-            let file = shardline_xet_adapter::prepare_owned_xorb_file_with_checkpoint(
-                hash, file, checkpoint,
+    let worker = pool
+        .acquire()
+        .await
+        .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
+    let ((prepared, admission), worker) =
+        crate::admission::cancellable_work_with_permit(worker, move |cancel| {
+            let crate::upload_ingest::NativeBody { bytes, admission } = staged;
+            cancel.check()?;
+            let prepared = shardline_xet_adapter::prepare_owned_xorb_memory_with_checkpoint(
+                &hash,
+                bytes,
+                &|| cancel.check_io(),
             )?;
-            let canonical_length = file.length();
-            (PreparedNativeXorb::File(Box::new(file)), canonical_length)
-        }
-    };
-    checkpoint()?;
-    Ok((staged, canonical_length))
+            cancel.check()?;
+            Ok((prepared, admission))
+        })
+        .await?;
+    let length = prepared.length();
+    Ok((prepared, length, (admission, worker)))
 }
 
 pub(crate) fn repository(scope: Option<&RepositoryScope>) -> Result<String, ServerError> {

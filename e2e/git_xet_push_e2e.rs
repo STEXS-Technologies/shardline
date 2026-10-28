@@ -307,9 +307,15 @@ async fn exercise_git_xet_push_flow() -> Result<(), TestError> {
         .error_for_status()?
         .json::<ServerStatsResponse>()
         .await?;
-    if stats.chunks == 0 {
+    if stats.objects == 0 || stats.object_bytes == 0 {
         return Err(ServerE2eInvariantError::new(
-            "shardline stats reported zero stored chunks after git-xet push",
+            "shardline stats reported no retained objects after git-xet push",
+        )
+        .into());
+    }
+    if stats.chunks != 0 || stats.chunk_bytes != 0 {
+        return Err(ServerE2eInvariantError::new(
+            "native git-xet push unexpectedly retained standalone chunk copies",
         )
         .into());
     }
@@ -560,21 +566,33 @@ async fn exercise_git_xet_clone_flow() -> Result<(), TestError> {
         )
         .into());
     }
-    let new_chunk_objects = stats_after_second_push
-        .chunks
-        .checked_sub(stats_after_first_push.chunks)
+    let new_object_bytes = stats_after_second_push
+        .object_bytes
+        .checked_sub(stats_after_first_push.object_bytes)
         .ok_or_else(|| {
-            ServerE2eInvariantError::new("chunk object count unexpectedly shrank after second push")
+            ServerE2eInvariantError::new(
+                "retained object bytes unexpectedly shrank after second push",
+            )
         })?;
-    if new_chunk_objects == 0 {
+    if new_object_bytes == 0 {
         return Err(ServerE2eInvariantError::new(
-            "second git-xet push reported no new chunk objects for changed content",
+            "second git-xet push retained no new object bytes for changed content",
         )
         .into());
     }
-    if new_chunk_objects >= stats_after_first_push.chunks {
+    if new_object_bytes >= stats_after_first_push.object_bytes {
         return Err(ServerE2eInvariantError::new(
             "second git-xet push did not reuse enough existing chunks for the small update",
+        )
+        .into());
+    }
+    if stats_after_first_push.chunks != 0
+        || stats_after_second_push.chunks != 0
+        || stats_after_first_push.chunk_bytes != 0
+        || stats_after_second_push.chunk_bytes != 0
+    {
+        return Err(ServerE2eInvariantError::new(
+            "native git-xet versions unexpectedly retained standalone chunk copies",
         )
         .into());
     }
@@ -901,23 +919,33 @@ async fn exercise_git_xet_multi_repo_flow() -> Result<(), TestError> {
         )
         .into());
     }
-    let new_chunk_objects = stats_after_repo_b
-        .chunks
-        .checked_sub(stats_after_repo_a.chunks)
+    let new_object_bytes = stats_after_repo_b
+        .object_bytes
+        .checked_sub(stats_after_repo_a.object_bytes)
         .ok_or_else(|| {
             ServerE2eInvariantError::new(
-                "chunk object count unexpectedly shrank after second repository push",
+                "retained object bytes unexpectedly shrank after second repository push",
             )
         })?;
-    if new_chunk_objects == 0 {
+    if new_object_bytes == 0 {
         return Err(ServerE2eInvariantError::new(
-            "second repository push reported no new chunk objects for changed content",
+            "second repository push retained no new object bytes for changed content",
         )
         .into());
     }
-    if new_chunk_objects >= stats_after_repo_a.chunks {
+    if new_object_bytes >= stats_after_repo_a.object_bytes {
         return Err(ServerE2eInvariantError::new(
             "second repository push did not reuse enough chunks across repositories",
+        )
+        .into());
+    }
+    if stats_after_repo_a.chunks != 0
+        || stats_after_repo_b.chunks != 0
+        || stats_after_repo_a.chunk_bytes != 0
+        || stats_after_repo_b.chunk_bytes != 0
+    {
+        return Err(ServerE2eInvariantError::new(
+            "native cross-repository uploads unexpectedly retained standalone chunk copies",
         )
         .into());
     }

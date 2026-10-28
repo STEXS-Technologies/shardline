@@ -245,39 +245,18 @@ where
                     UploadLifecycleBoundary::AfterObjectWork,
                 )
                 .map_err(E::from)?;
-                self.transition_upload_in_scope(
-                    &tenant,
-                    &repository,
-                    intent.intent_id(),
-                    shardline_index::UploadIntentState::Stored,
-                )
-                .await
-                .map_err(E::from)?;
+                self.complete_upload_in_scope(&tenant, &repository, intent.intent_id())
+                    .await
+                    .map_err(E::from)?;
                 upload_lifecycle_failpoint(
                     intent.intent_id(),
                     UploadLifecycleBoundary::AfterStored,
                 )
                 .map_err(E::from)?;
-                self.transition_upload_in_scope(
-                    &tenant,
-                    &repository,
-                    intent.intent_id(),
-                    shardline_index::UploadIntentState::MetadataCommitted,
-                )
-                .await
-                .map_err(E::from)?;
                 upload_lifecycle_failpoint(
                     intent.intent_id(),
                     UploadLifecycleBoundary::AfterMetadataCommitted,
                 )
-                .map_err(E::from)?;
-                self.transition_upload_in_scope(
-                    &tenant,
-                    &repository,
-                    intent.intent_id(),
-                    shardline_index::UploadIntentState::Visible,
-                )
-                .await
                 .map_err(E::from)?;
                 upload_lifecycle_failpoint(
                     intent.intent_id(),
@@ -991,9 +970,9 @@ mod tests {
             UploadLifecycleBoundary::AfterStoring | UploadLifecycleBoundary::AfterObjectWork => {
                 UploadIntentState::Storing
             }
-            UploadLifecycleBoundary::AfterStored => UploadIntentState::Stored,
-            UploadLifecycleBoundary::AfterMetadataCommitted => UploadIntentState::MetadataCommitted,
-            UploadLifecycleBoundary::AfterVisible => UploadIntentState::Visible,
+            UploadLifecycleBoundary::AfterStored
+            | UploadLifecycleBoundary::AfterMetadataCommitted
+            | UploadLifecycleBoundary::AfterVisible => UploadIntentState::Visible,
         }
     }
 

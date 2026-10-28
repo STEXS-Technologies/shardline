@@ -11,12 +11,13 @@ use futures_util::stream::{self, Stream, StreamExt};
 use md5::{Digest, Md5};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::{ServerError, object_store::ServerObjectStore, overflow::checked_add};
+use crate::{ServerError, overflow::checked_add};
 
 type BodyChunkResult = Result<Bytes, ServerError>;
 type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
 
 mod md5_checked_tee;
+#[cfg(test)]
 const MAX_IN_MEMORY_STAGED_BODY_BYTES: usize = 256 * 1024;
 
 /// Stream wrapper that feeds every chunk into a caller-shared MD5 hasher, so
@@ -84,15 +85,11 @@ impl Stream for Md5Verifier {
     }
 }
 
-pub(super) enum ChunkBuffer {
-    Pooled(Bytes),
-}
+pub(super) struct ChunkBuffer(pub(super) Bytes);
 
 impl ChunkBuffer {
     pub(super) fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Pooled(bytes) => bytes.as_ref(),
-        }
+        self.0.as_ref()
     }
 }
 
@@ -104,41 +101,67 @@ pub(crate) struct RequestBodyReader {
     read_bytes: u64,
 }
 
-mod staging_digest;
-use staging_digest::StagingDigest;
-
-pub(crate) type StagedXorbBody = StagedRequestBody<()>;
-
-pub(crate) enum StagedRequestBody<H = shardline_protocol::ShardlineHash> {
-    Memory {
-        bytes: Bytes,
-        length: u64,
-        hash: H,
-    },
-    File {
-        file: tempfile::NamedTempFile,
-        length: u64,
-        hash: H,
-    },
-}
-
-impl<H> StagedRequestBody<H> {
-    pub(crate) const fn length(&self) -> u64 {
-        match self {
-            Self::Memory { length, .. } | Self::File { length, .. } => *length,
-        }
-    }
+pub(crate) struct StagedRequestBody {
+    bytes: Bytes,
+    length: u64,
 }
 
 impl StagedRequestBody {
-    pub(crate) const fn hash(&self) -> shardline_protocol::ShardlineHash {
-        match self {
-            Self::Memory { hash, .. } | Self::File { hash, .. } => *hash,
-        }
+    pub(crate) const fn length(&self) -> u64 {
+        self.length
+    }
+
+    pub(crate) fn shared_bytes(&self) -> Bytes {
+        self.bytes.clone()
+    }
+
+    pub(crate) fn into_bytes(self) -> Bytes {
+        self.bytes
     }
 }
 
 impl RequestBodyReader {
+    /// Collect under the configured request ceiling, or the default wire bound
+    /// for internal streams without an explicit limit. Caller owns admission.
+    pub(super) async fn read_bounded_memory(&mut self) -> Result<Vec<u8>, ServerError> {
+        let maximum = self.bounded_memory_limit()?;
+        let mut bytes = Vec::new();
+        if let Some(expected) = self.expected_total_bytes {
+            bytes
+                .try_reserve_exact(expected.min(maximum))
+                .map_err(|_error| ServerError::RequestBodyTooLarge)?;
+        }
+        while let Some(frame) = self.next_bytes().await? {
+            let next = bytes
+                .len()
+                .checked_add(frame.len())
+                .ok_or(ServerError::Overflow)?;
+            if next > maximum {
+                return Err(ServerError::RequestBodyTooLarge);
+            }
+            if next > bytes.capacity() {
+                let capacity = next
+                    .checked_next_power_of_two()
+                    .unwrap_or(maximum)
+                    .min(maximum);
+                let additional = capacity
+                    .checked_sub(bytes.len())
+                    .ok_or(ServerError::Overflow)?;
+                bytes
+                    .try_reserve_exact(additional)
+                    .map_err(|_error| ServerError::RequestBodyTooLarge)?;
+            }
+            bytes.extend_from_slice(&frame);
+        }
+        Ok(bytes)
+    }
+
+    pub(super) fn bounded_memory_limit(&mut self) -> Result<usize, ServerError> {
+        let maximum = *self
+            .max_bytes
+            .get_or_insert(crate::config::DEFAULT_MAX_XORB_BODY_BYTES.get() as u64);
+        Ok(usize::try_from(maximum)?)
+    }
     /// Counts consumed payload bytes without changing size hints, byte limits,
     /// validation, or staging. Used for actual successful native-Xet traffic.
     pub(crate) fn with_byte_counter(mut self, counter: Arc<AtomicU64>) -> Self {
@@ -174,12 +197,32 @@ impl RequestBodyReader {
 
     /// Creates a reader over in-memory bytes for tests and non-HTTP callers.
     pub(crate) fn from_bytes(bytes: Bytes) -> Self {
+        let length = bytes.len();
         Self {
             stream: Box::pin(stream::once(async move { Ok(bytes) })),
-            max_bytes: None,
-            expected_total_bytes: None,
+            // Trusted internal callers already own this bounded payload. Keep
+            // their previous accepted sizes rather than imposing HTTP defaults.
+            max_bytes: Some(length as u64),
+            expected_total_bytes: Some(length),
             read_bytes: 0,
         }
+    }
+
+    /// Replay shared payload slices without losing their admission owner.
+    pub(crate) fn from_chunked_bytes(bytes: Bytes, chunk_size: NonZeroUsize) -> Self {
+        let length = bytes.len();
+        let mut reader =
+            Self::from_stream(stream::unfold(bytes, move |mut remaining| async move {
+                if remaining.is_empty() {
+                    return None;
+                }
+                let count = remaining.len().min(chunk_size.get());
+                let frame = remaining.split_to(count);
+                Some((Ok(frame), remaining))
+            }));
+        reader.max_bytes = Some(length as u64);
+        reader.expected_total_bytes = Some(length);
+        reader
     }
 
     /// Creates a reader over an internal byte stream.
@@ -324,142 +367,17 @@ pub(crate) async fn read_body_to_bytes(
     Ok(body)
 }
 
-/// Drains a request body into a temporary file while hashing it. This keeps
-/// request-sized protocol objects out of the heap; callers can pass the file
-/// directly to a file-capable object store.
-pub(crate) async fn stage_body_to_tempfile(
-    reader: &mut RequestBodyReader,
-) -> Result<
-    (
-        tempfile::NamedTempFile,
-        u64,
-        shardline_protocol::ShardlineHash,
-    ),
-    ServerError,
-> {
-    stage_to_tempfile::<blake3::Hasher>(reader).await
-}
-
-async fn stage_to_tempfile<D: StagingDigest>(
-    reader: &mut RequestBodyReader,
-) -> Result<(tempfile::NamedTempFile, u64, D::Hash), ServerError> {
-    let temporary = tempfile::NamedTempFile::new()?;
-    let mut output = tokio::fs::File::create(temporary.path()).await?;
-    let mut hasher = D::default();
-    let mut length = 0_u64;
-    while let Some(bytes) = reader.next_bytes().await? {
-        hasher.update(&bytes);
-        length = checked_add(length, u64::try_from(bytes.len())?)?;
-        tokio::io::AsyncWriteExt::write_all(&mut output, &bytes).await?;
-    }
-    tokio::io::AsyncWriteExt::flush(&mut output).await?;
-    Ok((temporary, length, hasher.finish()))
-}
-
-/// Stages a bounded protocol object in memory for remote object storage and
-/// small local bodies, spilling larger local bodies to a temporary file. The
-/// request reader's configured ceiling remains the total accepted-body bound.
-pub(crate) async fn stage_body_for_object_store(
-    reader: &mut RequestBodyReader,
-    object_store: &ServerObjectStore,
-) -> Result<StagedRequestBody, ServerError> {
-    if matches!(object_store, ServerObjectStore::S3(_)) {
-        let bytes = read_body_to_bytes(reader).await?;
-        let hash = shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes());
-        return Ok(StagedRequestBody::Memory {
-            length: u64::try_from(bytes.len())?,
-            bytes: Bytes::from(bytes),
-            hash,
-        });
-    }
-
-    stage_body_with_spill(reader).await
-}
-
-/// Bounds native-container staging independently of the storage backend.
-/// Larger bodies use an owned temporary file, removed on failure or cancellation.
-pub(crate) async fn stage_body_with_spill(
+/// Validate a complete request before mutating resumable state. Shared aggregate
+/// admission remains held through replay; the configured reader ceiling applies.
+pub(crate) async fn stage_bounded_body(
     reader: &mut RequestBodyReader,
 ) -> Result<StagedRequestBody, ServerError> {
-    stage_with_spill::<blake3::Hasher>(reader).await
-}
-
-/// Stage native Xorb bytes without an unused raw-wire checksum. The caller
-/// must authenticate members/root and the final serialized object before
-/// publication. Size bounds, spill behavior and cancellation remain shared.
-pub(crate) async fn stage_xorb_with_spill(
-    reader: &mut RequestBodyReader,
-) -> Result<StagedXorbBody, ServerError> {
-    stage_with_spill::<()>(reader).await
-}
-
-async fn stage_with_spill<D: StagingDigest>(
-    reader: &mut RequestBodyReader,
-) -> Result<StagedRequestBody<D::Hash>, ServerError> {
-    // Small protocol objects can be validated in memory and then written
-    // once to their final content-addressed path. Avoid a disposable scratch
-    // write for those bodies. Unknown or larger bodies spill after a strict
-    // per-request memory bound.
-    if reader
-        .expected_total_bytes
-        .is_some_and(|length| length > MAX_IN_MEMORY_STAGED_BODY_BYTES)
-    {
-        let (file, length, hash) = stage_to_tempfile::<D>(reader).await?;
-        return Ok(StagedRequestBody::File { file, length, hash });
-    }
-
-    let initial_capacity = reader
-        .expected_total_bytes
-        .unwrap_or(0)
-        .min(MAX_IN_MEMORY_STAGED_BODY_BYTES);
-    let mut memory = Vec::new();
-    memory
-        .try_reserve(initial_capacity)
-        .map_err(|_error| ServerError::RequestBodyTooLarge)?;
-    let mut hasher = D::default();
-    let mut length = 0_u64;
-    let mut temporary: Option<(tempfile::NamedTempFile, tokio::fs::File)> = None;
-
-    while let Some(bytes) = reader.next_bytes().await? {
-        hasher.update(&bytes);
-        length = checked_add(length, u64::try_from(bytes.len())?)?;
-        let next_memory_length = memory
-            .len()
-            .checked_add(bytes.len())
-            .ok_or(ServerError::Overflow)?;
-        if temporary.is_none() && next_memory_length <= MAX_IN_MEMORY_STAGED_BODY_BYTES {
-            memory
-                .try_reserve(bytes.len())
-                .map_err(|_error| ServerError::RequestBodyTooLarge)?;
-            memory.extend_from_slice(&bytes);
-            continue;
-        }
-
-        if temporary.is_none() {
-            let file = tempfile::NamedTempFile::new()?;
-            let mut output = tokio::fs::File::create(file.path()).await?;
-            tokio::io::AsyncWriteExt::write_all(&mut output, &memory).await?;
-            memory = Vec::new();
-            temporary = Some((file, output));
-        }
-        let Some((_file, output)) = temporary.as_mut() else {
-            return Err(ServerError::Overflow);
-        };
-        tokio::io::AsyncWriteExt::write_all(output, &bytes).await?;
-    }
-
-    let hash = hasher.finish();
-    if let Some((file, mut output)) = temporary {
-        tokio::io::AsyncWriteExt::flush(&mut output).await?;
-        drop(output);
-        Ok(StagedRequestBody::File { file, length, hash })
-    } else {
-        Ok(StagedRequestBody::Memory {
-            bytes: Bytes::from(memory),
-            length,
-            hash,
-        })
-    }
+    let admission = super::buffer_admission::acquire().await?;
+    let bytes = reader.read_bounded_memory().await?;
+    Ok(StagedRequestBody {
+        length: u64::try_from(bytes.len())?,
+        bytes: super::buffer_admission::into_bytes(bytes, admission),
+    })
 }
 
 #[cfg(test)]
@@ -467,11 +385,10 @@ mod tests {
     use axum::body::Bytes;
     use md5::{Digest, Md5};
     use std::sync::{Arc, Mutex};
-    use tokio::io::AsyncReadExt;
 
     use super::{
         ChunkBuffer, MAX_IN_MEMORY_STAGED_BODY_BYTES, RequestBodyReader, StagedRequestBody,
-        read_body_to_bytes, stage_body_for_object_store, stage_body_to_tempfile,
+        read_body_to_bytes, stage_bounded_body,
     };
     use crate::{ObjectStorageAdapter, ServerConfig, object_store::object_store_from_config};
 
@@ -496,7 +413,7 @@ mod tests {
         let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"actual"))
             .with_expected_md5(Md5::digest(b"different").into());
         assert!(matches!(
-            stage_body_to_tempfile(&mut reader).await,
+            stage_bounded_body(&mut reader).await,
             Err(crate::ServerError::RequestBodyMd5Mismatch)
         ));
         assert!(reader.next_bytes().await.unwrap().is_none());
@@ -547,13 +464,13 @@ mod tests {
 
     #[test]
     fn pooled_chunk_buffer_as_slice_returns_bytes() {
-        let buf = ChunkBuffer::Pooled(Bytes::from_static(b"hello"));
+        let buf = ChunkBuffer(Bytes::from_static(b"hello"));
         assert_eq!(buf.as_slice(), b"hello");
     }
 
     #[test]
     fn pooled_chunk_buffer_empty() {
-        let buf = ChunkBuffer::Pooled(Bytes::new());
+        let buf = ChunkBuffer(Bytes::new());
         assert_eq!(buf.as_slice(), b"");
     }
 
@@ -591,13 +508,12 @@ mod tests {
             std::num::NonZeroUsize::new(1024).unwrap(),
         )
         .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config));
-        let object_store = object_store_from_config(&config).unwrap();
+        let _object_store = object_store_from_config(&config).unwrap();
         let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"remote"));
 
-        let staged = stage_body_for_object_store(&mut reader, &object_store)
-            .await
-            .unwrap();
-        assert!(matches!(staged, StagedRequestBody::Memory { .. }));
+        let staged = stage_bounded_body(&mut reader).await.unwrap();
+        assert_eq!(staged.length(), 6);
+        assert_eq!(staged.into_bytes(), b"remote".as_slice());
     }
 
     #[tokio::test]
@@ -609,31 +525,17 @@ mod tests {
             root.path().to_path_buf(),
             std::num::NonZeroUsize::new(1024).unwrap(),
         );
-        let object_store = object_store_from_config(&config).unwrap();
+        let _object_store = object_store_from_config(&config).unwrap();
         let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"local"));
 
-        let staged = stage_body_for_object_store(&mut reader, &object_store)
-            .await
-            .unwrap();
-        assert!(matches!(&staged, StagedRequestBody::Memory { .. }));
-        let StagedRequestBody::Memory {
-            bytes,
-            length,
-            hash,
-        } = staged
-        else {
-            return;
-        };
+        let staged = stage_bounded_body(&mut reader).await.unwrap();
+        let StagedRequestBody { bytes, length } = staged;
         assert_eq!(bytes.as_ref(), b"local");
         assert_eq!(length, 5);
-        assert_eq!(
-            hash,
-            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"local").as_bytes())
-        );
     }
 
     #[tokio::test]
-    async fn local_object_storage_spills_large_body_to_file() {
+    async fn local_object_storage_keeps_large_body_in_admitted_memory() {
         let root = tempfile::tempdir().unwrap();
         let config = ServerConfig::new(
             std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
@@ -641,7 +543,7 @@ mod tests {
             root.path().to_path_buf(),
             std::num::NonZeroUsize::new(1024 * 1024).unwrap(),
         );
-        let object_store = object_store_from_config(&config).unwrap();
+        let _object_store = object_store_from_config(&config).unwrap();
         let mut contents = vec![b'x'; MAX_IN_MEMORY_STAGED_BODY_BYTES];
         contents.push(b'y');
         let body = axum::body::Body::from_stream(futures_util::stream::iter([
@@ -652,35 +554,21 @@ mod tests {
             RequestBodyReader::from_body(body, std::num::NonZeroUsize::new(1024 * 1024).unwrap())
                 .unwrap();
 
-        let staged = stage_body_for_object_store(&mut reader, &object_store)
-            .await
-            .unwrap();
-        assert!(matches!(&staged, StagedRequestBody::File { .. }));
-        let StagedRequestBody::File { file, length, hash } = staged else {
-            return;
-        };
-        let mut actual = Vec::new();
-        tokio::fs::File::open(file.path())
-            .await
-            .unwrap()
-            .read_to_end(&mut actual)
-            .await
-            .unwrap();
+        let staged = stage_bounded_body(&mut reader).await.unwrap();
+        let StagedRequestBody {
+            bytes: actual,
+            length,
+            ..
+        } = staged;
         assert_eq!(actual, contents);
         assert_eq!(length, u64::try_from(actual.len()).unwrap());
-        assert_eq!(
-            hash,
-            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&actual).as_bytes())
-        );
     }
 
     #[tokio::test]
     async fn native_staging_preserves_memory_and_stream_limits_without_a_wire_digest() {
         let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"native"));
-        let staged = super::stage_xorb_with_spill(&mut reader).await.unwrap();
-        assert!(
-            matches!(staged, StagedRequestBody::Memory { bytes, length: 6, hash: () } if bytes == b"native"[..])
-        );
+        let bytes = reader.read_bounded_memory().await.unwrap();
+        assert_eq!(bytes, b"native");
 
         let body = axum::body::Body::from_stream(futures_util::stream::iter([
             Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
@@ -689,30 +577,17 @@ mod tests {
         let mut reader =
             RequestBodyReader::from_body(body, std::num::NonZeroUsize::new(2).unwrap()).unwrap();
         assert!(matches!(
-            super::stage_xorb_with_spill(&mut reader).await,
+            reader.read_bounded_memory().await,
             Err(crate::ServerError::RequestBodyTooLarge)
         ));
     }
 
     #[tokio::test]
-    #[allow(clippy::panic)] // A memory result must fail this spill/cleanup test immediately.
-    async fn native_staging_spills_and_removes_the_owned_file_on_drop() {
+    async fn native_body_above_the_old_spill_boundary_stays_in_memory() {
         let bytes = vec![0x5a; MAX_IN_MEMORY_STAGED_BODY_BYTES + 1];
         let mut reader = RequestBodyReader::from_bytes(Bytes::from(bytes.clone()));
-        let staged = super::stage_xorb_with_spill(&mut reader).await.unwrap();
-        let StagedRequestBody::File {
-            file,
-            length,
-            hash: (),
-        } = staged
-        else {
-            panic!("large native body must spill independently of its destination");
-        };
-        let path = file.path().to_owned();
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert_eq!(length, bytes.len() as u64);
-        drop(file);
-        assert!(!path.exists());
+        let buffered = reader.read_bounded_memory().await.unwrap();
+        assert_eq!(buffered, bytes);
     }
 
     #[tokio::test]
@@ -899,21 +774,6 @@ mod tests {
         let digest = hasher.lock().unwrap().clone().finalize();
         assert_eq!(output, b"stream me");
         assert_eq!(format!("{digest:x}"), "514d2e08c72387a27d4420217482a513");
-    }
-
-    #[tokio::test]
-    async fn stage_body_to_tempfile_streams_and_returns_integrity() {
-        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"stage this"));
-        let (temporary, length, hash) = stage_body_to_tempfile(&mut reader).await.unwrap();
-        assert_eq!(length, 10);
-        let mut file = tokio::fs::File::open(temporary.path()).await.unwrap();
-        let mut contents = Vec::new();
-        file.read_to_end(&mut contents).await.unwrap();
-        assert_eq!(contents, b"stage this");
-        assert_eq!(
-            hash,
-            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"stage this").as_bytes())
-        );
     }
 
     #[tokio::test]

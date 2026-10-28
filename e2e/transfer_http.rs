@@ -945,9 +945,19 @@ async fn chunk_transfer_permit_uses_stored_chunk_length() {
     let Ok(backend) = backend else {
         return;
     };
-    let (body, hash) = single_chunk_xorb(b"abcdefgh");
-    let upload = backend.upload_xorb(&hash, body).await;
-    assert!(upload.is_ok());
+    let upload = backend
+        .upload_file("permit-length", Bytes::from_static(b"abcdefgh"), None)
+        .await
+        .expect("persist the chunk used by the transfer permit");
+    assert_eq!(upload.chunks.len(), 1);
+    let hash = upload
+        .chunks
+        .first()
+        .expect("single stored chunk")
+        .hash
+        .clone();
+    let stored_length = backend.chunk_length(&hash).await.expect("stored length");
+    assert!(stored_length > 0 && stored_length < chunk_size.get() as u64);
     let reconstruction_cache = ReconstructionCacheService::from_config(&ServerConfig::new(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
         "http://127.0.0.1:8080".to_owned(),

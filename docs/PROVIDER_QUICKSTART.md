@@ -407,6 +407,11 @@ against both of them:
 scripts/shardline/live-provider-bridge-smoke.sh
 ```
 
+The bridge test uses a unique qualification branch for each run, preserving
+existing branches. Its checked workflow covers native Xet uploads, changed-content
+reuse, cloning and historical reads against both providers. This qualifies the
+bridge workflow; it does not establish compatibility with every provider API.
+
 Inputs:
 
 - GitHub authentication from `gh auth`

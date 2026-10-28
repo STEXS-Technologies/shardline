@@ -21,8 +21,9 @@ def counter(name):
         if line.startswith(name + " ") or line.startswith(name + "{"))
 for ordinal, size in enumerate([8 * 1024 * 1024 - 1, 8 * 1024 * 1024, 8 * 1024 * 1024 + 1]):
     name = f"selection-boundary-{size}.bin"
-    block = bytes((index * 13 + index // 251 + ordinal) % 256 for index in range(65536))
-    payload = (block * ((size + len(block) - 1) // len(block)))[:size]
+    # Keep the threshold fixture deterministic without repeated blocks that
+    # would let compression hide the actual native ingestion workload.
+    payload = hashlib.shake_256(f"selection-boundary-{ordinal}".encode()).digest(size)
     before = {name: counter(name) for name in ["shardline_xorbs_total", "shardline_shards_total", "shardline_hub_api_file_uploads_total"]}
     api.upload_file(path_or_fileobj=payload, path_in_repo=name, repo_id=repo, commit_message=f"boundary {size}")
     info = api.get_paths_info(repo, [name])[0]

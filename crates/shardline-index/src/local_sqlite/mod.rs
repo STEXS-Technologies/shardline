@@ -21,6 +21,7 @@ mod task_artifacts;
 mod tests;
 mod tree_store;
 mod upload_recovery_guard;
+mod upload_transitions;
 mod xet_xorb;
 
 pub(crate) use crate::record_kind::RecordKind;

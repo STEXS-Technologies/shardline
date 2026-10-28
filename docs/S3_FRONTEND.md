@@ -137,10 +137,12 @@ need upgraded replicas during a
 mixed-version rollout because older writers may discard tags on same-key
 updates. Forms without a valid
 SigV4 policy are rejected; bearer-token authentication alone is not accepted
-for browser forms. The file part must be last and is size-bounded. Its bytes are
-spooled to an anonymous temporary file, then passed through the normal verified
-object publication path; a failed policy or checksum does not replace an
-existing object.
+for browser forms. The file part must be last and is size-bounded. The server
+authenticates the policy and fields before streaming file bytes into normal
+verified ingestion, without a complete-file scratch copy or memory buffer.
+Size, checksum and trailing-form checks must all pass before object metadata
+publishes. A failure preserves the existing object; any provisional immutable
+chunks remain unreferenced and eligible for ordinary garbage collection.
 
 `CreateMultipartUpload` supports negotiated `CRC32`, `CRC32C`, `SHA1`, and `SHA256`
 with the default or explicit `COMPOSITE` type, and `CRC32`, `CRC32C`, or
@@ -371,7 +373,10 @@ durability guarantees:
 - **Write integrity** — `PutObject` and `CompleteMultipartUpload` stream through
   the shared `FileUploadIngestor` (CDC chunking, per-chunk BLAKE3 + BLAKE3-root
   content hash), stored content-addressed with `ObjectIntegrity` (hash + size
-  verified at the store boundary). Identical to Xet/LFS/OCI/Bazel/Hub uploads.
+  verified at the store boundary). LFS, OCI, Bazel and regular Hub uploads reuse
+  this ingestion core. Native Xet uploads retain their wire-format member and
+  container verification, then use the same storage integrity and publication
+  boundaries; they do not run CDC again over an uploaded Xorb.
 - **Read integrity** — `GetObject` / `Range` reconstruct via the shared
   record-reconstruction path, which verifies every chunk hash against the
   `FileRecord` before returning bytes. A corrupted or wrong chunk fails rather

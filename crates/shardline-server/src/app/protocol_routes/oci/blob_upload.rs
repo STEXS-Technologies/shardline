@@ -24,16 +24,18 @@ use crate::{
     admission::weights,
     object_store::{
         materialize_object_to_file, s3_resumable_parts_reader, stage_bytes_content_addressed,
+        stage_owned_bytes_content_addressed,
     },
     oci_adapter::{
-        abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
-        create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
-        lock_upload_sessions, new_upload_session_id, oci_blob_location, read_upload_session,
-        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
-        upload_session_length, upload_session_location, validate_repository,
+        abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes_owned,
+        append_upload_bytes_owned, create_upload_session, delete_upload_session,
+        finalize_s3_multipart_upload_session, lock_upload_sessions, new_upload_session_id,
+        oci_blob_location, read_upload_session, touch_upload_session, upload_body_integrity,
+        upload_body_path_for_session, upload_length, upload_session_length,
+        upload_session_location, validate_repository,
     },
     protocol_support::{parse_sha256_digest, scope_namespace},
-    upload_ingest::{RequestBodyReader, StagedRequestBody, stage_body_for_object_store},
+    upload_ingest::{RequestBodyReader, StagedRequestBody, stage_bounded_body},
 };
 
 const fn durable_oci_sessions_enabled(state: &AppState) -> bool {
@@ -48,10 +50,9 @@ use super::manifest::ensure_oci_object_visible;
 use super::tags::oci_created_response;
 
 /// Validate a ranged request before appending any bytes to its upload session.
-/// The staging policy keeps local bodies on disk and remote bodies within the
-/// reader's existing memory ceiling. Keep the returned file alive during replay.
-/// Remote ranged requests buffer the full bounded body before replay, trading
-/// chunk-at-a-time memory use for validation before session publication.
+/// Shared admission bounds full-body memory across OCI and native requests.
+/// Retain the returned admission through replay; durable session bytes remain
+/// separate from this disposable, verified request buffer.
 async fn stage_oci_ranged_body(
     state: &Arc<AppState>,
     body: &mut RequestBodyReader,
@@ -62,16 +63,19 @@ async fn stage_oci_ranged_body(
     };
     let expected_length = range.len().ok_or(ServerError::Overflow)?;
     ensure_upload_growth_within_limit(state, range.start(), usize::try_from(expected_length)?)?;
-    let staged = stage_body_for_object_store(body, &state.backend.object_store()).await?;
+    let staged = stage_bounded_body(body).await?;
     if expected_length != staged.length() {
         return Err(ServerError::RangeNotSatisfiable);
     }
-    *body = match &staged {
-        StagedRequestBody::Memory { bytes, .. } => RequestBodyReader::from_bytes(bytes.clone()),
-        StagedRequestBody::File { file, .. } => RequestBodyReader::from_reader_chain(
-            vec![tokio::fs::File::open(file.path()).await?],
-            state.config.chunk_size().get(),
-        ),
+    *body = if matches!(
+        state.backend.object_store(),
+        crate::object_store::ServerObjectStore::S3(_)
+    ) {
+        // Preserve the existing remote part granularity/request cost.
+        RequestBodyReader::from_bytes(staged.shared_bytes())
+    } else {
+        // Local appends copy into a blocking writer. Keep each copy bounded.
+        RequestBodyReader::from_chunked_bytes(staged.shared_bytes(), state.config.chunk_size())
     };
     Ok(Some(staged))
 }
@@ -259,18 +263,18 @@ pub(crate) async fn oci_patch_blob_upload(
     while let Some(bytes) = body.next_bytes().await? {
         ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
         new_length = if session.use_s3_multipart {
-            let (updated_session, length) = append_s3_multipart_upload_bytes(
+            let (updated_session, length) = append_s3_multipart_upload_bytes_owned(
                 state.config.root_dir(),
                 &state.backend,
                 session_id,
                 session,
-                &bytes,
+                bytes.clone(),
             )
             .await?;
             session = updated_session;
             length
         } else {
-            append_upload_bytes(state.config.root_dir(), session_id, &bytes).await?
+            append_upload_bytes_owned(state.config.root_dir(), session_id, bytes.clone()).await?
         };
         if let Some(expected_range) = expected_range {
             let observed_end = new_length.checked_sub(1).ok_or(ServerError::Overflow)?;
@@ -345,10 +349,10 @@ async fn durable_oci_patch_blob_upload(
         ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
         let part_number =
             std::num::NonZeroU64::new(next_part_number).ok_or(ServerError::Overflow)?;
-        let (key, integrity) = stage_bytes_content_addressed(
+        let (key, integrity) = stage_owned_bytes_content_addressed(
             &state.backend.object_store(),
             &format!("staging/resumable/oci/{session_id}/{}", part_number.get()),
-            &bytes,
+            bytes.clone(),
         )
         .await?;
         let max_bytes = u64::try_from(state.config.max_request_body_bytes().get())?;
@@ -467,12 +471,12 @@ pub(crate) async fn oci_put_blob_upload(
         let mut new_length = current_length;
         while let Some(bytes) = body.next_bytes().await? {
             ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
-            let (updated, length) = append_s3_multipart_upload_bytes(
+            let (updated, length) = append_s3_multipart_upload_bytes_owned(
                 state.config.root_dir(),
                 &state.backend,
                 session_id,
                 s3_session,
-                &bytes,
+                bytes.clone(),
             )
             .await?;
             s3_session = updated;
@@ -525,7 +529,8 @@ pub(crate) async fn oci_put_blob_upload(
     let mut new_length = current_length;
     while let Some(bytes) = body.next_bytes().await? {
         ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
-        new_length = append_upload_bytes(state.config.root_dir(), session_id, &bytes).await?;
+        new_length =
+            append_upload_bytes_owned(state.config.root_dir(), session_id, bytes.clone()).await?;
         if let Some(expected_range) = expected_range
             && new_length.checked_sub(1).ok_or(ServerError::Overflow)?
                 > expected_range.end_inclusive()

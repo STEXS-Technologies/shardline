@@ -1,5 +1,4 @@
-//! Bounded packing for protocol uploads whose public response exposes no raw chunks.
-use axum::body::Bytes;
+//! Shared bounded container packing, with optional standalone-chunk accounting.
 use shardline_index::{FileChunkRecord, xet_hash_hex_string};
 use shardline_storage::{ObjectBody, ObjectIntegrity, PutOutcome};
 
@@ -28,6 +27,7 @@ pub(super) struct PackedProtocolUpload {
     pending_bytes: usize,
     result: PackedProtocolResult,
     batch_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    report_chunks: bool,
 }
 
 impl PackedProtocolUpload {
@@ -39,6 +39,19 @@ impl PackedProtocolUpload {
             pending_bytes: 0,
             result: PackedProtocolResult::default(),
             batch_permit: None,
+            report_chunks: true,
+        }
+    }
+
+    /// Public upload accounting belongs to the independently persisted chunks.
+    /// Reuse the same bounded packer without reporting those chunks twice.
+    pub(super) fn for_individual_chunks(
+        store: ServerObjectStore,
+        work_pool: crate::admission::BoundedPool,
+    ) -> Self {
+        Self {
+            report_chunks: false,
+            ..Self::new(store, work_pool)
         }
     }
 
@@ -84,28 +97,34 @@ impl PackedProtocolUpload {
         // The permit covers raw accumulation, CPU work, read-back and fallback.
         // A cancelled running worker retains it until its buffers are dropped.
         let permit = self.batch_permit.take().ok_or(ServerError::Overflow)?;
-        let ((raw, packed), mut _permit) =
+        let ((raw, packed), permit) =
             crate::admission::blocking_work_with_permit(permit, move || {
                 let raw = RecoverableXorbBatch::new(chunks);
                 let packed = raw.pack();
                 Ok((raw, packed))
             })
             .await?;
+        // The encoded payload may outlive a cancelled request in transport.
+        // Share the same charge with its owner and with fallback/CPU work.
+        let mut _permit = std::sync::Arc::new(permit);
         match packed {
             Ok(mut packed) => {
+                let integrity = ObjectIntegrity::new(
+                    crate::local_backend::chunk_hash(&packed.serialized),
+                    u64::try_from(packed.serialized.len())?,
+                );
                 let key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex)?;
                 let serialized = std::mem::take(&mut packed.serialized);
-                let integrity = ObjectIntegrity::new(
-                    crate::local_backend::chunk_hash(&serialized),
-                    u64::try_from(serialized.len())?,
-                );
                 // Move the encoded buffer into the request; retaining raw input
                 // must not require another whole-container payload copy.
                 let mut stored = match &self.store {
                     ServerObjectStore::S3(store) => store
                         .put_if_absent_with_read_back(
                             &key,
-                            ObjectBody::from_bytes(Bytes::from(serialized)),
+                            ObjectBody::from_bytes(super::buffer_admission::into_bytes(
+                                serialized,
+                                _permit.clone(),
+                            )),
                             &integrity,
                         )
                         .await
@@ -150,7 +169,9 @@ impl PackedProtocolUpload {
                         if recovered_chunks.len() != packed.chunk_entries.len() {
                             return Err(ServerError::Overflow);
                         }
-                        crate::metrics::record_compression_saved(raw_bytes, retained_length);
+                        if self.report_chunks {
+                            crate::metrics::record_compression_saved(raw_bytes, retained_length);
+                        }
                         for ((bytes, offset), entry) in
                             recovered_chunks.into_iter().zip(packed.chunk_entries)
                         {
@@ -190,20 +211,22 @@ impl PackedProtocolUpload {
                 tracing::warn!(%error, "protocol packing failed; using verified individual chunks")
             }
         }
-        self.store_individual_fallback(raw.into_chunks()).await
+        self.store_individual_fallback(raw.into_chunks(), _permit)
+            .await
     }
 
     async fn store_individual_fallback(
         &mut self,
         chunks: Vec<(Vec<u8>, u64)>,
+        permit: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<(), ServerError> {
         let objects = self.store.clone();
         for (bytes, offset) in chunks {
-            let (outcome, _) = put_if_absent_pooled_chunk_buffer(
-                &objects,
-                ChunkBuffer::Pooled(Bytes::copy_from_slice(&bytes)),
-            )
-            .await?;
+            // The batch already owns this allocation. Share it with chunk
+            // persistence and accounting instead of copying the raw member.
+            let bytes = super::buffer_admission::into_bytes(bytes, permit.clone());
+            let (outcome, _) =
+                put_if_absent_pooled_chunk_buffer(&objects, ChunkBuffer(bytes.clone())).await?;
             let record = FileChunkRecord {
                 hash: outcome.hash_hex,
                 offset,
@@ -233,6 +256,9 @@ impl PackedProtocolUpload {
         offset: u64,
         inserted: bool,
     ) -> Result<(), ServerError> {
+        if !self.report_chunks {
+            return Ok(());
+        }
         let length = u64::try_from(bytes.len())?;
         if inserted {
             self.result.inserted = self

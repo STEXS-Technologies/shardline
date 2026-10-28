@@ -623,6 +623,43 @@ impl InventoryEntry for ProviderRepositoryState {
     }
 }
 
+pub(super) fn load_verified_sqlite_intent(
+    transaction: &Transaction<'_>,
+    intent_id: &str,
+) -> Result<Option<UploadIntent>, LocalIndexStoreError> {
+    let intent = transaction
+        .query_row(
+            "SELECT intent_id, object_key, object_hash, object_length, state,
+                created_at_unix_seconds, updated_at_unix_seconds
+         FROM shardline_upload_intents WHERE intent_id = ?1",
+            [intent_id],
+            |row| {
+                let state_text: String = row.get(4)?;
+                let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        4,
+                        format!("invalid state: {state_text}"),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+                Ok(UploadIntent::from_parts(
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? as u64,
+                    state,
+                    Duration::from_secs(row.get::<_, i64>(5)? as u64),
+                    Duration::from_secs(row.get::<_, i64>(6)? as u64),
+                ))
+            },
+        )
+        .optional()?;
+    if let Some(intent) = &intent {
+        verify_sqlite_intent_evidence(transaction, intent)?;
+    }
+    Ok(intent)
+}
+
 fn verify_sqlite_intent_evidence(
     transaction: &Transaction<'_>,
     intent: &UploadIntent,
@@ -2116,60 +2153,20 @@ impl UploadIntentStore for super::LocalIndexStore {
         new_state: UploadIntentState,
         event: &LifecycleEvent,
     ) -> Result<bool, Self::Error> {
-        let current = self.intent_by_id(intent_id).await?;
-        let Some(current) = current else {
-            return Ok(false);
-        };
-        if current.state() == new_state {
-            return Ok(true);
-        }
-        if !current.state().can_transition_to(new_state) {
-            return Ok(false);
-        }
-        event.validate_for_transition(intent_id, current.state(), new_state)?;
+        self.transition_intent_batch_with_events(intent_id, &[(new_state, event.clone())])
+            .await
+    }
+
+    async fn transition_intent_batch_with_events(
+        &self,
+        intent_id: &str,
+        transitions: &[(UploadIntentState, LifecycleEvent)],
+    ) -> Result<bool, Self::Error> {
         let store = self.clone();
         let intent_id = intent_id.to_owned();
-        let current_state = current.state();
-        let event_json = serde_json::to_string(event)?;
-        let event = event.clone();
-        let operation_id = event.operation.operation_id.clone();
-        let transitioned = tokio::task::spawn_blocking(move || -> Result<bool, LocalIndexStoreError> {
-            let mut conn = store.open_connection()?;
-            let transaction = conn.transaction()?;
-            let marked = super::upload_recovery_guard::enter(&transaction, &intent_id, &event.operation.repository)?;
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO)
-                .as_secs() as i64;
-            let rows = transaction.execute(
-                "UPDATE shardline_upload_intents SET state = ?1, updated_at_unix_seconds = ?2 WHERE intent_id = ?3 AND state = ?4",
-                rusqlite::params![new_state.as_str(), now, intent_id, current_state.as_str()],
-            )?;
-            if rows == 0 {
-                transaction.rollback()?;
-                return Ok(false);
-            }
-            super::helpers::persist_reliability_event_at(&transaction, &event, now)?;
-            let stored_event: String = transaction.query_row(
-                "SELECT event_json FROM shardline_reliability_events WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence = ?3",
-                rusqlite::params![
-                    event.operation.kind.as_str(),
-                    &event.operation.operation_id,
-                    u64_to_i64(event.sequence)?,
-                ],
-                |row| row.get(0),
-            )?;
-            if stored_event != event_json {
-                transaction.rollback()?;
-                return Err(LocalIndexStoreError::ReliabilityEventConflict(
-                    operation_id,
-                ));
-            }
-            if marked {
-                super::upload_recovery_guard::leave(&transaction, &intent_id)?;
-            }
-            transaction.commit()?;
-            Ok(true)
+        let transitions = transitions.to_vec();
+        let transitioned = tokio::task::spawn_blocking(move || {
+            super::upload_transitions::commit(&store, &intent_id, &transitions)
         })
         .await
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))??;
@@ -2182,38 +2179,9 @@ impl UploadIntentStore for super::LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             let mut conn = store.open_connection()?;
             let transaction = conn.transaction()?;
-            let mut stmt = transaction.prepare(
-                "SELECT intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds FROM shardline_upload_intents WHERE intent_id = ?1"
-            )?;
-            let result = stmt.query_row(rusqlite::params![intent_id], |row| {
-                let state_str: String = row.get(4)?;
-                let state = UploadIntentState::parse(&state_str).ok_or_else(|| {
-                    rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_str}"), rusqlite::types::Type::Text)
-                })?;
-                Ok(UploadIntent::from_parts(
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get::<_, i64>(3)? as u64,
-                    state,
-                    Duration::from_secs(row.get::<_, i64>(5)? as u64),
-                    Duration::from_secs(row.get::<_, i64>(6)? as u64),
-                ))
-            });
-            match result {
-                Ok(intent) => {
-                    drop(stmt);
-                    verify_sqlite_intent_evidence(&transaction, &intent)?;
-                    transaction.commit()?;
-                    Ok(Some(intent))
-                }
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    drop(stmt);
-                    transaction.commit()?;
-                    Ok(None)
-                }
-                Err(e) => Err(LocalIndexStoreError::from(e)),
-            }
+            let intent = load_verified_sqlite_intent(&transaction, &intent_id)?;
+            transaction.commit()?;
+            Ok(intent)
         })
         .await
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
@@ -4239,6 +4207,123 @@ mod tests {
             rt.block_on(store.reliability_events(intent.intent_id())),
             Err(LocalIndexStoreError::Reliability(_))
         ));
+    }
+
+    #[test]
+    fn concurrent_explicit_upload_events_publish_one_verified_transition() {
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "concurrent-explicit-event".to_owned(),
+            "objects/concurrent-explicit-event".to_owned(),
+            "a".repeat(64),
+            42,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            store.create_intent(&intent).await.unwrap();
+            let event = upload_lifecycle_event(
+                "shardline",
+                "default",
+                intent.intent_id(),
+                intent.object_key(),
+                intent.object_hash(),
+                UploadIntentState::Created,
+                UploadIntentState::Storing,
+            )
+            .unwrap();
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+            let mut writers = Vec::new();
+            for _ in 0..16 {
+                let store = store.clone();
+                let event = event.clone();
+                let barrier = barrier.clone();
+                writers.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    store
+                        .transition_intent_with_event(
+                            "concurrent-explicit-event",
+                            UploadIntentState::Storing,
+                            &event,
+                        )
+                        .await
+                        .unwrap()
+                }));
+            }
+            for writer in writers {
+                assert!(writer.await.unwrap());
+            }
+            let events = store.reliability_events(intent.intent_id()).await.unwrap();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events.last(), Some(&event));
+            assert_eq!(
+                store
+                    .intent_by_id(intent.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                UploadIntentState::Storing
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_upload_transition_rejects_corrupt_current_evidence() {
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "corrupt-transition-head".to_owned(),
+            "objects/corrupt-transition-head".to_owned(),
+            "b".repeat(64),
+            42,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(store.create_intent(&intent)).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events WHERE operation_id = ?1",
+                [intent.intent_id()],
+            )
+            .unwrap();
+        let event = upload_lifecycle_event(
+            "shardline",
+            "default",
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            UploadIntentState::Created,
+            UploadIntentState::Storing,
+        )
+        .unwrap();
+        // Both a forward transition and the idempotent fast return must verify
+        // the durable head; neither may silently repair or bypass corruption.
+        for target in [UploadIntentState::Storing, UploadIntentState::Created] {
+            assert!(
+                runtime
+                    .block_on(store.transition_intent_with_event(
+                        intent.intent_id(),
+                        target,
+                        &event,
+                    ))
+                    .is_err()
+            );
+        }
+        let state: String = connection
+            .query_row(
+                "SELECT state FROM shardline_upload_intents WHERE intent_id = ?1",
+                [intent.intent_id()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, UploadIntentState::Created.as_str());
+        let event_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_reliability_events WHERE operation_id = ?1",
+                [intent.intent_id()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 0);
     }
 
     #[test]

@@ -1,5 +1,6 @@
-//! Rolling-upgrade e2e: proves the API and transfer roles can be upgraded and
-//! rolled back independently of each other.
+//! Same-version role-replacement E2E: checks listener replacement and role
+//! availability. This does not prove cross-version storage compatibility or
+//! graceful completion of active transfers.
 //!
 //! Two role-split servers run side by side (one `api`, one `transfer`) on
 //! distinct ephemeral ports. One role is stopped (mimicking a rolling
@@ -51,9 +52,9 @@ impl RoleRuntime {
         &self.base_url
     }
 
-    /// Stops the server and waits for its task to fully unwind. Mimics a
-    /// graceful rolling-upgrade stop: the listener is dropped before this
-    /// returns, so the same port can be rebound immediately.
+    /// Aborts the server task and waits for its listener to be dropped, so the
+    /// same port can be rebound. This fixture has no active data transfers;
+    /// task cancellation must not be treated as proof of graceful draining.
     async fn stop(&mut self) -> Result<(), Box<dyn Error>> {
         let Some(server) = self.server.take() else {
             return Ok(());

@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+mod ordered_terms;
 use sha2::{Digest, Sha256};
 use shardline_protocol::RepositoryProvider;
 use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
@@ -11,7 +12,7 @@ use shardline_xet_core::{
     },
 };
 
-fn store_members(
+pub(super) fn store_members(
     objects: &ServerObjectStore,
     members: &[&[u8]],
 ) -> (MerkleHash, Vec<(MerkleHash, u64)>) {
@@ -88,9 +89,8 @@ fn cancelled_digest_stops_between_verified_members_and_can_retry() {
 }
 
 #[test]
-fn cancelled_digest_reload_stops_s3_materialization_and_can_retry() {
+fn cancelled_digest_reload_stops_s3_streaming_and_can_retry() {
     use shardline_protocol::SecretString;
-    use shardline_server_core::ServerObjectStoreError;
     use shardline_storage::S3ObjectStoreConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -125,46 +125,77 @@ fn cancelled_digest_reload_stops_s3_materialization_and_can_retry() {
         metadata_ext: None,
     };
     let expected = format!("{:x}", Sha256::digest(&data));
-    tokio::runtime::Runtime::new().unwrap().block_on(async move {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let body = serialized.serialized_data;
-        let app = axum::Router::new().fallback(move || {
-            let body = body.clone();
-            async move { body }
-        });
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let objects = ServerObjectStore::s3(
-            S3ObjectStoreConfig::new("fixture".to_owned(), "us-east-1".to_owned())
-                .with_endpoint(Some(endpoint))
-                .with_allow_http(true)
-                .with_credentials(
-                    Some(SecretString::new("fixture".to_owned())),
-                    Some(SecretString::new("fixture-secret".to_owned())),
-                    None,
-                ),
-        ).unwrap();
-        tokio::task::spawn_blocking(move || {
-            let mut verified = HashMap::new();
-            verified.insert(hash.hex(), info);
-            let checks = AtomicUsize::new(0);
-            let mut verifier = file_digests::FileDigestVerifier::default();
-            // Model an evicted source whose authenticated metadata remains cached.
-            let error = verifier.verify(&objects, &file, Some(&expected), false, &verified, &|| {
-                if checks.fetch_add(1, Ordering::SeqCst) >= 3 {
-                    Err(std::io::ErrorKind::Interrupted.into())
-                } else {
-                    Ok(())
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let body = serialized.serialized_data;
+            let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+                let body = body.clone();
+                async move {
+                    let range = headers.get("range").unwrap().to_str().unwrap();
+                    let (start, end) = range
+                        .strip_prefix("bytes=")
+                        .unwrap()
+                        .split_once('-')
+                        .unwrap();
+                    let start: usize = start.parse().unwrap();
+                    let end: usize = end.parse().unwrap();
+                    axum::http::Response::builder()
+                        .status(206)
+                        .header(
+                            "content-range",
+                            format!("bytes {start}-{end}/{}", body.len()),
+                        )
+                        .body(axum::body::Body::from(body[start..=end].to_vec()))
+                        .unwrap()
                 }
-            }).unwrap_err();
-            assert!(matches!(error, XetAdapterError::ObjectStore(ServerObjectStoreError::Io(ref error))
+            });
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let objects = ServerObjectStore::s3(
+                S3ObjectStoreConfig::new("fixture".to_owned(), "us-east-1".to_owned())
+                    .with_endpoint(Some(endpoint))
+                    .with_allow_http(true)
+                    .with_credentials(
+                        Some(SecretString::new("fixture".to_owned())),
+                        Some(SecretString::new("fixture-secret".to_owned())),
+                        None,
+                    ),
+            )
+            .unwrap();
+            tokio::task::spawn_blocking(move || {
+                let mut verified = HashMap::new();
+                verified.insert(hash.hex(), info);
+                let checks = AtomicUsize::new(0);
+                let mut verifier = file_digests::FileDigestVerifier::default();
+                // Model an evicted source whose authenticated metadata remains cached.
+                let error = verifier
+                    .verify(&objects, &file, Some(&expected), false, &verified, &|| {
+                        if checks.fetch_add(1, Ordering::SeqCst) >= 3 {
+                            Err(std::io::ErrorKind::Interrupted.into())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .unwrap_err();
+                assert!(matches!(error, XetAdapterError::Io(ref error)
                 if error.kind() == std::io::ErrorKind::Interrupted));
-            assert_eq!(verifier.source_reads, 0, "partial source must not enter the verified cache");
-            verifier.verify(&objects, &file, Some(&expected), false, &verified, &|| Ok(())).unwrap();
-            assert_eq!(verifier.source_reads, 1);
-        }).await.unwrap();
-        server.abort();
-    });
+                assert_eq!(
+                    verifier.source_reads, 0,
+                    "partial source must not enter the verified cache"
+                );
+                verifier
+                    .verify(&objects, &file, Some(&expected), false, &verified, &|| {
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(verifier.source_reads, 1);
+            })
+            .await
+            .unwrap();
+            server.abort();
+        });
 }
 
 #[test]

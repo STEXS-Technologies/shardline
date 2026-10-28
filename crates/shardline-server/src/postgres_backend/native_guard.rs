@@ -3,12 +3,11 @@ use std::sync::Arc;
 
 use shardline_index::{PostgresIndexStore, PostgresMetadataStoreError};
 use sqlx::{Connection, PgConnection};
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::{
     ServerError, ServerObjectStore,
     maintenance_barrier::RequestSession,
-    upload_identity::PreparedNativeXorb,
+    upload_identity::{NativeUploadResources, PreparedNativeXorb},
     upload_ingest::store_admitted_xorb,
     xet_adapter::{XorbUploadResponse, xorb_object_key},
 };
@@ -19,7 +18,7 @@ pub(super) async fn store_xorb(
     objects: &ServerObjectStore,
     hash: &str,
     staged: PreparedNativeXorb,
-    permit: OwnedSemaphorePermit,
+    permit: NativeUploadResources,
 ) -> Result<XorbUploadResponse, ServerError> {
     let result = if let Some(mut owner) = RequestSession::connection_for(identity).await {
         let connection = owner.as_mut().ok_or(ServerError::StaleResourceFence)?;
@@ -43,7 +42,7 @@ async fn store_on_connection(
     objects: &ServerObjectStore,
     hash: &str,
     staged: PreparedNativeXorb,
-    permit: OwnedSemaphorePermit,
+    permit: NativeUploadResources,
 ) -> Result<XorbUploadResponse, ServerError> {
     let key = xorb_object_key(hash)?;
     let mut transaction = connection

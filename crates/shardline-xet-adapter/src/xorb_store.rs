@@ -32,7 +32,10 @@ pub use normalization::{
 pub use owned_preparation::{
     PreparedXorbFile, prepare_owned_xorb_file_with_checkpoint, store_prepared_xorb_file,
 };
-pub use prepared_memory::{PreparedXorbMemory, prepare_xorb_memory, store_prepared_xorb_memory};
+pub use prepared_memory::{
+    IncrementalXorbMemory, PreparedXorbMemory, prepare_owned_xorb_memory_with_checkpoint,
+    prepare_xorb_memory, store_prepared_xorb_memory,
+};
 
 #[derive(Debug)]
 pub struct StoredXorbUpload {

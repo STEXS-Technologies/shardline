@@ -717,6 +717,74 @@ async fn blob_upload_session_lifecycle() {
     assert_eq!(response.status(), StatusCode::CREATED);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ranged_blob_requests_validate_before_mutating_durable_session() {
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+    let response = send(
+        &app,
+        Method::POST,
+        &format!("/v2/{REPO}/blobs/uploads/"),
+        Body::empty(),
+    )
+    .await;
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    // Both short and long bodies must leave the existing session empty.
+    for range in ["0-0", "0-9"] {
+        let request = Request::builder()
+            .method(Method::PATCH)
+            .uri(&location)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_RANGE, range)
+            .body(Body::from("abc"))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        let status = send(&app, Method::GET, &location, Body::empty()).await;
+        assert_eq!(status.status(), StatusCode::NO_CONTENT);
+        assert_eq!(status.headers().get(header::RANGE).unwrap(), "0-0");
+    }
+    let bytes = vec![0x5a; 256 * 1024 + 1];
+    let request = Request::builder()
+        .method(Method::PATCH)
+        .uri(&location)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_RANGE, format!("0-{}", bytes.len() - 1))
+        .body(Body::from(bytes.clone()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+    let digest = sha256_hex(&bytes);
+    let response = send(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest=sha256:{digest}"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let response = send(
+        &app,
+        Method::GET,
+        &format!("/v2/{REPO}/blobs/sha256:{digest}"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let downloaded = axum::body::to_bytes(response.into_body(), bytes.len())
+        .await
+        .unwrap();
+    assert_eq!(downloaded.as_ref(), bytes);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn blob_upload_session_resumes_across_postgres_nodes_without_rwx() {
     let Some(cluster) = build_oci_postgres_test_cluster().await else {

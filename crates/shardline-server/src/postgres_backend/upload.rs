@@ -9,8 +9,8 @@ use crate::{
     ServerError, ShardMetadataLimits,
     model::UploadFileResponse,
     upload_ingest::{
-        FileUploadIngestor, RequestBodyReader, UploadStorage, stage_body_with_spill,
-        stage_xorb_with_spill, upload_attempt_id,
+        FileUploadIngestor, RequestBodyReader, UploadStorage, prepare_native_xorb,
+        read_native_body, upload_attempt_id,
     },
     validation::validate_identifier,
     xet_adapter::{ShardUploadResponse, XorbUploadResponse, xorb_object_key},
@@ -34,11 +34,10 @@ impl super::PostgresBackend {
             self.chunk_size,
             false,
             self.upload_max_in_flight_chunks,
+            &self.packing_work_pool,
         )
         .with_packed_protocol_storage(&object_store, &self.packing_work_pool);
-        while let Some(bytes) = body.next_bytes().await? {
-            ingestor.ingest_body_chunk(&object_store, &bytes).await?;
-        }
+        ingestor.ingest_body(&object_store, &mut body).await?;
         ingestor
             .finish(&object_store, file_id, repository_scope, None)
             .await
@@ -161,14 +160,13 @@ impl super::PostgresBackend {
                 self.chunk_size,
                 expected_sha256.is_some(),
                 self.upload_max_in_flight_chunks,
+                &self.packing_work_pool,
             );
             if matches!(storage, UploadStorage::ProtocolContainers) {
                 ingestor =
                     ingestor.with_packed_protocol_storage(&object_store, &self.packing_work_pool);
             }
-            while let Some(bytes) = body.next_bytes().await? {
-                ingestor.ingest_body_chunk(&object_store, &bytes).await?;
-            }
+            ingestor.ingest_body(&object_store, &mut body).await?;
 
             crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
                 .await?;
@@ -274,20 +272,11 @@ impl super::PostgresBackend {
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
         let object_store = self.object_store();
-        let staged = stage_xorb_with_spill(&mut body).await?;
-        crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
-            .await?;
-        let (staged, body_length) =
-            crate::upload_identity::xorb_length(expected_hash, staged, &self.stream_work_pool)
-                .await?;
+        let (staged, body_length, permit) =
+            prepare_native_xorb(&mut body, expected_hash, &self.stream_work_pool).await?;
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
         let intent_id = crate::upload_identity::xorb(expected_hash, body_length);
-        let permit = self
-            .stream_work_pool
-            .acquire()
-            .await
-            .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
         crate::maintenance_barrier::RequestSession::verify_for(&self.request_session_identity)
             .await?;
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
@@ -350,9 +339,9 @@ impl super::PostgresBackend {
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
         let object_store = self.object_store();
-        let staged = stage_body_with_spill(&mut body).await?;
-        let body_length = staged.length();
-        let body_hash = staged.hash();
+        let staged = read_native_body(&mut body).await?;
+        let body_length = u64::try_from(staged.bytes.len())?;
+        let body_hash = shardline_server_core::chunk_hash(&staged.bytes);
         let body_hash_hex = hex::encode(body_hash.as_bytes());
         let (intent_id, reliability_repository) =
             crate::upload_identity::native_shard(&body_hash_hex, repository_scope)?;

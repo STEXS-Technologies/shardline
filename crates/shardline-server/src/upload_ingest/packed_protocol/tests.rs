@@ -157,6 +157,7 @@ impl Provider {
             NonZeroUsize::new(64 * 1024).unwrap(),
             false,
             NonZeroUsize::new(8).unwrap(),
+            &crate::admission::ExecutionPools::default_sizes().hashing,
         );
         if direct {
             ingestor = ingestor.with_packed_protocol_storage(

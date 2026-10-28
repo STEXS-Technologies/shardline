@@ -17,7 +17,71 @@ connections to finish; allow enough runtime termination grace for those transfer
 If an embedding application sets `ServerConfig::with_shutdown_timeout`, give the
 runtime a longer grace period so the server's deadline runs before SIGKILL.
 
+Process-level predecessor tests hold an authorized LFS upload body open until
+the real 1.12.1 process receives SIGTERM. They check that the listener closes
+while the process stays alive, finish the body, require a successful upload
+response and clean process exit, then read the bytes through the candidate.
+The same sequence on the candidate verifies both files through 1.12.1 after
+rollback, before any upload retry. These checks pass on SQLite/filesystem and
+PostgreSQL/MinIO. They verify an admitted transfer's drain and durable handoff;
+they do not automate load-balancer routing or prove an entire fleet has stopped.
+
 ## Protocol frontend upgrade from 1.12.1
+
+### Recommended coordinated upgrade
+
+For deployments using several frontends or embedded backend readers, use a brief
+coordinated cutover rather than assuming every new feature works on old replicas:
+
+1. Back up metadata and object storage together and pause destructive maintenance.
+2. Stop admitting new writes, drain active transfers and stop all old backend readers.
+3. Run the owner migration command described below with the new binary.
+4. Start the upgraded API and transfer replicas, verify readiness and read existing
+   files through the frontends you use before resuming writes.
+5. Resume traffic and maintenance after every backend reader is upgraded.
+
+Existing data stays in place; no reupload is required. This procedure includes a
+write pause and requires deployment-level routing/draining. Shardline does not
+automatically discover or retire every old process. Read the rollback boundaries
+below before accepting new writes; the passing predecessor tests qualify their
+named workflows rather than unrestricted rollback of new features.
+
+### Native Xet reader rollout
+
+Existing uploads do not need to be uploaded again. The new server reads existing
+Xorbs and legacy standalone chunks. Keep those legacy objects during upgrade.
+
+The storage-layout transition concerns servers and embedded applications that
+open the storage backend directly. An HTTP client does not open those objects;
+the serving Shardline process interprets the layout. Updating servers does not
+itself require a storage-format migration in those clients.
+
+Use the following compatibility boundaries when planning the rollout:
+
+| Reader and data | Qualification |
+| --- | --- |
+| New server reading existing 1.12.1 uploads | Tested with real released-binary fixtures; no reupload required. |
+| 1.12.1 native CAS HTTP reader reading candidate-created Xorbs | Tested during simultaneous old/new publication and after rollback, with local storage and PostgreSQL/MinIO. |
+| 1.12.1 Hub routes serving new native SHA-256 identity features | Not qualified; keep these requests on upgraded replicas. |
+| Old embedded application reading standalone chunks directly | Not covered by native CAS HTTP tests; it may require chunk copies that new uploads omit. |
+
+The native CAS result is a specific supported workflow, not evidence that every
+old frontend or embedded reader understands new publications. Existing HTTP
+clients can continue using the upgraded server; new server-side features do not
+become available on an old server simply because the client is unchanged.
+
+New native uploads omit the redundant standalone chunk copies. An old server or
+embedded backend reader that requires those copies may not read that new data.
+Until mixed-version compatibility is explicitly qualified for your workflow,
+pause native uploads, drain the old processes, upgrade every backend reader, and
+then resume uploads. Keep upgraded readers available after new writes begin.
+
+Restarting an old binary does not recreate the omitted chunk objects. The
+predecessor drills below cover their named workflows, not unrestricted rollback
+of every new storage layout. Automated transition enforcement remains under
+qualification; readiness alone does not prove that all old readers have stopped.
+
+### Schema installation and protocol routing
 
 The unreleased frontend changes add durable Xet file identities and aliases,
 LFS locks, S3 multipart part counts, record membership, verified Xorb descriptors,

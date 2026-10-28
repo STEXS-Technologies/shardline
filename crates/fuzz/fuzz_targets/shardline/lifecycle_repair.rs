@@ -141,7 +141,7 @@ fn expected_summary(
         }
     }
 
-    for &(release_after_unix_seconds, _held_at_unix_seconds, object_exists) in retention_states {
+    for &(release_after_unix_seconds, _held_at_unix_seconds, _object_exists) in retention_states {
         // Match the production classifier exactly: a hold expires solely by its
         // absolute release deadline (release_after <= now). `held_at` plays no
         // role — RetentionHold::new rejects inverted timelines (release_after <
@@ -150,14 +150,10 @@ fn expected_summary(
             .is_some_and(|release_after| release_after <= now_unix_seconds);
         if is_expired {
             summary.retention_delete_expired = checked_increment(summary.retention_delete_expired)?;
-        } else if object_exists || release_after_unix_seconds.is_none() {
-            // Permanent holds are operator protection and remain durable even
-            // when their object is temporarily absent. This mirrors the
-            // production classifier and prevents a transient metadata/storage
-            // inconsistency from silently removing the hold.
-            summary.retention_keep = checked_increment(summary.retention_keep)?;
         } else {
-            summary.retention_delete_missing = checked_increment(summary.retention_delete_missing)?;
+            // Finite and permanent holds can protect keys before bytes arrive.
+            // Missing bytes cannot end protection before its release deadline.
+            summary.retention_keep = checked_increment(summary.retention_keep)?;
         }
     }
 

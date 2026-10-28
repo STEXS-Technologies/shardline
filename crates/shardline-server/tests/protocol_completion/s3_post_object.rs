@@ -333,6 +333,8 @@ async fn signed_browser_post_object_expands_filename_and_checks_policy_before_pu
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = post_object_form(&client, &url, b"", PostObjectFormOptions::default()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let response = signed_request(&client, reqwest::Method::GET, &object_url, b"")
         .send()
         .await
@@ -396,12 +398,84 @@ async fn signed_browser_post_redirects_with_bucket_key_and_etag() {
     );
 }
 
+#[tokio::test]
+async fn signed_browser_post_large_stream_rejects_late_failures_without_replacing_object() {
+    let root = tempfile::tempdir().unwrap();
+    let server = start_configured(
+        root.path(),
+        ServerFrontend::S3,
+        true,
+        None,
+        None,
+        Some(signing_identity(token(
+            "writer",
+            "aws-resume",
+            TokenScope::Write,
+        ))),
+    )
+    .await;
+    let client = Client::new();
+    let url = format!("{}/aws-resume.locks", server.base);
+    let object_url = format!("{url}/uploads/weights%20model.bin");
+    let previous = b"previous acknowledged object";
+    let response =
+        post_object_form(&client, &url, previous, PostObjectFormOptions::default()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    // Cross the 32 MiB packing boundary before discovering invalid trailing
+    // syntax or a final checksum mismatch. Provisional immutable objects must
+    // never publish a replacement, even when all payload bytes were received.
+    let large = vec![0x5a; 34 * 1024 * 1024 + 17];
+    for options in [
+        PostObjectFormOptions {
+            trailing_field: true,
+            ..Default::default()
+        },
+        PostObjectFormOptions {
+            truncated: true,
+            ..Default::default()
+        },
+        PostObjectFormOptions {
+            invalid_checksum: true,
+            ..Default::default()
+        },
+    ] {
+        let response = post_object_form(&client, &url, &large, options).await;
+        let status = response.status();
+        let error = response.text().await.unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        let response = signed_request(&client, reqwest::Method::GET, &object_url, b"")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), previous);
+    }
+    let response = post_object_form(&client, &url, &large, PostObjectFormOptions::default()).await;
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let response = signed_request(&client, reqwest::Method::GET, &object_url, b"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let downloaded = response.bytes().await.unwrap();
+    assert_eq!(downloaded.len(), large.len());
+    assert_eq!(Sha256::digest(&downloaded), Sha256::digest(&large));
+}
+
 #[derive(Default)]
 struct PostObjectFormOptions<'redirect> {
     corrupt_signature: bool,
     invalid_key: bool,
     invalid_checksum: bool,
     too_large_for_policy: bool,
+    trailing_field: bool,
+    truncated: bool,
     redirect_url: Option<&'redirect str>,
 }
 
@@ -416,6 +490,8 @@ async fn post_object_form(
         invalid_key,
         invalid_checksum,
         too_large_for_policy,
+        trailing_field,
+        truncated,
         redirect_url,
     } = options;
     let now = chrono::Utc::now();
@@ -428,7 +504,11 @@ async fn post_object_form(
         STANDARD.encode(Sha256::digest(file))
     };
     let content_md5 = STANDARD.encode(md5::Md5::digest(file));
-    let policy_max = if too_large_for_policy { 4 } else { 1024 };
+    let policy_max = if too_large_for_policy {
+        4
+    } else {
+        file.len().max(1024)
+    };
     let mut conditions = json!([
         { "bucket": "aws-resume.locks" },
         ["starts-with", "$key", "uploads/"],
@@ -508,7 +588,11 @@ async fn post_object_form(
         format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"folder/weights model.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
     );
     body.extend_from_slice(file);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    if trailing_field {
+        body.extend_from_slice(format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"x-ignore-late\"\r\n\r\nlate\r\n--{boundary}--\r\n").as_bytes());
+    } else if !truncated {
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    }
     client
         .post(url)
         .header(
