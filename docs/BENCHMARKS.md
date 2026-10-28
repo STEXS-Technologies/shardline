@@ -3334,7 +3334,7 @@ verification/durability contract, not a production-service performance claim.
 ### Native upload foundation audit
 
 A further 512 MiB audit used CPU sampling and a separate syscall trace against
-the optimized candidate and upstream commit
+the optimized candidate before verified-body publication and upstream commit
 `629562cd9fc37432317eb57811faf13a6935c601`. Symbolized binaries were checked
 against their benchmark binaries: their executable `.text` sections match.
 Both complete original and edited downloads verified SHA-256. Profiling and
@@ -3405,6 +3405,75 @@ Directory synchronization is unchanged. Actual 1.12.1 local and PostgreSQL/MinIO
 native upload, upgrade and rollback tests pass against this candidate. The
 disposable MinIO migration fixture uses tmpfs; it qualifies protocol/content
 compatibility and does not establish physical-disk durability or hardware wear.
+
+### Native shard-registration attribution
+
+An October 28 diagnostic used the same 512 MiB fixture, cold `hf_xet` 1.7 client
+caches, local backend and server affinity to CPUs 0–1. The release baseline was
+`ce1f7ff6`, executable SHA-256
+`2172e8d82bd093be8ab3a20da4547642f53cb97452557704338cb52c869b6f0b`;
+the reference was upstream local test CAS at `629562cd9fc37432317eb57811faf13a6935c601`.
+A streaming proxy measured the complete `/v2/shards` response body, not just
+headers. These are phase diagnostics, **not new throughput results**.
+
+| Initial registration measurement | Observed time |
+| --- | ---: |
+| Uninstrumented release, two complete responses through proxy | 260.7 / 265.0 ms |
+| Upstream local test CAS, matching responses | 2.4 / 2.7 ms |
+| Instrumented Shardline, two complete responses | 261.0 / 264.3 ms |
+| Verification preparation, inclusive | 212.5 / 212.5 ms |
+| SHA-256 worker updates, overlapping preparation | 199.6 / 199.6 ms |
+| Member BLAKE3 authentication, overlapping SHA | 63.8 / 63.8 ms |
+| Member decoding, including source reads | 49.8 / 50.8 ms |
+| Source `Read` calls, included in decoding | 25.7 / 26.5 ms |
+| Shard metadata parsing | 0.25 / 0.24 ms |
+| Logical file Merkle verification | 0.83 / 0.84 ms |
+| SHA worker finish/join after preceding work | 0.04 / 0.04 ms |
+| Shard object persistence | 3.4 / 6.7 ms |
+| Domain metadata publication callback, inclusive | 35.7 / 35.9 ms |
+
+Do not add the overlapping rows. Producer copy/channel/backpressure time was
+89–91 ms, overlapping the SHA worker; it is not an additional 90 ms bottleneck.
+Process reads were served from the page cache (`read_bytes=0`); these numbers do
+not measure cold-disk latency or NVMe wear.
+
+Private, detached diagnostic builds disabled one operation at a time. These
+shortcuts are absent from release sources and must never qualify integrity or
+durability. Without SHA, initial preparation took about 111 ms; without member
+hashing it still took about 211 ms. Removing member authentication therefore did
+not materially shorten initial preparation while SHA remained on the critical
+path. It did shorten edited-file preparation, where the existing verified-prefix
+cache already reduces SHA updates to about 0.12 ms. Publication had occasional
+large storage-latency outliers, so complete-response ablation deltas alone are
+not a reliable estimate of verification cost.
+
+A separate probe retained real sync operations and recorded 23 sync calls
+during initial registration, totaling 10.9 ms of call durations. The diagnostic
+no-sync control produced 249.8 / 254.8 ms complete responses; verification still
+took 212–217 ms. Sync time is a subset of publication/lifecycle time, and summed
+call durations are not a general wall-time savings forecast.
+
+Removing the captured shard's SHA metadata did not remove derivation: scoped
+preparation still took 218 ms, versus 221 ms with metadata. Disabling derivation
+in that metadata-free diagnostic took 109 ms. A future explicit CAS-only policy
+could defer this identity, but changing the current default would remove a
+Hub-compatible mapping and would not accelerate ordinary uploads that assert
+SHA-256. Asserted SHA identities must still be verified before publication.
+
+The remaining initial-upload cost is chiefly mandatory file verification, with
+measured durable syncs and additional metadata-publication work. The latter is
+not proven irreducible, but this investigation identified no large redundant
+verification pass to remove: source authentication and SHA already overlap.
+A persisted descriptor alone cannot detect source corruption introduced after
+upload, pin content against GC, or establish durability after a crash. Existing
+corruption checks and authenticated reads remain in place. Across 22 diagnostic
+lanes, all 44 complete original and edited downloads verified SHA-256; this does not
+certify the intentionally weakened diagnostic modes as safe.
+
+No verification, sync, admission, recovery, layout or public identity behavior
+was changed as a result of this investigation. The previously reported clean
+upload timings remain the throughput evidence; upstream parity is not claimed
+for servers with different verification and durability contracts.
 
 ### Rejected decoded-buffer ownership experiment
 
