@@ -6,6 +6,7 @@ pub use background_tasks::RouterBackgroundTasks;
 mod metadata_routes;
 mod operational;
 mod protocol_routes;
+mod response_idle;
 mod shard_progress;
 #[cfg(test)]
 pub(crate) use protocol_routes::oci::test_helpers::build_oci_postgres_test_cluster;
@@ -1428,9 +1429,10 @@ async fn request_timeout_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
-    tokio::time::timeout(timeouts::REQUEST_TOTAL, next.run(request))
+    let response = tokio::time::timeout(timeouts::REQUEST_TOTAL, next.run(request))
         .await
-        .unwrap_or_else(|_| ServerError::RequestTimedOut.into_response())
+        .unwrap_or_else(|_| ServerError::RequestTimedOut.into_response());
+    response_idle::wrap(response, timeouts::RESPONSE_IDLE)
 }
 
 #[cfg(test)]

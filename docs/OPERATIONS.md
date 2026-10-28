@@ -17,6 +17,19 @@ services:
 That separation defines how to run Shardline safely, how to scale it, and how to recover
 it.
 
+## Request and download deadlines
+
+Admission and handler work have a five-minute deadline through response headers.
+After headers, a response producer is stopped if it supplies no nonempty data
+for five minutes. This includes clients that stop reading and stalled backend
+reads. Downloads that keep making progress can take longer than five minutes.
+
+An expired response fails as an incomplete transfer; it does not become a
+successful empty download. Clients should retry through their normal protocol.
+Stopping the producer releases its resources, but bytes already handed to the
+HTTP transport retain their buffer charges until their last owner drops them.
+This is a response-producer deadline, not a TCP acknowledgement deadline.
+
 ## High Availability
 
 Shardline availability depends on three layers:

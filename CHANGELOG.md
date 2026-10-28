@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Improved
 
+- Stop idle response producers after five minutes without nonempty body data,
+  including when a client stops reading; progressing transfers can run longer.
 - Release packing execution slots while uploads accumulate data or wait on
   object storage, retaining bounded batch buffers through cancellation and fallback.
 - Keep authenticated range response buffers charged through transport slices

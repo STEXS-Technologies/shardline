@@ -280,12 +280,15 @@ impl ExecutionPools {
 pub mod timeouts {
     use std::time::Duration;
 
-    /// Upper bound for work performed while serving one HTTP request.
+    /// Upper bound for admission and handler work through response headers.
     ///
-    /// This does not replace lower-level client and database deadlines; it is
-    /// the final server-side guard that prevents an accepted request from
-    /// running indefinitely.
+    /// This complements lower-level client and database deadlines.
+    /// Response producers have a separate no-progress deadline after headers.
     pub const REQUEST_TOTAL: Duration = Duration::from_secs(300);
+
+    /// Maximum interval without nonempty response data. This is an idle limit,
+    /// not a limit on total transfer duration or a TCP acknowledgement timer.
+    pub(crate) const RESPONSE_IDLE: Duration = Duration::from_secs(300);
 }
 
 /// Admission metrics counters tracked via atomics (used when prometheus metrics are unavailable).
