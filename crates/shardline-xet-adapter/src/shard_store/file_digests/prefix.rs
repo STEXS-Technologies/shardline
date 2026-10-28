@@ -43,7 +43,7 @@ pub(super) struct Prefixes {
 impl Prefixes {
     pub(super) fn new(scope: &RepositoryScope) -> Self {
         let mut key = blake3::Hasher::new();
-        key.update(b"shardline:verified-sha256-prefix:v1");
+        key.update(b"shardline:verified-sha256-prefix:v2");
         for field in [scope.provider().as_str(), scope.owner(), scope.name()] {
             key.update(&field.len().to_le_bytes());
             key.update(field.as_bytes());
@@ -60,12 +60,22 @@ impl Prefixes {
 
     /// Native roots bind member content and order. The caller must still
     /// authenticate every source and validate every claimed range and length.
+    /// Adjacent terms in one source describe the same bytes regardless of their
+    /// split points. Canonicalize only the cache key, never the terms validated
+    /// by the caller; gaps, overlap and backwards ranges remain distinct.
     pub(super) fn begin(&mut self, terms: &[FileDataSequenceEntry]) -> Option<Sha256> {
-        for term in terms {
-            self.key.update(term.xorb_hash.hex().as_bytes());
-            self.key.update(&term.chunk_index_start.to_le_bytes());
-            self.key.update(&term.chunk_index_end.to_le_bytes());
-            self.key.update(&term.unpacked_segment_bytes.to_le_bytes());
+        let mut remaining = terms;
+        while let Some(first) = remaining.first() {
+            let adjacent = super::contiguous_source_terms(remaining).ok()?;
+            let last = adjacent.last()?;
+            let length = adjacent.iter().try_fold(0_u64, |total, term| {
+                total.checked_add(term.unpacked_segment_bytes)
+            })?;
+            self.key.update(first.xorb_hash.hex().as_bytes());
+            self.key.update(&first.chunk_index_start.to_le_bytes());
+            self.key.update(&last.chunk_index_end.to_le_bytes());
+            self.key.update(&length.to_le_bytes());
+            remaining = remaining.get(adjacent.len()..)?;
         }
         CACHE
             .get_or_init(Mutex::default)

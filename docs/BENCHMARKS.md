@@ -3507,6 +3507,59 @@ Reducing SQL statement count alone did not improve this SQLite workload.
 This follow-up establishes no additional safe upload-speed gain; existing
 verification and durability remain intact.
 
+### Verified SHA prefix reuse across equivalent term layouts
+
+A subsequent source audit found that the process-local SHA prefix cache keyed
+the exact term boundaries. Splitting a contiguous range of the same Xorb into
+two valid adjacent terms therefore repeated SHA work even when its complete
+decoded content had already been authenticated in the same repository scope.
+
+The cache now canonicalizes adjacent ranges within each lookup group. This
+changes only the cache key: the original terms still receive individual length
+checks, every source member is authenticated, the logical file Merkle identity
+is checked, and the final SHA is compared with the asserted identity. Gaps,
+overlaps, backwards ranges and different scopes remain distinct. The cache
+bounds and publication rules are unchanged. Nothing new is persisted; a restart
+or cache eviction falls back to complete verification.
+
+The matched two-CPU 512 MiB preparation diagnostic first registered a captured
+stock-client shard, then registered equivalent metadata with each multi-member
+term split in two. Metadata retained the stock client's asserted SHA-256.
+Baseline/candidate/candidate/baseline observations were:
+
+| Preparation | Baseline | Candidate |
+| --- | ---: | ---: |
+| First file, cold process cache | 213.5 / 212.3 ms | 213.4 / 213.7 ms |
+| Equivalent fragmented retry | 209.7 / 209.3 ms | 114.1 / 115.4 ms |
+
+A separate test used release binaries and complete `/v2/shards` response bodies
+after an actual stock `hf_xet` upload. The valid fragmented retry took
+236.0 / 264.0 ms before and 132.7 / 131.4 ms after. Repeating the same fragmented
+request, which both implementations already cache, took 122–130 ms before and
+124–126 ms after. Every original and edited file was then downloaded through
+the stock client and verified against its full SHA-256.
+
+This is a measured improvement for equivalent fragmented retries in a warm
+process cache, not a first-upload improvement or an upstream-parity result.
+The metadata variant is a constructed valid protocol fixture, not a claim that
+every stock client emits these exact splits. Actual MinIO registration also
+passes using the same scope for whole and fragmented layouts; forged split
+lengths, changed-source corruption and cancellation remain rejected.
+
+A separate complete stock-client upload control had substantial timing drift:
+baseline/candidate/candidate/baseline initial uploads took 0.985 / 1.175 /
+1.526 / 1.633 seconds. Both variants slowed across the sequence, so these
+observations do not establish a general cold-upload throughput difference.
+All eight complete original/edited downloads in that control verified SHA-256.
+Actual released v1.12.1 local and PostgreSQL/MinIO upgrade-and-rollback tests
+also passed with the candidate release binary.
+The adapter library passed 416 tests plus its ignored I/O qualification.
+All three PostgreSQL/MinIO HTTP recovery tests passed: disconnect/retry,
+ownership loss without publication, and stalled verification followed by
+successful publication. Their small MinIO fixtures use tmpfs to isolate these
+protocol tests from the host disk reserve; this does not qualify physical-disk
+power-loss durability. Strict adapter/server all-target Clippy passed.
+
 ### Rejected decoded-buffer ownership experiment
 
 An experiment transferred decoded buffers directly into HTTP responses instead

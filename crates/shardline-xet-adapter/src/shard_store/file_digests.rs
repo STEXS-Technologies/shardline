@@ -122,6 +122,11 @@ pub(super) struct FileDigest {
 }
 
 impl FileDigest {
+    #[cfg(test)]
+    pub(super) const fn reuses_verified_prefix(&self) -> bool {
+        self.reusing_prefix
+    }
+
     pub(super) fn new(expected: Option<String>, derive: bool) -> Self {
         let digest = (expected.is_some() || derive).then(Sha256::new);
         Self {

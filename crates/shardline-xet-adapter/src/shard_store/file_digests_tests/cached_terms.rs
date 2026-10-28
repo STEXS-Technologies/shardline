@@ -7,6 +7,13 @@ fn cached_contiguous_terms_preserve_order_and_reject_forged_splits() {
     let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
     let members = [b"first".as_slice(), b"second", b"third"];
     let (hash, leaves) = store_members(&objects, &members);
+    let scope = RepositoryScope::new(
+        RepositoryProvider::GitHub,
+        "prefix-tests",
+        "cached-contiguous-length-checks",
+        None,
+    )
+    .unwrap();
     for ranges in [
         vec![(0, 1), (1, 3)],
         vec![(0, 1), (2, 3)],
@@ -75,12 +82,20 @@ fn cached_contiguous_terms_preserve_order_and_reject_forged_splits() {
                 // The total stays valid, but each constituent length is false.
                 target.segments.first_mut().unwrap().unpacked_segment_bytes += 1;
                 target.segments.last_mut().unwrap().unpacked_segment_bytes -= 1;
+                if ranges == [(0, 1), (1, 3)] {
+                    let mut probe = file_digests::FileDigest::with_scope(None, Some(&scope));
+                    probe.begin_terms(&target.segments);
+                    assert!(
+                        probe.reuses_verified_prefix(),
+                        "forged split must exercise a cache hit"
+                    );
+                }
             }
             let mut verifier = file_digests::FileDigestVerifier::default();
             let result = build_file_records_with_cache(
                 vec![seed.clone(), target],
                 &objects,
-                None,
+                Some(&scope),
                 None,
                 &mut HashMap::new(),
                 &mut verifier,

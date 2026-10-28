@@ -102,7 +102,9 @@ async fn fragmented_registration_preserves_sha256_on_real_minio() {
         let scope = RepositoryScope::new(
             RepositoryProvider::GitHub,
             "qualification",
-            if fragmented { "fragmented" } else { "whole" },
+            // The second registration must exercise the same verified-prefix
+            // cache as the first while retaining real remote member reads.
+            "equivalent-fragmented",
             None,
         )
         .unwrap();

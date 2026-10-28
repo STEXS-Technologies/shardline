@@ -49,6 +49,53 @@ fn wrong_final_identity_is_rejected_even_on_cache_hit() {
 }
 
 #[test]
+fn equivalent_adjacent_splits_reuse_verified_sha_in_both_directions() {
+    for parallel in [false, true] {
+        for seed_split in [false, true] {
+            let scope = scope(&format!("adjacent-{parallel}-{seed_split}"));
+            let hash = compute_data_hash(b"container identity");
+            let whole = FileDataSequenceEntry::new(hash, 11, 0, 2);
+            let split = [
+                FileDataSequenceEntry::new(hash, 5, 0, 1),
+                FileDataSequenceEntry::new(hash, 6, 1, 2),
+            ];
+            let expected = format!("{:x}", Sha256::digest(b"firstsecond"));
+            for (seed, segmented) in [(true, seed_split), (false, !seed_split)] {
+                let mut digest = FileDigest::with_scope(Some(expected.clone()), Some(&scope));
+                digest.enable_parallel(parallel);
+                if segmented {
+                    digest.begin_terms(&split);
+                    assert_eq!(digest.reusing_prefix, !seed);
+                    let [first, second] = &split;
+                    digest.update_validating_member(first, 0, b"first");
+                    digest.update_validating_member(second, 1, b"second");
+                } else {
+                    digest.begin_terms(std::slice::from_ref(&whole));
+                    assert_eq!(digest.reusing_prefix, !seed);
+                    digest.update_validating_member(&whole, 0, b"first");
+                    digest.update_validating_member(&whole, 1, b"second");
+                }
+                digest.finish_terms();
+                assert_eq!(digest.finish().unwrap(), Some(expected.clone()));
+            }
+            let mut wrong = FileDigest::with_scope(Some("00".repeat(32)), Some(&scope));
+            wrong.begin_terms(&split);
+            assert!(wrong.reusing_prefix);
+            assert!(wrong.finish().is_err());
+            for [first, second] in [[(0, 1), (2, 3)], [(1, 2), (0, 1)], [(0, 2), (1, 2)]] {
+                let changed = [
+                    FileDataSequenceEntry::new(hash, 5, first.0, first.1),
+                    FileDataSequenceEntry::new(hash, 6, second.0, second.1),
+                ];
+                let mut digest = FileDigest::with_scope(Some(expected.clone()), Some(&scope));
+                digest.begin_terms(&changed);
+                assert!(!digest.reusing_prefix);
+            }
+        }
+    }
+}
+
+#[test]
 fn parallel_digest_checks_final_identity_and_resets_to_verified_prefix() {
     let scope = scope("parallel-prefix");
     let data = vec![42; 512 * 1024];
@@ -178,6 +225,10 @@ fn warm_prefix_still_authenticates_source_members() {
         let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
         let (hash, _) = store_members(&objects, &[b"first".as_slice(), b"second".as_slice()]);
         let entry = FileDataSequenceEntry::new(hash, 11, 0, 2);
+        let split = [
+            FileDataSequenceEntry::new(hash, 5, 0, 1),
+            FileDataSequenceEntry::new(hash, 6, 1, 2),
+        ];
         let info = load_xorb_range_info(&objects, &hash.hex(), None).unwrap();
         let scope = scope(if parallel {
             "source-authentication-parallel"
@@ -196,7 +247,7 @@ fn warm_prefix_still_authenticates_source_members() {
 
         let mut warm = FileDigest::with_scope(None, Some(&scope));
         warm.enable_parallel(parallel);
-        warm.begin_terms(std::slice::from_ref(&entry));
+        warm.begin_terms(&split);
         assert!(warm.reusing_prefix);
         let mut verifier = FileDigestVerifier::default();
         warm.update(&mut verifier, &objects, &entry, &info, &|| Ok(()))
@@ -209,7 +260,7 @@ fn warm_prefix_still_authenticates_source_members() {
 
         let mut cancelled = FileDigest::with_scope(None, Some(&scope));
         cancelled.enable_parallel(parallel);
-        cancelled.begin_terms(std::slice::from_ref(&entry));
+        cancelled.begin_terms(&split);
         assert!(cancelled.reusing_prefix);
         assert!(
             cancelled
@@ -224,7 +275,7 @@ fn warm_prefix_still_authenticates_source_members() {
 
         let mut warm = FileDigest::with_scope(None, Some(&scope));
         warm.enable_parallel(parallel);
-        warm.begin_terms(std::slice::from_ref(&entry));
+        warm.begin_terms(&split);
         assert!(warm.reusing_prefix);
         let key = xorb_object_key(&hash.hex()).unwrap();
         std::fs::write(objects.local_root().unwrap().join(key.as_str()), b"corrupt").unwrap();

@@ -113,7 +113,7 @@ async fn stalled_verification(outcome: Outcome) -> Result<(), Error> {
     let stack = tokio::task::spawn_blocking(|| {
         shardline_test_support::DockerLocalStack::builder()
             .with_postgres()
-            .with_minio()
+            .with_minio_tmpfs()
             .start()
     })
     .await??
