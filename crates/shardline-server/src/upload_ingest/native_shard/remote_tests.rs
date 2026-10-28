@@ -39,8 +39,8 @@ async fn fragmented_registration_preserves_sha256_on_real_minio() {
             .with_allow_http(true),
     )
     .unwrap();
-    // Distinct, incompressible-enough members; both layouts describe the same
-    // logical file, including a backwards jump after the first complete run.
+    // Distinct, incompressible-enough members. Whole and fragmented layouts
+    // agree, including sparse ranges and a backwards jump after the full run.
     let mut data = vec![0_u8; 8 * 1024 * 1024];
     let mut fixture = blake3::Hasher::new();
     fixture.update(b"fragmented-registration-minio-fixture");
@@ -67,24 +67,42 @@ async fn fragmented_registration_preserves_sha256_on_real_minio() {
     shardline_xet_adapter::store_prepared_xorb_memory(&objects, prepared, ())
         .await
         .unwrap();
-    let mut digest = Sha256::new();
-    digest.update(&data);
-    digest.update(&data);
-    let expected = format!("{:x}", digest.finalize());
-    let all_leaves: Vec<_> = leaves.iter().chain(&leaves).copied().collect();
     let full = FileDataSequenceEntry::new(hash, data.len() as u64, 0, leaves.len() as u64);
-    for fragmented in [false, true] {
-        let mut segments = vec![full.clone()];
-        if fragmented {
-            segments.extend(leaves.iter().enumerate().map(|(index, (_, length))| {
-                FileDataSequenceEntry::new(hash, *length, index as u64, (index + 1) as u64)
-            }));
+    for (fragmented, sparse) in [(false, false), (true, false), (false, true), (true, true)] {
+        let ranges = if sparse {
+            vec![(0, 32), (96, 128)]
         } else {
-            segments.push(full.clone());
+            vec![(0, 128)]
+        };
+        let mut selected = leaves.clone();
+        let mut digest = Sha256::new();
+        digest.update(&data);
+        let mut segments = vec![full.clone()];
+        for (start, end) in ranges {
+            selected.extend_from_slice(&leaves[start..end]);
+            digest.update(&data[start * 64 * 1024..end * 64 * 1024]);
+            if fragmented {
+                segments.extend((start..end).map(|index| {
+                    FileDataSequenceEntry::new(
+                        hash,
+                        leaves[index].1,
+                        index as u64,
+                        (index + 1) as u64,
+                    )
+                }));
+            } else {
+                segments.push(FileDataSequenceEntry::new(
+                    hash,
+                    ((end - start) * 64 * 1024) as u64,
+                    start as u64,
+                    end as u64,
+                ));
+            }
         }
+        let expected = format!("{:x}", digest.finalize());
         let file = MDBFileInfo {
             metadata: FileDataSequenceHeader::new(
-                file_hash(&all_leaves),
+                file_hash(&selected),
                 segments.len() as u64,
                 false,
                 true,
@@ -104,7 +122,11 @@ async fn fragmented_registration_preserves_sha256_on_real_minio() {
             "qualification",
             // The second registration must exercise the same verified-prefix
             // cache as the first while retaining real remote member reads.
-            "equivalent-fragmented",
+            if sparse {
+                "equivalent-sparse"
+            } else {
+                "equivalent-fragmented"
+            },
             None,
         )
         .unwrap();
@@ -121,7 +143,7 @@ async fn fragmented_registration_preserves_sha256_on_real_minio() {
             assert_eq!(parsed.file_identities.first().unwrap().sha256, expected);
             assert_eq!(
                 parsed.records.first().unwrap().total_bytes,
-                16 * 1024 * 1024
+                if sparse { 12 } else { 16 } * 1024 * 1024
             );
         })
         .await

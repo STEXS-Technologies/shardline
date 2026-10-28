@@ -288,3 +288,79 @@ fn warm_prefix_still_authenticates_source_members() {
         assert!(verifier.member_rechecks > 0);
     }
 }
+
+#[test]
+fn cached_ordered_gaps_reuse_sha_but_authenticate_each_selected_member() {
+    use super::super::file_digests_tests::store_members;
+    for parallel in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
+        let (hash, _) = store_members(&objects, &[b"first", b"gap", b"second"]);
+        let terms = [
+            FileDataSequenceEntry::new(hash, 5, 0, 1),
+            FileDataSequenceEntry::new(hash, 6, 2, 3),
+        ];
+        let info = load_xorb_range_info(&objects, &hash.hex(), None).unwrap();
+        let scope = scope(&format!("cached-ordered-gaps-{parallel}"));
+        let expected = format!("{:x}", Sha256::digest(b"firstsecond"));
+        let mut short = FileDigest::with_scope(None, Some(&scope));
+        feed(&mut short, &terms[0], b"first");
+        short.finish().unwrap();
+        let mut partial = FileDigest::with_scope(Some(expected.clone()), Some(&scope));
+        partial.enable_parallel(parallel);
+        assert!(partial.prefixes.as_ref().unwrap().contains(&terms[..1]));
+        assert!(!partial.prefixes.as_ref().unwrap().contains(&terms));
+        partial
+            .update_cached_terms(
+                &mut FileDigestVerifier::default(),
+                &objects,
+                &terms,
+                &info,
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(partial.finish().unwrap(), Some(expected.clone()));
+        let mut seed = FileDigest::with_scope(Some(expected.clone()), Some(&scope));
+        seed.begin_terms(&terms);
+        seed.update_validating_member(&terms[0], 0, b"first");
+        seed.update_validating_member(&terms[1], 2, b"second");
+        seed.finish_terms();
+        assert_eq!(seed.finish().unwrap(), Some(expected.clone()));
+
+        let mut verifier = FileDigestVerifier::default();
+        let mut warm = FileDigest::with_scope(Some(expected.clone()), Some(&scope));
+        warm.enable_parallel(parallel);
+        warm.update_cached_terms(&mut verifier, &objects, &terms, &info, &|| Ok(()))
+            .unwrap();
+        assert!(warm.reusing_prefix);
+        assert_eq!(verifier.member_rechecks, 2);
+        assert_eq!(warm.finish().unwrap(), Some(expected));
+
+        let mut forged = terms.clone();
+        forged[0].unpacked_segment_bytes += 1;
+        forged[1].unpacked_segment_bytes -= 1;
+        let mut invalid = FileDigest::with_scope(None, Some(&scope));
+        assert!(
+            invalid
+                .update_cached_terms(&mut verifier, &objects, &forged, &info, &|| Ok(()))
+                .is_err()
+        );
+
+        let mut cancelled = FileDigest::with_scope(None, Some(&scope));
+        assert!(
+            cancelled
+                .update_cached_terms(&mut verifier, &objects, &terms, &info, &|| Err(
+                    std::io::Error::other("cancelled")
+                ))
+                .is_err()
+        );
+        let key = xorb_object_key(&hash.hex()).unwrap();
+        std::fs::write(objects.local_root().unwrap().join(key.as_str()), b"corrupt").unwrap();
+        let mut corrupt = FileDigest::with_scope(None, Some(&scope));
+        assert!(
+            corrupt
+                .update_cached_terms(&mut verifier, &objects, &terms, &info, &|| Ok(()))
+                .is_err()
+        );
+    }
+}

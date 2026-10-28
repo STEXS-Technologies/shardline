@@ -64,19 +64,7 @@ impl Prefixes {
     /// split points. Canonicalize only the cache key, never the terms validated
     /// by the caller; gaps, overlap and backwards ranges remain distinct.
     pub(super) fn begin(&mut self, terms: &[FileDataSequenceEntry]) -> Option<Sha256> {
-        let mut remaining = terms;
-        while let Some(first) = remaining.first() {
-            let adjacent = super::contiguous_source_terms(remaining).ok()?;
-            let last = adjacent.last()?;
-            let length = adjacent.iter().try_fold(0_u64, |total, term| {
-                total.checked_add(term.unpacked_segment_bytes)
-            })?;
-            self.key.update(first.xorb_hash.hex().as_bytes());
-            self.key.update(&first.chunk_index_start.to_le_bytes());
-            self.key.update(&last.chunk_index_end.to_le_bytes());
-            self.key.update(&length.to_le_bytes());
-            remaining = remaining.get(adjacent.len()..)?;
-        }
+        self.key = self.key_after(terms)?;
         CACHE
             .get_or_init(Mutex::default)
             .lock()
@@ -84,6 +72,33 @@ impl Prefixes {
             .states
             .get(self.key.finalize().as_bytes())
             .cloned()
+    }
+
+    pub(super) fn contains(&self, terms: &[FileDataSequenceEntry]) -> bool {
+        self.key_after(terms).is_some_and(|key| {
+            CACHE
+                .get_or_init(Mutex::default)
+                .lock()
+                .is_ok_and(|cache| cache.states.contains_key(key.finalize().as_bytes()))
+        })
+    }
+
+    fn key_after(&self, terms: &[FileDataSequenceEntry]) -> Option<blake3::Hasher> {
+        let mut key = self.key.clone();
+        let mut remaining = terms;
+        while let Some(first) = remaining.first() {
+            let adjacent = super::contiguous_source_terms(remaining).ok()?;
+            let last = adjacent.last()?;
+            let length = adjacent.iter().try_fold(0_u64, |total, term| {
+                total.checked_add(term.unpacked_segment_bytes)
+            })?;
+            key.update(first.xorb_hash.hex().as_bytes());
+            key.update(&first.chunk_index_start.to_le_bytes());
+            key.update(&last.chunk_index_end.to_le_bytes());
+            key.update(&length.to_le_bytes());
+            remaining = remaining.get(adjacent.len()..)?;
+        }
+        Some(key)
     }
 
     pub(super) fn retain(&mut self, state: &Sha256) {

@@ -3560,6 +3560,45 @@ successful publication. Their small MinIO fixtures use tmpfs to isolate these
 protocol tests from the host disk reserve; this does not qualify physical-disk
 power-loss durability. Strict adapter/server all-target Clippy passed.
 
+### Ordered sparse-prefix reuse
+
+A follow-up audit found different SHA-prefix grouping between initial source
+validation and cached-source reads. Initial validation can cover increasing,
+disjoint terms in one source; cached reads previously looked up each contiguous
+range separately. The first cached use could therefore hash an early range
+again before reaching an already verified later prefix.
+
+Cached reads now prefer an existing complete ordered prefix. When it is absent,
+they retain per-range lookup and snapshots, including existing shorter-prefix
+hits. Gaps still cause separate authenticated reads; no additional bytes are
+fetched to bridge them. Every selected member, original term length, asserted
+SHA-256 and file Merkle identity remains checked. Cache bounds, persistence,
+ownership checks and durability are unchanged.
+
+An isolated release-mode component fixture selected the first and last quarters
+of each source term from the captured 512 MiB stock-client upload. Its logical
+file contained 267,109,018 bytes. After authenticated initial verification,
+baseline/candidate/candidate/baseline observations were:
+
+| Cached file verification | Baseline | Candidate |
+| --- | ---: | ---: |
+| First cached use | 89.1 / 89.7 ms | 70.5 / 71.2 ms |
+| Two later repeats per process | 70.9–71.9 ms | 70.6–72.3 ms |
+
+Every observation checked the same full asserted SHA-256. The first cached use
+improved by about 20%; later repeats already benefited from per-range cached
+states. This measures the file-record verification component using constructed
+valid sparse metadata and current source reads, not complete HTTP upload time,
+first-time ingestion, production traffic frequency or upstream parity. Skipping
+SHA work also does not create new intermediate SHA snapshots that were never
+computed; future edits still fall back to verification when no prefix matches.
+
+Qualification passed 417 adapter library tests, strict adapter/server all-target
+Clippy, actual MinIO whole/fragmented/sparse registration, and all three
+PostgreSQL/MinIO HTTP recovery cases (disconnect/retry, ownership loss without
+publication, stalled verification followed by publication). The cache remains
+process-local; this change introduces no persistent format or schema migration.
+
 ### Rejected decoded-buffer ownership experiment
 
 An experiment transferred decoded buffers directly into HTTP responses instead

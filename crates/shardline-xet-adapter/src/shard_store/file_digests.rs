@@ -7,6 +7,7 @@ use shardline_server_core::MaterializedObject;
 use shardline_xet_core::xorb_object::deserialize_chunk;
 
 use super::*;
+mod cached;
 mod prefix;
 #[cfg(test)]
 mod tests;

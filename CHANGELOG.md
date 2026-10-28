@@ -77,8 +77,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Coalesce adjacent cached-Xorb registration terms into one authenticated range
   read while checking each term length and the final file SHA-256.
 - Reuse bounded, verified SHA-256 prefix states for native Xet registration of
-  overlapping files and equivalent adjacent term layouts, retaining source
-  authentication, individual term-length checks and final identity checks.
+  overlapping files, equivalent adjacent term layouts and cached ordered sparse
+  ranges, retaining source authentication, individual term-length checks and
+  final identity checks.
 - Overlap native Xet member authentication and file hashing when CPU admission
   has spare capacity, retaining sequential verification under saturation.
 - Combine final CAS upload-state commits in SQLite and PostgreSQL after durable

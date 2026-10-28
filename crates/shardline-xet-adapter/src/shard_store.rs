@@ -850,29 +850,21 @@ fn build_file_records_with_cache(
             let packed_end = xorb_info.packed_end(range_end)?;
             verification::verify_term_length(segment, &xorb_info.verified_chunks)?;
             if segment_index >= digested_through {
-                let contiguous = file_digests::contiguous_source_terms(
+                let ordered = file_digests::ordered_source_terms(
                     file_info
                         .segments
                         .get(segment_index..)
                         .ok_or(XetAdapterError::Overflow)?,
                 )?;
-                // Validate every constituent length before hashing the combined
-                // range. A forged split must not hide behind a valid total.
-                let mut combined = segment.clone();
-                for next in contiguous.iter().skip(1) {
-                    checkpoint()?;
-                    verification::verify_term_length(next, &xorb_info.verified_chunks)?;
-                    combined.unpacked_segment_bytes = combined
-                        .unpacked_segment_bytes
-                        .checked_add(next.unpacked_segment_bytes)
-                        .ok_or(XetAdapterError::Overflow)?;
-                    combined.chunk_index_end = next.chunk_index_end;
-                }
-                digest.begin_terms(contiguous);
-                digest.update(file_digests, object_store, &combined, xorb_info, checkpoint)?;
-                digest.finish_terms();
+                digest.update_cached_terms(
+                    file_digests,
+                    object_store,
+                    ordered,
+                    xorb_info,
+                    checkpoint,
+                )?;
                 digested_through = segment_index
-                    .checked_add(contiguous.len())
+                    .checked_add(ordered.len())
                     .ok_or(XetAdapterError::Overflow)?;
             }
             let length = segment.unpacked_segment_bytes;
