@@ -52,13 +52,19 @@ before creating and pushing its version tag.
    - `[workspace.package] version = "X.Y.Z"`
    - `[workspace.dependencies]`: bump every `shardline-*` `version = "..."` (and
      `sdx`) to the new version so published manifests are coherent.
-2. Refresh the lockfile and confirm the workspace still builds:
+2. Refresh both lockfiles without updating unrelated dependencies and confirm
+   the workspace still builds:
    ```bash
-   cargo check --workspace
+   cargo update --workspace
+   cargo update --workspace --manifest-path e2e/Cargo.toml
+   cargo check --locked --workspace
+   cargo metadata --locked --manifest-path e2e/Cargo.toml --format-version 1 --no-deps
    ```
 3. Update `CHANGELOG.md`: the repo convention is to rename `## [Unreleased]` to a
    dated `## [<version>] - YYYY-MM-DD` section at release time. Do **not** add a dated
-   section yourself in a normal change.
+   section yourself in a normal change. Match the existing release introduction
+   and category headings, consolidate overlapping implementation notes, retain
+   upgrade/security limits, and update the version comparison links.
 4. Confirm formatting/clippy on the crates being published:
    ```bash
    cargo fmt --all -- --check

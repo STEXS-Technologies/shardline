@@ -3325,7 +3325,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sdx"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3557,7 +3557,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-auth"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "hex",
@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-cache"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "getrandom 0.3.4",
  "hex",
@@ -3583,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-cas"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "async-trait",
  "shardline-index",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-fsck"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "lz4_flex 0.11.6",
  "serde_json",
@@ -3652,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-gc"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -3671,7 +3671,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-hub-api"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "aes-gcm",
  "arrow-array",
@@ -3710,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-index"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3733,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-metrics"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -3744,7 +3744,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-oci-adapter"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -3764,7 +3764,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-protocol"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "hex",
  "hmac 0.12.1",
@@ -3778,7 +3778,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-protocol-adapters"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "hex",
  "serde",
@@ -3792,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-provider-events"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "serde_json",
  "shardline-index",
@@ -3807,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-rebuild"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3822,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-reliability"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "chrono",
  "ed25519-dalek 2.2.0",
@@ -3844,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-s3-adapter"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3871,7 +3871,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-server"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -3938,7 +3938,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-server-core"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3961,7 +3961,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-storage"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3977,7 +3977,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-test-support"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -3986,14 +3986,14 @@ dependencies = [
 
 [[package]]
 name = "shardline-validation"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "shardline-vcs"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "hex",
  "hmac 0.12.1",
@@ -4006,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-xet-adapter"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "axum",
  "blake3",
@@ -4027,7 +4027,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-xet-core"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "blake3",
  "bytes",

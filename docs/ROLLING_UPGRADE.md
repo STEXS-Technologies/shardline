@@ -26,7 +26,7 @@ rollback, before any upload retry. These checks pass on SQLite/filesystem and
 PostgreSQL/MinIO. They verify an admitted transfer's drain and durable handoff;
 they do not automate load-balancer routing or prove an entire fleet has stopped.
 
-## Protocol frontend upgrade from 1.12.1
+## Protocol frontend upgrade from 1.12.1 to 1.13.0
 
 ### Recommended coordinated upgrade
 
@@ -83,7 +83,7 @@ readiness alone does not prove that all old readers have stopped.
 
 ### Schema installation and protocol routing
 
-The unreleased frontend changes add durable Xet file identities and aliases,
+The 1.13.0 frontend changes add durable Xet file identities and aliases,
 LFS locks, S3 multipart part counts, record membership, verified Xorb descriptors,
 Hub object locations, and repository-creation policy state. An owner-run command
 installs these additive tables in a separate frontend schema registry. The
