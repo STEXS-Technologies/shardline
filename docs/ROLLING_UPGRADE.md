@@ -78,17 +78,17 @@ then resume uploads. Keep upgraded readers available after new writes begin.
 
 Restarting an old binary does not recreate the omitted chunk objects. The
 predecessor drills below cover their named workflows, not unrestricted rollback
-of every new storage layout. Automated transition enforcement remains under
-qualification; readiness alone does not prove that all old readers have stopped.
+of every new storage layout. There is no automatic fleet-wide retirement check;
+readiness alone does not prove that all old readers have stopped.
 
 ### Schema installation and protocol routing
 
 The unreleased frontend changes add durable Xet file identities and aliases,
 LFS locks, S3 multipart part counts, record membership, verified Xorb descriptors,
-and Hub object locations. An owner-run command installs these additive
-tables in a separate frontend schema registry. The released core migration
-ledger remains compatible with 1.12.1; unknown core migrations still cause
-startup to fail. Existing object records are not rewritten. Part counts are
+Hub object locations, and repository-creation policy state. An owner-run command
+installs these additive tables in a separate frontend schema registry. The
+released core migration ledger remains compatible with 1.12.1; unknown core
+migrations still cause startup to fail. Existing object records are not rewritten. Part counts are
 known only for multipart objects completed by the new version; legacy records
 and rows changed by an older binary report the count as unknown.
 
@@ -125,8 +125,8 @@ lock or identity records.
 
 Immutable Hub/Xet read credentials and their signed range URLs also require
 upgraded API and transfer replicas. Keep those requests on upgraded replicas
-until the rollout is complete. The latest predecessor drills install all seven
-frontend migrations, preserve the released core ledger, and verify old/new
+until the rollout is complete. The predecessor drills install the frontend
+migration set, preserve the released core ledger, and verify old/new
 OCI and S3 access on PostgreSQL. Local drills migrate release-created SQLite
 data and compare clean FSCK results from both binaries at concurrency 1, 32 and
 128. These checks cover installation and existing storage compatibility; they

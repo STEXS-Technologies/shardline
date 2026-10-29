@@ -3670,6 +3670,59 @@ workers and 1.28 seconds with 8; both made 256 backend requests. This single
 pair is insufficient to quantify a small-file regression, but it reinforces
 that the large-file result does not justify lowering the global default.
 
+## Released v1.12.1 cost-preservation check
+
+An October 29, 2026 local comparison used the released v1.12.1 executable and
+candidate `d3565024`, with disposable PostgreSQL/MinIO and one CPU-limited API
+replica. Both unique and repeated data passed exact download checks after
+concurrent GC. One ordered pair per workload is cost-accounting evidence,
+not a stable throughput or tail-latency comparison.
+
+| Upload workload | Backend ingestion requests, release → candidate | Packed payload bytes, release and candidate |
+| --- | ---: | ---: |
+| 128 × 1 MiB unique | 512 → 512 | 134,358,080 |
+| 128 × 1 MiB repeated | 416 → 416 | 33,588,848 |
+| 8 × 36 MiB unique | 56 → 56 | 302,252,152 |
+| 8 × 36 MiB repeated | 44 → 44 | 75,563,360 |
+
+Preserved object-store ingestion cost does not mean every cost stayed unchanged.
+Top-level PostgreSQL statement calls increased 5%. Top-level statement WAL
+increased about 29% for the small-object fixture and 10% for the larger files.
+Per-query diagnostics attribute the extra statements to record-membership
+indexes and multipart-count proof maintenance. Nested statement WAL overlaps
+parent statements; neither sum establishes physical disk writes or SSD wear.
+
+Across two settling GC passes, unique-data requests fell from 1,347 to 575 for
+the small-object fixture, but response bytes rose from about 135 MB to 269 MB.
+The release reused an unauthenticated member-list sidecar on later scans;
+the candidate verifies the actual container on each scan. Keep that integrity
+check: fewer requests and fewer transferred bytes are different goals.
+
+The 1/2/4/8-replica shared-host matrix also preserved packed bytes and ingestion
+request counts, with 11,520 exact post-GC reads per executable. Timing repeats
+showed large variance, including stalls in the unchanged release. These runs
+do not qualify production scaling efficiency or performance parity. Cgroup
+memory peaks include page cache and are not application RSS bounds.
+In the larger-file pair, the candidate's server cgroup peaks were approximately
+305 MB (unique) and 290 MB (repeated), compared with 262 MB and 254 MB in the
+release. These observations do not establish a concurrency memory bound or
+support a claim that memory use stayed unchanged.
+
+Reproduce each executable's small-object run using
+[`validate_performance.py`](../scripts/shardline/validate_performance.py):
+
+```bash
+python3 scripts/shardline/validate_performance.py /absolute/path/to/shardline \
+  /private/path/outside-checkout/cost-check \
+  --replicas 1 --datasets unique repeated --objects 128 \
+  --object-bytes 1048576 --clients 16 --repeats 1
+```
+
+For the larger-file fixture use eight objects of 37,748,736 bytes and four
+clients. Use separate output directories and identical backend/host settings
+for each executable. Retain failed and slow runs; these short checks establish
+neither retention-expired savings nor annual cloud bills or NVMe lifetime.
+
 ## Production-shaped incident and recovery
 
 Run the exact incident drills as separate nextest processes:
