@@ -16,24 +16,19 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def mint_token(compose, timeout=30):
+def mint_token(compose, timeout=30, **process_options):
     token = command(*compose,
         "exec", "-T", "shardline", "shardline", "admin", "token",
         "--issuer", "local", "--subject", "compose-smoke", "--scope", "write",
         "--provider", "generic", "--owner", "team", "--repo", "assets",
         "--revision", "main", "--key-env", "SHARDLINE_TOKEN_SIGNING_KEY",
-        timeout=timeout)
+        timeout=timeout, **process_options)
     if not token:
         raise ValueError("container token mint returned no token")
     return token
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--endpoint", default="http://127.0.0.1:18080")
-    parser.add_argument("--project", help="Compose project name, if overridden")
-    parser.add_argument("--compose-file", action="append", default=[])
-    args = parser.parse_args()
+def run_checks(args):
     files = args.compose_file or [
         str(Path(__file__).resolve().parents[2] / "docker-compose.yml")
     ]
@@ -72,7 +67,7 @@ def main():
     else:
         raise ValueError("missing credentials were accepted")
 
-    token = mint_token(compose)
+    token = mint_token(compose, start_new_session=False)
     request("/v1/stats", token)
     body = bytes(range(251)) * 4178
     path = "/lfs/objects/" + hashlib.sha256(body).hexdigest()
@@ -80,6 +75,27 @@ def main():
     if request(path, token, limit=len(body)) != body:
         raise ValueError("downloaded bytes differ from uploaded bytes")
     print("PASS: readiness, missing-token 401, authenticated upload/download, exact bytes")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--endpoint", default="http://127.0.0.1:18080")
+    parser.add_argument("--project", help="Compose project name, if overridden")
+    parser.add_argument("--compose-file", action="append", default=[])
+    parser.add_argument("--timeout", type=int, default=180,
+                        help="whole smoke-check deadline in seconds (default: 180)")
+    parser.add_argument("--_run-checks", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if not 0 < args.timeout < 100000:
+        parser.error("--timeout must be a positive integer below 100000")
+    if args._run_checks:
+        run_checks(args)
+    else:
+        # A socket timeout alone does not bound slow-drip headers or bodies.
+        # Reuse owned-process cleanup so the deadline also covers token minting
+        # and stops any remaining CLI descendants without touching the services.
+        print(command(sys.executable, str(Path(__file__).resolve()),
+                      "--_run-checks", *sys.argv[1:], timeout=args.timeout))
 
 
 if __name__ == "__main__":

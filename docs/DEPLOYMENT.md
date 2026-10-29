@@ -69,6 +69,9 @@ the fixture remains in the development deployment. It does not restart services
 or delete data. Credentials stay out of its output, and downloads do not follow
 redirects. Use `--endpoint`, `--project`, and repeated `--compose-file` arguments
 when you override the bundled development configuration.
+The complete check has a 180-second deadline, including token minting and HTTP
+response bodies. Use `--timeout SECONDS` to change it; expiry stops the check's
+owned client processes without stopping the deployment.
 
 Compose supplies a development signing key through
 `SHARDLINE_TOKEN_SIGNING_KEY`. To mint a token using the running server's key,
