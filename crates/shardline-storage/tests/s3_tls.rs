@@ -83,6 +83,10 @@ fn s3_https_child() {
     let body = vec![73_u8; 131072];
     let key = ObjectKey::parse("tls/verified").unwrap();
     let rejection = value("SHARDLINE_TLS_TEST_REJECT");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     if rejection != "false" {
         let error = store
             .metadata(&key)
@@ -98,6 +102,20 @@ fn s3_https_child() {
                     || diagnostic.contains("not valid for name")
                     || diagnostic.contains("hostname"),
                 "trusted CA with wrong hostname must fail name validation"
+            );
+        }
+        let async_error = runtime
+            .block_on(shardline_storage::AsyncObjectStore::metadata(&store, &key))
+            .expect_err("async storage must reject invalid CA or hostname");
+        let async_diagnostic = format!("{async_error:?}").to_lowercase();
+        assert!(
+            async_diagnostic.contains("certificate") || async_diagnostic.contains("unknownissuer")
+        );
+        if rejection == "hostname" {
+            assert!(
+                async_diagnostic.contains("notvalidforname")
+                    || async_diagnostic.contains("not valid for name")
+                    || async_diagnostic.contains("hostname")
             );
         }
         return;
@@ -129,4 +147,49 @@ fn s3_https_child() {
     );
     assert!(store.delete_if_present(&key).is_ok());
     assert!(!store.contains(&key).unwrap());
+    runtime.block_on(async {
+        use shardline_storage::AsyncObjectStore;
+
+        let async_key = ObjectKey::parse("tls/async-verified").unwrap();
+        AsyncObjectStore::put_if_absent(
+            &store,
+            &async_key,
+            ObjectBody::from_slice(&body),
+            &integrity,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            AsyncObjectStore::metadata(&store, &async_key)
+                .await
+                .unwrap()
+                .unwrap()
+                .length(),
+            body.len() as u64
+        );
+        assert_eq!(
+            AsyncObjectStore::read_range(
+                &store,
+                &async_key,
+                ByteRange::new(0, body.len() as u64 - 1).unwrap(),
+            )
+            .await
+            .unwrap(),
+            body
+        );
+        assert_eq!(
+            AsyncObjectStore::read_range(&store, &async_key, ByteRange::new(100, 199).unwrap())
+                .await
+                .unwrap(),
+            vec![73_u8; 100]
+        );
+        AsyncObjectStore::delete_if_present(&store, &async_key)
+            .await
+            .unwrap();
+        assert!(
+            !AsyncObjectStore::contains(&store, &async_key)
+                .await
+                .unwrap()
+        );
+    });
 }
