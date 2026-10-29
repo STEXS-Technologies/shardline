@@ -108,7 +108,13 @@ pub(super) fn qualify(
         }
     } else {
         for member in &published.members {
-            fs::remove_file(root.join("chunks").join(&member[..2]).join(member))?;
+            // Native ingestion may already omit the standalone copy. Only
+            // absence is acceptable; permission and other I/O errors still fail.
+            if let Err(error) = fs::remove_file(root.join("chunks").join(&member[..2]).join(member))
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error.into());
+            }
         }
     }
     assert_status(&scan_configured(root, remote)?, 0);
@@ -197,13 +203,16 @@ fn qualify_recorded_operational_failure(root: &Path, source: &str) -> Result<()>
 #[cfg(target_os = "linux")]
 fn qualify_supervised_operational_failure(root: &Path) -> Result<()> {
     let state = tempfile::tempdir()?;
+    // Let the controller create its private state directory. A pre-existing
+    // tempdir may have broader permissions and must be rejected before work.
+    let private_state = state.path().join("maintenance");
     let task = "corrupt-native-descriptor";
     let output = shardline_test_support::native_client_output(
         Command::new(binary())
             .env_clear()
             .current_dir(root)
             .args(["maintenance", "--state-dir"])
-            .arg(state.path())
+            .arg(&private_state)
             .args(["--task-id", task, "fsck", "--root"])
             .arg(root),
         std::time::Duration::from_secs(120),
@@ -212,7 +221,7 @@ fn qualify_supervised_operational_failure(root: &Path) -> Result<()> {
     // FSCK retains exit 2. No successful scan may be certified in either case.
     assert_status(&output, 1);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("maintenance.status: completed"));
-    let directory = state.path().join(hex::encode(
+    let directory = private_state.join(hex::encode(
         penelope::core::task::Digest::of(task.as_bytes()).0,
     ));
     assert!(!directory.join("result-proof.json").exists());

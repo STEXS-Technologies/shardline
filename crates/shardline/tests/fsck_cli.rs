@@ -234,12 +234,18 @@ async fn native_corpus(remote: Option<&RemoteStorage>) -> Result<()> {
     assert!(String::from_utf8_lossy(&report.stdout).contains("issue_count: 0"));
     assert!(!String::from_utf8_lossy(&report.stderr).contains("issue:"));
 
-    // A same-length mutation must still be detected even though the intact
-    // container can reconstruct the file. The standalone copy is also checked.
+    // Copy-free ingestion need not create a standalone member directory.
+    // Materialize a valid legacy copy explicitly, then prove a same-length
+    // mutation is detected even though the intact container serves the file.
     let member = shardline_server::test_fixtures::xet_hash_hex(
         &shardline_xet_core::merklehash::compute_data_hash(left),
     );
     let member_path = root.path().join("chunks").join(&member[..2]).join(&member);
+    if remote.is_none() {
+        fs::create_dir_all(member_path.parent().ok_or("member directory")?)?;
+        fs::write(&member_path, left)?;
+        assert_status(&scan_configured(root.path(), remote)?, 0);
+    }
     if let Some(remote) = remote {
         overwrite_remote_member(remote, &member, &vec![b'!'; left.len()])?;
     } else {
