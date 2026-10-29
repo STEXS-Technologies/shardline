@@ -536,6 +536,34 @@ fn provisional_digest_cannot_accept_a_later_corrupt_member() {
 
 #[test]
 fn cached_source_metadata_does_not_hide_later_payload_corruption() {
+    assert!(cached_source_change_is_rejected(|path, _verifier| {
+        std::fs::write(path, b"corrupt source after metadata validation").unwrap();
+    }));
+}
+
+#[test]
+fn cached_metadata_without_pinned_source_rejects_source_removal() {
+    assert!(cached_source_change_is_rejected(|path, verifier| {
+        std::fs::remove_file(path).unwrap();
+        assert!(!path.exists());
+        verifier.release_source();
+    }));
+}
+
+#[test]
+fn pinned_source_authenticates_bytes_after_source_path_removal() {
+    // Unlink does not invalidate an already-open immutable source. Its members
+    // and asserted file SHA must still be authenticated; a fresh lookup is
+    // separately required to reject the now-missing object above.
+    assert!(!cached_source_change_is_rejected(|path, _verifier| {
+        std::fs::remove_file(path).unwrap();
+        assert!(!path.exists());
+    }));
+}
+
+fn cached_source_change_is_rejected(
+    change: impl FnOnce(&std::path::Path, &mut file_digests::FileDigestVerifier),
+) -> bool {
     let root = tempfile::tempdir().unwrap();
     let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
     let (hash, leaves) = store_members(&objects, &[b"first", b"second"]);
@@ -546,7 +574,7 @@ fn cached_source_metadata_does_not_hide_later_payload_corruption() {
     let key = xorb_object_key(&hash.hex()).unwrap();
     let path = objects.local_root().unwrap().join(key.as_str());
     assert!(path.is_file());
-    std::fs::write(path, b"corrupt source after metadata validation").unwrap();
+    change(&path, &mut verifier);
     let file = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(file_hash(&leaves), 1, false, true),
         segments: vec![FileDataSequenceEntry::new(hash, 11, 0, 2)],
@@ -555,19 +583,16 @@ fn cached_source_metadata_does_not_hide_later_payload_corruption() {
             MerkleHash::from_hex(&format!("{:x}", Sha256::digest(b"firstsecond"))).unwrap(),
         )),
     };
-    assert!(
-        build_file_records_with_cache(
-            vec![file],
-            &objects,
-            None,
-            None,
-            &mut cache,
-            &mut verifier,
-            &|| Ok(()),
-        )
-        .is_err(),
-        "cached metadata must not replace current member verification"
-    );
+    build_file_records_with_cache(
+        vec![file],
+        &objects,
+        None,
+        None,
+        &mut cache,
+        &mut verifier,
+        &|| Ok(()),
+    )
+    .is_err()
 }
 
 #[test]

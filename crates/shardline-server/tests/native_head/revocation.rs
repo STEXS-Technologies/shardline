@@ -97,6 +97,7 @@ impl Read<'_> {
         root: &std::path::Path,
         database: Option<&str>,
         million: bool,
+        file_id: &str,
     ) {
         let metadata = match database {
             Some(database) => Metadata::Postgres(sqlx::PgPool::connect(database).await.unwrap()),
@@ -187,6 +188,17 @@ impl Read<'_> {
             )
             .await;
         }
+        // Issue after the potentially long scale probes so expiry cannot be
+        // mistaken for authoritative revocation in the replay assertions.
+        let capability = super::capability::Read::issue(
+            self.client,
+            self.url,
+            self.credential,
+            file_id,
+            self.bytes,
+        )
+        .await;
+        capability.allowed(self.client).await;
         assert_eq!(
             metadata.delete("latest").await,
             u64::try_from(expected.checked_sub(1).unwrap()).unwrap()
@@ -194,10 +206,12 @@ impl Read<'_> {
         assert_eq!(metadata.counts().await, (1, 1));
         // Historical publications remain valid grants after latest disappears.
         self.allowed().await;
+        capability.allowed(self.client).await;
         match &metadata {
             Metadata::Local(connection) => {
                 connection.execute_batch("BEGIN IMMEDIATE; DELETE FROM shardline_file_records WHERE record_kind='version';").unwrap();
                 self.allowed().await;
+                capability.allowed(self.client).await;
                 connection.execute_batch("ROLLBACK").unwrap();
             }
             Metadata::Postgres(pool) => {
@@ -211,13 +225,16 @@ impl Read<'_> {
                     1
                 );
                 self.allowed().await;
+                capability.allowed(self.client).await;
                 transaction.rollback().await.unwrap();
             }
         }
         assert_eq!(metadata.counts().await, (1, 1));
+        capability.allowed(self.client).await;
         assert_eq!(metadata.delete("version").await, 1);
         assert_eq!(metadata.counts().await, (0, 0));
         super::denied_reads(self.client, self.url, self.credential, self.proxy).await;
+        capability.denied(self.client, self.proxy).await;
         if let Metadata::Postgres(pool) = metadata {
             pool.close().await;
         }

@@ -1172,7 +1172,8 @@ async fn start_runtime_with_roles(
         shardline_server::apply_database_migrations(&pool).await?;
         pool.close().await;
         config = config.with_index_postgres_url(url.clone())?;
-        let stack = services.as_ref().ok_or("remote Hub services missing")?;
+    }
+    if let Some(stack) = services.as_ref() {
         let prefix = stack.unique_s3_key_prefix("native-hf-cli");
         if let Some(raw) = stack.s3_raw_config(Some(&prefix)) {
             let object_config = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)

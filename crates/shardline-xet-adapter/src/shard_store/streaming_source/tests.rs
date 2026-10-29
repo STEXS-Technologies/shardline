@@ -11,7 +11,15 @@ use shardline_xet_core::{
 };
 use std::sync::{Arc, Mutex};
 
-async fn exercise(change_second_read: bool, ignore_range: bool) -> Result<(), XetAdapterError> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    None,
+    Corrupt,
+    Missing,
+    IgnoreRange,
+}
+
+async fn exercise(fault: Fault) -> Result<(), XetAdapterError> {
     let members: Vec<Vec<u8>> = (1..=4).map(|index| vec![index; 64 * 1024]).collect();
     let leaves: Vec<_> = members
         .iter()
@@ -50,8 +58,14 @@ async fn exercise(change_second_read: bool, ignore_range: bool) -> Result<(), Xe
                 requests.push(range.clone());
                 requests.len()
             };
+            if fault == Fault::Missing && ordinal >= 2 {
+                return axum::http::Response::builder()
+                    .status(404)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+            }
             if let Some(range) = range {
-                if ignore_range {
+                if fault == Fault::IgnoreRange {
                     return axum::http::Response::new(axum::body::Body::from(body));
                 }
                 let (start, end) = range
@@ -62,7 +76,7 @@ async fn exercise(change_second_read: bool, ignore_range: bool) -> Result<(), Xe
                 let start: usize = start.parse().unwrap();
                 let end: usize = end.parse().unwrap();
                 let mut selected = body[start..=end].to_vec();
-                if change_second_read && ordinal == 2 {
+                if fault == Fault::Corrupt && ordinal == 2 {
                     selected[12] ^= 0x40;
                 }
                 axum::http::Response::builder()
@@ -137,7 +151,7 @@ async fn exercise(change_second_read: bool, ignore_range: bool) -> Result<(), Xe
     .await
     .unwrap();
     server.abort();
-    if !change_second_read && !ignore_range {
+    if fault == Fault::None {
         let requests = requests.lock().unwrap();
         assert_eq!(
             requests.len(),
@@ -147,20 +161,37 @@ async fn exercise(change_second_read: bool, ignore_range: bool) -> Result<(), Xe
         assert!(requests[0].is_none());
         assert!(requests[1].is_some());
     }
+    if fault == Fault::Missing {
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.len() >= 2,
+            "source must disappear after validation"
+        );
+        assert!(requests[0].is_none());
+        assert!(
+            requests[1].is_some(),
+            "revisited terms must read the source"
+        );
+    }
     result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_source_and_repeated_terms_use_only_streams() {
-    exercise(false, false).await.unwrap();
+    exercise(Fault::None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_changes_before_revisited_terms_are_rejected() {
-    assert!(exercise(true, false).await.is_err());
+    assert!(exercise(Fault::Corrupt).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_removed_before_revisited_terms_is_rejected() {
+    assert!(exercise(Fault::Missing).await.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ignored_backend_range_cannot_feed_the_file_digest() {
-    assert!(exercise(false, true).await.is_err());
+    assert!(exercise(Fault::IgnoreRange).await.is_err());
 }
