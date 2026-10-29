@@ -43,6 +43,7 @@ pub(crate) const S3_UPLOAD_DIR: &str = "s3-uploads";
 
 /// The S3 protocol maximum part number.
 pub const MAX_S3_PART_NUMBER: u32 = 10_000;
+const MULTIPART_CHECKSUM_METADATA_KEY: &str = "shardline-internal-s3-multipart-checksum-v1";
 
 /// Maximum upload id length (hex upload ids are 32 chars).
 const MAX_UPLOAD_ID_BYTES: usize = 64;
@@ -681,6 +682,62 @@ pub async fn read_session_locked(
     Ok(session)
 }
 
+/// Lists live sessions for a bucket and namespace without opening part payloads.
+///
+/// # Errors
+/// Returns I/O or evidence errors; an expired session is omitted.
+pub async fn list_bucket_sessions(
+    root: &Path,
+    scope: &str,
+    bucket: &str,
+    ttl: NonZeroU64,
+) -> Result<Vec<MultipartUploadSession>, S3SessionError> {
+    let mut sessions = Vec::new();
+    visit_bucket_sessions(root, scope, bucket, ttl, |session| sessions.push(session)).await?;
+    Ok(sessions)
+}
+
+/// Visits verified live session metadata one session at a time, without part I/O.
+/// The synchronous visitor runs under the upload-session lock and must not do
+/// blocking work or acquire that lock again.
+///
+/// # Errors
+/// Returns directory I/O or session evidence failures.
+pub async fn visit_bucket_sessions(
+    root: &Path,
+    scope: &str,
+    bucket: &str,
+    ttl: NonZeroU64,
+    mut visit: impl FnMut(MultipartUploadSession),
+) -> Result<(), S3SessionError> {
+    let _guard = lock_upload_sessions(root).await?;
+    let mut entries = match tokio::fs::read_dir(upload_dir(root)).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        if !entry.file_type().await?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(id) = name.to_str() else {
+            continue;
+        };
+        if validate_upload_id(id).is_err() {
+            continue;
+        }
+        match read_session_locked(root, id, ttl).await {
+            Ok(session) if session.scope_namespace == scope && session.bucket == bucket => {
+                visit(session);
+            }
+            Ok(_) | Err(S3SessionError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// Records a stored part's size in the session metadata.
 ///
 /// The part file itself is written by the caller (which streams the request
@@ -752,6 +809,7 @@ pub async fn store_part_locked(
             etag: None,
         },
         None,
+        None,
         ttl_seconds,
         session_max_bytes,
         total_max_bytes,
@@ -789,6 +847,43 @@ pub async fn store_versioned_part_locked(
     total_max_bytes: NonZeroU64,
     max_active_part_files: NonZeroUsize,
 ) -> Result<Option<MultipartPart>, S3SessionError> {
+    store_versioned_part_with_checksum_locked(
+        root,
+        upload_id,
+        part_number,
+        part,
+        expected_scope_namespace,
+        expected_key,
+        None,
+        ttl_seconds,
+        session_max_bytes,
+        total_max_bytes,
+        max_active_part_files,
+    )
+    .await
+}
+
+/// Publishes an immutable part with its negotiated checksum in the same
+/// integrity-protected session snapshot.
+///
+/// # Errors
+///
+/// Returns the persistence/quota errors of [`store_part`], or a reliability
+/// error for invalid part metadata or checksum values.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_versioned_part_with_checksum_locked(
+    root: &Path,
+    upload_id: &str,
+    part_number: u32,
+    part: MultipartPart,
+    expected_scope_namespace: &str,
+    expected_key: &str,
+    checksum: Option<(&str, &str)>,
+    ttl_seconds: NonZeroU64,
+    session_max_bytes: NonZeroU64,
+    total_max_bytes: NonZeroU64,
+    max_active_part_files: NonZeroUsize,
+) -> Result<Option<MultipartPart>, S3SessionError> {
     stored_part_file_path(root, upload_id, part_number, &part)?;
     let prefix = format!("part-{part_number}-");
     if !part.file_name.starts_with(&prefix)
@@ -815,6 +910,7 @@ pub async fn store_versioned_part_locked(
         part_number,
         part,
         Some((expected_scope_namespace, expected_key)),
+        checksum,
         ttl_seconds,
         session_max_bytes,
         total_max_bytes,
@@ -830,6 +926,7 @@ async fn store_part_metadata_locked(
     part_number: u32,
     part: MultipartPart,
     expected_binding: Option<(&str, &str)>,
+    checksum: Option<(&str, &str)>,
     ttl_seconds: NonZeroU64,
     session_max_bytes: NonZeroU64,
     total_max_bytes: NonZeroU64,
@@ -865,6 +962,24 @@ async fn store_part_metadata_locked(
         total_active_part_files,
     )?;
 
+    let checksum_marker = format!("PART_CHECKSUM:{part_number}:");
+    session.user_metadata.retain(|(name, value)| {
+        !name.eq_ignore_ascii_case(MULTIPART_CHECKSUM_METADATA_KEY)
+            || !value.starts_with(&checksum_marker)
+    });
+    if let Some((algorithm, checksum_value)) = checksum {
+        validate_part_checksum(algorithm, checksum_value)?;
+        let value = format!(
+            "PART_CHECKSUM:{part_number}:{algorithm}:{checksum_value}:{}",
+            part.file_name
+        );
+        session
+            .user_metadata
+            .push((MULTIPART_CHECKSUM_METADATA_KEY.to_owned(), value));
+        session
+            .user_metadata
+            .sort_by(|left, right| left.0.cmp(&right.0));
+    }
     let previous = session.parts.insert(part_number, part);
     session.last_touched_unix_seconds = now_unix_seconds;
     let (evidence, _) = verify_and_append_session_transition(
@@ -881,6 +996,32 @@ async fn store_part_metadata_locked(
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     persist_session_with_evidence(root, upload_id, &session, &evidence, snapshot_evidence).await?;
     Ok(previous)
+}
+
+fn validate_part_checksum(algorithm: &str, checksum: &str) -> Result<(), S3SessionError> {
+    let expected_len = match algorithm {
+        "CRC32" | "CRC32C" => 4,
+        "CRC64NVME" => 8,
+        "SHA1" => 20,
+        "SHA256" => 32,
+        _ => {
+            return Err(S3SessionError::Reliability(
+                "unsupported persisted multipart checksum algorithm".into(),
+            ));
+        }
+    };
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(checksum)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    if decoded.len() != expected_len
+        || base64::engine::general_purpose::STANDARD.encode(decoded) != checksum
+    {
+        return Err(S3SessionError::Reliability(
+            "invalid persisted multipart checksum".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validates a part against the per-session and aggregate byte quotas and the

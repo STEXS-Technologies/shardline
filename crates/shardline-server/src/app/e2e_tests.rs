@@ -3,6 +3,8 @@
 //! Each test group builds a minimal [`Router`] with only the routes needed for that
 //! protocol and sends real HTTP requests via [`tower::ServiceExt::oneshot`].
 
+mod xorb_file_hint;
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -137,7 +139,8 @@ async fn test_app_for_frontends_with_role(
                         )
                         .route(
                             "/v1/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction),
+                            get(super::reconstruction_routes::batch_reconstruction)
+                                .post(super::reconstruction_routes::batch_reconstruction_post),
                         )
                         .route(
                             "/v1/reconstructions/{file_id}",
@@ -265,19 +268,18 @@ async fn test_app_for_frontends_with_role(
                 }
             }
             ServerFrontend::Hub => {
-                hub_state = Some(build_test_hub_state(tmp.path()).await);
+                hub_state = Some(build_test_hub_state(tmp.path(), None).await);
             }
         }
     }
 
     let app: Router = app.with_state(Arc::clone(&state));
 
-    // Merge Hub routes at the type-erased Router<()> level.
-    // Register Hub's xet token routes only when the Xet frontend is not active
-    // (to avoid route conflicts with the native Xet adapter routes).
-    let register_hub_xet_routes = !frontends.contains(&ServerFrontend::Xet);
+    // Merge Hub routes at the type-erased Router<()> level. Hub Xet-token
+    // endpoints have fixed repo-type prefixes and coexist with native Xet's
+    // provider-scoped token endpoints.
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs, register_hub_xet_routes))
+        app.merge(shardline_hub_api::hub_routes(hs, true))
     } else {
         app
     };
@@ -286,8 +288,11 @@ async fn test_app_for_frontends_with_role(
 }
 
 /// Builds a [`HubState`] backed by a temporary SQLite database for E2E tests.
-/// Auth and HTTP client are disabled; only the local SQLite store is wired.
-async fn build_test_hub_state(root: &std::path::Path) -> shardline_hub_api::routes::HubState {
+/// Callers may supply the same auth provider used by the Shardline routes.
+async fn build_test_hub_state(
+    root: &std::path::Path,
+    auth: Option<shardline_hub_api::auth::HubAuth>,
+) -> shardline_hub_api::routes::HubState {
     let hub_root = root.join("hub");
     std::fs::create_dir_all(&hub_root).ok();
     let store = shardline_index::LocalIndexStore::new(hub_root.clone()).expect("hub sqlite store");
@@ -297,7 +302,7 @@ async fn build_test_hub_state(root: &std::path::Path) -> shardline_hub_api::rout
     shardline_hub_api::routes::HubState {
         store: boxed,
         object_store,
-        auth: None,
+        auth,
         http_client: None,
         webhook_secret_cipher: None,
         public_base_url: "http://127.0.0.1:8080".to_owned(),
@@ -336,6 +341,8 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
     .expect("server frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .expect("token signing key")
+    .with_hub_webhook_secret_key(TEST_SIGNING_KEY.to_vec())
+    .expect("Hub webhook secret key")
     .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
     .expect("s3 min part bytes");
 
@@ -384,7 +391,8 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                         )
                         .route(
                             "/v1/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction),
+                            get(super::reconstruction_routes::batch_reconstruction)
+                                .post(super::reconstruction_routes::batch_reconstruction_post),
                         )
                         .route(
                             "/v1/reconstructions/{file_id}",
@@ -512,7 +520,11 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                 }
             }
             ServerFrontend::Hub => {
-                hub_state = Some(build_test_hub_state(tmp.path()).await);
+                let auth = state
+                    .auth
+                    .as_ref()
+                    .map(|auth| shardline_hub_api::auth::HubAuth::from_arc(auth.provider_arc()));
+                hub_state = Some(build_test_hub_state(tmp.path(), auth).await);
             }
         }
     }
@@ -520,7 +532,7 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
     let app: Router = app.with_state(Arc::clone(&state));
 
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs, false))
+        app.merge(shardline_hub_api::hub_routes(hs, true))
     } else {
         app
     };
@@ -658,7 +670,8 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                         )
                         .route(
                             "/v1/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction),
+                            get(super::reconstruction_routes::batch_reconstruction)
+                                .post(super::reconstruction_routes::batch_reconstruction_post),
                         )
                         .route(
                             "/v1/reconstructions/{file_id}",
@@ -777,7 +790,11 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                 // S3 routes are registered in a later lane.
             }
             ServerFrontend::Hub => {
-                hub_state = Some(build_test_hub_state(tmp.path()).await);
+                let auth = state
+                    .auth
+                    .as_ref()
+                    .map(|auth| shardline_hub_api::auth::HubAuth::from_arc(auth.provider_arc()));
+                hub_state = Some(build_test_hub_state(tmp.path(), auth).await);
             }
         }
     }
@@ -785,7 +802,7 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
     let app: Router = app.with_state(Arc::clone(&state));
 
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs, false))
+        app.merge(shardline_hub_api::hub_routes(hs, true))
     } else {
         app
     };
@@ -953,9 +970,15 @@ async fn embedded_router_clones_keep_housekeeping_alive_until_the_last_router_dr
         NonZeroUsize::new(4096).unwrap(),
     );
     let (guard, stopped) = HousekeepingGuard::new();
-    let app = super::router_with_housekeeping_guard(config.clone(), guard, stopped.clone())
-        .await
-        .unwrap();
+    let mut background = super::RouterBackgroundTasks::new(stopped.clone());
+    let app = super::router_with_housekeeping_guard(
+        config.clone(),
+        guard,
+        stopped.clone(),
+        &mut background,
+    )
+    .await
+    .unwrap();
     let ordinary = TaskEvidenceStore::from_config(&config).unwrap();
     let housekeeping = ordinary.clone().with_housekeeping_stop(stopped.clone());
     let surviving = app.clone();
@@ -996,6 +1019,7 @@ async fn embedded_router_clones_keep_housekeeping_alive_until_the_last_router_dr
     ordinary
         .publish("fixture/application", b"available")
         .unwrap();
+    background.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1006,6 +1030,10 @@ async fn embedded_postgres_router_lifetime_preserves_shared_metadata_for_every_r
         eprintln!("SKIPPED: embedded PostgreSQL router lifetime requires DATABASE_URL");
         return;
     };
+    // The fixture clones table definitions and core history, not installed
+    // frontend history or triggers. Exercise normal router startup only after
+    // the explicit owner migration has installed that additive state.
+    fixture.migrate().await;
     fixture
         .index()
         .initialize_task_history_scope()
@@ -1017,9 +1045,15 @@ async fn embedded_postgres_router_lifetime_preserves_shared_metadata_for_every_r
     {
         let config = fixture.config.clone().with_server_role(role);
         let (guard, stopped) = HousekeepingGuard::new();
-        let app = super::router_with_housekeeping_guard(config.clone(), guard, stopped.clone())
-            .await
-            .unwrap();
+        let mut background = super::RouterBackgroundTasks::new(stopped.clone());
+        let app = super::router_with_housekeeping_guard(
+            config.clone(),
+            guard,
+            stopped.clone(),
+            &mut background,
+        )
+        .await
+        .unwrap();
         let (ordinary, scope) = TaskEvidenceStore::from_backend(&config, &fixture.backend)
             .await
             .unwrap();
@@ -1058,6 +1092,7 @@ async fn embedded_postgres_router_lifetime_preserves_shared_metadata_for_every_r
         })
         .await
         .unwrap();
+        background.shutdown().await.unwrap();
     }
     fixture.finish().await;
 }
@@ -1423,12 +1458,10 @@ async fn reconstruction_not_found() {
 
 // ── Read-path admission gating ──────────────────────────────────────────
 //
-// `read_chunk`, `head_xorb`, and `read_xorb_transfer` each run an O(N)
-// repository-reference metadata scan (`repository_references_xorb` enumerates
-// the repo's latest + version records) with no LIMIT and no cache. They must be
-// admission-gated like the upload/reconstruction paths so a request flood
-// cannot drive unbounded per-request scans. When the admission gate is
-// saturated, every read handler rejects with 503 SERVICE_UNAVAILABLE.
+// Read authorization can fall back to repository-reference traversal when an
+// indexed candidate or named-file proof is insufficient. Admission bounds the
+// concurrent metadata and storage work, including those proportional fallbacks.
+// When the gate is saturated, every read handler rejects with 503.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_paths_are_admission_gated() {
@@ -1738,6 +1771,89 @@ async fn batch_reconstruction_v1_route() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_reconstruction_v1_post_uses_xet_json_request_shape() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let content = b"batch reconstruction POST compatibility";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let xorb_upload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xorb_upload.status(), StatusCode::OK);
+
+    let (shard_bytes, file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let shard_upload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/shards")
+                .body(Body::from(shard_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shard_upload.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/reconstructions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!([{
+                        "prefix": "default",
+                        "hash": file_id.as_str()
+                    }]))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    let reconstruction = &body["files"][&file_id];
+    assert!(reconstruction.is_array());
+    assert!(!reconstruction.as_array().unwrap().is_empty());
+    assert!(body["fetch_info"].is_object());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_reconstruction_v1_post_rejects_unsupported_prefix() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/reconstructions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!([{
+                        "prefix": "unknown",
+                        "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    }]))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_read_token_without_provider_key_returns_unauthorized() {
     let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
 
@@ -1784,6 +1900,60 @@ async fn xet_write_token_without_provider_key_returns_unauthorized() {
         "missing provider key should return 401, got {}",
         response.status()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_tcp_upload_rejects_overflowing_footers_and_allows_verified_retry() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let (valid, hash) = test_fixtures::single_chunk_xorb(b"valid after rejected footer");
+    for length in [
+        i64::MAX as u64 - 7,
+        i64::MAX as u64,
+        i64::MAX as u64 + 1,
+        u64::MAX,
+    ] {
+        let response = client
+            .post(format!("{endpoint}/v1/xorbs/default/{hash}"))
+            .body(length.to_le_bytes().to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            client
+                .head(format!("{endpoint}/v1/xorbs/default/{hash}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let response = client
+        .post(format!("{endpoint}/v1/xorbs/default/{hash}"))
+        .body(valid.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = client
+        .get(format!("{endpoint}/transfer/xorb/default/{hash}"))
+        .header("range", format!("bytes=0-{}", valid.len() - 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), valid.as_ref());
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2687,7 +2857,7 @@ async fn single_chunk_file_ingest_is_xorb_backed_and_reconstructs_byte_identical
     // The server download stream returns byte-identical data.
     use futures_util::StreamExt;
     let mut stream = crate::download_stream::file_record_byte_stream(
-        object_store,
+        object_store.clone(),
         record.clone(),
         None,
         crate::admission::ExecutionPools::default_sizes().blocking_io,
@@ -2749,16 +2919,11 @@ async fn single_chunk_file_ingest_is_xorb_backed_and_reconstructs_byte_identical
         .unwrap();
     assert_eq!(transfer.status(), StatusCode::PARTIAL_CONTENT);
 
-    // The individual chunk object is still stored for the dedup path: the
-    // upload pipeline stores every chunk both standalone (under its chunk
-    // hash) and inside the xorb, so dedupe shards can reference it. The
-    // `/v1/chunks/default/{hash}` HTTP endpoint serves *dedupe shards*, which
-    // the server-side ingest path does not build; the standalone chunk read
-    // (`read_chunk`) is the direct proof that the individual-chunk storage
-    // path is intact for dedup.
-    let chunk_bytes = upload_backend.read_chunk(&chunk_hash).await.unwrap();
-    let decompressed = lz4_flex::decompress_size_prepended(&chunk_bytes).unwrap();
-    assert_eq!(decompressed.as_slice(), content);
+    // The public upload API advertises independently readable chunks even
+    // though its reconstruction record points at the packed Xorb. Protocol
+    // uploads omit these compatibility objects (covered by uploader tests).
+    let chunk_key = crate::chunk_store::chunk_object_key(&chunk_hash).unwrap();
+    assert!(ObjectStore::contains(&object_store, &chunk_key).unwrap());
 }
 
 // ============================================================================
@@ -8168,6 +8333,60 @@ async fn hub_xet_write_token_route_wired() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_xet_token_routes_coexist_with_native_xet_frontend() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Hub, ServerFrontend::Xet]).await;
+    let token = _test_token_with_scope_and_repo(TokenScope::Write, "hx-team", "hx-model");
+
+    // Token exchange validates the repository and revision; establish a real
+    // Hub repository rather than expecting credentials for a missing one.
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "type": "model",
+                        "name": "hx-team/hx-model",
+                        "private": false,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/hx-team/hx-model/xet-write-token/main")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("X-Xet-Cas-Url").unwrap(),
+        "http://127.0.0.1:8080"
+    );
+    assert!(response.headers().get("X-Xet-Access-Token").is_some());
+    assert_eq!(
+        response.headers().get("X-Xet-Token-Expiration").unwrap(),
+        u64::MAX.to_string().as_str()
+    );
+    let body = body_json(response).await;
+    assert!(body["token"].as_str().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_search_returns_results() {
     let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
 
@@ -8525,26 +8744,39 @@ async fn hub_tree_returns_file_listing() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // Tree listing — returns empty array for fresh repo.
-    // Axum's {*path} wildcard requires at least one path segment, so use "."
-    // as a sentinel for "root".
-    let response = app
-        .clone()
+    // Preserve the existing root sentinel for normal, paged and expanded SDK
+    // requests. A genuinely absent directory must still fail.
+    for suffix in [".", ".?limit=1", ".?expand=true&limit=1"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/models/tree-team/tree-model/tree/main/{suffix}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{suffix}");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+    let missing = app
         .oneshot(
             Request::builder()
-                .method("GET")
-                .uri("/api/models/tree-team/tree-model/tree/main/.")
+                .uri("/api/models/tree-team/tree-model/tree/main/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json.is_array(), "tree response should be an array");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10696,10 +10928,9 @@ async fn hub_and_xet_without_provider_tokens() {
         .unwrap();
     assert_eq!(stats.status(), StatusCode::OK);
 
-    // Hub xet-read-token route should NOT conflict with Xet's xet-read-token route.
-    // When Hub + Xet are both active, the Hub's xet-read-token route is disabled
-    // (register_hub_xet_routes = false) to avoid conflicts. Verify the Hub's
-    // xet-read-token route returns 404 (not registered) while Xet routes still work.
+    // Hub Xet token routes use fixed repo-type path prefixes and coexist with
+    // the native Xet frontend's provider-scoped token routes. With auth disabled,
+    // the endpoint is present but correctly refuses to mint a credential.
     let hub_xet = app
         .clone()
         .oneshot(
@@ -10712,12 +10943,10 @@ async fn hub_and_xet_without_provider_tokens() {
         .await
         .unwrap();
 
-    // The Hub's xet token routes should NOT be registered when Xet frontend is active.
-    // So this should return 404.
     assert_eq!(
         hub_xet.status(),
-        StatusCode::NOT_FOUND,
-        "Hub xet-read-token should NOT be registered when Xet frontend is active"
+        StatusCode::UNAUTHORIZED,
+        "Hub xet-read-token route should be registered with Xet frontend active"
     );
 
     // But the Xet frontend's xet-read-token route at a different path should work

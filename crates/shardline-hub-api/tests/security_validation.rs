@@ -491,20 +491,18 @@ fn validate_cas_error_no_longer_leaks_internals() {
 /// before accumulating each instruction.
 #[test]
 fn validate_ndjson_has_instruction_count_limit() {
-    let commit_source = include_str!("../src/commit.rs");
-
-    assert!(
-        commit_source.contains("MAX_COMMIT_INSTRUCTIONS"),
-        "parse_ndjson_commit has MAX_COMMIT_INSTRUCTIONS constant"
-    );
-    assert!(
-        commit_source.contains("instructions.len() >= MAX_COMMIT_INSTRUCTIONS"),
-        "parse_ndjson_commit checks instruction count before accumulating"
-    );
-    assert!(
-        commit_source.contains("too many instructions"),
-        "parse_ndjson_commit returns descriptive error for too many instructions"
-    );
+    let mut body = String::from("{\"header\":{\"message\":\"instruction bound\"}}\n");
+    let instruction = "{\"deletedEntry\":{\"path\":\"absent\"}}\n";
+    for _ in 0..100_000 {
+        body.push_str(instruction);
+    }
+    let parsed = shardline_hub_api::commit::parse_ndjson_commit(&body)
+        .expect("documented instruction ceiling remains accepted");
+    assert_eq!(parsed.instructions.len(), 100_000);
+    body.push_str(instruction);
+    let error = shardline_hub_api::commit::parse_ndjson_commit(&body)
+        .expect_err("one instruction beyond the ceiling must be rejected");
+    assert!(error.to_string().contains("too many instructions"));
 }
 
 // ============================================================================

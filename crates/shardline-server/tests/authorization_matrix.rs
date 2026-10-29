@@ -55,13 +55,10 @@
 //!
 //! ## Documented design exceptions (not invariant violations)
 //!
-//! - Hub `repo_create` / `repo_create_type` are DELIBERATELY GLOBAL (see
-//!   routes/repos.rs): a Write-scoped caller may create a repository under any
-//!   namespace; a freshly created empty repository grants no access to existing
-//!   tenants' content. The cross-tenant boundary is enforced on ACCESS
-//!   (read/write/delete/commit/resolve require the token's repository scope to
-//!   match the URL repo). Case (c) for Hub is therefore asserted against
-//!   commit/read access, not creation.
+//! - Hub `repo_create` / `repo_create_type` bind creation to the exact
+//!   repository in the write token. A token with an issuer-signed namespace
+//!   creation grant may create siblings only within that namespace. Neither
+//!   route may create a repository for another tenant.
 //! - LFS/Bazel/Xet carry no repository in the HTTP path — the token's own
 //!   `RepositoryScope` selects the storage namespace, so a repo-B token on
 //!   those routes operates in repo B's namespace by construction. The
@@ -1151,10 +1148,73 @@ async fn matrix_oci_cases_a_through_e() {
 // ===========================================================================
 // Hub matrix — bearer token, repo-scoped routes under /api/...
 //
-// NOTE: repo CREATE is deliberately global (see routes/repos.rs) — a
-// Write-scoped caller may create under any namespace. The cross-tenant (c)
-// boundary is asserted against ACCESS operations (commit/read) below.
+// Repository creation is separately bound to the requested repository or an
+// explicit same-namespace creation grant. This matrix's positive creation
+// case uses the exact repository scope; dedicated route tests cover sibling
+// grants and cross-namespace denial.
 // ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_creation_private_report_cannot_squat_or_change_visibility() {
+    let server = TestServer::start().await;
+    let client = reqwest::Client::new();
+    let attacker = mint_token(TokenScope::Write, "alice", "own");
+    let owner = mint_token(TokenScope::Write, "bob", "secret");
+    for (path, body) in [
+        (
+            "/api/repos/create",
+            serde_json::json!({"organization":"bob","name":"secret","type":"model","private":false}),
+        ),
+        (
+            "/api/models/bob/secret",
+            serde_json::json!({"private":false}),
+        ),
+    ] {
+        let denied = client
+            .post(server.url(path))
+            .bearer_auth(&attacker)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), axum::http::StatusCode::FORBIDDEN, "{path}");
+        let absent = client
+            .get(server.url("/api/models/bob/secret"))
+            .bearer_auth(&owner)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(absent.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+    let created = client.post(server.url("/api/repos/create")).bearer_auth(&owner)
+        .json(&serde_json::json!({"organization":"bob","name":"secret","type":"model","private":true}))
+        .send().await.unwrap();
+    assert_eq!(created.status(), axum::http::StatusCode::CREATED);
+    for path in ["/api/repos/create", "/api/models/bob/secret"] {
+        let denied = client.post(server.url(path)).bearer_auth(&attacker)
+            .json(&serde_json::json!({"organization":"bob","name":"secret","type":"model","private":false}))
+            .send().await.unwrap();
+        assert_eq!(denied.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+    let metadata: serde_json::Value = client
+        .get(server.url("/api/models/bob/secret"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(metadata["private"], true);
+    let anonymous = client
+        .get(server.url("/api/models/bob/secret"))
+        .send()
+        .await
+        .unwrap();
+    assert!(!anonymous.status().is_success());
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn matrix_hub_cases_a_through_e() {
@@ -1392,12 +1452,12 @@ async fn matrix_hub_git_smart_http_receive_pack_cross_tenant() {
     );
 
     // (e) control: repo A's own Write token reaches the handler (200 report;
-    // an empty update set is a benign no-op push).
+    // a flush packet encodes an empty update set).
     let resp = client
         .post(&receive_url)
         .header("Authorization", bearer(&token_a_write))
         .header("Content-Type", "application/x-git-receive-pack-request")
-        .body(Vec::new())
+        .body(b"0000".to_vec())
         .send()
         .await
         .unwrap();

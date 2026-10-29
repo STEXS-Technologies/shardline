@@ -71,6 +71,9 @@ pub enum ServerError {
     /// The decoded request payload did not match its Content-MD5 digest.
     #[error("request body MD5 did not match Content-MD5")]
     RequestBodyMd5Mismatch,
+    /// The request payload did not match its declared S3 checksum.
+    #[error("request body checksum did not match its S3 checksum header")]
+    RequestBodyChecksumMismatch,
     /// Request query exceeded the bounded metadata parser budget.
     #[error("request query exceeded the bounded metadata parser budget")]
     RequestQueryTooLarge,
@@ -319,7 +322,9 @@ impl ServerError {
             | Self::InvalidToken(_) => "UNAUTHORIZED",
             Self::InsufficientScope => "DENIED",
             Self::NotAcceptable => "UNSUPPORTED",
-            Self::ExpectedBodyHashMismatch | Self::RequestBodyMd5Mismatch => "DIGEST_INVALID",
+            Self::ExpectedBodyHashMismatch
+            | Self::RequestBodyMd5Mismatch
+            | Self::RequestBodyChecksumMismatch => "DIGEST_INVALID",
             Self::TooManyUploadSessions
             | Self::S3UploadTooManyParts
             | Self::TooManyRegistryTokenRequests => "TOO_MANY_REQUESTS",
@@ -410,9 +415,9 @@ impl ServerError {
             Self::RequestQueryTooLarge => StatusCode::URI_TOO_LONG,
             Self::InvalidAdminQuery => StatusCode::BAD_REQUEST,
             Self::RequestBodyRead(_) | Self::RequestBodyFrameOutOfBounds => StatusCode::BAD_REQUEST,
-            Self::ExpectedBodyHashMismatch | Self::RequestBodyMd5Mismatch => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::ExpectedBodyHashMismatch
+            | Self::RequestBodyMd5Mismatch
+            | Self::RequestBodyChecksumMismatch => StatusCode::BAD_REQUEST,
             Self::NotFound | Self::UnknownProvider | Self::ProviderTokensDisabled => {
                 StatusCode::NOT_FOUND
             }
@@ -527,7 +532,7 @@ impl IntoResponse for ServerError {
 
 fn index_error_message(error: &IndexError) -> &'static str {
     if error.is_retryable_transaction() {
-        return "database transaction snapshot changed; retry the request in a new transaction";
+        return "database transaction interrupted; retry the request in a new transaction";
     }
     if let IndexError::PostgresMetadata(error) = error
         && error.is_remote_delete_pending()
@@ -799,7 +804,9 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
                 S3ErrorClass::RangeNotSatisfiable
             }
             Self::NotFound => S3ErrorClass::NotFound,
-            Self::RequestBodyMd5Mismatch => S3ErrorClass::BadDigest,
+            Self::RequestBodyMd5Mismatch | Self::RequestBodyChecksumMismatch => {
+                S3ErrorClass::BadDigest
+            }
             Self::MissingAuthorization
             | Self::InvalidAuthorizationHeader
             | Self::InvalidToken(_)

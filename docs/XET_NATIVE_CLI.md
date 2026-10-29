@@ -29,6 +29,348 @@ Xet-compatible server, including shardline itself.
 - It ships as a single `shardline` binary — `sdx` is a symlink that invokes the same
   binary, which detects `argv[0]` and routes to the `xet` command lane automatically.
 
+## Retrying interrupted uploads
+
+Retry the same upload after a disconnect or server restart. Native Xorb and
+shard uploads reuse unfinished attempts. If recovery has already marked an
+attempt failed, the retry starts a new tracked attempt and preserves the old
+failure record. No manual database cleanup is needed for this case.
+
+Retries still verify content and repository authorization. They do not clear
+unresolved remote deletes or overwrite a conflicting content identity. A failed
+response alone does not establish whether an upload committed.
+
+If the file committed before the connection failed, a stock-client retry can
+reuse it without resending the original shard metadata. Downloads still verify
+the file. The earlier registration may remain unresolved in the upload history
+when its exact request is unavailable; Shardline preserves that uncertainty
+instead of recording an unproven completion.
+
+Different clients may encode the same Xorb content with different compression.
+Shardline keeps the first stored container and its offsets. A differently encoded
+retry succeeds only after its content and the complete retained container verify
+against the same ordered chunk identities and lengths. It does not rewrite existing
+containers or change how previously uploaded data is read.
+
+## Streaming shard registration
+
+Registration verifies the complete referenced containers and hashes each file's
+decoded bytes with SHA-256. Consecutive, increasing ranges from one container
+share that validation pass; skipped ranges do not enter the file digest.
+Repeated or out-of-order ranges retain their separate authenticated reads.
+This saves redundant decoding without replacing file verification with chunk
+hashes. Remote registration streams the initial container verification without
+a scratch file, retaining member metadata and at most one encoded member at a
+time. Revisited ranges use streaming range GETs and reverify their members
+against that metadata. This can add requests compared with retaining a local
+spool; it does not establish a throughput or API-cost improvement. Local sources
+continue to use their existing pinned files.
+
+Repeated versions can reuse bounded, verified SHA-256 prefix states, but every
+source is still authenticated and the final file hash must match. The cache is
+disposable: restart or eviction falls back to normal verification. When CPU
+admission has spare capacity, member authentication and file hashing overlap;
+saturated and single-CPU requests keep sequential verification.
+
+`POST /v2/shards` accepts the same serialized shard and Write token as
+`POST /v1/shards`. It returns newline-delimited JSON with a terminal `result`
+after verified publication, or a sanitized terminal `error` on failure. Read the
+response to completion: HTTP 200 starts the stream and does not mean the shard
+committed. The existing version-one and unversioned routes remain available.
+
+The stream starts with a validation event and repeats it every five seconds
+while registration is pending. Its counters stay at zero when no finer-grained
+progress is available; they are not a completed-work estimate. Write ownership
+and bounded admission remain attached to publication. Disconnecting cancels the
+operation without a detached worker; retry through the normal recovery path if
+the final result was lost.
+
+When admission is full, a new registration receives HTTP 503 with `Retry-After`
+instead of starting another verification. A PostgreSQL/MinIO HTTP test holds a
+source read across two validation events, checks this rejection, and verifies
+that no file record appears before storage is released. It also checks that a
+disconnected registration can retry safely. This qualifies that stalled-read
+case, rather than sustained saturation across multiple hosts.
+
+The stock `hf_xet` 1.5.2, 1.6.0 and 1.7.0 Hub model/dataset workflows pass with both local storage
+and disposable PostgreSQL/MinIO. Separate tests cover terminal errors,
+authentication, cross-node PostgreSQL visibility, session loss and lock release
+when a response is dropped. These checks do not establish the entire upstream
+client/version compatibility matrix.
+
+Resolve HEAD tests check the logical SHA-256 in `X-Linked-Etag`, file length,
+the Xet hash, and the immutable Git commit in `X-Repo-Commit`. The `xet-auth`
+Link must match `X-Xet-Refresh-Route` and name that same repository and commit;
+the reconstruction Link must name the exact `X-Xet-Hash`. Both links remain on
+Shardline's configured public origin. Local and PostgreSQL/MinIO tests also
+send hostile Host and forwarding headers and assert that these cannot change
+the advertised origin. This covers those fixture configurations, not every
+reverse-proxy deployment.
+
+With `huggingface_hub` 1.25.1, both tested Xet versions also pass 512 MiB
+SIGKILL/retry transfers and 1 GiB upload/download memory-bound checks on local
+storage and PostgreSQL/MinIO. These are specific executed workflows, not a claim
+that every optional upstream endpoint or deployment configuration is supported.
+
+For large-file qualification, run the explicit Linux tests with stock `hf` and
+`hf_xet` installed on `PATH`:
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo nextest run --locked \
+  --manifest-path e2e/Cargo.toml --test native_huggingface_cli_e2e \
+  --run-ignored only \
+  -E 'test(native_huggingface_one_gib) or test(native_huggingface_two_gib)'
+```
+
+This checks combined and separate API/transfer roles on local storage and
+PostgreSQL/MinIO. The remote cases require Docker; missing prerequisites fail.
+They generate 1 GiB of incompressible content, require native Xorb/shard ingestion,
+compare a cold-cache stock-client download byte-for-byte, then verify two
+concurrent slow ordinary HTTP downloads against the file's SHA-256. Linux peak
+RSS covers the server/test process, excluding the stock client and backend
+services. Each test requires the process peak to stay below 384 MiB. This bounds
+the tested workload; sustained saturation still requires separate qualification.
+With Hub 2.3.0 / hf_xet 1.7.0, all four cases also abandon an ordinary HTTP
+download after its first body frame before starting the two verified readers.
+Measured process peaks were 106,648–270,020 KiB. This exercises large-response
+abandonment and subsequent downloads; focused admission tests separately check
+permit release after cancellation.
+Nextest isolates each case in its own process and runs these large cases one at
+a time. The split-role cases use the documented streaming front door and require
+successful ranged downloads through the Shardline transfer role. Both roles run
+inside the measured test process; their combined peak must meet the same ceiling.
+
+The additional 2 GiB case uses PostgreSQL/MinIO with separate API/transfer roles
+and the same byte comparison, cancellation, concurrent-reader and 384 MiB RSS
+checks. It passes with Hub 2.3.0 / hf_xet 1.7.0; measured server/test peak RSS
+was 311,068 KiB (about 304 MiB), excluding client and backend processes. This
+qualifies that larger-file workflow, not arbitrary concurrency or production
+throughput. Both sizes share Nextest's serial large-transfer group.
+The 2 GiB remote split-role case also passes with Hub 1.25.1 and hf_xet 1.5.2
+and 1.6.0, including the same byte, cancellation, concurrent-reader and RSS
+checks.
+Fixture generation is timed separately. The standalone E2E workspace optimizes
+SHA-256 in development/test builds, matching the root workspace, so fixture
+hashing and complete-response verification fit the existing test deadlines.
+
+The current shared ingestion path also passes the 1 GiB checks with Hub 1.25.1
+and each of hf_xet 1.5.2 and 1.6.0: combined PostgreSQL/MinIO, local split roles,
+and PostgreSQL/MinIO split roles. All six cases verify native transfer, complete
+file bytes, cancellation and two slow readers within the same RSS ceiling.
+Process I/O counters include more than scratch writes and do not establish
+reduced device wear or a throughput gain.
+
+Native Xorb and shard request bodies are buffered in memory without spilling to
+scratch files. Native uploads, OCI ranged-request validation and local Bazel
+action-cache uploads share two
+buffered-body slots per process; additional requests wait before consuming
+their bodies. Native verification and immutable publication retain admission
+even when their worker outlives a disconnected client. OCI validation retains
+its slot through replay, and shared payload owners retain it while outstanding
+storage writes finish after cancellation. Existing request-size limits still apply. The default Xorb
+wire limit is 128 MiB; normalization and decoded-member buffers add memory above
+the wire bytes, so the two slots are not a 256 MiB total-RSS guarantee.
+
+This removes disposable request staging, not durable storage. An upload succeeds
+only after the existing object-persistence and upload-intent checks complete.
+Files larger than one Xorb remain a sequence of bounded native requests. Public
+local uploads now pack bounded batches through the existing packing work pool
+without a full-upload raw scratch copy. They still persist standalone chunks
+for public chunk access and preserve verified fallback.
+
+Shared packing admission also follows encoded S3 payload ownership: cancelling
+the request cannot release its batch slot while transport still retains those
+bytes. This uses the existing packing pool, independently of the two buffered-body
+slots described above.
+
+Other remote-source readers and some protocol-specific paths can still use
+temporary files. For measured upload times, resource use, reference-CAS
+limitations and retained improvements, see [native upload benchmarks](BENCHMARKS.md#overlapping-native-upload-verification).
+Those shared-host measurements do not establish production throughput or
+upstream speed parity.
+
+New native uploads retain the verified Xorb with chunk-location metadata rather
+than duplicate decoded chunk objects. Existing standalone chunks remain readable;
+removing historical copies requires separate compatibility qualification.
+Upgrade all native readers before allowing these new writes. Older readers that
+require standalone chunk objects are not guaranteed to read new copy-free
+uploads; see the [reader rollout procedure](ROLLING_UPGRADE.md#native-xet-reader-rollout).
+
+Standard Xorbs can exceed 64 MiB on the wire because of framing. Shardline's
+default native Xorb wire limit is 128 MiB; ordinary upload limits remain 64 MiB.
+See [deployment limits](DEPLOYMENT.md) before placing a proxy in front of CAS.
+
+## Interrupted uploads
+
+For process-interruption qualification with stock `hf_xet` and Docker:
+
+```bash
+cargo test -p shardline-server --features docker --test native_upload_process \
+  stock_xet_large_upload_recovers -- --ignored --nocapture --test-threads=1
+```
+
+These explicit tests upload 512 MiB through the stock native session API and
+SIGKILL the server at six named hooks: intent creation, storing,
+successful object-store work, stored, metadata committed and visible. Completion
+now commits the final three events together in SQLite and PostgreSQL, so those
+last three hooks observe the same `Visible` commit, not independent intermediate
+durability boundaries. Adapter tests separately inject failure at completion
+event insertion and verify that neither partial state nor evidence commits. A test-only
+pause records the client-selected Xorb intent and the parent checks its durable
+state before killing the process. Normal production builds do not expose this
+fault-injection hook. A cold client retries and verifies its downloaded SHA-256.
+Local storage restarts against its retained
+directory; PostgreSQL/MinIO retries through a new process, address and empty local
+directory. The exact interrupted immutable object must become visible, with its
+prior intent history retained. This qualifies those CAS recovery scenarios;
+it does not establish every Hub workflow or every possible crash timing.
+The six-boundary matrix passed on October 24, 2026 with `hf_xet` 1.7.0,
+covering six local-storage and six PostgreSQL/MinIO interruptions. The external
+report's precise failure sequence remains a separate qualification requirement.
+A subsequent current-tree run with Hub 2.2.0 / `hf_xet` 1.7.0 passed all six
+PostgreSQL/MinIO boundaries in 73 seconds, including final committed and visible
+states. It used real disk-backed disposable services with their ordinary
+write preflight and reserve settings. This does not qualify all client versions,
+split roles or rolling upgrades.
+This is recovery evidence, not a recovery
+latency or normal-transfer throughput benchmark.
+
+The mixed-client PostgreSQL/MinIO drill pairs `hf_xet` 1.7.0 and 1.5.2. After
+each of the same six SIGKILL boundaries, both cold clients retry through separate
+replacement processes and check the reconstructed 512 MiB file's length and
+SHA-256. Their caches and download destinations are independent. The interrupted
+object must become visible without losing its original intent history.
+The current-tree PostgreSQL/MinIO checks passed all six boundaries for both
+the 1.7.0/1.5.2 and 1.7.0/1.6.0 client pairs. Each client independently verified
+the reconstructed length and SHA-256. These direct-CAS checks do not establish
+mixed server-version rollout or every Hub workflow.
+Separate current-tree Hub CLI checks with Hub 2.2.0 / `hf_xet` 1.7.0 passed
+model/dataset workflows in Hub-only PostgreSQL/MinIO, PostgreSQL/local-object,
+Hub+Xet/local and combined Hub+Xet+S3 PostgreSQL/MinIO configurations. They
+assert native upload selection and downloaded content, not only route success.
+Higher-concurrency pressure and rolling deployments remain separate qualification gates.
+The current pinned-client large-file checks also passed 1 GiB PostgreSQL/MinIO
+transfers with combined and split roles, and a 2 GiB split-role transfer. They
+include native download verification, cancellation and two concurrent slow HTTP
+readers. The 2 GiB run observed about 224 MiB server/test peak RSS, excluding
+client RSS, below the test's 384 MiB ceiling. This is a bounded single-host
+qualification scenario; higher concurrency, other client versions and rolling
+deployments remain separate gates. Its process I/O counters include waited-for
+clients and do not establish scratch-write or physical device-wear savings.
+Run with the 1.7.0 environment's `python` on `PATH` and
+`SHARDLINE_NATIVE_PEER_PYTHON` pointing to the 1.5.2 environment's Python:
+
+```bash
+cargo test -p shardline-server --features docker --test native_upload_process \
+  stock_xet_large_mixed_clients_recover_with_postgres_and_minio \
+  -- --ignored --nocapture
+```
+
+CI checks both client versions explicitly and fails if either is unavailable.
+This covers CAS recovery for that pair on one host; other client combinations,
+Hub commits and multi-host recovery need their own qualification.
+
+Cancelling the upload future also cancels a final file write still queued on
+the blocking pool. A synchronous write that has already started can still
+finish after the connection disappears. That does not acknowledge the upload:
+the durable intent remains available for verified retry and reconciliation.
+The server retains that write's staged file and existing stream-work admission
+slot until the synchronous write ends, even if its caller has gone away. This
+uses the existing pool and requires no additional service or setting.
+
+The exact remote durability-boundary drill uses 32 MiB native containers:
+
+```bash
+cargo test -p shardline-server --features docker --test native_upload_process \
+  native_xorb_remote_sigkill_at_every_durable_boundary -- --ignored --nocapture
+```
+
+It kills the owning process at six persisted lifecycle boundaries, checks whether
+the object should already exist, and retries through a fresh replica. It compares
+the durable bytes and checks that an altered retry cannot replace the valid object.
+
+A separate remote drill sends simultaneous retries through two fresh server
+processes using uncompressed and LZ4 encodings of the same content. At each of
+the six boundaries, either verified representation may become immutable; later
+equivalent or mismatching retries must leave its bytes unchanged. Run it with
+`native_xorb_remote_mixed_encoding_sigkill_at_every_durable_boundary` in the same
+test target. These are HTTP-level competing retries, not a mixed-version
+stock-client qualification or a guarantee that both metadata commits overlap.
+
+## Native client deduplication
+
+The chunk lookup endpoints return a short-lived Xet lookup shard, rather than
+the original uploaded shard. A scoped token can discover chunks referenced by
+its repository's published files, including historical versions. Administrator
+tokens retain their broader access. Both `default` and `default-merkledb` routes
+use the same checks.
+
+Replies contain no file records. They retain the original container positions
+needed by Xet clients, while hidden members use private lookup labels that cannot
+match the client's content hashes. The public matching key expires after fifteen
+minutes; the independent private key is never included in the reply. This
+projection changes the lookup response only, leaving stored Xorbs and shards
+unchanged. Matching an authorized member does not grant access to another
+member's bytes.
+
+Transfer authorization reads indexed candidate records until published file
+terms prove the complete requested byte range. It can then stop parsing further
+records, even when many historical versions share the container. Gaps and shared
+footer bytes still require their existing ownership proof; a lookup-index entry
+alone never authorizes a read. Object and chunk integrity verification is
+unchanged. PostgreSQL first tries one candidate with a bounded query, so a
+complete first-record proof avoids transferring the rest of the candidate set.
+Boolean membership checks use the same bounded lookup. If a range needs more
+records, the full traversal starts with an empty proof and uses its own snapshot;
+it never combines partial permissions from the initial lookup. That fallback
+requires an extra lookup. See `docs/BENCHMARKS.md` for the synthetic shared-hash
+measurement and its limits.
+
+Signed reconstruction URLs name a file. Shardline first checks that file's
+current authoritative record for the exact repository, container and requested
+bytes. A complete proof avoids searching other files sharing the container.
+Missing, replaced or incomplete records use the existing historical and
+multi-record lookup; partial proofs from separate reads are never combined.
+This changes neither the download URL format nor content verification.
+
+Existing deployments can rebuild a missing descriptor from their retained shard
+mapping and fully verified Xorb. Cached descriptors are checked against the
+native content root, published file terms, object existence and PostgreSQL's
+unresolved-delete guard before being advertised. Publication still checks the
+delete boundary independently, because a cached client reply cannot guarantee
+that an object will remain present until a later upload.
+
+Native Xorb ingestion uses a one-frame queue between the request reader and an
+admitted blocking verifier. Complete members are decoded and hashed while later
+frames arrive. Declared sizes are checked before decompression. At EOF, their
+hashes and lengths must match the requested native root and the supplied footer;
+footerless requests receive a footer generated from the verified members.
+The resulting metadata is carried into publication without decoding those
+members again. Historical footer formats and larger pre-existing canonical
+member tables retain the full-validation fallback; the incremental table is
+bounded to 8,192 members without rejecting those previously supported containers.
+Cancellation and successful EOF are checked before publication;
+immutable storage still completes its existing verification and persistence steps.
+The public file-preparation API can still use temporary normalization files;
+native HTTP request ingestion does not. Historical footer-bearing Xorbs keep
+their existing read format.
+
+The real-client test uses separate empty Hub/Xet caches for successive uploads
+of a 36 MiB incompressible file with a 256 KiB edit. On the local PostgreSQL/MinIO
+fixture, `hf_xet` 1.5.2 uploaded 291,918 Xorb bytes for the edited version and a
+third empty-cache client downloaded matching bytes. This is a focused transfer
+measurement, not a production throughput or total storage-cost estimate. The
+test asserts a dedup endpoint hit and counts consumed upload payload bytes.
+
+Recovery is tested with the same workload after deleting the derived descriptor
+index and running the maintenance rebuild used by `shardline index rebuild`.
+Fresh official clients reuse existing chunks
+and download matching bytes with `hf_xet` 1.5.2, 1.6.0 and 1.7.0, on local and
+PostgreSQL/MinIO storage with combined or split API/transfer roles. Split roles
+use the documented ingress routing. These tests retain authoritative files and
+immutable objects; they do not qualify every predecessor migration or concurrent
+maintenance failure.
+
 ## Non-Goals
 
 - Reimplementing the shardline server or any part of the CAS coordinator.
@@ -205,6 +547,32 @@ exposing any requested range. This intentionally turns stale or corrupted provid
 responses into an error rather than a successful partial body. The trade-off is that a
 cold range request reads and validates the complete bounded xorb before responding.
 
+A repository can read only the container ranges used by its published file versions.
+Sharing a container does not grant access to another repository's chunks. Full-container
+and footer reads remain available when the repository references the entire payload.
+Reconstruction URLs also carry a short-lived capability for the exact advertised range,
+so clients can fetch that range without forwarding their bearer token.
+Ordinary S3 presigned URLs grant access to the whole object and must not replace
+these scoped URLs for shared containers. MinIO qualification confirms that signing
+the exact `Range` header rejects omitted or changed ranges, expires and can be
+refreshed. This is a provider-signature test only, not a supported download path.
+Download capabilities authorize Shardline endpoints only. Clients read through
+Shardline, which enforces repository authorization and content verification before
+serving backend bytes. Shardline does not issue backend MinIO, S3 or R2 download
+URLs to clients, and storage credentials remain on the server.
+An expired signed URL returns `403` when no bearer token is supplied, allowing
+the native client's URL provider to request fresh reconstruction metadata. A
+current bearer token for the same repository can still authorize the exact
+previously signed range. Official `hf` CLI download recovery is qualified with
+Hub 2.2.0 / `hf_xet` 1.7.0 and Hub 1.25.1 / `hf_xet` 1.5.2 and 1.6.0.
+For each environment, a test proxy delivers an expired grant; the real server
+rejects it and the unmodified client obtains a fresh URL and downloads matching
+bytes. Local and PostgreSQL/MinIO storage pass with combined and split roles.
+The companion `sdx` tests verify bearer-authorized access to the expired range
+URL in local and remote split-role deployments. These six selected cases pass
+in each environment; other proxy and multi-host deployments need their own
+qualification.
+
 Xorb upload:
 
 ```
@@ -220,6 +588,13 @@ skipped.
 
 The namespace is the server's repository-scoped prefix.
 For shardline, the namespace is derived from the repository scope.
+
+Valid footerless uploads are normalized to a verified container in admitted
+memory. This path accepts up to 64 MiB of decoded content and 8,192
+members, including their framing overhead. Valid existing footer-bearing
+containers retain their current validation and read behavior. A damaged footer,
+truncated frame or trailing garbage is rejected; normalization never discards
+invalid trailing bytes to make an upload pass verification.
 
 ### Step 3 — Metadata Registration (Write Path)
 

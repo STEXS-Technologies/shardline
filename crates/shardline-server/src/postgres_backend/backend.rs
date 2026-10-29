@@ -154,6 +154,17 @@ impl PostgresBackend {
         &self.record_store
     }
 
+    pub(crate) async fn xet_file_identity(
+        &self,
+        repository_scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<shardline_index::XetFileIdentity>, crate::ServerError> {
+        self.record_store
+            .xet_file_identity(repository_scope, sha256)
+            .await
+            .map_err(crate::ServerError::from)
+    }
+
     pub(crate) const fn object_backend_name(&self) -> &'static str {
         self.object_store.backend_name()
     }
@@ -346,7 +357,10 @@ impl PostgresBackend {
                 }
                 let target_state = match ObjectKey::parse(intent.object_key()) {
                     Ok(key) => match AsyncObjectStore::metadata(&self.object_store, &key).await? {
-                        Some(metadata) if metadata.length() != intent.object_length() => {
+                        Some(metadata) if metadata.length() != intent.object_length()
+                            && !crate::upload_intent_recovery::native_xorb_has_equivalent_encoding(
+                                intent, self.object_store.clone(), &self.stream_work_pool,
+                            ).await? => {
                             Some(UploadIntentState::Failed)
                         }
                         Some(_) if intent.state() == UploadIntentState::MetadataCommitted => {

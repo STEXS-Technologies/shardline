@@ -103,7 +103,7 @@ async fn wait_visible<S: UploadIntentStore>(index: &S, intent: &UploadIntent)
 where
     S::Error: std::fmt::Debug,
 {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let visible = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if index
                 .intent_by_id(intent.intent_id())
@@ -118,8 +118,23 @@ where
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    if visible.is_err() {
+        let state = tokio::time::timeout(
+            Duration::from_secs(1),
+            index.intent_by_id(intent.intent_id()),
+        )
+        .await;
+        let events = tokio::time::timeout(
+            Duration::from_secs(1),
+            index.reliability_events(intent.intent_id()),
+        )
+        .await;
+        panic!(
+            "recovery did not become Visible: intent={}, state={state:?}, events={events:?}",
+            intent.intent_id()
+        );
+    }
     assert_eq!(
         index
             .reliability_events(intent.intent_id())
@@ -240,6 +255,7 @@ async fn postgres_router_serves_while_large_file_recovery_is_held_for_every_role
         eprintln!("SKIPPED: large-file startup fixture requires DATABASE_URL");
         return;
     };
+    fixture.migrate().await;
     fixture
         .index()
         .initialize_remote_delete_guard()

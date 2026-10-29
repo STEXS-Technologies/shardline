@@ -83,9 +83,11 @@ pub use local_path::{
     resolve_platform_symlinks,
 };
 pub use object::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
+mod verified_body;
 #[cfg(feature = "s3")]
 pub use s3::{
-    BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectStore,
-    S3ObjectStoreConfig, S3ObjectStoreError,
+    BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectReadError,
+    S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
 };
 pub use store::ObjectStore;
+pub use verified_body::{VerifiedBodyBuilder, VerifiedObjectBody};

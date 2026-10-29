@@ -67,13 +67,63 @@ async fn schema_pool(url: &str, schema: String) -> PgPool {
 
 #[tokio::test]
 async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replies() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("SKIPPED: saved-reply recovery needs the PostgreSQL fixture");
+    let Some(url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
+    let directory = tempfile::tempdir().unwrap();
+    let objects = ServerObjectStore::local(directory.path().join("chunks")).unwrap();
+    exercise(
+        &url,
+        objects,
+        StorageMigrationEndpoint::LocalStateRoot(directory.path().to_path_buf()),
+    )
+    .await;
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+#[ignore = "requires owned PostgreSQL and MinIO containers"]
+async fn remote_saved_reply_recovery_preserves_user_objects_and_uncertain_attempts() {
+    use shardline_protocol::SecretString;
+    use shardline_storage::S3ObjectStoreConfig;
+
+    let services = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .with_minio()
+        .start()
+        .unwrap()
+        .expect("Docker is required");
+    let url = services.postgres_url().unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    shardline_server::apply_database_migrations(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let raw = services.s3_raw_config(None).unwrap();
+    let config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            None,
+        )
+        .with_allow_http(true);
+    exercise(
+        &url,
+        ServerObjectStore::s3(config.clone()).unwrap(),
+        StorageMigrationEndpoint::S3(config),
+    )
+    .await;
+}
+
+async fn exercise(url: &str, objects: ServerObjectStore, source: StorageMigrationEndpoint) {
     let admin = PgPoolOptions::new()
         .max_connections(1)
-        .connect(&url)
+        .connect(url)
         .await
         .expect("owned recovery fixture administrator");
     let schema = format!(
@@ -104,7 +154,7 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
         .await
         .unwrap();
     }
-    let work_pool = schema_pool(&url, schema.clone()).await;
+    let work_pool = schema_pool(url, schema.clone()).await;
     let work = PostgresIndexStore::new(work_pool.clone());
     work.initialize_remote_delete_guard().await.unwrap();
     let namespace = work
@@ -131,8 +181,6 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
     let receipt = permit.sign_acknowledged_receipt(&key).unwrap();
     let unknown = ObjectKey::parse("reply-recovery/missing-reply").unwrap();
     let unknown_permit = work.begin_remote_delete(&unknown).await.unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let objects = ServerObjectStore::local(directory.path().join("chunks")).unwrap();
     // Recovery may only consume reply evidence. Even a user object recreated
     // outside a covered write path must never be deleted by reconciliation.
     let known_payload = b"user bytes present during saved-reply recovery";
@@ -157,7 +205,7 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
     // is needed to settle the persisted observation.
     work_pool.close().await;
     drop(key);
-    let replay_pool = schema_pool(&url, schema.clone()).await;
+    let replay_pool = schema_pool(url, schema.clone()).await;
     let replay = PostgresIndexStore::new(replay_pool.clone());
     let mut poison_keys = Vec::new();
     for index in 0..64 {
@@ -186,7 +234,7 @@ async fn recovery_advances_past_invalid_evidence_and_never_infers_missing_replie
     write(&objects, &misplaced, &receipt_bytes);
     let destination = tempfile::tempdir().unwrap();
     let options = StorageMigrationOptions::new(
-        StorageMigrationEndpoint::LocalStateRoot(directory.path().to_path_buf()),
+        source,
         StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
     );
     let inventory = run_storage_migration(&options.clone().with_dry_run(true)).unwrap();

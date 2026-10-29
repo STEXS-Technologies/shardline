@@ -3,32 +3,51 @@ use shardline_protocol::RepositoryScope;
 
 use crate::ServerError;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) const SCOPE_PREFIX: &str = "scope-json-v1:";
 
-/// Distinguish canonical physical representations from historical wire-length
-/// identities. Footerless and normalized retries share this private identity.
+pub(crate) type PreparedNativeXorb = shardline_xet_adapter::PreparedXorbMemory;
+pub(crate) type NativeUploadResources = (
+    tokio::sync::OwnedSemaphorePermit,
+    tokio::sync::OwnedSemaphorePermit,
+);
+
+/// Track the validated request representation separately from historical raw
+/// wire-length identities. Footerless and normalized retries share this identity.
+/// An equivalent retained encoding can have a different physical length; recovery
+/// must then verify the complete native content identity before advancing it.
 pub(crate) fn xorb(hash: &str, canonical_length: u64) -> String {
     format!("xorb-v2-{hash}-{canonical_length}")
 }
 
+#[cfg(test)]
 pub(crate) async fn xorb_length(
     hash: &str,
-    staged: crate::upload_ingest::StagedRequestBody,
+    staged: crate::upload_ingest::NativeBody,
     pool: &crate::admission::BoundedPool,
-) -> Result<(crate::upload_ingest::StagedRequestBody, u64), ServerError> {
+) -> Result<(PreparedNativeXorb, u64, NativeUploadResources), ServerError> {
     let hash = hash.to_owned();
-    crate::admission::blocking_work(pool, move || {
-        let length = match &staged {
-            crate::upload_ingest::StagedRequestBody::Memory { bytes, .. } => {
-                shardline_xet_adapter::canonical_uploaded_xorb_length(&hash, bytes)?
-            }
-            crate::upload_ingest::StagedRequestBody::File { file, .. } => {
-                shardline_xet_adapter::canonical_uploaded_xorb_file_length(&hash, file.path())?
-            }
-        };
-        Ok((staged, length))
-    })
-    .await
+    let worker = pool
+        .acquire()
+        .await
+        .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
+    let ((prepared, admission), worker) =
+        crate::admission::cancellable_work_with_permit(worker, move |cancel| {
+            let crate::upload_ingest::NativeBody { bytes, admission } = staged;
+            cancel.check()?;
+            let prepared = shardline_xet_adapter::prepare_owned_xorb_memory_with_checkpoint(
+                &hash,
+                bytes,
+                &|| cancel.check_io(),
+            )?;
+            cancel.check()?;
+            Ok((prepared, admission))
+        })
+        .await?;
+    let length = prepared.length();
+    Ok((prepared, length, (admission, worker)))
 }
 
 pub(crate) fn repository(scope: Option<&RepositoryScope>) -> Result<String, ServerError> {

@@ -9,6 +9,31 @@ use std::{
 
 struct OwnedChild(Child);
 
+/// Missing released binaries may skip developer runs, never qualification.
+#[track_caller]
+pub(crate) fn binary(variable: &str) -> Option<String> {
+    let required = shardline_test_support::native_clients_required()
+        || std::env::var_os("SHARDLINE_REQUIRE_POSTGRES_TESTS").is_some_and(|value| value == "1");
+    resolve_binary(variable, std::env::var(variable), required)
+}
+
+#[track_caller]
+fn resolve_binary(
+    variable: &str,
+    value: Result<String, std::env::VarError>,
+    required: bool,
+) -> Option<String> {
+    if !required && matches!(&value, Err(std::env::VarError::NotPresent)) {
+        eprintln!("SKIPPED: optional released recovery binary {variable} is not configured");
+        return None;
+    }
+    assert!(
+        value.as_ref().is_ok_and(|path| !path.trim().is_empty()),
+        "released recovery binary {variable} is missing or invalid"
+    );
+    value.ok()
+}
+
 impl Drop for OwnedChild {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -80,4 +105,38 @@ pub(crate) async fn run(binary: PathBuf, root: PathBuf, database_url: Option<Str
     })
     .await
     .unwrap()
+}
+
+#[cfg(test)]
+mod prerequisites {
+    use super::resolve_binary;
+
+    #[test]
+    fn missing_binary_only_skips_optional_runs() {
+        assert!(
+            resolve_binary("TEST_BINARY", Err(std::env::VarError::NotPresent), false).is_none()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                resolve_binary("TEST_BINARY", Err(std::env::VarError::NotPresent), true)
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn invalid_configured_binary_never_skips_or_discloses_its_value() {
+        for value in [
+            Ok(" ".to_owned()),
+            Err(std::env::VarError::NotUnicode("private-binary-path".into())),
+        ] {
+            let failure = std::panic::catch_unwind(|| resolve_binary("TEST_BINARY", value, false))
+                .expect_err("invalid configured binary must fail");
+            let message = failure.downcast_ref::<String>().unwrap();
+            assert_eq!(
+                message,
+                "released recovery binary TEST_BINARY is missing or invalid"
+            );
+        }
+    }
 }

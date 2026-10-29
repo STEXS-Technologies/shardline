@@ -19,6 +19,7 @@ struct RecordScan {
     kind: RecordKind,
     after: Option<String>,
     repository_bounds: Option<(String, String)>,
+    hash_filter: Option<(String, String)>,
 }
 
 impl RecordScan {
@@ -50,6 +51,7 @@ impl RecordScan {
             kind,
             after: None,
             repository_bounds,
+            hash_filter: None,
         })
     }
 
@@ -85,20 +87,38 @@ impl RecordScan {
             (false, _) => "",
         };
         let columns = if locators_only {
-            "record_key, record_kind, scope_key, file_id, content_hash"
+            "r.record_key, r.record_kind, r.scope_key, r.file_id, r.content_hash"
         } else {
-            "record_key, record_kind, scope_key, file_id, content_hash, record, updated_at_unix_seconds"
+            "r.record_key, r.record_kind, r.scope_key, r.file_id, r.content_hash, r.record, r.updated_at_unix_seconds"
         };
-        let sql = format!(
-            "SELECT {columns} FROM shardline_file_records WHERE record_kind = ?1{repository_predicate}{predicate} ORDER BY record_key LIMIT {}",
-            super::index_store::INVENTORY_BATCH_SIZE
-        );
+        let (sql, parameters) = if let Some((scope_key, hash)) = &self.hash_filter {
+            (
+                format!(
+                    "SELECT {columns} FROM shardline_record_membership m
+                 JOIN shardline_file_records r ON r.record_key=m.record_key
+                 WHERE m.scope_key=?1 AND m.member_hash=?2 AND r.scope_key=?1
+                   AND m.record_key > ?3 ORDER BY m.record_key LIMIT {}",
+                    super::index_store::INVENTORY_BATCH_SIZE,
+                ),
+                vec![
+                    scope_key.clone(),
+                    hash.clone(),
+                    self.after.clone().unwrap_or_default(),
+                ],
+            )
+        } else {
+            let sql = format!(
+                "SELECT {columns} FROM shardline_file_records r WHERE record_kind = ?1{repository_predicate}{predicate} ORDER BY record_key LIMIT {}",
+                super::index_store::INVENTORY_BATCH_SIZE
+            );
+            let mut parameters = vec![self.kind.as_str().to_owned()];
+            if let Some((lower, upper)) = &self.repository_bounds {
+                parameters.extend([lower.clone(), upper.clone()]);
+            }
+            parameters.extend(self.after.clone());
+            (sql, parameters)
+        };
         let mut statement = self.connection.get()?.prepare(&sql)?;
-        let mut parameters = vec![self.kind.as_str().to_owned()];
-        if let Some((lower, upper)) = &self.repository_bounds {
-            parameters.extend([lower.clone(), upper.clone()]);
-        }
-        parameters.extend(self.after.clone());
         let mut rows = statement.query(rusqlite::params_from_iter(parameters.iter()))?;
         let mut batch = Vec::with_capacity(super::index_store::INVENTORY_BATCH_SIZE);
         let mut batch_bytes = 0usize;
@@ -140,7 +160,7 @@ async fn visit_records<Visitor, VisitorError>(
     store: LocalRecordStore,
     kind: RecordKind,
     repository: Option<RepositoryRecordScope>,
-    mut visitor: Visitor,
+    visitor: Visitor,
 ) -> Result<(), VisitorError>
 where
     Visitor: FnMut(crate::StoredRecord<LocalRecordLocator>) -> Result<(), VisitorError>,
@@ -148,13 +168,25 @@ where
     VisitorError: Send,
 {
     let reservation = super::index_store::reserve_async_cursor().map_err(Into::into)?;
-    let mut scan = tokio::task::spawn_blocking(move || {
+    let scan = tokio::task::spawn_blocking(move || {
         RecordScan::new(&store, kind, Some(reservation), repository)
     })
     .await
     .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
     .map_err(Into::into)?
     .map_err(Into::into)?;
+    visit_scan(scan, visitor).await
+}
+
+async fn visit_scan<Visitor, VisitorError>(
+    mut scan: RecordScan,
+    mut visitor: Visitor,
+) -> Result<(), VisitorError>
+where
+    Visitor: FnMut(crate::StoredRecord<LocalRecordLocator>) -> Result<(), VisitorError>,
+    LocalIndexStoreError: Into<VisitorError>,
+    VisitorError: Send,
+{
     for locators_only in [true, false] {
         scan.after = None;
         loop {
@@ -201,6 +233,67 @@ where
 impl RecordTraversal for LocalRecordStore {
     type Error = LocalIndexStoreError;
     type Locator = LocalRecordLocator;
+
+    fn native_chunk_reference_page(
+        &self,
+        after: Option<(String, i64)>,
+    ) -> RecordStoreFuture<'_, Vec<(String, i64, String)>, Self::Error> {
+        let store = self.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let connection = store.open_connection()?;
+                if after.is_none() {
+                    // Released metadata can lack this optional derived index.
+                    // GC still scans authoritative records and verifies source
+                    // containers when standalone member copies are missing.
+                    let present: bool = connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='shardline_xet_chunks')",
+                        [], |row| row.get(0),
+                    )?;
+                    if !present { return Ok(Vec::new()); }
+                }
+                let (hash, ordinal) = after.unwrap_or_else(|| (String::new(), -1));
+                let mut query = connection.prepare("SELECT xorb_hash,chunk_index,chunk_hash FROM shardline_xet_chunks WHERE (xorb_hash,chunk_index)>(?1,?2) ORDER BY xorb_hash,chunk_index LIMIT 256")?;
+                let rows = query.query_map(params![hash, ordinal], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            }).await.map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        })
+    }
+
+    fn visit_repository_hash_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        repository: &'operation shardline_protocol::RepositoryScope,
+        hash_hex: &'operation str,
+        visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(crate::StoredRecord<Self::Locator>) -> Result<(), VisitorError>
+            + Send
+            + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        let store = self.clone();
+        let filter = (
+            crate::record_key::repository_scope_key(Some(repository)),
+            hash_hex.to_owned(),
+        );
+        Box::pin(async move {
+            let reservation = super::index_store::reserve_async_cursor().map_err(Into::into)?;
+            let scan = tokio::task::spawn_blocking(move || {
+                let mut scan =
+                    RecordScan::new(&store, RecordKind::Latest, Some(reservation), None)?;
+                scan.hash_filter = Some(filter);
+                Ok::<_, LocalIndexStoreError>(scan)
+            })
+            .await
+            .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))
+            .map_err(Into::into)?
+            .map_err(Into::into)?;
+            visit_scan(scan, visitor).await
+        })
+    }
 
     fn visit_latest_records<'operation, Visitor, VisitorError>(
         &'operation self,
@@ -628,6 +721,73 @@ mod tests {
             .expect("read should succeed");
         let loaded: FileRecord = serde_json::from_slice(&bytes).expect("should deserialize");
         assert_eq!(loaded, record);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn version_replay_refreshes_row_and_latest_replay_updates() {
+        let store = make_store();
+        let record = sample_record();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE audit_record_updates (record_kind TEXT NOT NULL);
+                 CREATE TRIGGER audit_file_record_updates
+                 AFTER UPDATE ON shardline_file_records
+                 BEGIN
+                   INSERT INTO audit_record_updates(record_kind) VALUES (NEW.record_kind);
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        let version_updates: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM audit_record_updates WHERE record_kind = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_updates, 1);
+        drop(connection);
+
+        let mut changed_record = record.clone();
+        changed_record.total_bytes += 1;
+        RecordMutation::write_version_record(&store, &changed_record)
+            .await
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        let version_updates: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM audit_record_updates WHERE record_kind = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_updates, 2);
+        drop(connection);
+
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+        let connection = store.open_connection().unwrap();
+        let latest_updates: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM audit_record_updates WHERE record_kind = 'latest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest_updates, 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

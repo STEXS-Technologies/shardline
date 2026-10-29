@@ -1,0 +1,4 @@
+DROP TRIGGER IF EXISTS shardline_s3_multipart_counts_after_delete;
+DROP TRIGGER IF EXISTS shardline_s3_multipart_counts_after_update;
+DROP TRIGGER IF EXISTS shardline_s3_multipart_counts_after_insert;
+DROP TABLE IF EXISTS shardline_s3_multipart_counts;

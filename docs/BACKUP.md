@@ -91,17 +91,24 @@ shardline repair
 For full restore, recover object storage and metadata from their native backup systems,
 then run `shardline repair` before returning traffic.
 
+For a filesystem copy of local SQLite metadata, stop every Shardline process using
+that root and wait for it to exit before copying. Preserve the database and any
+remaining WAL files together. Stopping HTTP traffic alone does not stop SQLite
+checkpoints. For a live backup, use a SQLite-aware backup tool rather than copying
+individual database files while they can change. Restore with Shardline stopped.
+
 For scenario-by-scenario recovery procedures built on these manifests — node loss,
 metadata loss, object-store loss, crash mid-upload, and cross-node moves — see
 [Disaster Recovery](DISASTER_RECOVERY.md).
 
 ## Automated Recovery Rehearsal
 
-`crates/shardline-server/tests/fault_drills.rs` contains
+`crates/shardline-server/tests/fault_drills/main.rs` contains
 `drill9_backup_destroy_restore_fsck_and_download`. The hermetic drill:
 
 1. uploads several differently sized objects and records their acknowledged bytes
-2. writes a backup manifest and takes a native snapshot of the local deployment root
+2. writes a backup manifest, forcibly terminates the server process and waits for
+   exit before copying the local deployment root
 3. destroys the live root and restores the snapshot into a fresh root
 4. requires `fsck` to report zero issues
 5. requires the post-restore manifest to equal the pre-destruction manifest

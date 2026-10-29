@@ -55,8 +55,16 @@ where
         issues: Vec::new(),
     };
     let mut candidates = HashMap::new();
+    let mut native_xorbs = HashSet::new();
     RecordTraversal::visit_version_records(record_store, |entry| {
         report.scanned_version_records = checked_increment(report.scanned_version_records)?;
+        if record_store.supports_native_locations()
+            && let Ok(record) = shardline_server_core::parse_stored_file_record_bytes(&entry.bytes)
+            && record.storage_layout()
+                == shardline_index::FileRecordStorageLayout::ReferencedObjectTerms
+        {
+            native_xorbs.extend(record.chunks.into_iter().map(|term| term.hash));
+        }
         collect_candidate(record_store, entry, &mut candidates, &mut report)
     })
     .await?;
@@ -138,6 +146,18 @@ where
         &mut report,
     )
     .await?;
+
+    if report.is_clean() && record_store.supports_native_locations() {
+        for hash in native_xorbs {
+            // Never reconstruct locations from client shard offsets or the
+            // damaged index. Authenticate the entire immutable source first.
+            let descriptor = shardline_xet_adapter::recover_xorb_descriptor(object_store, &hash)?;
+            record_store
+                .cache_native_location(&descriptor)
+                .await
+                .map_err(Into::into)?;
+        }
+    }
 
     Ok(report)
 }
@@ -223,25 +243,29 @@ where
         report.scanned_retained_shards = checked_increment(report.scanned_retained_shards)?;
         let shard_key = metadata.key().clone();
         let shard_location = shard_key.as_str().to_owned();
-        let mut shard_file = object_store
-            .materialize_object_to_tempfile(&shard_key, metadata.length())
-            .map_err(RebuildError::from)?;
-        let chunk_hashes = match retained_shard_chunk_hashes_from_reader(
-            shard_file.as_file_mut(),
-            shard_metadata_limits,
-        ) {
-            Ok(chunk_hashes) => chunk_hashes,
-            Err(XetAdapterError::InvalidSerializedShard(detail)) => {
-                push_issue(
-                    report,
-                    IndexRebuildIssueKind::InvalidRetainedShard,
-                    shard_location,
-                    IndexRebuildIssueDetail::InvalidRetainedShard(detail),
-                )?;
-                return Ok(());
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let (mut shard_reader, length) = object_store
+            .materialize_bounded_object_if_present(&shard_key, 0)?
+            .ok_or(shardline_server_core::ServerObjectStoreError::NotFound)?;
+        if length != metadata.length() {
+            return Err(
+                shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch.into(),
+            );
+        }
+        let chunk_hashes =
+            match retained_shard_chunk_hashes_from_reader(&mut shard_reader, shard_metadata_limits)
+            {
+                Ok(chunk_hashes) => chunk_hashes,
+                Err(XetAdapterError::InvalidSerializedShard(detail)) => {
+                    push_issue(
+                        report,
+                        IndexRebuildIssueKind::InvalidRetainedShard,
+                        shard_location,
+                        IndexRebuildIssueDetail::InvalidRetainedShard(detail),
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
 
         for chunk_hash_hex in chunk_hashes {
             let mapping =

@@ -4,11 +4,14 @@ use shardline_index::{
     PostgresIndexStore, PostgresMetadataStoreError, RemoteDeleteReceipt,
     RemoteDeleteReceiptSettlement,
 };
-use shardline_protocol::{ByteRange, ShardlineHash};
+use shardline_protocol::ShardlineHash;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore};
 
 use super::GuardedRemoteDeleteError;
-use crate::ServerObjectStore;
+use crate::{BoundedObjectReadError, ServerObjectStore};
+
+#[cfg(test)]
+mod tests;
 
 const PREFIX: &str = "_shardline_tasks/v1/delete-replies/";
 const PAGE_SIZE: usize = 64;
@@ -59,15 +62,11 @@ fn read_bounded(
     key: &ObjectKey,
     maximum: u64,
 ) -> Result<Option<Vec<u8>>, GuardedRemoteDeleteError> {
-    let Some(metadata) = ObjectStore::metadata(objects, key)? else {
-        return Ok(None);
-    };
-    if metadata.length() == 0 || metadata.length() > maximum {
-        return Ok(None);
+    match objects.read_object_if_present(key, maximum) {
+        Ok(Some((bytes, _length))) if !bytes.is_empty() => Ok(Some(bytes)),
+        Ok(_) | Err(BoundedObjectReadError::ObjectTooLarge) => Ok(None),
+        Err(BoundedObjectReadError::Store(error)) => Err(error.into()),
     }
-    let range = ByteRange::new(0, metadata.length().saturating_sub(1))
-        .map_err(|_error| invalid("invalid saved reply range"))?;
-    Ok(Some(ObjectStore::read_range(objects, key, range)?))
 }
 
 /// Result of one bounded saved-reply recovery pass.

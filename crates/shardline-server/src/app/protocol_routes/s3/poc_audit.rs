@@ -633,27 +633,23 @@ async fn poc_f8_phantom_delete_serialized() {
     );
 
     // --- Probe 2: a DELETE issued mid-PUT cannot finish before the PUT. ---
-    // The PUT starts first, acquires the per-key lock, and holds it across a
-    // slow ~300ms body; the DELETE is issued mid-upload and must be serialized
+    // The PUT acquires the per-key lock before polling this gated body; the
+    // DELETE is issued after that signal and must be serialized
     // BEHIND the PUT's commit (with the bug it completes instantly, before the
     // PUT's swap — the phantom delete).
     let key2 = "phantom/race-order.bin";
     let url2 = format!("/{BUCKET}/{key2}");
-    let slow_body = Body::from_stream(futures_util::stream::unfold(0_u32, |i| async move {
-        if i >= 3 {
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let chunk = vec![0x5A_u8; 1024];
-        Some((
-            Ok::<_, std::io::Error>(axum::body::Bytes::from(chunk)),
-            i + 1,
-        ))
+    let (body_started, started) = tokio::sync::oneshot::channel();
+    let (allow_body, allowed) = tokio::sync::oneshot::channel();
+    let slow_body = Body::from_stream(futures_util::stream::once(async move {
+        body_started.send(()).unwrap();
+        allowed.await.unwrap();
+        Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![0x5A_u8; 3 * 1024]))
     }));
     let put_app = app.clone();
     let put_url = url2.clone();
     let put_task = tokio::spawn(async move {
-        let status = put_app
+        put_app
             .clone()
             .oneshot(
                 Request::builder()
@@ -669,15 +665,18 @@ async fn poc_f8_phantom_delete_serialized() {
             )
             .await
             .unwrap()
-            .status();
-        (status, std::time::Instant::now())
+            .status()
     });
-    // Let the PUT acquire the lock and start streaming its body.
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    // Body polling proves the PUT holds the key lock. A fixed delay cannot
+    // establish that ordering when the whole suite saturates the scheduler.
+    tokio::time::timeout(std::time::Duration::from_secs(10), started)
+        .await
+        .unwrap()
+        .unwrap();
     let del_app = app.clone();
     let del_url = url2.clone();
-    let del_task = tokio::spawn(async move {
-        let status = del_app
+    let delete = async move {
+        del_app
             .clone()
             .oneshot(
                 Request::builder()
@@ -692,22 +691,26 @@ async fn poc_f8_phantom_delete_serialized() {
             )
             .await
             .unwrap()
-            .status();
-        (status, std::time::Instant::now())
-    });
-    let (put_joined, del_joined) = tokio::join!(put_task, del_task);
-    let (put_status, put_finish) = put_joined.unwrap();
-    let (del_status, del_finish) = del_joined.unwrap();
+            .status()
+    };
+    tokio::pin!(delete);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut delete)
+            .await
+            .is_err(),
+        "DELETE cannot finish while the PUT body is gated under the key lock"
+    );
+    allow_body.send(()).unwrap();
+    let (put_joined, del_status) = tokio::join!(put_task, delete);
+    let put_status = put_joined.unwrap();
     assert_eq!(put_status, StatusCode::OK, "PUT must succeed");
     assert_eq!(del_status, StatusCode::NO_CONTENT, "DELETE must succeed");
-    println!(
-        "F-8-B delta: PUT finished {:?}, DELETE finished {:?} (DELETE must be no earlier)",
-        put_finish, del_finish
-    );
-    assert!(
-        del_finish >= put_finish,
-        "DELETE issued mid-PUT must be serialized behind the PUT's commit \
-         (phantom delete: DELETE finished before the PUT that held the lock)"
+    // Publication order, not response scheduling order, is the contract.
+    let final_get = app.clone().oneshot(get_request(url2)).await.unwrap();
+    assert_eq!(
+        final_get.status(),
+        StatusCode::NOT_FOUND,
+        "the serialized DELETE must remove the committed PUT"
     );
 }
 

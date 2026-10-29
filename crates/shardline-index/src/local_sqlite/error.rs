@@ -70,6 +70,9 @@ pub enum LocalIndexStoreError {
         #[source]
         UploadIntentConflictError,
     ),
+    /// A Hub SHA-256 identity conflicts with an existing file size.
+    #[error("Hub Xet file identity conflicts with an existing SHA-256 mapping")]
+    XetFileIdentityConflict,
     /// A stored integer exceeded the supported range.
     #[error("stored integer exceeded the supported range: {0}")]
     IntegerOutOfRange(String),
@@ -96,6 +99,9 @@ pub enum LocalIndexStoreError {
     /// An existing local metadata database contains an unknown migration.
     #[error("local metadata database contains an unknown migration version: {0}")]
     UnknownSchemaMigration(String),
+    /// Additive frontend state is missing or differs from its installed contract.
+    #[error("local frontend schema is incompatible for {0}; run shardline db migrate local-up")]
+    FrontendSchemaIncompatible(String),
     /// An existing local metadata database is behind the running binary.
     #[error(
         "local metadata schema is stale: {pending_count} migration(s) pending, first pending version {first_pending_version}"

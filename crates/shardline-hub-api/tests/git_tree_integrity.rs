@@ -27,6 +27,36 @@ use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 use std::collections::HashMap;
 use tower::ServiceExt;
 
+async fn advertised_main(
+    state: &shardline_hub_api::routes::HubState,
+    token: Option<&str>,
+) -> [u8; 20] {
+    let mut request =
+        Request::builder().uri("/models/alice/model/info/refs?service=git-receive-pack");
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let response = shardline_hub_api::hub_routes(state.clone(), true)
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    // Smart HTTP's service announcement ends with a flush before the refs.
+    let service_length =
+        usize::from_str_radix(std::str::from_utf8(&bytes[..4]).unwrap(), 16).unwrap();
+    assert_eq!(&bytes[service_length..service_length + 4], b"0000");
+    let lines = pktline::decode_lines(&bytes[service_length + 4..]);
+    let sha = lines
+        .iter()
+        .filter_map(|line| std::str::from_utf8(line).ok())
+        .filter_map(|line| line.split('\0').next())
+        .filter_map(|line| line.trim().split_once(' '))
+        .find_map(|(sha, name)| (name == "refs/heads/main").then_some(sha))
+        .expect("created repositories advertise their initial main commit");
+    hex::decode(sha).unwrap().try_into().unwrap()
+}
+
 #[test]
 fn invalid_tree_names_modes_and_duplicates_rejected() {
     let blob = create_blob_object(b"content");
@@ -78,12 +108,18 @@ async fn push_lfs(
         .store
         .create_repo(HubRepoType::Model, "alice/model", false)
         .unwrap();
+    let parent = advertised_main(test.state(), None).await;
     let pointer = create_blob_object(
         format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n")
             .as_bytes(),
     );
     let tree = create_tree_object(&[(0o100644, "weights.bin", &pointer.sha1())]);
-    let commit = create_commit_object(&tree.sha1(), None, "Alice <alice@example.com>", "LFS");
+    let commit = create_commit_object(
+        &tree.sha1(),
+        Some(&parent),
+        "Alice <alice@example.com>",
+        "LFS",
+    );
     let commit_sha = hex::encode(commit.sha1());
     let mut objects = vec![pointer, tree, commit];
     if let Some(bytes) = payload {
@@ -91,7 +127,7 @@ async fn push_lfs(
     }
     let mut request = pktline::encode_line(&format!(
         "{} {commit_sha} refs/heads/main\n",
-        "0".repeat(40)
+        hex::encode(parent)
     ))
     .unwrap()
     .into_bytes();
@@ -261,6 +297,7 @@ async fn scoped_http_lfs_upload_is_reused_without_global_fallback() {
         .store
         .create_repo(HubRepoType::Model, "alice/model", false)
         .unwrap();
+    let parent = advertised_main(&state, Some("scoped")).await;
     let payload = b"uploaded via scoped HTTP";
     let oid = hex::encode(Sha256::digest(payload));
     let pointer = create_blob_object(
@@ -271,12 +308,17 @@ async fn scoped_http_lfs_upload_is_reused_without_global_fallback() {
         .as_bytes(),
     );
     let tree = create_tree_object(&[(0o100644, "weights.bin", &pointer.sha1())]);
-    let commit = create_commit_object(&tree.sha1(), None, "Alice <alice@example.com>", "LFS");
+    let commit = create_commit_object(
+        &tree.sha1(),
+        Some(&parent),
+        "Alice <alice@example.com>",
+        "LFS",
+    );
     let commit_sha = hex::encode(commit.sha1());
     let objects = vec![pointer, tree, commit];
     let mut request = pktline::encode_line(&format!(
         "{} {commit_sha} refs/heads/main\n",
-        "0".repeat(40)
+        hex::encode(parent)
     ))
     .unwrap()
     .into_bytes();

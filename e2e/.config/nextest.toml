@@ -3,6 +3,17 @@
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# Each case includes a stock 1 or 2 GiB upload, a cold download and two simultaneous
+# slow HTTP readers. Keep the backend/role cases separate so their clients and
+# disposable stores do not compete for the runner's memory or disk capacity.
+# Concurrency inside each case remains part of the qualification.
+[[profile.default.overrides]]
+filter = 'test(native_huggingface_one_gib) | test(native_huggingface_two_gib)'
+test-group = "hub-large-transfer"
+
+[test-groups.hub-large-transfer]
+max-threads = 1
+
 # These tests reset and migrate the same Docker-backed Postgres service.
 # Nextest runs tests in separate processes, so the in-process mutex in the
 # test binary cannot prevent concurrent service restarts.

@@ -100,17 +100,26 @@ pub(super) fn seed_retained_shard(root: &Path, ordinal: u8) -> Result<()> {
 
 #[test]
 fn rebuild_sigterm_preserves_derived_index_mutations_and_fresh_recovery() -> Result<()> {
+    verify_cuts(15)
+}
+
+#[test]
+fn rebuild_sigkill_preserves_derived_index_mutations_and_fresh_recovery() -> Result<()> {
+    verify_cuts(9)
+}
+
+fn verify_cuts(signal: i32) -> Result<()> {
     for mutation in [
         Mutation::ReconstructionPrune,
         Mutation::DedupePrune,
         Mutation::DedupeRestore,
     ] {
-        verify_cut(mutation)?;
+        verify_cut(mutation, signal)?;
     }
     Ok(())
 }
 
-fn verify_cut(mutation: Mutation) -> Result<()> {
+fn verify_cut(mutation: Mutation, signal: i32) -> Result<()> {
     use std::os::unix::process::ExitStatusExt;
     let root = tempfile::tempdir()?;
     let scratch = tempfile::tempdir()?;
@@ -192,12 +201,12 @@ fn verify_cut(mutation: Mutation) -> Result<()> {
     assert_eq!(identity.operation, "IndexRebuild");
     assert!(
         Command::new("kill")
-            .arg("-TERM")
+            .arg(format!("-{signal}"))
             .arg(child.0.id().to_string())
             .status()?
             .success()
     );
-    assert_eq!(child.0.wait()?.signal(), Some(15));
+    assert_eq!(child.0.wait()?.signal(), Some(signal));
     metadata.execute_batch("DROP TRIGGER hold_derived_rebuild")?;
     assert_eq!(mutation.verify_count(&store)?, 1);
     assert_eq!(

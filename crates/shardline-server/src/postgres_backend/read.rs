@@ -2,8 +2,7 @@ use std::time::Duration;
 
 use shardline_index::{
     FileRecord, FileRecordStorageLayout, OciObjectKey, OciObjectStore, OciTagEntry, OciTagStore,
-    PostgresMetadataStoreError, RecordStore, RecordTraversal, RepositoryRecordScope, S3ObjectEntry,
-    S3ObjectIndexStore,
+    PostgresMetadataStoreError, RecordStore, RecordTraversal, S3ObjectEntry, S3ObjectIndexStore,
 };
 use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
 #[cfg(test)]
@@ -16,11 +15,11 @@ use crate::{
     ServerError,
     chunk_store::chunk_object_key,
     download_stream::{
-        ServerByteStream, collect_file_record_bytes, file_record_byte_stream,
-        object_byte_range_stream, object_byte_stream, validated_xorb_byte_range_stream,
+        ServerByteStream, VerifiedXorb, collect_file_record_bytes, file_record_byte_stream,
+        object_byte_range_stream, object_byte_stream, prepare_xorb_byte_range,
     },
     error::IndexError,
-    object_store::{read_full_object, reconstruct_file_record_bytes, visit_object_prefix},
+    object_store::{reconstruct_file_record_bytes, visit_object_prefix},
     record_store::parse_stored_file_record_bytes,
     validation::{ensure_directory, validate_content_hash, validate_identifier},
     xet_adapter::{
@@ -159,18 +158,42 @@ impl super::PostgresBackend {
         content_hash: Option<&str>,
         range: Option<ByteRange>,
     ) -> Result<(ServerByteStream, u64), ServerError> {
+        self.read_file_stream_scoped(file_id, content_hash, range, None)
+            .await
+    }
+
+    pub(crate) async fn read_file_stream_scoped(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        range: Option<ByteRange>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<(ServerByteStream, u64), ServerError> {
         // With a content hash the read is pinned to that immutable version
         // record; without one it resolves the latest record.
-        let record = self.read_record(file_id, content_hash, None).await?;
+        let record = self
+            .read_record(file_id, content_hash, repository_scope)
+            .await?;
         let total_bytes = record.total_bytes;
         crate::metrics::record_object_read_by_repr(record.storage_repr.as_str(), total_bytes);
-        let stream = file_record_byte_stream(
-            self.object_store(),
-            record,
-            range,
-            self.stream_work_pool.clone(),
-        )
-        .await?;
+        let stream = if record.storage_layout() == FileRecordStorageLayout::ReferencedObjectTerms {
+            if range.is_some() {
+                return Err(ServerError::RangeNotSatisfiable);
+            }
+            crate::server_frontend::xet::referenced_file_record_byte_stream(
+                self.object_store(),
+                record,
+                self.stream_work_pool.clone(),
+            )?
+        } else {
+            file_record_byte_stream(
+                self.object_store(),
+                record,
+                range,
+                self.stream_work_pool.clone(),
+            )
+            .await?
+        };
         Ok((stream, total_bytes))
     }
 
@@ -314,16 +337,23 @@ impl super::PostgresBackend {
     pub async fn read_chunk(&self, hash_hex: &str) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
         let object_key = chunk_object_key(hash_hex)?;
-        let metadata = AsyncObjectStore::metadata(&object_store, &object_key).await?;
-        let Some(metadata) = metadata else {
-            return Err(ServerError::NotFound);
-        };
-
-        task::spawn_blocking(move || {
-            read_full_object(&object_store, &object_key, metadata.length())
-        })
+        match crate::object_store::read_small_object(object_store, object_key).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        crate::native_chunk_read::read_indexed_member(
+            self.object_store(),
+            hash_hex,
+            &self.stream_work_pool,
+            |after| async move {
+                Ok(self
+                    .record_store()
+                    .xet_chunk_candidates_after(hash_hex, None, after.as_deref())
+                    .await?)
+            },
+        )
         .await
-        .map_err(ServerError::BlockingTask)?
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
@@ -336,14 +366,7 @@ impl super::PostgresBackend {
 
     pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
-        let object_key = object_key.clone();
-        task::spawn_blocking(move || {
-            object_store
-                .read_object_bytes(&object_key)?
-                .ok_or(ServerError::NotFound)
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?
+        crate::object_store::read_small_object(object_store, object_key.clone()).await
     }
 
     pub(crate) async fn read_object_stream(
@@ -400,7 +423,7 @@ impl super::PostgresBackend {
         let object_key = chunk_object_key(hash_hex)?;
         let metadata = AsyncObjectStore::metadata(&object_store, &object_key).await?;
         let Some(metadata) = metadata else {
-            return Err(ServerError::NotFound);
+            return Ok(u64::try_from(self.read_chunk(hash_hex).await?.len())?);
         };
 
         Ok(metadata.length())
@@ -418,27 +441,25 @@ impl super::PostgresBackend {
         Ok((byte_stream, total_length))
     }
 
-    /// Streams a stored xorb byte range by hash.
+    /// Prepares a fully verified xorb for subsequent range authorization.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the hash is invalid, the xorb is missing, or the
-    /// requested byte range cannot be served.
-    pub(crate) async fn read_xorb_range_stream(
+    /// stored length or content fails verification.
+    pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
-        total_length: u64,
-        range: ByteRange,
-    ) -> Result<ServerByteStream, ServerError> {
+        total_length: Option<u64>,
+    ) -> Result<VerifiedXorb, ServerError> {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        validated_xorb_byte_range_stream(
+        prepare_xorb_byte_range(
             &object_store,
             &object_key,
             hash_hex,
             total_length,
-            range,
             self.stream_work_pool.clone(),
         )
         .await
@@ -484,6 +505,16 @@ impl super::PostgresBackend {
         Ok(metadata.length())
     }
 
+    pub(crate) async fn repository_xorb_coverage(
+        &self,
+        hash: &str,
+        scope: &RepositoryScope,
+        requested: Option<ByteRange>,
+    ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
+        crate::record_store::repository_xorb_coverage(&self.record_store, hash, scope, requested)
+            .await
+    }
+
     pub(crate) async fn repository_references_xorb(
         &self,
         hash_hex: &str,
@@ -516,7 +547,7 @@ impl super::PostgresBackend {
         })
     }
 
-    pub(super) async fn read_record(
+    pub(crate) async fn read_record(
         &self,
         file_id: &str,
         content_hash: Option<&str>,
@@ -573,24 +604,36 @@ impl super::PostgresBackend {
         self.read_record(file_id, None, None).await
     }
 
-    /// Upserts one S3 object listing-index row.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index write fails.
-    pub(crate) async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), ServerError> {
-        self.index_store.upsert_s3_object(entry).await?;
+    pub(crate) async fn upsert_s3_object_with_multipart_count(
+        &self,
+        entry: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<(), ServerError> {
+        self.index_store
+            .upsert_s3_object_with_multipart_count(entry, part_count)
+            .await?;
         Ok(())
     }
 
-    /// Atomically replaces an S3 object row if its current value matches.
-    pub(crate) async fn compare_and_swap_s3_object(
+    pub(crate) async fn compare_and_swap_s3_object_with_multipart_count(
         &self,
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
+        part_count: u32,
     ) -> Result<bool, ServerError> {
         self.index_store
-            .compare_and_swap_s3_object(expected, replacement)
+            .compare_and_swap_s3_object_with_multipart_count(expected, replacement, part_count)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn compare_and_swap_s3_object_metadata(
+        &self,
+        expected: &S3ObjectEntry,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .compare_and_swap_s3_object_metadata(expected, replacement)
             .await
             .map_err(ServerError::from)
     }
@@ -659,6 +702,17 @@ impl super::PostgresBackend {
             .map_err(ServerError::from)
     }
 
+    pub(crate) async fn scan_s3_object_exact_with_multipart_count(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, ServerError> {
+        self.index_store
+            .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
+
     pub(crate) async fn insert_oci_tag_if_absent(
         &self,
         entry: &OciTagEntry,
@@ -712,37 +766,16 @@ pub(crate) async fn repository_references_hash_in_scope<RecordAdapter>(
 ) -> Result<bool, ServerError>
 where
     RecordAdapter: RecordStore + Sync,
+    RecordAdapter::Error: Send,
     ServerError: From<RecordAdapter::Error>,
 {
-    let repository = RepositoryRecordScope::from_repository_scope(repository_scope);
-    let mut found = false;
-    RecordTraversal::visit_repository_latest_records(record_store, &repository, |entry| {
-        if found {
-            return Ok::<(), ServerError>(());
-        }
-        if stored_record_references_hash(&entry.bytes, hash_hex, repository_scope)? {
-            found = true;
-        }
-        Ok(())
-    })
-    .await?;
-
-    if found {
-        return Ok(true);
-    }
-
-    RecordTraversal::visit_repository_version_records(record_store, &repository, |entry| {
-        if found {
-            return Ok::<(), ServerError>(());
-        }
-        if stored_record_references_hash(&entry.bytes, hash_hex, repository_scope)? {
-            found = true;
-        }
-        Ok(())
-    })
-    .await?;
-
-    Ok(found)
+    crate::record_store::any_repository_hash_record(
+        record_store,
+        repository_scope,
+        hash_hex,
+        |bytes| stored_record_references_hash(bytes, hash_hex, repository_scope),
+    )
+    .await
 }
 
 fn stored_record_references_hash(
@@ -803,6 +836,7 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::IntegerOutOfRange(_)
         | PostgresMetadataStoreError::Reliability(_)
         | PostgresMetadataStoreError::ReliabilityEventConflict(_)
+        | PostgresMetadataStoreError::XetFileIdentityConflict
         | PostgresMetadataStoreError::InvalidRecordKind
         | PostgresMetadataStoreError::InvalidOciObjectKind(_)
         | PostgresMetadataStoreError::InvalidRepoType(_)
@@ -1200,11 +1234,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chunk_length_not_found_for_missing_hash() {
+    async fn chunk_length_missing_copy_requires_available_native_index() {
         let (backend, _root) = make_backend().await;
+        backend.index_store().pool().close().await;
         let hash_hex = "ab".repeat(32); // valid hex but no chunk stored
         let result = backend.chunk_length(&hash_hex).await;
-        assert!(matches!(result, Err(ServerError::NotFound)));
+        // This fixture deliberately has no database. An unavailable native
+        // member index cannot establish that an absent standalone copy is 404.
+        assert!(matches!(
+            result,
+            Err(ServerError::Index(IndexError::PostgresMetadata(_)))
+        ));
     }
 
     #[tokio::test]
@@ -1217,11 +1257,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_chunk_not_found_for_missing_hash() {
+    async fn read_chunk_missing_copy_requires_available_native_index() {
         let (backend, _root) = make_backend().await;
+        backend.index_store().pool().close().await;
         let hash_hex = "ba".repeat(32);
         let result = backend.read_chunk(&hash_hex).await;
-        assert!(matches!(result, Err(ServerError::NotFound)));
+        assert!(matches!(
+            result,
+            Err(ServerError::Index(IndexError::PostgresMetadata(_)))
+        ));
     }
 
     #[tokio::test]

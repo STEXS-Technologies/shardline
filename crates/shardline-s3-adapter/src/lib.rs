@@ -43,7 +43,11 @@ mod key;
 mod listing;
 mod multipart;
 mod protocol_support;
+mod sigv4;
 mod types;
+mod wire_conditions;
+
+pub use wire_conditions::{WireConditionalHeader, read_wire_conditional_headers};
 
 pub use auth::{
     AuthScheme, CredentialScope, QueryCredential, extract_access_key,
@@ -62,17 +66,22 @@ pub use multipart::{
     MAX_S3_PART_NUMBER, MultipartPart, MultipartUploadSession, PartQuotaLimits, S3SessionError,
     S3SessionPartFileLock, S3UploadSessionLock, acquire_session_part_lock,
     acquire_session_part_lock_for_root, count_active_sessions, create_session, delete_session,
-    delete_session_locked, is_expired, lock_session_parts, lock_upload_sessions, new_upload_id,
-    part_file_path, read_session, read_session_locked, repair_session_evidence, session_dir,
-    session_metadata_path, store_part, store_part_locked, store_versioned_part_locked,
-    stored_part_file_path, sweep_expired_sessions, upload_dir, validate_part_number,
+    delete_session_locked, is_expired, list_bucket_sessions, lock_session_parts,
+    lock_upload_sessions, new_upload_id, part_file_path, read_session, read_session_locked,
+    repair_session_evidence, session_dir, session_metadata_path, store_part, store_part_locked,
+    store_versioned_part_locked, store_versioned_part_with_checksum_locked, stored_part_file_path,
+    sweep_expired_sessions, upload_dir, validate_part_number,
     validate_part_quota_for_session_locked, validate_part_quota_locked, validate_upload_id,
-    versioned_part_file_name,
+    versioned_part_file_name, visit_bucket_sessions,
 };
 pub use protocol_support::{
     ConditionalHeader, CopySource, EntityTag, EntityTagSet, InvalidS3HeaderValue, QueryMap,
     S3SubResource, classify, etag_header, parse_content_md5, parse_copy_source, parse_s3_range,
     parse_subresource, read_conditional_headers,
+};
+pub use sigv4::{
+    SigV4ChunkVerifier, SigV4Credential, SigV4PostPolicyAuth, VerifiedSigV4,
+    VerifiedSigV4PostPolicy, verify_sigv4, verify_sigv4_post_policy,
 };
 pub use types::{
     CompleteMultipartUploadResult, CompleteParts, Contents, CopyObjectResult, HeadObjectHeaders,

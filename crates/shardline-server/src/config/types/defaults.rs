@@ -35,6 +35,13 @@ pub(crate) const DEFAULT_MAX_SHARD_FILES: NonZeroUsize = match NonZeroUsize::new
     None => NonZeroUsize::MIN,
 };
 
+// Standard Xorbs contain up to 64 MiB of content plus serialized framing.
+pub(crate) const DEFAULT_MAX_XORB_BODY_BYTES: NonZeroUsize =
+    match NonZeroUsize::new(128 * 1024 * 1024) {
+        Some(value) => value,
+        None => NonZeroUsize::MIN,
+    };
+
 pub(crate) const DEFAULT_MAX_SHARD_XORBS: NonZeroUsize = match NonZeroUsize::new(16_384) {
     Some(value) => value,
     None => NonZeroUsize::MIN,

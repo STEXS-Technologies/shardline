@@ -8,12 +8,12 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::PathBuf,
     sync::Arc,
-    time::Duration,
 };
-use tokio::{net::TcpListener, spawn, time::sleep};
+use tokio::{net::TcpListener, spawn};
 use xet_data::processing::{FileUploadSession, Sha256Policy, configurations::TranslatorConfig};
 
 const CHUNK_SIZE: usize = 65_536;
+mod support;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,18 +39,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let server = spawn(async move { serve_with_listener(config, listener).await });
 
-    // Wait for server ready
-    let client = reqwest::Client::new();
-    for _ in 0..20 {
-        if client
-            .get(format!("{base_url}/healthz"))
-            .send()
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        sleep(Duration::from_millis(500)).await;
+    if let Err(error) = support::wait_for_health(&base_url).await {
+        server.abort();
+        return Err(error);
     }
 
     let translator = Arc::new(TranslatorConfig::test_server_config(

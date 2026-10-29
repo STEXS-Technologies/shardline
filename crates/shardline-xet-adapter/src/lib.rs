@@ -46,6 +46,7 @@
 //! reconstruction responses are built with
 //! [`build_batch_reconstruction_response`].
 
+mod checkpoint_reader;
 mod error;
 mod frontend;
 mod ingest;
@@ -56,16 +57,33 @@ mod xorb;
 mod xorb_store;
 mod xorb_visit;
 
+pub use shard_store::{
+    PreparedShardUpload, prepare_uploaded_shard, prepare_uploaded_shard_with_checkpoint,
+    prepare_uploaded_shard_with_digest_worker,
+};
+pub use shard_store::{
+    dedup_xorb_candidates, recover_dedup_xorb_descriptor,
+    recover_dedup_xorb_descriptor_from_candidates, recover_xorb_descriptor,
+};
+pub use xorb_store::read_verified_xorb_chunk;
+pub use xorb_store::{
+    normalize_owned_uploaded_xorb_file, normalize_owned_uploaded_xorb_file_with_checkpoint,
+    normalize_uploaded_xorb_file,
+};
+
 pub use error::XetAdapterError;
 pub use frontend::{
-    XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE, XET_REVISIONS_ROUTE, XET_TREE_ROUTE,
-    XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE, build_xorb_transfer_url, validate_hash_path,
-    validate_optional_content_hash, validate_xorb_transfer_namespace,
+    XET_METADATA_ACCEPT, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
+    XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
+    build_xorb_transfer_url, validate_hash_path, validate_optional_content_hash,
+    validate_xorb_transfer_namespace,
 };
 pub use ingest::{
     register_uploaded_shard_bytes, register_uploaded_shard_bytes_with_member_references,
-    register_uploaded_shard_file, register_uploaded_shard_file_with_member_references,
-    store_uploaded_xorb_bytes, store_uploaded_xorb_file_path,
+    register_uploaded_shard_bytes_with_verified_descriptors, register_uploaded_shard_file,
+    register_uploaded_shard_file_with_member_references,
+    register_uploaded_shard_file_with_verified_descriptors, store_uploaded_xorb_bytes,
+    store_uploaded_xorb_file_path,
 };
 pub use model::{
     BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
@@ -84,16 +102,22 @@ pub use shard_store::{
     shard_object_key,
 };
 pub use xorb::{
-    DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbParseError, XorbVisitError,
-    decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
-    try_for_each_serialized_xorb_chunk_async, try_for_each_serialized_xorb_chunk_async_trusted,
+    AuthenticatedXorbFooter, DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbParseError,
+    XorbVisitError, decode_authenticated_xorb_chunk, decode_serialized_xorb_chunks,
+    try_for_each_serialized_xorb_chunk, try_for_each_serialized_xorb_chunk_async,
+    try_for_each_serialized_xorb_chunk_async_trusted, try_for_each_serialized_xorb_chunk_range,
     try_for_each_serialized_xorb_chunk_trusted, validate_serialized_xorb,
-    validate_serialized_xorb_with_data,
+    validate_serialized_xorb_footer, validate_serialized_xorb_with_data,
 };
 pub use xorb_store::{
+    IncrementalXorbMemory, PreparedXorbFile, PreparedXorbMemory,
     canonical_uploaded_xorb_file_length, canonical_uploaded_xorb_length, normalize_serialized_xorb,
-    store_uploaded_xorb, store_uploaded_xorb_file, store_uploaded_xorb_with_metrics,
-    visit_stored_xorb_chunk_hashes, xorb_chunks_cache_hash_from_key_if_present,
-    xorb_hash_from_object_key_if_present, xorb_object_key,
+    prepare_owned_xorb_file_with_checkpoint, prepare_owned_xorb_memory_with_checkpoint,
+    prepare_xorb_memory, store_owned_xorb_file, store_prepared_xorb_file,
+    store_prepared_xorb_memory, store_uploaded_xorb, store_uploaded_xorb_file,
+    store_uploaded_xorb_with_metrics, store_xorb_bytes_with_resources,
+    visit_stored_xorb_chunk_hashes, visit_stored_xorb_chunk_hashes_if_present,
+    xorb_chunks_cache_hash_from_key_if_present, xorb_hash_from_object_key_if_present,
+    xorb_object_key,
 };
 pub use xorb_visit::map_xorb_visit_error;

@@ -277,6 +277,7 @@ pub fn compute_internal_node_hash(slice: &[u8]) -> DataHash {
     DataHash::from(*digest.as_bytes())
 }
 
+/// Computes the Xet data hash of bytes successfully accepted by a writer.
 pub struct HashedWrite<W: std::io::Write> {
     hasher: blake3::Hasher,
     writer: W,
@@ -302,8 +303,15 @@ impl<W: std::io::Write> HashedWrite<W> {
 
 impl<W: std::io::Write> std::io::Write for HashedWrite<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.hasher.update(buf);
-        self.writer.write(buf)
+        let written = self.writer.write(buf)?;
+        let accepted = buf.get(..written).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "writer accepted more bytes than supplied",
+            )
+        })?;
+        self.hasher.update(accepted);
+        Ok(written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

@@ -37,6 +37,82 @@ cargo check -p shardline
 3. Run contributor quality gates locally.
 4. Open a PR with a clear summary, risk notes, and test evidence.
 
+### PostgreSQL qualification
+
+Use a disposable database and export its connection string as `DATABASE_URL`.
+Apply the candidate's migrations before running the gate; a database migrated
+only by the preceding release is missing the candidate's frontend tables.
+
+```bash
+cargo run --locked --all-features -p shardline -- db migrate up --database-url "$DATABASE_URL"
+cargo make test-postgres
+```
+
+The gate checks both v1.12.1 recovery and v1.11.3 preservation of newer evidence.
+It fetches checksum-pinned Linux x86_64 binaries when they are not supplied.
+To reuse local binaries or run on another platform, set
+`SHARDLINE_N_MINUS_ONE_BINARY` to a native v1.12.1 executable and
+`SHARDLINE_LEGACY_RECOVERY_BINARY` to a native v1.11.3 executable. These are
+distinct compatibility contracts; the historical binary does not replace the
+adjacent release. Remote object-store and stock-client qualification require
+their separately provisioned gates as well.
+
+### Full Docker integration prerequisites
+
+`cargo make test-integration` also runs interrupted CLI storage-copy tests.
+Build the current CLI with `cargo build --locked --release -p shardline` and set
+`CARGO_BIN_EXE_shardline` to a frozen copy of that executable. Respect a custom
+`CARGO_TARGET_DIR` when locating the build output.
+
+Set `SHARDLINE_N_MINUS_ONE_BINARY` to the released v1.12.1 executable. The
+archive-history cases separately require `SHARDLINE_ARCHIVE_PREDECESSOR_BINARY`:
+a CLI built from development commit `a2f343963f0105e6c89fad8c6c76d150211c648a`,
+which produced the older temporary-directory task archives. This historical
+development fixture does not replace the released upgrade/rollback baseline.
+Use absolute paths and keep these executables unchanged throughout the run.
+Missing fixtures fail qualification; they must not be counted as passing tests.
+
+### Distributed-integrity qualification
+
+Use Docker, Git, `libfaketime`, and a Python 3 environment with
+`huggingface_hub==2.2.0` and `hf_xet==1.7.0` on `PATH`. Run:
+
+```bash
+SHARDLINE_FAKETIME_LIBRARY=/path/to/libfaketime.so.1 \
+  cargo make test-distributed-integrity /private/evidence/distributed
+```
+
+The gate freezes the current binary, verifies the released v1.12.1 baseline,
+and runs every deployment and multi-node test, including ignored qualification
+cases. Missing clients, skipped cases and failed assertions fail the gate.
+Keep evidence outside the checkout; logs can contain backend addresses.
+
+### Disk-pressure qualification
+
+On Linux, run the candidate CLI against a disposable 512 MiB ext4 image with
+MinIO. The drill fills only that image, checks that failed uploads remain
+unpublished, frees space, retries the identical content, and restarts Shardline
+before checking every downloaded byte. It exercises both S3 and the stock
+`hf_xet` client, including its normal retry window.
+
+Requires Docker with privileged containers, `mkfs.ext4`, Python 3 with `boto3`,
+and a Python environment exposing `hf_xet.XetSession` (validated with 1.7.0).
+Pass a frozen candidate executable; do not rebuild or replace it during the
+drill. Use a new evidence directory outside the checkout for each run:
+
+```bash
+cargo make test-disk-pressure /path/to/shardline /private/evidence/sqlite \
+  --metadata sqlite --native-python /path/to/xet-environment/bin/python
+cargo make test-disk-pressure /path/to/shardline /private/evidence/postgres \
+  --metadata postgresql --native-python /path/to/xet-environment/bin/python
+```
+
+The runner creates and removes its own database, MinIO containers and loop
+mount. Client logs stay private because upstream errors may contain signed URLs
+or credentials. Missing prerequisites and timeouts fail qualification. This is
+a bounded 1 MiB S3 / 9 MiB native-Xet recovery drill, not a throughput benchmark
+or proof of every client's behavior under disk pressure.
+
 ## Git commits and pull requests
 
 ### Philosophy

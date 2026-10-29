@@ -1,5 +1,9 @@
 use std::path::Path;
 
+mod creation;
+mod object_location;
+mod ref_batch;
+
 use rusqlite::{Connection, params};
 use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 
@@ -16,9 +20,7 @@ use crate::{
         verify_hub_ref_evidence, verify_hub_ref_evidence_batch,
     },
 };
-use shardline_reliability::{
-    HubRefEvidenceLog, SnapshotEvidence, verify_and_append_snapshot_transition,
-};
+use shardline_reliability::{SnapshotEvidence, verify_and_append_snapshot_transition};
 
 fn sqlite_store_error(error: &LocalIndexStoreError) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(error.to_string())
@@ -86,6 +88,39 @@ const fn repo_type_to_str(t: HubRepoType) -> &'static str {
 }
 
 impl HubStore for LocalIndexStore {
+    fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: crate::hub::HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<crate::hub::HubObjectLocation>, Self::Error> {
+        object_location::lookup(self, scope, kind, object_id)
+    }
+    fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: crate::hub::HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Self::Error> {
+        object_location::remember(self, scope, kind, object_id)
+    }
+    fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Self::Error> {
+        crate::LocalRecordStore::open(self.root().to_owned()).xet_file_identity(scope, sha256)
+    }
+    fn supports_atomic_ref_updates(&self) -> bool {
+        true
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[crate::hub::HubRefChange],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply(self, repo_id, changes)
+    }
     type Error = LocalIndexStoreError;
 
     fn create_repo(
@@ -94,45 +129,34 @@ impl HubStore for LocalIndexStore {
         name: &str,
         private: bool,
     ) -> Result<HubRepo, Self::Error> {
-        let root = self.root().to_owned();
-        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
-        let now = unix_now_seconds_lossy();
-        retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
-            let tx = conn.transaction()?;
-            tx.execute(
-                "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![name, repo_type_to_str(repo_type), private as i64, initial_sha, u64_to_i64(now)?, u64_to_i64(now)?],
-            )?;
-            tx.execute(
-                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                 VALUES (?1, 'main', ?2, NULL, NULL, ?3)",
-                params![name, initial_sha, u64_to_i64(now)?],
-            )?;
-            tx.execute(
-                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, 'main', ?2)",
-                params![name, initial_sha],
-            )?;
-            let evidence = HubRefEvidenceLog::baseline(hub_ref_snapshot(
-                name,
-                "main",
-                Some(initial_sha.clone()),
-            )?)?;
-            for event in evidence.events() {
-                persist_hub_ref_evidence(&tx, event)?;
+        creation::create(self, repo_type, name, private, false, None)
+    }
+
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&crate::hub::HubCreationActor>,
+    ) -> Result<crate::hub::HubCreationOutcome, Self::Error> {
+        use crate::hub::HubCreationOutcome;
+        match creation::create(self, repo_type, name, private, true, actor) {
+            Ok(repo) => Ok(HubCreationOutcome::Created(repo)),
+            Err(LocalIndexStoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                error,
+                Some(message),
+            ))) if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER => {
+                match message.as_str() {
+                    "shardline_hub_creation_denied" => Ok(HubCreationOutcome::Denied),
+                    "shardline_hub_creation_quota" => Ok(HubCreationOutcome::QuotaExceeded),
+                    "shardline_hub_creation_rate" => Ok(HubCreationOutcome::RateLimited),
+                    _ => Err(LocalIndexStoreError::Sqlite(
+                        rusqlite::Error::SqliteFailure(error, Some(message)),
+                    )),
+                }
             }
-            tx.commit()?;
-            Ok(())
-        })?;
-        Ok(HubRepo {
-            repo_id: name.to_owned(),
-            repo_type,
-            private,
-            default_branch: initial_sha,
-            created_at_unix_seconds: now,
-            updated_at_unix_seconds: now,
-        })
+            Err(error) => Err(error),
+        }
     }
 
     fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
@@ -303,6 +327,25 @@ impl HubStore for LocalIndexStore {
             }
         }
     }
+    fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        match self.publish_hub_revision_at(
+            &revision.repo_id,
+            revision.parent_sha.as_deref(),
+            &revision.sha,
+            &revision.ref_name,
+            revision.message.as_deref().unwrap_or(""),
+            HubRefPublicationMode::UpdateOnly,
+            Some(revision),
+        )? {
+            HubRefCreateOutcome::Created(stored) => Ok(HubRefUpdateOutcome::Updated(stored)),
+            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
+            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
+        }
+    }
+
     fn update_revision_if_current(
         &self,
         repo_id: &str,
@@ -442,6 +485,28 @@ impl HubStore for LocalIndexStore {
             .unwrap_or_default())
     }
 
+    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, Self::Error> {
+        let conn = open_hub_connection(self.root())?;
+        conn.query_row(
+            "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+             FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2",
+            params![repo_id, sha],
+            |row| {
+                Ok(HubRevision {
+                    repo_id: row.get(0)?,
+                    ref_name: row.get(1)?,
+                    sha: row.get(2)?,
+                    parent_sha: row.get(3)?,
+                    message: row.get(4)?,
+                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
+                        .map_err(|e| sqlite_store_error(&e))?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     fn list_revisions_bounded(
         &self,
         repo_id: &str,
@@ -534,7 +599,7 @@ impl HubStore for LocalIndexStore {
                 commit_sha.to_owned(),
             ));
         }
-        if commit_sha == EMPTY_HUB_REVISION {
+        if commit_sha == EMPTY_HUB_REVISION || files.is_empty() {
             return Ok(());
         }
         let root = self.root().to_owned();
@@ -545,8 +610,15 @@ impl HubStore for LocalIndexStore {
             let tx = conn.transaction()?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT (commit_sha, path) DO UPDATE SET
+                         size = excluded.size,
+                         sha = excluded.sha,
+                         is_lfs = excluded.is_lfs
+                     WHERE shardline_hub_file_entries.size IS NOT excluded.size
+                        OR shardline_hub_file_entries.sha IS NOT excluded.sha
+                        OR shardline_hub_file_entries.is_lfs IS NOT excluded.is_lfs",
                 )?;
                 for file in &files {
                     stmt.execute(params![
@@ -636,36 +708,47 @@ impl HubStore for LocalIndexStore {
         let query_limit = i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
         let mut entries = Vec::new();
         if options.recursive {
-            let cursor = options
-                .cursor
-                .as_ref()
-                .map(|cursor| format!("{prefix}{cursor}"));
-            let lower = cursor.as_ref().unwrap_or(&prefix);
-            let comparison = if cursor.is_some() { ">" } else { ">=" };
-            let upper_clause = if upper.is_some() { "AND path<?3" } else { "" };
-            let cursor_clause = if cursor.is_some() {
-                "AND EXISTS(SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path=?4 AND path<>?6)"
-            } else {
-                ""
-            };
-            let sql = format!("SELECT path,size,sha,is_lfs FROM shardline_hub_file_entries
-                WHERE commit_sha=?1 AND path{comparison}?2 AND path<>?6 {upper_clause} {cursor_clause}
-                ORDER BY path LIMIT ?5");
-            let mut statement = transaction.prepare(&sql)?;
+            let prefix_start =
+                i64::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i64::MAX);
+            let mut statement = transaction.prepare(
+                "WITH RECURSIVE filtered AS (
+                   SELECT substr(path,?4) AS relative,size,sha,is_lfs
+                   FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path>=?2
+                   AND (?3 IS NULL OR path<?3) AND path<>?2),
+                 directories(path,rest) AS (
+                   SELECT substr(relative,1,instr(relative,'/')-1),substr(relative,instr(relative,'/')+1)
+                   FROM filtered WHERE instr(relative,'/')>0
+                   UNION
+                   SELECT path||'/'||substr(rest,1,instr(rest,'/')-1),substr(rest,instr(rest,'/')+1)
+                   FROM directories WHERE instr(rest,'/')>0),
+                 entries AS (
+                   SELECT DISTINCT 0 AS kind,path,NULL AS size,NULL AS sha,NULL AS is_lfs FROM directories
+                   UNION ALL SELECT 1,relative,size,sha,is_lfs FROM filtered)
+                 SELECT kind,path,size,sha,is_lfs FROM entries
+                 WHERE ?5 IS NULL OR (path>?5 AND EXISTS(SELECT 1 FROM entries WHERE path=?5))
+                 ORDER BY path LIMIT ?6")?;
             let rows = statement.query_map(
-                params![commit_sha, lower, upper, cursor, query_limit, prefix],
+                params![
+                    commit_sha,
+                    prefix,
+                    upper,
+                    prefix_start,
+                    options.cursor,
+                    query_limit
+                ],
                 |row| {
-                    let full_path: String = row.get(0)?;
-                    Ok(HubTreePageEntry::File(HubFileEntry {
-                        path: full_path
-                            .strip_prefix(&prefix)
-                            .unwrap_or(&full_path)
-                            .to_owned(),
-                        size: i64_to_u64(row.get(1)?)
-                            .map_err(|error| sqlite_store_error(&error))?,
-                        sha: row.get(2)?,
-                        is_lfs: row.get::<_, i64>(3)? != 0,
-                    }))
+                    let path: String = row.get(1)?;
+                    if row.get::<_, i64>(0)? == 0 {
+                        Ok(HubTreePageEntry::Directory { path })
+                    } else {
+                        Ok(HubTreePageEntry::File(HubFileEntry {
+                            path,
+                            size: i64_to_u64(row.get(2)?)
+                                .map_err(|error| sqlite_store_error(&error))?,
+                            sha: row.get(3)?,
+                            is_lfs: row.get::<_, i64>(4)? != 0,
+                        }))
+                    }
                 },
             )?;
             for row in rows {
@@ -979,6 +1062,23 @@ impl LocalIndexStore {
         message: &str,
         mode: HubRefPublicationMode,
     ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
+        self.publish_hub_revision_at(repo_id, parent_sha, new_sha, ref_name, message, mode, None)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "shared transactional legacy and prepared publication"
+    )]
+    fn publish_hub_revision_at(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+        mode: HubRefPublicationMode,
+        prepared: Option<&HubRevision>,
+    ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
         let ref_name = canonical_ref_name(ref_name);
         let root = self.root().to_owned();
         let repo_id = repo_id.to_owned();
@@ -1028,13 +1128,14 @@ impl LocalIndexStore {
                 }
             }
 
-            let now = unix_now_seconds_lossy();
+            let published_at = unix_now_seconds_lossy();
+            let now = prepared.map_or(published_at, |r| r.created_at_unix_seconds);
 
             if ref_name == "main" {
                 tx.execute(
                 "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
                  WHERE repo_id = ?3",
-                params![new_sha, u64_to_i64(now)?, repo_id],
+                params![new_sha, u64_to_i64(published_at)?, repo_id],
             )?;
             }
 
@@ -1079,6 +1180,12 @@ impl LocalIndexStore {
                     })
                 },
             )?;
+            if prepared.is_some_and(|expected| !revision.matches_prepared(expected)) {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "conflicting prepared revision metadata".to_owned(),
+                )
+                .into());
+            }
             tx.commit()?;
             Ok(HubRefCreateOutcome::Created(revision))
         })
@@ -1102,6 +1209,78 @@ mod tests {
     use crate::hub::{BoxedHubStore, HubRepoType};
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn atomic_ref_batch_contract() {
+        let (_storage, store) = make_store();
+        crate::hub::ref_batch_tests::contract(&store);
+    }
+
+    #[test]
+    fn atomic_ref_batch_storage_failure_rolls_back_evidence_and_refs() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+        let (_storage, store) = make_store();
+        let repo = "atomic/failure";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "old", "main", "Initial")
+            .unwrap();
+        let connection = open_hub_connection_rw(store.root()).unwrap();
+        let before: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_reliability_events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection.execute_batch("CREATE TRIGGER atomic_ref_failure BEFORE INSERT ON shardline_hub_refs WHEN NEW.ref_name = 'reject' BEGIN SELECT RAISE(ABORT, 'injected ref failure'); END;").unwrap();
+        let changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("old".into()),
+                new_sha: Some("next".into()),
+                message: "Next".into(),
+            },
+            HubRefChange {
+                ref_name: "reject".into(),
+                expected_sha: None,
+                new_sha: Some("new".into()),
+                message: "New".into(),
+            },
+        ];
+        let result = store.change_refs_atomically(repo, &changes);
+        connection
+            .execute_batch("DROP TRIGGER atomic_ref_failure")
+            .unwrap();
+        assert!(result.is_err());
+        let after: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_reliability_events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            store.resolve_revision(repo, "main").unwrap().as_deref(),
+            Some("old")
+        );
+        assert_eq!(store.get_repo(repo).unwrap().unwrap().default_branch, "old");
+        assert!(store.get_revision(repo, "next").unwrap().is_none());
+        assert!(store.resolve_revision(repo, "reject").unwrap().is_none());
+        assert_eq!(
+            store.change_refs_atomically(repo, &changes).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        assert_eq!(store.list_refs(repo).unwrap().len(), 2);
+        // Boxed stores must forward the batch primitive, rather than the
+        // compatibility default for third-party stores.
+        let boxed = BoxedHubStore::from_store(store);
+        assert_eq!(
+            boxed.change_refs_atomically(repo, &[]).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+    }
 
     fn make_store() -> (shardline_test_support::TempStorage, LocalIndexStore) {
         let ts = shardline_test_support::TempStorage::new();
@@ -1445,6 +1624,30 @@ mod tests {
         assert_eq!(rev.ref_name, "main");
         assert!(rev.parent_sha.is_none());
         assert_eq!(rev.message.as_deref(), Some("initial commit"));
+        let boxed = BoxedHubStore::from_store(store);
+        let loaded = boxed.get_revision("org/model", "abc123").unwrap().unwrap();
+        assert_eq!(
+            (
+                loaded.repo_id,
+                loaded.sha,
+                loaded.parent_sha,
+                loaded.message,
+                loaded.created_at_unix_seconds
+            ),
+            (
+                rev.repo_id,
+                rev.sha,
+                rev.parent_sha,
+                rev.message,
+                rev.created_at_unix_seconds
+            )
+        );
+        assert!(
+            boxed
+                .get_revision("other/model", "abc123")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1849,6 +2052,50 @@ mod tests {
         assert_eq!(files[0].sha, "new");
         assert_eq!(files[0].size, 20);
         assert!(files[0].is_lfs);
+    }
+
+    #[test]
+    fn replaying_identical_files_does_not_replace_sqlite_rows() {
+        let (ts, store) = make_store();
+        let files = vec![HubFileEntry {
+            path: "f.txt".into(),
+            size: 10,
+            sha: "same-sha".into(),
+            is_lfs: false,
+        }];
+        store.store_files("c-replay", &files).unwrap();
+        store
+            .store_files(
+                "c-replay",
+                &[HubFileEntry {
+                    path: "sentinel.txt".into(),
+                    size: 1,
+                    sha: "sentinel".into(),
+                    is_lfs: false,
+                }],
+            )
+            .unwrap();
+
+        let row_id = |path: &str| {
+            Connection::open(ts.path().join("metadata.sqlite3"))
+                .unwrap()
+                .query_row(
+                    "SELECT rowid FROM shardline_hub_file_entries
+                     WHERE commit_sha = ?1 AND path = ?2",
+                    params!["c-replay", path],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let before = row_id("f.txt");
+        store.store_files("c-replay", &files).unwrap();
+        let after = row_id("f.txt");
+
+        assert_eq!(
+            before, after,
+            "identical replay must not delete/reinsert row"
+        );
+        assert_eq!(store.get_files("c-replay").unwrap().len(), 2);
     }
 
     // === Full lifecycle: create repo → commit → files ===
@@ -2484,7 +2731,7 @@ mod tests {
     }
 
     #[test]
-    fn store_files_partial_failure_rollback() {
+    fn empty_store_files_preserves_existing_entries() {
         use crate::hub::HubStore;
 
         let (_ts, store) = make_store();
@@ -2505,17 +2752,10 @@ mod tests {
         let files = store.get_files("commit_rollback").unwrap();
         assert_eq!(files.len(), 1);
 
-        // Now try to store files where one has a path that violates the PK constraint
-        // (same commit_sha + path) — but with INSERT OR REPLACE that would succeed.
-        // Instead, we test that the transaction works correctly by storing to a
-        // non-existent commit (which is fine since there's no FK on commit_sha).
-        //
-        // The real test: store_files with an empty list succeeds and doesn't affect prior data.
+        // An empty input appends no entries and must not replace the stored tree.
         store
             .store_files("commit_rollback", &[])
             .expect("empty store should succeed");
-        // The existing files are still there because the prior store already committed,
-        // and this empty store is a new transaction (INSERT OR REPLACE with no rows = no-op).
         let files = store.get_files("commit_rollback").unwrap();
         assert_eq!(
             files.len(),

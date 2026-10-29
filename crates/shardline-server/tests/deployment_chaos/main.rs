@@ -10,9 +10,9 @@
 //! models real deployment incidents (DB outage, object-store outage, cache
 //! outage, network partition), not process crashes.
 //!
-//! Runtime-SKIP convention (fault_drills.rs drill3): when the chaos stack is
-//! not available the test prints a loud banner and returns — never
-//! `#[ignore]`, which is compile-time static.
+//! Optional local runs can report unavailable prerequisites and return.
+//! With `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1`, missing deployment prerequisites
+//! fail qualification instead of counting an unexecuted drill as a pass.
 //!
 //! Each drill owns an isolated Compose project and dynamically allocated host
 //! ports. Run this suite with nextest so every drill gets its own OS process;
@@ -39,6 +39,7 @@ use shardline_server::{
 };
 use shardline_server_core::{AuthProvider, ServerObjectStoreError, auth::LocalHmacProvider};
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore as _, S3ObjectStoreConfig};
+use shardline_test_support::{S3FaultProxy, S3ProxyFault};
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
@@ -48,13 +49,26 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 
+#[cfg(unix)]
+mod prerequisite_tests;
 mod readonly_maintenance_deployment;
 
 mod tracker_replacement;
 
 mod gc_acknowledgement;
 
+#[cfg(all(feature = "docker", unix))]
+mod native_source_gc;
+
 mod maintenance_history;
+
+mod local_protocol_upgrade;
+
+mod git_receive_pack;
+
+mod reconstruction_cache;
+
+mod oci_lost_delete_ack;
 
 // ---------------------------------------------------------------------------
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
@@ -239,13 +253,22 @@ fn resolve_docker_arg(arg: &str) -> String {
     arg.to_owned()
 }
 
+fn cleanup_docker(args: &[&str]) {
+    let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
+    let _ = shardline_test_support::native_client_output(
+        Command::new("docker").args(args),
+        Duration::from_secs(30),
+    );
+}
+
 async fn docker_run(args: &[&str]) -> std::process::Output {
     let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("docker")
-            .args(&args)
-            .output()
-            .unwrap()
+        shardline_test_support::native_client_output(
+            std::process::Command::new("docker").args(&args),
+            Duration::from_secs(120),
+        )
+        .unwrap()
     })
     .await
     .unwrap()
@@ -254,10 +277,11 @@ async fn docker_run(args: &[&str]) -> std::process::Output {
 async fn docker_run_owned(args: Vec<String>) -> std::process::Output {
     let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("docker")
-            .args(args)
-            .output()
-            .unwrap()
+        shardline_test_support::native_client_output(
+            std::process::Command::new("docker").args(args),
+            Duration::from_secs(120),
+        )
+        .unwrap()
     })
     .await
     .unwrap()
@@ -437,29 +461,23 @@ impl ServiceRecoveryGuard {
 impl Drop for ServiceRecoveryGuard {
     fn drop(&mut self) {
         for name in &self.stopped {
-            let _ = std::process::Command::new("docker")
-                .args(["start", name])
-                .output();
+            cleanup_docker(&["start", name]);
         }
         for name in &self.disconnected {
-            let _ = std::process::Command::new("docker")
-                .args(["network", "connect", NET, name])
-                .output();
+            cleanup_docker(&["network", "connect", NET, name]);
         }
         for name in &self.netem {
             let network = format!("--network=container:{name}");
-            let _ = std::process::Command::new("docker")
-                .args([
-                    "run",
-                    "--rm",
-                    &network,
-                    "--cap-add=NET_ADMIN",
-                    NETEM_IMAGE,
-                    "sh",
-                    "-c",
-                    "tc qdisc del dev eth0 root 2>/dev/null || true",
-                ])
-                .output();
+            cleanup_docker(&[
+                "run",
+                "--rm",
+                &network,
+                "--cap-add=NET_ADMIN",
+                NETEM_IMAGE,
+                "sh",
+                "-c",
+                "tc qdisc del dev eth0 root 2>/dev/null || true",
+            ]);
         }
     }
 }
@@ -483,8 +501,8 @@ impl Drop for ChaosStack {
 }
 
 fn cleanup_compose_project(compose_file: &Path, project: &str) {
-    let _ = std::process::Command::new("docker")
-        .args([
+    let _ = shardline_test_support::native_client_output(
+        std::process::Command::new("docker").args([
             "compose",
             "-f",
             compose_file.to_str().unwrap_or(COMPOSE_FILE),
@@ -493,8 +511,9 @@ fn cleanup_compose_project(compose_file: &Path, project: &str) {
             "down",
             "--volumes",
             "--remove-orphans",
-        ])
-        .output();
+        ]),
+        Duration::from_secs(120),
+    );
 }
 
 /// Returns the resolved chaos-stack endpoints, or `None` (after printing a
@@ -507,7 +526,7 @@ async fn chaos_stack_available(drill: &str) -> Option<ChaosStack> {
     if !ps.status.success() {
         eprintln!(
             "SKIPPED: {drill} — shardline-chaos stack not available; run `cargo make chaos-deployment` (docker: {})",
-            String::from_utf8_lossy(&ps.stderr).trim()
+            ps.status
         );
         return None;
     }
@@ -521,7 +540,7 @@ async fn chaos_stack_available(drill: &str) -> Option<ChaosStack> {
     if !inspect.status.success() {
         eprintln!(
             "SKIPPED: {drill} — shardline-chaos stack not available; run `cargo make chaos-deployment` (docker: inspect {CONTAINER_POSTGRES} {CONTAINER_MINIO} {CONTAINER_REDIS}: {})",
-            String::from_utf8_lossy(&inspect.stderr).trim()
+            inspect.status
         );
         return None;
     }
@@ -608,7 +627,7 @@ async fn ensure_chaos_stack_ready(drill: &str, stack: &ChaosStack) -> bool {
             if !start.status.success() {
                 eprintln!(
                     "SKIPPED: {drill} — shardline-chaos stack not available; run `cargo make chaos-deployment` (could not start {name}: {})",
-                    String::from_utf8_lossy(&start.stderr).trim()
+                    start.status
                 );
                 return false;
             }
@@ -648,12 +667,25 @@ async fn ensure_chaos_stack_ready(drill: &str, stack: &ChaosStack) -> bool {
 /// Resolves the chaos stack and self-heals it; `None` (loud SKIP) only when
 /// docker or the chaos containers are genuinely absent.
 async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
-    let docker = docker_run(&["version"]).await;
-    if !docker.status.success() {
-        eprintln!(
-            "SKIPPED: {drill} — Docker is unavailable: {}",
-            String::from_utf8_lossy(&docker.stderr).trim()
-        );
+    let stack = try_boot_chaos_stack(drill).await;
+    assert!(
+        stack.is_some() || !shardline_test_support::native_clients_required(),
+        "{drill}: required deployment-chaos infrastructure is unavailable"
+    );
+    stack
+}
+
+async fn try_boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
+    let docker = tokio::task::spawn_blocking(|| {
+        shardline_test_support::native_client_output(
+            Command::new("docker").arg("version"),
+            Duration::from_secs(10),
+        )
+    })
+    .await
+    .unwrap();
+    if !docker.is_ok_and(|output| output.status.success()) {
+        eprintln!("SKIPPED: {drill} — Docker is unavailable");
         return None;
     }
     let project = format!(
@@ -691,31 +723,39 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
     drop(postgres_listener);
     drop(minio_listener);
     let started = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("docker")
-            .args([
-                "compose",
-                "-f",
-                compose_file_for_command.to_str().unwrap_or(COMPOSE_FILE),
-                "-p",
-                &project_for_command,
-                "up",
-                "-d",
-                "--quiet-pull",
-            ])
-            .env("SHARDLINE_CHAOS_PG_PORT", postgres_port.to_string())
-            .env("SHARDLINE_CHAOS_MINIO_PORT", minio_port.to_string())
-            .env("SHARDLINE_CHAOS_MINIO_CONSOLE_PORT", "0")
-            .env("SHARDLINE_CHAOS_REDIS_PORT", "0")
-            .output()
-            .unwrap()
+        shardline_test_support::native_client_output(
+            std::process::Command::new("docker")
+                .args([
+                    "compose",
+                    "-f",
+                    compose_file_for_command.to_str().unwrap_or(COMPOSE_FILE),
+                    "-p",
+                    &project_for_command,
+                    "up",
+                    "-d",
+                    "--quiet-pull",
+                ])
+                .env("SHARDLINE_CHAOS_PG_PORT", postgres_port.to_string())
+                .env("SHARDLINE_CHAOS_MINIO_PORT", minio_port.to_string())
+                .env("SHARDLINE_CHAOS_MINIO_CONSOLE_PORT", "0")
+                .env("SHARDLINE_CHAOS_REDIS_PORT", "0"),
+            Duration::from_secs(120),
+        )
     })
-    .await
-    .ok()?;
+    .await;
+    let started = match started {
+        Ok(Ok(output)) => output,
+        _ => {
+            cleanup_compose_project(&compose_file, &project);
+            eprintln!("SKIPPED: {drill} — isolated chaos startup command failed");
+            return None;
+        }
+    };
     if !started.status.success() {
         cleanup_compose_project(&compose_file, &project);
         eprintln!(
             "SKIPPED: {drill} — isolated chaos stack failed to start: {}",
-            String::from_utf8_lossy(&started.stderr).trim()
+            started.status
         );
         return None;
     }
@@ -825,26 +865,39 @@ async fn migrate_chaos_postgres(url: &str) {
 
 async fn migrate_chaos_postgres_with_binary(binary: &Path, url: &str) {
     let mut last_output = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     for attempt in 0..60 {
-        match Command::new(binary)
-            .args(["db", "migrate", "up", "--database-url", url])
-            .output()
-        {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let binary = binary.to_owned();
+        let url = url.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            shardline_test_support::native_client_output(
+                Command::new(binary)
+                    .args(["db", "migrate", "up"])
+                    .env("SHARDLINE_INDEX_POSTGRES_URL", url),
+                remaining,
+            )
+        })
+        .await
+        .expect("migration subprocess task did not panic");
+        match result {
             Ok(output) if output.status.success() => return,
             Ok(output) => {
-                last_output = format!(
-                    "status={} stdout={} stderr={}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                last_output = format!("status={}", output.status);
             }
-            Err(error) => last_output = error.to_string(),
+            Err(error) => last_output = format!("subprocess error: {:?}", error.kind()),
         }
         let delay = 250_u64.saturating_add((attempt as u64).saturating_mul(250));
-        tokio::time::sleep(Duration::from_millis(delay.min(2_000))).await;
+        tokio::time::sleep(
+            Duration::from_millis(delay.min(2_000))
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+        )
+        .await;
     }
-    panic!("migrate_chaos_postgres_with_binary: {binary:?} could not migrate {url}: {last_output}");
+    panic!("migrate_chaos_postgres_with_binary: {binary:?} could not migrate: {last_output}");
 }
 
 // ---------------------------------------------------------------------------
@@ -914,8 +967,29 @@ async fn wait_s3_object_count_grows(
 // ---------------------------------------------------------------------------
 
 fn resolve_shardline_binary() -> Option<PathBuf> {
+    let binary = try_resolve_shardline_binary();
+    assert!(
+        binary.is_some() || !shardline_test_support::native_clients_required(),
+        "required deployment-chaos candidate binary is unavailable"
+    );
+    binary
+}
+
+fn try_resolve_shardline_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_shardline") {
         return Some(PathBuf::from(path));
+    }
+    // Nextest does not set CARGO_BIN_EXE_* for another workspace package.
+    // Prefer the binary beside this test's profile, including custom target
+    // directories and target triples, rather than an unrelated stale build.
+    let sibling = std::env::current_exe().ok().and_then(|executable| {
+        executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|profile| profile.join(format!("shardline{}", std::env::consts::EXE_SUFFIX)))
+    });
+    if let Some(binary) = sibling.filter(|binary| binary.is_file()) {
+        return Some(binary);
     }
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -934,10 +1008,19 @@ fn resolve_shardline_binary() -> Option<PathBuf> {
 }
 
 fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("SHARDLINE_N_MINUS_ONE_BINARY")
-        .map(PathBuf::from)
-        .filter(|path| path.is_file());
+    let path = std::env::var_os("SHARDLINE_N_MINUS_ONE_BINARY").map(PathBuf::from);
+    if let Some(path) = &path {
+        assert!(
+            path.is_file(),
+            "{drill}: configured SHARDLINE_N_MINUS_ONE_BINARY is not a file: {}",
+            path.display()
+        );
+    }
     if path.is_none() {
+        assert!(
+            !shardline_test_support::native_clients_required(),
+            "{drill}: required SHARDLINE_N_MINUS_ONE_BINARY is not configured"
+        );
         eprintln!(
             "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to the adjacent released shardline binary"
         );
@@ -950,6 +1033,10 @@ fn resolve_faketime_library(drill: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_file());
     if path.is_none() {
+        assert!(
+            !shardline_test_support::native_clients_required(),
+            "{drill}: required SHARDLINE_FAKETIME_LIBRARY is unavailable"
+        );
         eprintln!("SKIPPED: {drill} — set SHARDLINE_FAKETIME_LIBRARY to libfaketime.so.1");
     }
     path
@@ -1116,6 +1203,25 @@ impl DeploymentServer {
 
     fn base_url(&self) -> String {
         self.base_url.clone()
+    }
+
+    fn kill_hard(&mut self) {
+        self.child.kill().expect("kill deployment server process");
+        self.child
+            .wait()
+            .expect("wait for killed deployment server");
+    }
+
+    fn restart(&mut self) {
+        let bind_addr = self
+            .base_url
+            .strip_prefix("http://")
+            .expect("deployment base URL uses HTTP")
+            .to_owned();
+        let binary = self.binary.clone();
+        let extra_env = self.extra_env.clone();
+        let root = self.root.clone();
+        *self = Self::spawn_process(&binary, &bind_addr, &extra_env, root);
     }
 }
 
@@ -1726,7 +1832,7 @@ async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
     let resp = client
         .post(&xorb_url)
         .header("Authorization", format!("Bearer {write_token}"))
-        .body(xorb_bytes)
+        .body(xorb_bytes.clone())
         .send()
         .await
         .unwrap();
@@ -1756,11 +1862,16 @@ async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
         .unwrap();
     assert_eq!(warm.status().as_u16(), 200, "warm reconstruction");
     let warm_bytes = warm.bytes().await.unwrap();
+    let warm_plan =
+        reconstruction_cache::verified_plan(&client, &warm_bytes, &base, &xorb_bytes).await;
     eprintln!(
         "chaos({drill}): warm reconstruction cached, {} bytes",
         warm_bytes.len()
     );
 
+    // Cross a signing-clock second so raw JSON equality cannot accidentally
+    // hide the expiring-URL regression when this drill completes quickly.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     guard.stop(CONTAINER_REDIS).await;
 
     // Redis is down: the reconstruction must fall through to the
@@ -1779,10 +1890,11 @@ async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
                 "reconstruction must still succeed after redis kill (fallback), got {status}"
             );
             let body = resp.bytes().await.unwrap();
+            let fallback =
+                reconstruction_cache::verified_plan(&client, &body, &base, &xorb_bytes).await;
             assert_eq!(
-                body.as_ref(),
-                warm_bytes.as_ref(),
-                "reconstruction byte-exact after redis kill"
+                fallback, warm_plan,
+                "reconstruction plan remains identical after redis kill"
             );
             eprintln!(
                 "chaos({drill}): reconstruction byte-exact after redis kill (fallback works)"
@@ -2127,10 +2239,9 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     let Some(previous_binary) = resolve_n_minus_one_binary(drill) else {
         return;
     };
-    // N-1 owns the database while the old deployment is serving. The new
-    // migration must not be applied until the old nodes are drained: the
-    // explicit schema compatibility check correctly rejects an N-1 binary
-    // that encounters an unknown N migration.
+    // N-1 owns the initial schema. Core migrations require the explicit drain
+    // boundary below; owner-installed additive frontend state can be installed
+    // under the existing write barrier while compatible old writers remain live.
     migrate_chaos_postgres_with_binary(&previous_binary, &stack.pg_url).await;
 
     // Seed the shared object with N-1 before starting the rollout. This
@@ -2201,10 +2312,28 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     // A format-preserving dependency upgrade needs no domain migration window.
     // Test overlap before optional owner setup, then upgraded history and rollback.
     let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
-    let incremental = shardline_server::check_database_schema_compatibility(&pool)
-        .await
-        .is_ok();
+    let compatibility = shardline_server::check_database_schema_compatibility(&pool).await;
     pool.close().await;
+    let incremental = match compatibility {
+        Ok(()) => true,
+        // The compatibility checker verifies the core ledger before frontend
+        // state. This specific error therefore distinguishes additive owner
+        // setup from an unknown, pending or corrupt core migration history.
+        Err(shardline_server::DatabaseMigrationError::FrontendSchemaIncompatible(_)) => {
+            migrate_chaos_postgres_with_binary(&current_binary, &stack.pg_url).await;
+            let pool = sqlx::PgPool::connect(&stack.pg_url).await.unwrap();
+            shardline_server::check_database_schema_compatibility(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+            true
+        }
+        Err(shardline_server::DatabaseMigrationError::PendingMigrations { .. }) => false,
+        Err(error) => panic!(
+            "core migration history must verify before testing rollout (error kind: {:?})",
+            std::mem::discriminant(&error)
+        ),
+    };
     if incremental {
         drop(node_a);
         node_a = DeploymentServer::spawn_at(
@@ -2605,6 +2734,10 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
 async fn chaos_workload_against_deployment() {
     let drill = "chaos_workload_against_deployment";
     if std::env::var("SHARDLINE_CHAOS_DEPLOYMENT").as_deref() != Ok("1") {
+        assert!(
+            !shardline_test_support::native_clients_required(),
+            "required deployment workload needs SHARDLINE_CHAOS_DEPLOYMENT=1"
+        );
         eprintln!("SKIP: {drill} — set SHARDLINE_CHAOS_DEPLOYMENT=1 to run the workload burst");
         return;
     }
@@ -3048,6 +3181,43 @@ async fn s3_upload_part_deployment(
     (status, etag)
 }
 
+/// Issues S3 `UploadPartCopy` and parses its acknowledged part ETag.
+async fn s3_upload_part_copy_deployment(
+    base: &str,
+    token: &str,
+    destination_key: &str,
+    upload_id: &str,
+    part_number: u32,
+    source_key: &str,
+) -> Result<(u16, Option<String>), reqwest::Error> {
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{base}/{BUCKET}/{destination_key}?partNumber={part_number}&uploadId={upload_id}"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-amz-copy-source", format!("/{BUCKET}/{source_key}"))
+        .send()
+        .await?;
+    let status = response.status().as_u16();
+    let body = response.text().await?;
+    Ok((status, extract_xml_tag(&body, "ETag")))
+}
+
+/// Returns the provider's current S3 multipart-part listing as XML.
+async fn s3_list_parts_deployment(
+    base: &str,
+    token: &str,
+    key: &str,
+    upload_id: &str,
+) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{base}/{BUCKET}/{key}?uploadId={upload_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("s3 list parts")
+}
+
 /// POSTs `?uploadId` to complete a multipart upload.
 async fn s3_complete_multipart_deployment(
     base: &str,
@@ -3117,6 +3287,10 @@ async fn drill_deploy_postgres_kill_mid_oci_blob_upload() {
     let full_content = deterministic_bytes(1024, 1515 ^ lfs_run_nonce());
     let digest = sha256_hex(&full_content);
     let Some(session_id) = oci_init_upload(&base, &token).await else {
+        assert!(
+            !shardline_test_support::native_clients_required(),
+            "{drill}: required OCI upload initialization failed"
+        );
         eprintln!(
             "chaos({drill}): SKIPPED — OCI blob-upload init failed (index adapter not configured for this deployment profile)"
         );
@@ -3254,5 +3428,140 @@ async fn drill_deploy_postgres_kill_mid_s3_multipart() {
     );
     eprintln!(
         "chaos({drill}): PASS - durable resumable S3 multipart survived postgres kill; object byte-exact after recovery"
+    );
+}
+
+// ===========================================================================
+// SHARDLINE PROCESS KILL DURING UPLOAD-PART-COPY: the interrupted copy must
+// not publish a partial part. After restarting the real server process, the
+// multipart session remains usable, and retrying the copy completes exactly.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill_deploy_server_kill_during_s3_upload_part_copy() {
+    let drill = "drill_deploy_server_kill_during_s3_upload_part_copy";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    // Hold the source object's successful backend GET after MinIO has returned
+    // it. This proves the child process is inside UploadPartCopy before SIGKILL.
+    let s3_proxy = S3FaultProxy::start_disarmed(
+        &stack.s3_endpoint,
+        S3ProxyFault::DelaySuccessfulGetBody(Duration::from_secs(8)),
+    )
+    .expect("start S3 response fault proxy");
+    let proxy_endpoint = s3_proxy.endpoint().to_owned();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "s3"),
+            ("SHARDLINE_S3_ENDPOINT", &proxy_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+    let suffix = lfs_run_nonce();
+    let source_key = format!("copy-crash-{suffix}-source");
+    let destination_key = format!("copy-crash-{suffix}-destination");
+    let source_bytes = deterministic_bytes(12 * 1024 * 1024, 3737 ^ suffix);
+
+    let source_put = s3_put(&base, &token, &source_key, source_bytes.clone()).await;
+    assert_eq!(source_put.status().as_u16(), 200, "source object stored");
+    let upload_id = s3_create_multipart_deployment(&base, &token, &destination_key).await;
+
+    s3_proxy.arm();
+    let copy_base = base.clone();
+    let copy_token = token.clone();
+    let copy_destination = destination_key.clone();
+    let copy_source = source_key.clone();
+    let copy_upload = upload_id.clone();
+    let copy_request = tokio::spawn(async move {
+        s3_upload_part_copy_deployment(
+            &copy_base,
+            &copy_token,
+            &copy_destination,
+            &copy_upload,
+            1,
+            &copy_source,
+        )
+        .await
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !s3_proxy.fault_was_injected() {
+        assert!(
+            server.alive(),
+            "server exited before UploadPartCopy reached the paused S3 read"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "UploadPartCopy did not reach the paused source read"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    server.kill_hard();
+    assert!(!server.alive(), "the Shardline child process was killed");
+    // Let the one-shot proxy finish its delayed response to the now-dead server
+    // before restarting and using the same proxy for recovery traffic.
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    assert!(
+        copy_request
+            .await
+            .expect("copy request task did not panic")
+            .is_err(),
+        "the in-flight request must lose its response when Shardline is killed"
+    );
+
+    server.restart();
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let listed = s3_list_parts_deployment(&base, &token, &destination_key, &upload_id).await;
+    assert_eq!(
+        listed.status().as_u16(),
+        200,
+        "multipart session survives restart"
+    );
+    let listing = listed.text().await.unwrap();
+    assert!(
+        !listing.contains("<PartNumber>1</PartNumber>"),
+        "a copy killed before publication must not expose a partial part: {listing}"
+    );
+
+    let (copy_status, copy_etag) =
+        s3_upload_part_copy_deployment(&base, &token, &destination_key, &upload_id, 1, &source_key)
+            .await
+            .expect("retry UploadPartCopy after restart");
+    assert_eq!(copy_status, 200, "copy retry succeeds after restart");
+    let copy_etag = copy_etag.expect("CopyPartResult ETag");
+
+    let complete = s3_complete_multipart_deployment(
+        &base,
+        &token,
+        &destination_key,
+        &upload_id,
+        &[(1, &copy_etag)],
+    )
+    .await;
+    assert_eq!(complete, 200, "complete retry after restart");
+    let copied = s3_get(&base, &token, &destination_key).await;
+    assert_eq!(copied.status().as_u16(), 200, "copied object is readable");
+    assert_eq!(
+        copied.bytes().await.unwrap().as_ref(),
+        source_bytes.as_slice(),
+        "retried copy is byte-exact after process death"
+    );
+    eprintln!(
+        "chaos({drill}): PASS - process killed during paused UploadPartCopy; no partial part published; retry completed byte-exactly"
     );
 }

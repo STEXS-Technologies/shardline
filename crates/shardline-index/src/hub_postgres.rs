@@ -1,5 +1,10 @@
 use std::collections::HashMap;
 
+mod creation;
+mod file_write;
+mod object_location;
+mod ref_batch;
+
 use futures_util::TryStreamExt;
 use serde_json::from_value;
 use sqlx::{Row, query_scalar};
@@ -246,6 +251,41 @@ where
 }
 
 impl HubStore for PostgresIndexStore {
+    fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: crate::hub::HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<crate::hub::HubObjectLocation>, Self::Error> {
+        object_location::lookup(self, scope, kind, object_id)
+    }
+    fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: crate::hub::HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Self::Error> {
+        object_location::remember(self, scope, kind, object_id)
+    }
+    fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Self::Error> {
+        block_on_async(
+            crate::PostgresRecordStore::new(self.pool().clone()).xet_file_identity(scope, sha256),
+        )
+    }
+    fn supports_atomic_ref_updates(&self) -> bool {
+        true
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[crate::hub::HubRefChange],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply(self, repo_id, changes)
+    }
     type Error = PostgresMetadataStoreError;
 
     fn create_repo(
@@ -254,74 +294,29 @@ impl HubStore for PostgresIndexStore {
         name: &str,
         private: bool,
     ) -> Result<HubRepo, Self::Error> {
-        let pool = self.pool().clone();
-        let repo_type_str = repo_type_to_str(repo_type);
-        let name = name.to_owned();
-        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
+        creation::create(self, repo_type, name, private, false, None)
+    }
 
-        block_on_async(async {
-            let mut tx = pool.begin().await?;
-
-            sqlx::query(
-                "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
-                 VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint)
-                 ON CONFLICT (repo_id) DO NOTHING",
-            )
-            .bind(&name)
-            .bind(repo_type_str)
-            .bind(private)
-            .bind(&initial_sha)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                 VALUES ($1, 'main', $2, NULL, NULL, EXTRACT(EPOCH FROM now())::bigint)
-                 ON CONFLICT (repo_id, sha) DO NOTHING",
-            )
-            .bind(&name)
-            .bind(&initial_sha)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES ($1, 'main', $2)
-                 ON CONFLICT (repo_id, ref_name) DO NOTHING",
-            )
-            .bind(&name)
-            .bind(&initial_sha)
-            .execute(&mut *tx)
-            .await?;
-            let evidence = HubRefEvidenceLog::baseline(HubRefSnapshot::new(
-                &name,
-                "main",
-                Some(initial_sha.clone()),
-            )?)?;
-            persist_hub_ref_evidence(&mut tx, &evidence).await?;
-
-            let row = sqlx::query(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                 FROM shardline_hub_repos WHERE repo_id = $1",
-            )
-            .bind(&name)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            tx.commit().await?;
-
-            Ok(HubRepo {
-                repo_id: row.try_get("repo_id")?,
-                repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                private: row.try_get::<bool, _>("private")?,
-                default_branch: row.try_get("default_branch")?,
-                created_at_unix_seconds: i64_to_u64(
-                    row.try_get::<i64, _>("created_at_unix_seconds")?,
-                )?,
-                updated_at_unix_seconds: i64_to_u64(
-                    row.try_get::<i64, _>("updated_at_unix_seconds")?,
-                )?,
-            })
-        })
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&crate::hub::HubCreationActor>,
+    ) -> Result<crate::hub::HubCreationOutcome, Self::Error> {
+        use crate::hub::HubCreationOutcome;
+        match creation::create(self, repo_type, name, private, true, actor) {
+            Ok(repo) => Ok(HubCreationOutcome::Created(repo)),
+            Err(PostgresMetadataStoreError::Sqlx(error)) => {
+                match error.as_database_error().and_then(|e| e.code()).as_deref() {
+                    Some("SL403") => Ok(HubCreationOutcome::Denied),
+                    Some("SL409") => Ok(HubCreationOutcome::QuotaExceeded),
+                    Some("SL429") => Ok(HubCreationOutcome::RateLimited),
+                    _ => Err(PostgresMetadataStoreError::Sqlx(error)),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
@@ -329,7 +324,11 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
 
         block_on_async(async {
-            let mut tx = pool.begin().await?;
+            // Compare the head and its evidence from one MVCC snapshot. A
+            // concurrent publication must not look like damaged evidence.
+            let mut tx = pool
+                .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .await?;
             let row = sqlx::query(
                 "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                  FROM shardline_hub_repos WHERE repo_id = $1",
@@ -501,6 +500,25 @@ impl HubStore for PostgresIndexStore {
             }
         }
     }
+    fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        match self.publish_hub_revision_at(
+            &revision.repo_id,
+            revision.parent_sha.as_deref(),
+            &revision.sha,
+            &revision.ref_name,
+            revision.message.as_deref().unwrap_or(""),
+            HubRefPublicationMode::UpdateOnly,
+            Some(revision),
+        )? {
+            HubRefCreateOutcome::Created(stored) => Ok(HubRefUpdateOutcome::Updated(stored)),
+            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
+            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
+        }
+    }
+
     fn update_revision_if_current(
         &self,
         repo_id: &str,
@@ -557,7 +575,9 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
 
         block_on_async(async {
-            let mut tx = pool.begin().await?;
+            let mut tx = pool
+                .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .await?;
             let refs = {
                 let mut rows = sqlx::query(
                     "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = $1 ORDER BY ref_name LIMIT $2",
@@ -642,6 +662,35 @@ impl HubStore for PostgresIndexStore {
             .unwrap_or_default())
     }
 
+    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let sha = sha.to_owned();
+        block_on_async(async {
+            let row = sqlx::query(
+                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+                 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2",
+            )
+            .bind(&repo_id)
+            .bind(&sha)
+            .fetch_optional(&pool)
+            .await?;
+            row.map(|row| {
+                Ok(HubRevision {
+                    repo_id: row.try_get("repo_id")?,
+                    ref_name: row.try_get("ref_name")?,
+                    sha: row.try_get("sha")?,
+                    parent_sha: row.try_get("parent_sha")?,
+                    message: row.try_get("message")?,
+                    created_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
+                })
+            })
+            .transpose()
+        })
+    }
+
     fn list_revisions_bounded(
         &self,
         repo_id: &str,
@@ -688,7 +737,9 @@ impl HubStore for PostgresIndexStore {
         let revision = revision.to_owned();
 
         block_on_async(async {
-            let mut tx = pool.begin().await?;
+            let mut tx = pool
+                .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .await?;
             if revision.is_empty() || revision == "main" {
                 let head: Option<String> = sqlx::query_scalar::<_, String>(
                     "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = $1",
@@ -742,7 +793,7 @@ impl HubStore for PostgresIndexStore {
                 commit_sha.to_owned(),
             ));
         }
-        if commit_sha == EMPTY_HUB_REVISION {
+        if commit_sha == EMPTY_HUB_REVISION || files.is_empty() {
             return Ok(());
         }
         let pool = self.pool().clone();
@@ -751,21 +802,7 @@ impl HubStore for PostgresIndexStore {
 
         block_on_async(async {
             let mut tx = pool.begin().await?;
-            for file in &files {
-                sqlx::query(
-                    "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
-                     VALUES ($1, $2, $3, $4, $5)
-                     ON CONFLICT (commit_sha, path)
-                     DO UPDATE SET size = EXCLUDED.size, sha = EXCLUDED.sha, is_lfs = EXCLUDED.is_lfs",
-                )
-                .bind(&commit_sha)
-                .bind(&file.path)
-                .bind(u64_to_i64(file.size)?)
-                .bind(&file.sha)
-                .bind(file.is_lfs)
-                .execute(&mut *tx)
-                .await?;
-            }
+            file_write::store(&mut tx, &commit_sha, &files).await?;
             tx.commit().await?;
             Ok(())
         })
@@ -869,42 +906,36 @@ impl HubStore for PostgresIndexStore {
                 i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
             let mut entries = Vec::new();
             if options.recursive {
-                let cursor = options
-                    .cursor
-                    .as_ref()
-                    .map(|cursor| format!("{prefix}{cursor}"));
-                let lower = cursor.as_ref().unwrap_or(&prefix);
-                let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                    "SELECT path,size,sha,is_lfs FROM shardline_hub_file_entries WHERE commit_sha=",
-                );
-                query.push_bind(&commit_sha).push(" AND path COLLATE \"C\"");
-                query
-                    .push(if cursor.is_some() { ">" } else { ">=" })
-                    .push_bind(lower);
-                query.push(" AND path COLLATE \"C\"<>").push_bind(&prefix);
-                if let Some(upper) = &upper {
-                    query.push(" AND path COLLATE \"C\"<").push_bind(upper);
-                }
-                if let Some(cursor) = &cursor {
-                    query.push(" AND EXISTS(SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=")
-                        .push_bind(&commit_sha).push(" AND path COLLATE \"C\"=").push_bind(cursor)
-                        .push(" AND path COLLATE \"C\"<>").push_bind(&prefix).push(")");
-                }
-                query
-                    .push(" ORDER BY path COLLATE \"C\" LIMIT ")
-                    .push_bind(query_limit);
-                let mut rows = query.build().fetch(&mut *transaction);
+                let prefix_start =
+                    i32::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i32::MAX);
+                let mut rows = sqlx::query(
+                    "WITH filtered AS (
+                       SELECT substring(path FROM $4) COLLATE \"C\" AS relative,size,sha,is_lfs
+                       FROM shardline_hub_file_entries WHERE commit_sha=$1 AND path COLLATE \"C\">=$2
+                       AND ($3::text IS NULL OR path COLLATE \"C\"<$3) AND path COLLATE \"C\"<>$2),
+                     directories AS (
+                       SELECT DISTINCT array_to_string(parts[1:level],'/') COLLATE \"C\" AS path
+                       FROM (SELECT string_to_array(relative,'/') AS parts FROM filtered) split
+                       CROSS JOIN LATERAL generate_series(1,cardinality(parts)-1) level),
+                     entries AS (
+                       SELECT 0 AS kind,path,NULL::bigint AS size,NULL::text AS sha,NULL::boolean AS is_lfs FROM directories
+                       UNION ALL SELECT 1,relative,size,sha,is_lfs FROM filtered)
+                     SELECT kind,path,size,sha,is_lfs FROM entries
+                     WHERE $5::text IS NULL OR (path>$5 AND EXISTS(SELECT 1 FROM entries WHERE path=$5))
+                     ORDER BY path LIMIT $6")
+                    .bind(&commit_sha).bind(&prefix).bind(&upper).bind(prefix_start).bind(&options.cursor).bind(query_limit).fetch(&mut *transaction);
                 while let Some(row) = rows.try_next().await? {
-                    let full_path: String = row.try_get("path")?;
-                    entries.push(HubTreePageEntry::File(HubFileEntry {
-                        path: full_path
-                            .strip_prefix(&prefix)
-                            .unwrap_or(&full_path)
-                            .to_owned(),
-                        size: i64_to_u64(row.try_get("size")?)?,
-                        sha: row.try_get("sha")?,
-                        is_lfs: row.try_get("is_lfs")?,
-                    }));
+                    let path: String = row.try_get("path")?;
+                    entries.push(if row.try_get::<i32, _>("kind")? == 0 {
+                        HubTreePageEntry::Directory { path }
+                    } else {
+                        HubTreePageEntry::File(HubFileEntry {
+                            path,
+                            size: i64_to_u64(row.try_get("size")?)?,
+                            sha: row.try_get("sha")?,
+                            is_lfs: row.try_get("is_lfs")?,
+                        })
+                    });
                 }
             } else {
                 let prefix_start =
@@ -1279,12 +1310,32 @@ impl PostgresIndexStore {
         message: &str,
         mode: HubRefPublicationMode,
     ) -> Result<HubRefCreateOutcome, PostgresMetadataStoreError> {
+        self.publish_hub_revision_at(repo_id, parent_sha, new_sha, ref_name, message, mode, None)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "shared transactional legacy and prepared publication"
+    )]
+    fn publish_hub_revision_at(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+        mode: HubRefPublicationMode,
+        prepared: Option<&HubRevision>,
+    ) -> Result<HubRefCreateOutcome, PostgresMetadataStoreError> {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
         let new_sha = new_sha.to_owned();
         let ref_name = canonical_ref_name(ref_name).to_owned();
         let message = message.to_owned();
         let parent_sha = parent_sha.map(ToOwned::to_owned);
+        let prepared_timestamp = prepared
+            .map(|r| u64_to_i64(r.created_at_unix_seconds))
+            .transpose()?;
 
         block_on_async(async {
             let mut tx = pool.begin().await?;
@@ -1358,7 +1409,7 @@ impl PostgresIndexStore {
 
             sqlx::query(
                 "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM now())::bigint)
+                 VALUES ($1, $2, $3, $4, $5, COALESCE($6, EXTRACT(EPOCH FROM now())::bigint))
                  ON CONFLICT (repo_id, sha) DO NOTHING",
             )
             .bind(&repo_id)
@@ -1366,6 +1417,7 @@ impl PostgresIndexStore {
             .bind(&new_sha)
             .bind(parent_sha.as_deref())
             .bind(&message)
+            .bind(prepared_timestamp)
             .execute(&mut *tx)
             .await?;
 
@@ -1398,9 +1450,7 @@ impl PostgresIndexStore {
             .fetch_one(&mut *tx)
             .await?;
 
-            tx.commit().await?;
-
-            Ok(HubRefCreateOutcome::Created(HubRevision {
+            let revision = HubRevision {
                 repo_id: row.try_get("repo_id")?,
                 ref_name: row.try_get("ref_name")?,
                 sha: row.try_get("sha")?,
@@ -1409,7 +1459,12 @@ impl PostgresIndexStore {
                 created_at_unix_seconds: i64_to_u64(
                     row.try_get::<i64, _>("created_at_unix_seconds")?,
                 )?,
-            }))
+            };
+            if prepared.is_some_and(|expected| !revision.matches_prepared(expected)) {
+                return Err(PostgresMetadataStoreError::RecordNotFound);
+            }
+            tx.commit().await?;
+            Ok(HubRefCreateOutcome::Created(revision))
         })
     }
 }
@@ -1479,6 +1534,78 @@ mod tests {
 
     // block_on_async itself is tested indirectly by every hub_postgres integration
     // test that exercises the HubStore impl (create_repo, get_repo, etc.)
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atomic_ref_batch_contract() {
+        if std::env::var_os("DATABASE_URL").is_none() {
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool);
+        crate::hub::ref_batch_tests::contract(&store);
+        cleanup_repo(&store, "atomic/contract").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atomic_ref_batch_storage_failure_rolls_back_evidence_and_refs() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+        if std::env::var_os("DATABASE_URL").is_none() {
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool.clone());
+        let repo = "atomic/failure";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "old", "main", "Initial")
+            .unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE FUNCTION atomic_ref_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected ref failure'; END $$;
+            CREATE TRIGGER atomic_ref_failure BEFORE INSERT ON shardline_hub_refs FOR EACH ROW WHEN (NEW.ref_name = 'reject') EXECUTE FUNCTION atomic_ref_failure();")
+            .execute(&pool).await.unwrap();
+        let changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("old".into()),
+                new_sha: Some("next".into()),
+                message: "Next".into(),
+            },
+            HubRefChange {
+                ref_name: "reject".into(),
+                expected_sha: None,
+                new_sha: Some("new".into()),
+                message: "New".into(),
+            },
+        ];
+        let result = store.change_refs_atomically(repo, &changes);
+        sqlx::raw_sql("DROP TRIGGER atomic_ref_failure ON shardline_hub_refs; DROP FUNCTION atomic_ref_failure();").execute(&pool).await.unwrap();
+        assert!(result.is_err());
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            store.resolve_revision(repo, "main").unwrap().as_deref(),
+            Some("old")
+        );
+        assert_eq!(store.get_repo(repo).unwrap().unwrap().default_branch, "old");
+        assert!(store.get_revision(repo, "next").unwrap().is_none());
+        assert!(store.resolve_revision(repo, "reject").unwrap().is_none());
+        assert_eq!(
+            store.change_refs_atomically(repo, &changes).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        assert_eq!(store.list_refs(repo).unwrap().len(), 2);
+        cleanup_repo(&store, repo).await;
+    }
 
     async fn connect_postgres() -> Option<PgPool> {
         crate::postgres::connect_isolated_postgres().await
@@ -1592,7 +1719,65 @@ mod tests {
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().repo_id, "pg-create-get");
 
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            store
+                .create_repo(HubRepoType::Dataset, "pg-create-get", true)
+                .is_err()
+        );
+        let preserved = store.get_repo("pg-create-get").unwrap().unwrap();
+        assert_eq!(preserved.repo_type, HubRepoType::Model);
+        assert!(!preserved.private);
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_reliability_events")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "duplicate creation must not append ref evidence"
+        );
+
         cleanup_repo(&store, "pg-create-get").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_concurrent_repository_creators_have_one_winner() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("SKIPPED: PostgreSQL creation race requires DATABASE_URL");
+            return;
+        };
+        let store = make_store(pool);
+        let repo = "pg-create-race";
+        cleanup_repo(&store, repo).await;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut creators = Vec::new();
+        for attempt in 0..8 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            creators.push(tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                let private = attempt % 2 == 0;
+                (
+                    private,
+                    store.create_repo(HubRepoType::Model, repo, private),
+                )
+            }));
+        }
+        let mut winner = None;
+        for creator in creators {
+            let (private, result) = creator.await.unwrap();
+            if result.is_ok() {
+                assert!(winner.replace(private).is_none());
+            }
+        }
+        assert_eq!(
+            store.get_repo(repo).unwrap().unwrap().private,
+            winner.unwrap()
+        );
+        cleanup_repo(&store, repo).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1710,6 +1895,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rev.sha, "rev2");
+        let loaded = store
+            .get_revision("pg-rev-resolve", "rev2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                loaded.repo_id,
+                loaded.sha,
+                loaded.parent_sha,
+                loaded.message,
+                loaded.created_at_unix_seconds
+            ),
+            (
+                rev.repo_id,
+                rev.sha,
+                rev.parent_sha,
+                rev.message,
+                rev.created_at_unix_seconds
+            )
+        );
+        assert!(
+            store
+                .get_revision("pg-other-repo", "rev2")
+                .unwrap()
+                .is_none()
+        );
 
         let sha = store.resolve_revision("pg-rev-resolve", "rev2").unwrap();
         assert_eq!(sha.as_deref(), Some("rev2"));
@@ -1799,8 +2010,36 @@ mod tests {
         store
             .store_files("pg-commit-files", &files)
             .expect("store_files");
+        let xmin_before: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_hub_file_entries
+             WHERE commit_sha = $1 AND path = $2",
+        )
+        .bind("pg-commit-files")
+        .bind("a.txt")
+        .fetch_one(store.pool())
+        .await
+        .expect("read xmin before replay");
+        store
+            .store_files("pg-commit-files", &files)
+            .expect("replay identical files");
+        store
+            .store_files("pg-commit-files", &[])
+            .expect("empty batch preserves the committed file entries");
+        let xmin_after: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_hub_file_entries
+             WHERE commit_sha = $1 AND path = $2",
+        )
+        .bind("pg-commit-files")
+        .bind("a.txt")
+        .fetch_one(store.pool())
+        .await
+        .expect("read xmin after replay");
         let retrieved = store.get_files("pg-commit-files").expect("get_files");
 
+        assert_eq!(
+            xmin_before, xmin_after,
+            "identical replay must not update tuple"
+        );
         assert_eq!(retrieved.len(), 2);
         assert_eq!(retrieved[0].path, "a.txt");
         assert!(!retrieved[0].is_lfs);

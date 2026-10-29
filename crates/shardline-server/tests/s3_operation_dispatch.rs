@@ -105,13 +105,25 @@ async fn unsupported_and_ambiguous_operations_preserve_data() {
         .await
         .unwrap();
     let status = copy.status();
-    let etag = original_etag.clone();
     let response_xml = copy.text().await.unwrap();
-    println!(
-        "UploadPartCopy existing nonempty source + empty request body: status={status}, original_etag={original_etag}, acknowledged_etag={etag}, response={response_xml:?}"
-    );
-    assert_eq!(status, 501);
-    assert!(response_xml.contains("NotImplemented"));
+    assert_eq!(status, 200);
+    let etag = response_xml
+        .split_once("<ETag>")
+        .expect("copy response ETag")
+        .1
+        .split_once("</ETag>")
+        .expect("closed copy response ETag")
+        .0;
+    assert_ne!(etag.trim_matches('"'), original_etag.trim_matches('"'));
+    // A later failed replacement must preserve the acknowledged copied part.
+    let failed_copy = client
+        .put(&part)
+        .bearer_auth(&token)
+        .header("x-amz-copy-source", "/md5-audit.isolated/missing")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed_copy.status(), 404);
     let completion = format!(
         "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>"
     );
@@ -133,7 +145,7 @@ async fn unsupported_and_ambiguous_operations_preserve_data() {
         .await
         .unwrap();
     println!("Copied-part completion: status=200, final_bytes={stored:?}");
-    assert_eq!(&stored[..], b"acknowledged-original-part");
+    assert_eq!(&stored[..], b"copy-source-bytes");
 
     let mixed = format!("{bucket}/mixed-query");
     let created = client

@@ -23,9 +23,15 @@ def snapshot(deployment, name):
 def query_mix(deployment, name):
     return json.loads(deployment.sql(name, """
       SELECT json_build_object('calls', coalesce(sum(calls),0),
+        'top_level_calls', coalesce(sum(calls) FILTER (WHERE toplevel),0),
+        'nested_calls', coalesce(sum(calls) FILTER (WHERE NOT toplevel),0),
         'execution_ms', coalesce(sum(total_exec_time),0),
         'shared_blocks_read', coalesce(sum(shared_blks_read),0),
         'shared_blocks_hit', coalesce(sum(shared_blks_hit),0),
+        'statement_wal_bytes', coalesce(sum(wal_bytes),0),
+        'top_level_statement_wal_bytes', coalesce(sum(wal_bytes) FILTER (WHERE toplevel),0),
+        'statement_wal_records', coalesce(sum(wal_records),0),
+        'statement_wal_full_page_images', coalesce(sum(wal_fpi),0),
         'temp_blocks_written', coalesce(sum(temp_blks_written),0))
       FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname=current_database())
         AND query NOT LIKE '/* performance-observer */%'
@@ -35,8 +41,10 @@ def query_mix(deployment, name):
 def top_queries(deployment, name):
     return json.loads(deployment.sql(name, """
       /* performance-observer */ SELECT coalesce(json_agg(t),'[]') FROM (
-        SELECT left(query,300) AS query, calls, total_exec_time AS execution_ms,
-          rows, shared_blks_read, shared_blks_hit, temp_blks_written
+        SELECT left(query,300) AS query, toplevel AS top_level, calls, total_exec_time AS execution_ms,
+          rows, shared_blks_read, shared_blks_hit, temp_blks_written,
+          wal_bytes AS statement_wal_bytes, wal_records AS statement_wal_records,
+          wal_fpi AS statement_wal_full_page_images
         FROM pg_stat_statements
         WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
           AND query NOT LIKE '/* performance-observer */%'
@@ -57,8 +65,34 @@ def container_sample(pid):
                  if line.startswith("0::"))
     root = Path("/sys/fs/cgroup") / group.lstrip("/")
     cpu = dict(line.split() for line in (root / "cpu.stat").read_text().splitlines())
+    # Preserve device identities: summing stacked devices can double-count I/O.
+    io = {}
+    for line in (root / "io.stat").read_text().splitlines():
+        device, *fields = line.split()
+        io[device] = {key: int(value) for key, value in
+                      (field.split("=", 1) for field in fields)}
     return {"cpu_seconds": int(cpu["usage_usec"]) / 1_000_000,
-            "peak_memory_bytes": int((root / "memory.peak").read_text())}
+            "peak_memory_bytes": int((root / "memory.peak").read_text()),
+            "block_io_by_device": io}
+
+
+def resource_delta(before, after):
+    result = dict(after, cpu_seconds=after["cpu_seconds"] - before["cpu_seconds"])
+    if "block_io_by_device" in after:
+        previous = before["block_io_by_device"]
+        if not previous.keys() <= after["block_io_by_device"].keys():
+            raise RuntimeError("container block I/O device counters disappeared")
+        if any(not counters.keys() <= after["block_io_by_device"][device].keys()
+               for device, counters in previous.items()):
+            raise RuntimeError("container block I/O counters disappeared")
+        result["block_io_by_device"] = {
+            device: {key: value - previous.get(device, {}).get(key, 0)
+                     for key, value in counters.items()}
+            for device, counters in after["block_io_by_device"].items()}
+        if any(value < 0 for counters in result["block_io_by_device"].values()
+               for value in counters.values()):
+            raise RuntimeError("container block I/O counters reset")
+    return result
 
 
 class Sampler:
@@ -115,6 +149,6 @@ class Sampler:
         self.resources = {key: self.sample(key, pid) for key, pid in self.pids.items()}
         return {"postgres_peak": {key: max(row[key] for row in self.samples)
                                   for key in ("connections", "active", "lock_waiting", "blocked")},
-                "resources": {key: dict(value, cpu_seconds=value["cpu_seconds"] - self.start[key]["cpu_seconds"])
+                "resources": {key: resource_delta(self.start[key], value)
                               for key, value in self.resources.items()},
                 "samples": self.samples}

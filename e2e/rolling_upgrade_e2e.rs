@@ -1,5 +1,6 @@
-//! Rolling-upgrade e2e: proves the API and transfer roles can be upgraded and
-//! rolled back independently of each other.
+//! Same-version role-replacement E2E: checks listener replacement and role
+//! availability. This does not prove cross-version storage compatibility or
+//! graceful completion of active transfers.
 //!
 //! Two role-split servers run side by side (one `api`, one `transfer`) on
 //! distinct ephemeral ports. One role is stopped (mimicking a rolling
@@ -13,6 +14,8 @@
 //! an unmounted route returns 404 while a mounted route rejects the wrong
 //! method with 405.
 
+mod deployment_probe_requirements;
+mod rolling_upgrade_shutdown;
 mod support;
 
 use std::{
@@ -29,17 +32,14 @@ use shardline_server::{
     ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
 };
 use support::ServerE2eInvariantError;
-use tokio::{
-    net::TcpListener,
-    task::JoinHandle,
-    time::sleep,
-};
+use tokio::{net::TcpListener, task::JoinHandle, time::sleep};
 
 const SIGNING_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
 /// Admin read token wired into spawned servers so tests verify runtime
 /// topology through the authenticated admin API.
 const TEST_ADMIN_TOKEN: &str = "rolling-upgrade-admin-read-token";
 const FRONTENDS: [ServerFrontend; 1] = [ServerFrontend::Xet];
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A running role-split server runtime.
 struct RoleRuntime {
@@ -53,18 +53,17 @@ impl RoleRuntime {
         &self.base_url
     }
 
-    /// Stops the server and waits for its task to fully unwind. Mimics a
-    /// graceful rolling-upgrade stop: the listener is dropped before this
-    /// returns, so the same port can be rebound immediately.
+    /// Aborts the server task and waits for its listener to be dropped, so the
+    /// same port can be rebound. This fixture has no active data transfers;
+    /// task cancellation must not be treated as proof of graceful draining.
     async fn stop(&mut self) -> Result<(), Box<dyn Error>> {
         let Some(server) = self.server.take() else {
             return Ok(());
         };
         server.abort();
         match server.await {
-            Ok(result) => result.map_err(|error| {
-                format!("server task failed during upgrade stop: {error}").into()
-            }),
+            Ok(result) => result
+                .map_err(|error| format!("server task failed during upgrade stop: {error}").into()),
             Err(join_error) if join_error.is_cancelled() => Ok(()),
             Err(join_error) => Err(format!("server task join failed: {join_error}").into()),
         }
@@ -83,10 +82,7 @@ impl Drop for RoleRuntime {
 async fn api_role_rolling_upgrade_keeps_transfer_serving() {
     let result = exercise_rolling_upgrade(ServerRole::Api, ServerRole::Transfer).await;
     let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "api rolling-upgrade e2e failed: {error:?}"
-    );
+    assert!(result.is_ok(), "api rolling-upgrade e2e failed: {error:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -110,8 +106,10 @@ async fn exercise_rolling_upgrade(
     let upgrade_storage = tempfile::tempdir()?;
     let steady_storage = tempfile::tempdir()?;
 
-    let mut upgrade = start_role_runtime(upgrade_role, &FRONTENDS, None, upgrade_storage.path()).await?;
-    let mut steady = start_role_runtime(steady_role, &FRONTENDS, None, steady_storage.path()).await?;
+    let mut upgrade =
+        start_role_runtime(upgrade_role, &FRONTENDS, None, upgrade_storage.path()).await?;
+    let mut steady =
+        start_role_runtime(steady_role, &FRONTENDS, None, steady_storage.path()).await?;
 
     let client = Client::new();
     wait_for_ready(&client, upgrade.base_url()).await?;
@@ -121,7 +119,10 @@ async fn exercise_rolling_upgrade(
     let steady_ready = ready_response(&client, steady.base_url()).await?;
     assert_eq!(upgrade_ready["server_role"], upgrade_role.as_str());
     assert_eq!(steady_ready["server_role"], steady_role.as_str());
-    assert_eq!(upgrade_ready["server_frontends"], serde_json::json!(["xet"]));
+    assert_eq!(
+        upgrade_ready["server_frontends"],
+        serde_json::json!(["xet"])
+    );
     assert_eq!(steady_ready["server_frontends"], serde_json::json!(["xet"]));
     assert_eq!(
         role_surface_statuses(&client, upgrade.base_url()).await?,
@@ -137,7 +138,7 @@ async fn exercise_rolling_upgrade(
 
     // Upgrade window: stop the upgraded server...
     upgrade.stop().await?;
-    wait_for_server_down(&client, &upgraded_base_url).await?;
+    wait_for_server_down(&upgraded_base_url).await?;
 
     // ...and prove the steady server never blinked: readiness plus its full
     // role surface (api-only reconstruction route and transfer-only chunk
@@ -160,7 +161,10 @@ async fn exercise_rolling_upgrade(
     wait_for_ready(&client, upgraded_restarted.base_url()).await?;
     let restarted_ready = ready_response(&client, upgraded_restarted.base_url()).await?;
     assert_eq!(restarted_ready["server_role"], upgrade_role.as_str());
-    assert_eq!(restarted_ready["server_frontends"], serde_json::json!(["xet"]));
+    assert_eq!(
+        restarted_ready["server_frontends"],
+        serde_json::json!(["xet"])
+    );
     assert_eq!(
         role_surface_statuses(&client, upgraded_restarted.base_url()).await?,
         expected_surface(upgrade_role)
@@ -219,7 +223,9 @@ async fn bind_with_retry(addr: SocketAddr, attempts: u32) -> Result<TcpListener,
                 sleep(Duration::from_millis(50 * u64::from(attempt + 1))).await;
             }
             Err(error) => {
-                return Err(format!("failed to bind {addr} after {attempts} attempts: {error}").into());
+                return Err(
+                    format!("failed to bind {addr} after {attempts} attempts: {error}").into(),
+                );
             }
         }
     }
@@ -227,54 +233,42 @@ async fn bind_with_retry(addr: SocketAddr, attempts: u32) -> Result<TcpListener,
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20)).await?;
+    Ok(())
 }
 
 async fn wait_for_ready(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..100 {
-        if let Ok(response) = client.get(format!("{base_url}/readyz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become ready").into())
+    support::wait_for_endpoint(client, base_url, "readyz", 100, Duration::from_millis(20)).await?;
+    Ok(())
 }
 
 /// Asserts the stopped server can no longer be reached, proving the upgrade
 /// window is real (the old listener is gone before the new one rebinds).
-async fn wait_for_server_down(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if client.get(format!("{base_url}/healthz")).send().await.is_err() {
-            return Ok(());
+async fn wait_for_server_down(base_url: &str) -> Result<(), Box<dyn Error>> {
+    let address = base_url
+        .strip_prefix("http://")
+        .ok_or_else(|| ServerE2eInvariantError::new("expected local HTTP fixture address"))?
+        .parse::<SocketAddr>()?;
+    let probe = async {
+        for _attempt in 0..50 {
+            // Only a refused fresh TCP connection proves the listener is gone.
+            // Invalid HTTP, a reset, or a silent peer can still have a live listener.
+            if let Ok(Err(error)) = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await
+                && error.kind() == std::io::ErrorKind::ConnectionRefused
+            {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(20)).await;
         }
-        // Raw connect probe (bypasses any reqwest connection pooling): if the
-        // listener is gone this must be refused.
-        let raw = tokio::net::TcpStream::connect(
-            base_url
-                .trim_start_matches("http://")
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("bad base url {base_url}: {error}"))?,
-        )
-        .await;
-        if raw.is_err() {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not go down after upgrade stop").into())
+        Err(ServerE2eInvariantError::new("server did not go down after upgrade stop").into())
+    };
+    tokio::time::timeout(Duration::from_secs(10), probe)
+        .await
+        .map_err(|_| ServerE2eInvariantError::new("server shutdown probe exceeded its deadline"))?
 }
 
 async fn ready_response(
@@ -285,12 +279,18 @@ async fn ready_response(
     // authenticated admin status endpoint.
     let readyz = client
         .get(format!("{base_url}/readyz"))
+        .timeout(PROBE_TIMEOUT)
         .send()
         .await?
         .error_for_status()?;
-    assert_eq!(readyz.status(), reqwest::StatusCode::OK, "readyz should be healthy");
+    assert_eq!(
+        readyz.status(),
+        reqwest::StatusCode::OK,
+        "readyz should be healthy"
+    );
     let response = client
         .get(format!("{base_url}/api/v1/status"))
+        .timeout(PROBE_TIMEOUT)
         .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
         .send()
         .await?
@@ -305,7 +305,11 @@ async fn role_surface_statuses(
     base_url: &str,
 ) -> Result<(StatusCode, StatusCode), Box<dyn Error>> {
     let reconstruction_status = client
-        .request(Method::PUT, format!("{base_url}/v1/reconstructions/asset.bin"))
+        .request(
+            Method::PUT,
+            format!("{base_url}/v1/reconstructions/asset.bin"),
+        )
+        .timeout(PROBE_TIMEOUT)
         .send()
         .await?
         .status();
@@ -314,6 +318,7 @@ async fn role_surface_statuses(
             Method::POST,
             format!("{base_url}/v1/chunks/default-merkledb/deadbeef"),
         )
+        .timeout(PROBE_TIMEOUT)
         .send()
         .await?
         .status();

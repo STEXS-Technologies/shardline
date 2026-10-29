@@ -1,0 +1,646 @@
+//! Damaged copy sources cannot replace an acknowledged multipart part.
+use super::*;
+
+#[tokio::test]
+async fn corrupt_copy_source_preserves_acknowledged_part() {
+    let (state, _root) = build_test_state().await;
+    exercise(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_corrupt_copy_source_preserves_acknowledged_part() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise(state).await;
+}
+
+#[tokio::test]
+async fn copy_source_snapshot_stays_pinned_if_source_is_replaced_before_read() {
+    let (state, _root) = build_test_state().await;
+    exercise_snapshot_pinning(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_copy_source_snapshot_stays_pinned_if_source_is_replaced_before_read() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise_snapshot_pinning(state).await;
+}
+
+#[tokio::test]
+async fn copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flight() {
+    let (state, _root) = build_test_state().await;
+    exercise_inflight_copy_overwrite(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flight() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise_inflight_copy_overwrite(state).await;
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+async fn minio_copy_part_keeps_snapshot_bytes_when_source_is_replaced_in_flight() {
+    let (state, _root, _stack) = build_minio_payload_test_state().await;
+    exercise_inflight_copy_overwrite(state).await;
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+async fn minio_disconnected_copy_part_can_be_reconciled_from_list_parts() {
+    let (state, _root, _stack) = build_minio_payload_test_state().await;
+    exercise_disconnected_copy_part(state).await;
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+async fn postgres_minio_disconnected_copy_part_can_be_reconciled_from_list_parts() {
+    use shardline_protocol::SecretString;
+    use shardline_test_support::DockerLocalStack;
+
+    let stack = DockerLocalStack::builder()
+        .with_postgres()
+        .with_minio()
+        .start()
+        .unwrap()
+        .expect("Docker PostgreSQL and MinIO");
+    let prefix = stack.unique_s3_key_prefix("copy-integrity");
+    let raw = stack
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO configuration");
+    let storage = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
+    let database_url = stack.postgres_url().expect("PostgreSQL URL");
+    let migration_pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+    crate::apply_database_migrations(&migration_pool)
+        .await
+        .unwrap();
+    migration_pool.close().await;
+    let (state, _root) = build_s3_payload_test_state_with_index(storage, Some(database_url)).await;
+    exercise_disconnected_copy_part(state).await;
+}
+
+#[tokio::test]
+async fn disconnected_copy_part_can_be_reconciled_from_list_parts() {
+    let (state, _root) = build_test_state().await;
+    exercise_disconnected_copy_part(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_disconnected_copy_part_can_be_reconciled_from_list_parts() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise_disconnected_copy_part(state).await;
+}
+
+async fn exercise_disconnected_copy_part(state: Arc<AppState>) {
+    use tokio::io::AsyncWriteExt;
+
+    let app = s3_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let base = format!("http://{address}");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _shutdown_received = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let credential = mint_token(TokenScope::Write, OWNER, NAME);
+    let source = "copy-source-lost-ack";
+    let source_bytes = b"source-version-pinned-before-disconnect";
+    let acknowledged = b"previous-acknowledged-part";
+
+    let uploaded = client
+        .put(format!("{base}/{BUCKET}/{source}"))
+        .bearer_auth(&credential)
+        .body(source_bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let created = client
+        .post(format!("{base}/{BUCKET}/{KEY}?uploads"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_xml = created.text().await.unwrap();
+    let upload = created_xml
+        .split_once("<UploadId>")
+        .unwrap()
+        .1
+        .split_once("</UploadId>")
+        .unwrap()
+        .0
+        .to_owned();
+
+    let first_part = client
+        .put(format!(
+            "{base}/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1"
+        ))
+        .bearer_auth(&credential)
+        .body(acknowledged.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first_part.status(), StatusCode::OK);
+
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let (copy_paused, resume_copy, published) =
+        super::super::object::copy_part_test_hooks::arm(&source_key)
+            .expect("copy-part pause hook must be available");
+    let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!(
+        "PUT /{BUCKET}/{KEY}?uploadId={upload}&partNumber=1 HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {credential}\r\nx-amz-copy-source: /{BUCKET}/{source}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    socket.write_all(request.as_bytes()).await.unwrap();
+    copy_paused.await.unwrap();
+
+    // The client disconnects after source resolution but before receiving the
+    // response. Once the operation settles, ListParts recovers the durable ETag.
+    drop(socket);
+    let replaced = client
+        .put(format!("{base}/{BUCKET}/{source}"))
+        .bearer_auth(&credential)
+        .body(b"later-source-version".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replaced.status(), StatusCode::OK);
+    let _resume_sent = resume_copy.send(());
+    let copied_part_was_published =
+        tokio::time::timeout(std::time::Duration::from_secs(5), published)
+            .await
+            .expect("copy-part request must settle after client disconnect")
+            .unwrap();
+
+    let listed = client
+        .get(format!("{base}/{BUCKET}/{KEY}?uploadId={upload}"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed_xml = listed.text().await.unwrap();
+    let part_etag = listed_xml
+        .split_once("<ETag>")
+        .unwrap()
+        .1
+        .split_once("</ETag>")
+        .unwrap()
+        .0;
+    let completion = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let completed = client
+        .post(format!("{base}/{BUCKET}/{KEY}?uploadId={upload}"))
+        .bearer_auth(&credential)
+        .header("content-type", "application/xml")
+        .body(completion)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::OK);
+    let downloaded = client
+        .get(format!("{base}/{BUCKET}/{KEY}"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(downloaded.status(), StatusCode::OK);
+    let downloaded = downloaded.bytes().await.unwrap();
+    let expected = if copied_part_was_published {
+        source_bytes.as_slice()
+    } else {
+        acknowledged.as_slice()
+    };
+    assert_eq!(downloaded.as_ref(), expected);
+
+    drop(client);
+    let _shutdown_sent = shutdown_tx.send(());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_copy_part_preserves_acknowledged_part() {
+    let (state, _root) = build_test_state().await;
+    exercise_cancelled_copy_part(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn postgres_cancelled_copy_part_preserves_acknowledged_part() {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be configured");
+    let (state, _root) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL");
+    exercise_cancelled_copy_part(state).await;
+}
+
+async fn exercise_cancelled_copy_part(state: Arc<AppState>) {
+    let app = s3_router(state.clone());
+    let source = "copy-source-cancelled-at-snapshot";
+    let uploaded = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            b"copy source bytes".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let upload = create_upload_id(&app).await;
+    let acknowledged = b"previously acknowledged part";
+    assert_eq!(
+        upload_part(&app, &upload, 1, acknowledged).await.status(),
+        StatusCode::OK
+    );
+
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let (copy_paused, resume_copy, published) =
+        super::super::object::copy_part_test_hooks::arm(&source_key)
+            .expect("copy-part pause hook must be available");
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header("x-amz-copy-source", format!("/{BUCKET}/{source}"))
+        .body(Body::empty())
+        .unwrap();
+    let copying = {
+        let app = app.clone();
+        tokio::spawn(async move { app.oneshot(request).await.unwrap() })
+    };
+    copy_paused.await.unwrap();
+
+    // Cancel while the request has a source snapshot but before it can read or
+    // publish replacement part bytes.
+    copying.abort();
+    let cancelled = copying.await.unwrap_err();
+    assert!(cancelled.is_cancelled());
+    drop(resume_copy);
+    assert!(!published.await.unwrap());
+
+    let completed = complete_upload(&app, &upload, complete_body(&upload, &[1])).await;
+    assert_eq!(completed.status(), StatusCode::OK);
+    assert_eq!(
+        body_bytes(get_etag_request(&app, KEY).await).await,
+        acknowledged
+    );
+}
+
+async fn exercise_inflight_copy_overwrite(state: Arc<AppState>) {
+    let app = s3_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let base = format!("http://{address}");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _shutdown_received = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let credential = mint_token(TokenScope::Write, OWNER, NAME);
+    let source = "copy-source-inflight-overwrite";
+    let original = b"original-bytes-pinned-by-copy-part";
+    let uploaded = client
+        .put(format!("{base}/{BUCKET}/{source}"))
+        .bearer_auth(&credential)
+        .body(original.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let created = client
+        .post(format!("{base}/{BUCKET}/{KEY}?uploads"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_xml = created.text().await.unwrap();
+    let upload = created_xml
+        .split_once("<UploadId>")
+        .unwrap()
+        .1
+        .split_once("</UploadId>")
+        .unwrap()
+        .0
+        .to_owned();
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let source_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let (copy_paused, resume_copy, published) =
+        super::super::object::copy_part_test_hooks::arm(&source_key)
+            .expect("copy-part pause hook must be available");
+    let copy_url = format!("{base}/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1");
+    let copy_source = format!("/{BUCKET}/{source}");
+    let copying = {
+        let client = client.clone();
+        let credential = credential.clone();
+        tokio::spawn(async move {
+            client
+                .put(copy_url)
+                .bearer_auth(credential)
+                .header("x-amz-copy-source", copy_source)
+                .send()
+                .await
+                .unwrap()
+        })
+    };
+    copy_paused.await.unwrap();
+
+    // The handler has committed to the old source snapshot but has not opened
+    // its byte stream yet. Replace the source through an independent TCP request.
+    let replaced = client
+        .put(format!("{base}/{BUCKET}/{source}"))
+        .bearer_auth(&credential)
+        .body(b"new-source-version-with-a-different-length".to_vec())
+        .send()
+        .await
+        .unwrap();
+    let _resume_sent = resume_copy.send(());
+    let copied = copying.await.unwrap();
+    assert_eq!(replaced.status(), StatusCode::OK);
+    assert_eq!(copied.status(), StatusCode::OK);
+    assert!(published.await.unwrap());
+
+    let copied_xml = copied.text().await.unwrap();
+    let copied_etag = copied_xml
+        .split_once("<ETag>")
+        .unwrap()
+        .1
+        .split_once("</ETag>")
+        .unwrap()
+        .0;
+    let completion_body = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{copied_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let completed = client
+        .post(format!("{base}/{BUCKET}/{KEY}?uploadId={upload}"))
+        .bearer_auth(&credential)
+        .header("content-type", "application/xml")
+        .body(completion_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::OK);
+    let copied = client
+        .get(format!("{base}/{BUCKET}/{KEY}"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(copied.status(), StatusCode::OK);
+    assert_eq!(copied.bytes().await.unwrap().as_ref(), original);
+
+    drop(client);
+    let _shutdown_sent = shutdown_tx.send(());
+    server.await.unwrap();
+}
+
+#[cfg(feature = "docker")]
+async fn build_minio_payload_test_state() -> (
+    Arc<AppState>,
+    TempDir,
+    shardline_test_support::DockerLocalStack,
+) {
+    use shardline_protocol::SecretString;
+    use shardline_test_support::DockerLocalStack;
+
+    let stack = DockerLocalStack::builder()
+        .with_minio()
+        .start()
+        .unwrap()
+        .expect("Docker MinIO");
+    let prefix = stack.unique_s3_key_prefix("copy-integrity");
+    let raw = stack
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO configuration");
+    let storage = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
+    let (state, root) = build_s3_payload_test_state(storage).await;
+    (state, root, stack)
+}
+
+#[cfg(feature = "docker")]
+async fn build_s3_payload_test_state(
+    storage: shardline_storage::S3ObjectStoreConfig,
+) -> (Arc<AppState>, TempDir) {
+    build_s3_payload_test_state_with_index(storage, None).await
+}
+
+#[cfg(feature = "docker")]
+async fn build_s3_payload_test_state_with_index(
+    storage: shardline_storage::S3ObjectStoreConfig,
+    database_url: Option<String>,
+) -> (Arc<AppState>, TempDir) {
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65_536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_frontends([ServerFrontend::S3])
+    .expect("server frontends")
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .expect("token signing key")
+    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
+    .expect("S3 max part size")
+    .with_s3_min_part_bytes(NonZeroU64::MIN)
+    .expect("S3 min part size")
+    .with_object_storage(crate::ObjectStorageAdapter::S3, Some(storage));
+    let config = match database_url {
+        Some(database_url) => config
+            .with_index_postgres_url(database_url)
+            .expect("PostgreSQL metadata URL"),
+        None => config,
+    };
+    let backend = crate::ServerBackend::from_config(&config)
+        .await
+        .expect("S3 payload backend");
+    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("server auth");
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend,
+        auth: Some(auth),
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256).unwrap()),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+    (state, tmp)
+}
+
+async fn exercise_snapshot_pinning(state: Arc<AppState>) {
+    let app = s3_router(state.clone());
+    let source = "copy-source-snapshot-race";
+    let original = b"snapshot-pinned-original-bytes";
+    let uploaded = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            original.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    // UploadPartCopy resolves the source's listing row and content version
+    // before it opens the byte stream. Reproduce that exact race window by
+    // committing a replacement after snapshot resolution but before the read.
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let object_key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let snapshot = state
+        .backend
+        .s3_object_read_snapshot(&namespace, source, &object_key)
+        .await
+        .unwrap();
+    assert!(snapshot.record_content_hash.is_some());
+
+    let replacement = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            b"replacement-version-with-different-length".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replacement.status(), StatusCode::OK);
+
+    let pinned = state
+        .backend
+        .read_object_stream_pinned(
+            &object_key,
+            snapshot.total_bytes,
+            None,
+            snapshot.record_content_hash.as_deref(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(Body::from_stream(pinned), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), original);
+}
+
+async fn exercise(state: Arc<AppState>) {
+    let app = s3_router(state.clone());
+    let source = "copy-integrity-source";
+    let uploaded = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{source}"),
+            b"source-original".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+    let upload = create_upload_id(&app).await;
+    let prior = upload_part(&app, &upload, 1, b"acknowledged-part").await;
+    assert_eq!(prior.status(), StatusCode::OK);
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let key = shardline_s3_adapter::s3_object_key(&namespace, source).unwrap();
+    let record = state
+        .backend
+        .protocol_file_record(
+            &shardline_server_core::protocol_support::protocol_object_file_id(&key),
+        )
+        .await
+        .unwrap();
+    assert_eq!(record.chunks.len(), 1);
+    let chunk = crate::xet_adapter::xorb_object_key(&record.chunks[0].hash).unwrap();
+    let storage_directory = if matches!(&state.backend, crate::ServerBackend::Postgres(_)) {
+        "objects"
+    } else {
+        "chunks"
+    };
+    let path = state
+        .config
+        .root_dir()
+        .join(storage_directory)
+        .join(chunk.as_str());
+    let original = tokio::fs::read(&path).await.unwrap();
+    let mut damaged = original.clone();
+    *damaged.last_mut().unwrap() ^= 1;
+    tokio::fs::write(&path, damaged).await.unwrap();
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/{BUCKET}/{KEY}?uploadId={upload}&partNumber=1"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header("x-amz-copy-source", format!("/{BUCKET}/{source}"))
+        .body(Body::empty())
+        .unwrap();
+    let rejected = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let completed = complete_upload(&app, &upload, complete_body(&upload, &[1])).await;
+    assert_eq!(completed.status(), StatusCode::OK);
+    assert_eq!(
+        body_bytes(get_etag_request(&app, KEY).await).await,
+        b"acknowledged-part"
+    );
+    tokio::fs::write(path, original).await.unwrap();
+    assert_eq!(
+        body_bytes(get_etag_request(&app, source).await).await,
+        b"source-original"
+    );
+}

@@ -13,7 +13,7 @@ use crate::{
     GcError, ServerFrontend,
     dispatch::{
         managed_protocol_object_identity, optional_chunk_container_keys,
-        referenced_term_object_key, visit_protocol_object_member_chunks,
+        referenced_term_object_key, uses_native_xet_storage, visit_protocol_object_member_chunks,
     },
     quarantine::LAST_GC_CLOCK_ANCHOR_KEY,
 };
@@ -34,7 +34,7 @@ pub(super) struct ReachabilityAccumulator {
     pub(super) referenced_object_keys: HashSet<String>,
     live_dedupe_chunk_hashes: HashSet<String>,
     missing_optional_object_keys: HashSet<String>,
-    inspected_protocol_objects: HashSet<String>,
+    inspected_protocol_objects: HashMap<String, bool>,
     pub(super) scanned_records: u64,
 }
 
@@ -88,6 +88,30 @@ where
     })
     .await?;
 
+    let mut after = None;
+    loop {
+        let page = record_store
+            .native_chunk_reference_page(after.clone())
+            .await
+            .map_err(Into::into)?;
+        if page.is_empty() {
+            break;
+        }
+        for (xorb, ordinal, member) in page {
+            let cursor = (xorb.clone(), ordinal);
+            if after.as_ref().is_some_and(|previous| previous >= &cursor) {
+                return Err(GcError::InvalidContentHash);
+            }
+            after = Some(cursor);
+            if reachability.live_dedupe_chunk_hashes.contains(&member) {
+                let key = shardline_xet_adapter::xorb_object_key(&xorb)?;
+                reachability
+                    .referenced_object_keys
+                    .insert(key.as_str().to_owned());
+            }
+        }
+    }
+
     index_store
         .visit_dedupe_shard_mappings(|mapping| {
             let chunk_hash_hex = xet_hash_hex_string(mapping.chunk_hash());
@@ -139,28 +163,34 @@ fn collect_record_object_references<Locator>(
                     .insert(chunk.hash.clone());
 
                 for object_key in optional_chunk_container_keys(frontends, &chunk.hash)? {
+                    if record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
+                        && shardline_xet_adapter::xorb_hash_from_object_key_if_present(&object_key)?
+                            .is_some()
+                    {
+                        // Full validation already observes the source's presence.
+                        // Retain its exact result, including missing sources, rather
+                        // than sending a separate metadata request first.
+                        if collect_live_chunk_references_from_protocol_object(
+                            object_store,
+                            frontends,
+                            &object_key,
+                            reachability,
+                        )? {
+                            reachability
+                                .referenced_object_keys
+                                .insert(object_key.as_str().to_owned());
+                        } else {
+                            reachability
+                                .missing_optional_object_keys
+                                .insert(object_key.as_str().to_owned());
+                        }
+                        continue;
+                    }
                     mark_optional_object_reference(
                         object_store,
                         &object_key,
                         &mut reachability.referenced_object_keys,
                         &mut reachability.missing_optional_object_keys,
-                    )?;
-                }
-
-                // For XorbCdcV1 records, also resolve the xorb container
-                // to its constituent chunk hashes so that the individual
-                // chunks inside the xorb are protected from GC even if
-                // the xorb container itself is missing or corrupted.
-                if record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
-                    && let Some(object_key) = optional_chunk_container_keys(frontends, &chunk.hash)?
-                        .into_iter()
-                        .next()
-                {
-                    collect_live_chunk_references_from_protocol_object(
-                        object_store,
-                        frontends,
-                        &object_key,
-                        reachability,
                     )?;
                 }
             }
@@ -205,26 +235,32 @@ fn collect_live_chunk_references_from_protocol_object(
     frontends: &[ServerFrontend],
     object_key: &ObjectKey,
     reachability: &mut ReachabilityAccumulator,
-) -> Result<(), GcError> {
+) -> Result<bool, GcError> {
     let object_key_string = object_key.as_str().to_owned();
-    if reachability
+    if let Some(present) = reachability
         .inspected_protocol_objects
-        .contains(&object_key_string)
+        .get(&object_key_string)
     {
-        return Ok(());
+        return Ok(*present);
     }
+
+    let present = visit_protocol_object_member_chunks(
+        frontends,
+        object_store,
+        object_key,
+        |chunk_hash_hex| {
+            let chunk_object_key = chunk_object_key(&chunk_hash_hex)?;
+            reachability
+                .referenced_object_keys
+                .insert(chunk_object_key.as_str().to_owned());
+            reachability.live_dedupe_chunk_hashes.insert(chunk_hash_hex);
+            Ok::<(), GcError>(())
+        },
+    )?;
     reachability
         .inspected_protocol_objects
-        .insert(object_key_string);
-
-    visit_protocol_object_member_chunks(frontends, object_store, object_key, |chunk_hash_hex| {
-        let chunk_object_key = chunk_object_key(&chunk_hash_hex)?;
-        reachability
-            .referenced_object_keys
-            .insert(chunk_object_key.as_str().to_owned());
-        reachability.live_dedupe_chunk_hashes.insert(chunk_hash_hex);
-        Ok::<(), GcError>(())
-    })
+        .insert(object_key_string, present);
+    Ok(present)
 }
 
 pub(super) fn scan_orphan_objects(
@@ -233,8 +269,16 @@ pub(super) fn scan_orphan_objects(
     referenced_object_keys: &HashSet<String>,
 ) -> Result<HashMap<String, OrphanObject>, GcError> {
     let mut orphans = HashMap::new();
+    let mut missing_chunks = HashSet::new();
+    for reference in referenced_object_keys {
+        let key = ObjectKey::parse(reference).map_err(|_error| GcError::InvalidContentHash)?;
+        if chunk_hash_from_chunk_object_key_if_present(&key)?.is_some() {
+            missing_chunks.insert(reference.as_str());
+        }
+    }
     let prefix = ObjectPrefix::parse("").map_err(|_error| GcError::InvalidContentHash)?;
     object_store.visit_prefix(&prefix, |metadata| {
+        missing_chunks.remove(metadata.key().as_str());
         let Some(hash) = managed_object_hash(metadata.key(), frontends)? else {
             return Ok(());
         };
@@ -252,6 +296,30 @@ pub(super) fn scan_orphan_objects(
         );
         Ok::<(), GcError>(())
     })?;
+
+    // A lost derived index must not make an intact source collectible. Use the
+    // inventory already collected above, then authenticate candidate sources
+    // only when a referenced standalone copy is absent. No per-chunk HEADs.
+    if !missing_chunks.is_empty() && uses_native_xet_storage(frontends) {
+        let mut protected = Vec::new();
+        for (key, orphan) in &orphans {
+            let Some(hash) =
+                shardline_xet_adapter::xorb_hash_from_object_key_if_present(&orphan.object_key)?
+            else {
+                continue;
+            };
+            let descriptor = shardline_xet_adapter::recover_xorb_descriptor(object_store, hash)?;
+            for member in descriptor.chunks {
+                if missing_chunks.contains(chunk_object_key(&member.hash)?.as_str()) {
+                    protected.push(key.clone());
+                    break;
+                }
+            }
+        }
+        for key in protected {
+            orphans.remove(&key);
+        }
+    }
 
     Ok(orphans)
 }
@@ -458,6 +526,9 @@ where
         max_embedded_temp_nanos,
     })
 }
+
+#[cfg(test)]
+mod verified_presence_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -723,6 +794,67 @@ mod tests {
     }
 
     // ── collect_referenced_object_keys tests ────────────────────────────
+
+    #[tokio::test]
+    async fn generic_historical_member_protects_native_sources_across_index_pages() {
+        use shardline_index::{
+            FileChunkRecord, FileRecord, LocalRecordStore, RecordMutation, StorageRepresentation,
+            XetXorbChunk, XetXorbDescriptor,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let records = LocalRecordStore::new(root.path().to_owned()).unwrap();
+        let member = "bb".repeat(32);
+        let descriptors: Vec<_> = (0..300)
+            .map(|index| XetXorbDescriptor {
+                hash: format!("{index:064x}"),
+                total_bytes: 256,
+                chunks: vec![XetXorbChunk {
+                    hash: member.clone(),
+                    packed_start: 0,
+                    packed_end: 12,
+                    unpacked_start: 0,
+                    unpacked_end: 4,
+                }],
+            })
+            .collect();
+        records
+            .cache_xet_xorb_descriptors(&descriptors)
+            .await
+            .unwrap();
+        let record = FileRecord {
+            file_id: "retained-history".to_owned(),
+            content_hash: member.clone(),
+            total_bytes: 4,
+            chunk_size: 4,
+            storage_repr: StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: member,
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        records.write_version_record(&record).await.unwrap();
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            &records,
+            &MemoryIndexStore::new(),
+            &ServerObjectStore::blackhole(),
+            &[ServerFrontend::Xet],
+            &mut reachability,
+        )
+        .await
+        .unwrap();
+        for descriptor in descriptors {
+            let key = shardline_xet_adapter::xorb_object_key(&descriptor.hash).unwrap();
+            assert!(reachability.referenced_object_keys.contains(key.as_str()));
+        }
+        assert_eq!(reachability.scanned_records, 1);
+    }
 
     #[test]
     fn collect_referenced_object_keys_with_empty_stores() {

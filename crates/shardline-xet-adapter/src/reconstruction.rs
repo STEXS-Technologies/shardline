@@ -104,6 +104,27 @@ pub fn build_reconstruction_response(
         }
     }
 
+    // Clients share downloaded blocks by hash and starting chunk. Advertise
+    // disjoint covering ranges so a shorter repeated term cannot seed an
+    // undersized block for a later, overlapping term. Merging touching ranges
+    // includes no chunks outside the authorized terms.
+    for entries in fetch_info.values_mut() {
+        entries.sort_by_key(|entry| (entry.range.start, entry.range.end));
+        let mut merged: Vec<ReconstructionFetchInfo> = Vec::with_capacity(entries.len());
+        for entry in entries.drain(..) {
+            if let Some(previous) = merged.last_mut()
+                && entry.range.start <= previous.range.end
+            {
+                previous.range.end = previous.range.end.max(entry.range.end);
+                previous.url_range.start = previous.url_range.start.min(entry.url_range.start);
+                previous.url_range.end = previous.url_range.end.max(entry.url_range.end);
+            } else {
+                merged.push(entry);
+            }
+        }
+        *entries = merged;
+    }
+
     Ok(FileReconstructionResponse {
         offset_into_first_range,
         terms,
@@ -187,6 +208,63 @@ mod tests {
         reconstruction_v2_from_v1,
     };
     use crate::error::XetAdapterError;
+
+    #[test]
+    fn overlapping_repeated_terms_share_a_covering_fetch_without_bridging_gaps() {
+        let hash = "a".repeat(64);
+        let mut offset = 0;
+        let chunks = [(0, 1, 4, 0, 10), (0, 2, 9, 0, 23), (4, 5, 3, 40, 50)]
+            .into_iter()
+            .map(
+                |(range_start, range_end, length, packed_start, packed_end)| {
+                    let chunk = FileChunkRecord {
+                        hash: hash.clone(),
+                        offset,
+                        length,
+                        range_start,
+                        range_end,
+                        packed_start,
+                        packed_end,
+                    };
+                    offset += length;
+                    chunk
+                },
+            )
+            .collect();
+        let record = FileRecord {
+            file_id: "repeated".to_owned(),
+            content_hash: "b".repeat(64),
+            total_bytes: offset,
+            chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks,
+        };
+        let response = build_reconstruction_response("http://localhost", &record, None)
+            .expect("valid reconstruction");
+        assert_eq!(response.terms.len(), 3);
+        let fetches = &response.fetch_info[&hash];
+        assert_eq!(fetches.len(), 2);
+        assert_eq!((fetches[0].range.start, fetches[0].range.end), (0, 2));
+        assert_eq!(
+            (fetches[0].url_range.start, fetches[0].url_range.end),
+            (0, 22)
+        );
+        assert_eq!((fetches[1].range.start, fetches[1].range.end), (4, 5));
+        let partial = build_reconstruction_response(
+            "http://localhost",
+            &record,
+            Some(ByteRange::new(0, 3).expect("valid range")),
+        )
+        .expect("valid partial reconstruction");
+        let fetches = &partial.fetch_info[&hash];
+        assert_eq!(fetches.len(), 1);
+        assert_eq!((fetches[0].range.start, fetches[0].range.end), (0, 1));
+        assert_eq!(
+            (fetches[0].url_range.start, fetches[0].url_range.end),
+            (0, 9)
+        );
+    }
 
     #[test]
     fn response_contains_xet_terms_and_fetch_info() {

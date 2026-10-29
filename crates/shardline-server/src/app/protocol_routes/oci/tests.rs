@@ -40,8 +40,9 @@ async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() 
         .unwrap();
     let app = oci_test_router(&cluster.node_a);
     let media = "application/vnd.oci.image.index.v1+json";
+    let subject = format!("sha256:{}", "a".repeat(64));
     let before = format!(
-        r#"{{"schemaVersion":2,"mediaType":"{media}","manifests":[],"annotations":{{"value":"before"}}}}"#
+        r#"{{"schemaVersion":2,"mediaType":"{media}","manifests":[],"annotations":{{"value":"before"}},"subject":{{"mediaType":"{media}","digest":"{subject}","size":1}}}}"#
     );
     let after = before.replace("before", "after");
     let uri = "/v2/ownership/manifest/manifests/latest";
@@ -87,6 +88,26 @@ async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() 
         .await
         .unwrap();
     assert_eq!(body.as_ref(), before.as_bytes());
+    let referrers = send(
+        &app,
+        Method::GET,
+        &format!("/v2/ownership/manifest/referrers/{subject}"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(referrers.status(), StatusCode::OK);
+    let listing: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(referrers.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        listing["manifests"].as_array().unwrap().len(),
+        1,
+        "an indexed but uncommitted manifest must stay hidden after owner loss"
+    );
+    assert_eq!(listing["manifests"][0]["annotations"]["value"], "before");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -694,6 +715,74 @@ async fn blob_upload_session_lifecycle() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ranged_blob_requests_validate_before_mutating_durable_session() {
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+    let response = send(
+        &app,
+        Method::POST,
+        &format!("/v2/{REPO}/blobs/uploads/"),
+        Body::empty(),
+    )
+    .await;
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    // Both short and long bodies must leave the existing session empty.
+    for range in ["0-0", "0-9"] {
+        let request = Request::builder()
+            .method(Method::PATCH)
+            .uri(&location)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_RANGE, range)
+            .body(Body::from("abc"))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        let status = send(&app, Method::GET, &location, Body::empty()).await;
+        assert_eq!(status.status(), StatusCode::NO_CONTENT);
+        assert_eq!(status.headers().get(header::RANGE).unwrap(), "0-0");
+    }
+    let bytes = vec![0x5a; 256 * 1024 + 1];
+    let request = Request::builder()
+        .method(Method::PATCH)
+        .uri(&location)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_RANGE, format!("0-{}", bytes.len() - 1))
+        .body(Body::from(bytes.clone()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+    let digest = sha256_hex(&bytes);
+    let response = send(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest=sha256:{digest}"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let response = send(
+        &app,
+        Method::GET,
+        &format!("/v2/{REPO}/blobs/sha256:{digest}"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let downloaded = axum::body::to_bytes(response.into_body(), bytes.len())
+        .await
+        .unwrap();
+    assert_eq!(downloaded.as_ref(), bytes);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1,13 +1,21 @@
 mod admin_api;
+mod background_tasks;
+mod delta;
+mod hub_xet_download;
+pub use background_tasks::RouterBackgroundTasks;
 mod metadata_routes;
 mod operational;
 mod protocol_routes;
+mod response_idle;
+mod shard_progress;
+mod transport;
 #[cfg(test)]
 pub(crate) use protocol_routes::oci::test_helpers::build_oci_postgres_test_cluster;
 mod provider;
 mod provider_routes;
 mod reconstruction_helpers;
 mod reconstruction_routes;
+mod xorb_transfer_capability;
 
 pub use protocol_routes::{LfsPatchEvidenceRepairInput, repair_lfs_patch_evidence};
 pub use provider::{
@@ -30,10 +38,11 @@ use std::{
 
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, State},
+    body::Body,
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, Method, header},
     middleware::{self, Next},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, head, post},
     serve as serve_http,
     serve::ListenerExt,
@@ -41,6 +50,7 @@ use axum::{
 use shardline_protocol::TokenScope;
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use shardline_server_core::{VerifiedAuthContext, auth::Ed25519AuthProvider};
@@ -63,8 +73,8 @@ use crate::{
     server_role::ServerRole,
     transfer_limiter::TransferLimiter,
     xet_adapter::{
-        XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE, XET_REVISIONS_ROUTE,
-        XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
+        XET_METADATA_ACCEPT, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
+        XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
     },
 };
 use admin_api::{
@@ -75,6 +85,7 @@ use admin_api::{
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use admin_api::{parse_admin_cursor_for_fuzzing, parse_admin_query_for_fuzzing};
+use hub_xet_download::download_hub_xet_file;
 use metadata_routes::{
     create_revision, delete_path, delete_revision, list_revisions, register_path, tree_lookup,
 };
@@ -84,11 +95,12 @@ use operational::{
 };
 use protocol_routes::{
     bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
-    bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
-    lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
-    oci_registry_token, oci_transfer_dispatch, oci_v2_root, s3_create_bucket, s3_delete_bucket,
-    s3_delete_object, s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object,
-    s3_list_buckets, s3_post_bucket, s3_post_object, s3_put_object,
+    bazel_put_ac, bazel_put_cas, lfs_batch, lfs_create_lock, lfs_delete_object, lfs_get_object,
+    lfs_head_object, lfs_list_locks, lfs_patch_object, lfs_put_object, lfs_unlock,
+    lfs_verify_locks, lfs_verify_object, oci_api_dispatch, oci_dispatch, oci_registry_token,
+    oci_transfer_dispatch, oci_v2_root, s3_create_bucket, s3_delete_bucket, s3_delete_object,
+    s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object, s3_list_buckets, s3_post_bucket,
+    s3_post_object, s3_put_object,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
@@ -96,10 +108,14 @@ use provider_routes::{
     git_lfs_authenticate, handle_provider_webhook, issue_provider_token, issue_xet_read_token,
     issue_xet_write_token,
 };
-use reconstruction_routes::{batch_reconstruction, reconstruction, reconstruction_v2};
+use reconstruction_routes::{
+    batch_reconstruction, batch_reconstruction_post, head_file, reconstruction, reconstruction_v2,
+};
 
 pub const MAX_BATCH_RECONSTRUCTION_FILE_IDS: usize = 1024;
-pub const MAX_BATCH_RECONSTRUCTION_QUERY_BYTES: usize = 131_072;
+pub const MAX_BATCH_RECONSTRUCTION_REQUEST_BYTES: usize = 131_072;
+/// Backwards-compatible name for the existing GET query-string limit.
+pub const MAX_BATCH_RECONSTRUCTION_QUERY_BYTES: usize = MAX_BATCH_RECONSTRUCTION_REQUEST_BYTES;
 pub const MAX_LFS_BATCH_OBJECTS: usize = 1024;
 pub const MAX_OCI_MANIFEST_TAGS: usize = 128;
 pub const MAX_OCI_TAG_LIST_PAGE_SIZE: usize = 256;
@@ -198,19 +214,61 @@ impl Drop for ActiveProtocolRequestGuard<'_> {
 /// }
 /// ```
 ///
+/// Hosts that shut down their own Tokio runtime should use
+/// [`router_with_background_tasks`] and drain its returned handle first. This
+/// convenience API retains the existing detached startup-worker behavior.
+///
 /// # Errors
 ///
 /// Returns [`ServerError`] when the configured backend cannot initialize.
 pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
+    let (router, _background_tasks) = router_with_background_tasks(config).await?;
+    Ok(router)
+}
+
+/// Builds a router with explicit ownership of its blocking startup workers.
+/// Embedded hosts should stop HTTP serving, drop the router, and await the
+/// returned handle's shutdown before dropping their Tokio runtime. The ordinary
+/// `serve` entry points manage this automatically. The legacy `router` API
+/// remains available for hosts that keep their runtime alive independently.
+///
+/// # Errors
+/// Returns backend or router initialization failures.
+pub async fn router_with_background_tasks(
+    config: ServerConfig,
+) -> Result<(Router, RouterBackgroundTasks), ServerError> {
     let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
-    router_with_housekeeping_guard(config, guard, stopped).await
+    let mut background = RouterBackgroundTasks::new(stopped.clone());
+    let result = router_with_housekeeping_guard(config, guard, stopped, &mut background).await;
+    match result {
+        Ok(router) => Ok((router, background)),
+        Err(error) => {
+            if let Err(worker_error) = background.shutdown().await {
+                tracing::warn!(%worker_error, "startup worker failed while router initialization unwound");
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn router_with_housekeeping_guard(
     config: ServerConfig,
     housekeeping_guard: crate::task_tracking::housekeeping::HousekeepingGuard,
     housekeeping_stopped: Arc<std::sync::atomic::AtomicBool>,
+    background: &mut RouterBackgroundTasks,
 ) -> Result<Router, ServerError> {
+    // The Hub frontend negotiates hf_xet for large-file transfers, so its
+    // runtime also needs the Xet CAS routes and reconstruction support. Add
+    // Xet to the effective frontend set once here so both route assembly and
+    // the backend's stored-object reconstruction dispatch agree. Hub-aware
+    // route registration below still leaves Hub-owned metadata paths intact.
+    let mut effective_frontends = config.server_frontends().to_vec();
+    if effective_frontends.contains(&ServerFrontend::Hub)
+        && !effective_frontends.contains(&ServerFrontend::Xet)
+    {
+        effective_frontends.push(ServerFrontend::Xet);
+    }
+    let config = config.with_server_frontends(effective_frontends)?;
     config.validate_runtime_requirements()?;
     let role = config.server_role();
     let max_request_body_bytes = config.max_request_body_bytes();
@@ -247,7 +305,7 @@ async fn router_with_housekeeping_guard(
     let retention_store = evidence_store.with_housekeeping_stop(housekeeping_stopped.clone());
     let retention_deployment = crate::task_tracking::deployment_fingerprint(&config)?;
     let retention_stopped = housekeeping_stopped.clone();
-    tokio::task::spawn_blocking(move || {
+    background.register(tokio::task::spawn_blocking(move || {
         if let Err(error) = retention_store.prune_completed_incrementally(
             retention_deployment,
             shardline_protocol::unix_now_seconds_lossy(),
@@ -262,7 +320,7 @@ async fn router_with_housekeeping_guard(
                 "legacy task history relocation unavailable; serving continues: {error}"
             );
         }
-    });
+    }));
     tracing::info!("embedded task tracker initialized; no separate tracker service required");
     let auth = build_auth_provider(&config).await?;
     let config_secret_cipher = config.config_secret_key().map_or_else(
@@ -503,7 +561,6 @@ async fn router_with_housekeeping_guard(
     // and must be merged at the Router<()> level after both sides are
     // converted via `.with_state()`.
     let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
-    let mut xet_frontend_enabled = false;
     // S3 is mounted as the app-level FALLBACK rather than merged into the main
     // route trie: its `/{bucket}/{*key}` wildcard would otherwise conflict with
     // any other frontend's root-level parameter routes (Hub's Git Smart HTTP
@@ -515,17 +572,22 @@ async fn router_with_housekeeping_guard(
     for frontend in state.config.server_frontends() {
         match frontend {
             ServerFrontend::Hub => {
-                hub_state = Some(build_hub_state(&state, task_tracker.clone())?);
+                hub_state = Some(build_hub_state(&state, task_tracker.clone(), background)?);
+                if role.serves_api() {
+                    app = protocol_routes::register_hub_lock_routes(app, state.clone());
+                }
             }
             ServerFrontend::Xet => {
-                xet_frontend_enabled = true;
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
             ServerFrontend::S3 => {
                 // Build the S3 router separately and apply the state at build
                 // time so it can be mounted as the app-level fallback service
                 // (an un-applied Router<Arc<AppState>> is not a Service).
-                s3_router = Some(register_s3_routes(Router::new(), role).with_state(state.clone()));
+                s3_router = Some(
+                    register_s3_routes(Router::new(), role, &state.config)
+                        .with_state(state.clone()),
+                );
             }
             ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {
                 app = register_frontend_routes(app, *frontend, role, &state);
@@ -540,7 +602,31 @@ async fn router_with_housekeeping_guard(
 
     // Merge hub routes (Router<()>) into the main app (Router<()>).
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs, !xet_frontend_enabled))
+        let hub_routes = shardline_hub_api::hub_routes(hs, true);
+        let xet_metadata_routes = if role.serves_api()
+            && state
+                .config
+                .server_frontends()
+                .contains(&ServerFrontend::Xet)
+        {
+            Some(
+                Router::new()
+                    .route(XET_TREE_ROUTE, get(tree_lookup))
+                    .route(XET_REVISIONS_ROUTE, get(list_revisions))
+                    .with_state(state.clone()),
+            )
+        } else {
+            None
+        };
+        let hub_routes = if let Some(xet_routes) = xet_metadata_routes {
+            hub_routes.route_layer(middleware::from_fn_with_state(
+                NativeXetMetadataDispatch { xet_routes },
+                dispatch_native_xet_metadata,
+            ))
+        } else {
+            hub_routes
+        };
+        app.merge(hub_routes)
     } else {
         app
     };
@@ -674,8 +760,8 @@ async fn serve_with_listener_until<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
-    let app = router_with_housekeeping_guard(config.clone(), guard, stopped.clone()).await?;
+    let (app, background) = router_with_background_tasks(config.clone()).await?;
+    let stopped = background.stopped_flag();
     shardline_metrics::metrics().system.start_uptime();
     tracing::info!("router initialized, starting HTTP serve");
     let shutdown_timeout = config.shutdown_timeout();
@@ -694,6 +780,7 @@ where
             tracing::warn!(%error, "failed to enable TCP_NODELAY on incoming connection");
         }
     });
+    let listener = transport::WriteIdleListener::new(listener, timeouts::WRITE_IDLE);
     let serve = serve_http(listener, app).with_graceful_shutdown(graceful_shutdown);
     let result = if let Some(timeout) = shutdown_timeout {
         tokio::select! {
@@ -715,6 +802,13 @@ where
         serve.await.map_err(ServerError::from)
     };
     stopped.store(true, Ordering::Relaxed);
+    let workers_result = background.shutdown().await;
+    if let Err(error) = workers_result {
+        if result.is_ok() {
+            return Err(error);
+        }
+        tracing::warn!(%error, "startup worker failed during HTTP shutdown");
+    }
     result
 }
 
@@ -724,10 +818,9 @@ fn register_frontend_routes(
     role: ServerRole,
     app_state: &AppState,
 ) -> Router<Arc<AppState>> {
-    // The Hub frontend already owns the `/api/{type}/{ns}/{repo}/tree/{rev}` and
-    // `/api/{type}/{ns}/{repo}/revisions` path shapes, which structurally collide
-    // with the M5 metadata routes. When Hub is enabled the Hub's routes win and the
-    // Xet M5 routes are omitted to avoid an axum route-insertion conflict.
+    // Hub owns the overlapping tree and revision-list paths. Those two Xet
+    // operations are content-negotiated by a layer on the Hub router; the
+    // non-overlapping path and single-revision routes remain mounted here.
     let hub_enabled = app_state
         .config
         .server_frontends()
@@ -738,7 +831,7 @@ fn register_frontend_routes(
         ServerFrontend::Lfs => register_lfs_routes(app, role),
         ServerFrontend::BazelHttp => register_bazel_routes(app, role),
         ServerFrontend::Oci => register_oci_routes(app, role),
-        ServerFrontend::S3 => register_s3_routes(app, role),
+        ServerFrontend::S3 => register_s3_routes(app, role, &app_state.config),
         ServerFrontend::Hub => app, // Hub routes are built separately
     }
 }
@@ -753,12 +846,36 @@ fn register_xet_routes(
             .route(XET_READ_TOKEN_ROUTE, get(issue_xet_read_token))
             .route(XET_WRITE_TOKEN_ROUTE, get(issue_xet_write_token))
             .route("/reconstructions", get(batch_reconstruction))
-            .route("/v1/reconstructions", get(batch_reconstruction))
+            .route(
+                "/v1/reconstructions",
+                get(batch_reconstruction)
+                    .post(batch_reconstruction_post)
+                    .layer(DefaultBodyLimit::max(
+                        MAX_BATCH_RECONSTRUCTION_REQUEST_BYTES,
+                    )),
+            )
             .route("/v1/reconstructions/{file_id}", get(reconstruction))
+            .route("/v1/files/{file_id}", head(head_file))
+            .route(
+                "/v2/file-chunk-hashes/{file_id}",
+                get(delta::file_chunk_hashes),
+            )
+            .route("/v1/hub/xet-files/{sha256}", get(download_hub_xet_file))
             .route("/v2/reconstructions/{file_id}", get(reconstruction_v2))
             .route("/shards", post(upload_shard))
+            .route("/v2/shards", post(shard_progress::upload))
             .route("/v1/shards", post(upload_shard));
-        if !hub_enabled {
+        if hub_enabled {
+            app = app
+                .route(
+                    XET_PATH_ROUTE,
+                    axum::routing::put(register_path).delete(delete_path),
+                )
+                .route(
+                    XET_REVISION_ROUTE,
+                    axum::routing::post(create_revision).delete(delete_revision),
+                );
+        } else {
             app = app
                 .route(XET_TREE_ROUTE, get(tree_lookup))
                 .route(
@@ -788,9 +905,62 @@ fn register_xet_routes(
     app
 }
 
+#[derive(Clone)]
+struct NativeXetMetadataDispatch {
+    xet_routes: Router,
+}
+
+async fn dispatch_native_xet_metadata(
+    State(dispatch): State<NativeXetMetadataDispatch>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !accepts_native_xet_metadata(&request) || !is_native_xet_metadata_route(request.uri().path())
+    {
+        return next.run(request).await;
+    }
+    // The Hub route has already inserted its path parameters into request
+    // extensions. Remove those router-local parameters before routing the same
+    // URI through the native Xet trie, which will insert its own captures.
+    let (mut parts, body) = request.into_parts();
+    parts.extensions.clear();
+    let rerouted_request = Request::from_parts(parts, body);
+    match dispatch.xet_routes.oneshot(rerouted_request).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    }
+}
+
+fn accepts_native_xet_metadata(request: &Request<Body>) -> bool {
+    request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|media_type| {
+                media_type
+                    .split(';')
+                    .next()
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case(XET_METADATA_ACCEPT))
+            })
+        })
+}
+
+fn is_native_xet_metadata_route(path: &str) -> bool {
+    let segments: Vec<_> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
+    matches!(
+        segments.as_slice(),
+        ["api", _, _, _, "revisions"] | ["api", _, _, _, "tree", _]
+    )
+}
+
 fn register_lfs_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
     if role.serves_api() {
-        app = app.route("/v1/lfs/objects/batch", post(lfs_batch));
+        app = app
+            .route("/v1/lfs/objects/batch", post(lfs_batch))
+            .route("/v1/lfs/locks", get(lfs_list_locks).post(lfs_create_lock))
+            .route("/v1/lfs/locks/verify", post(lfs_verify_locks))
+            .route("/v1/lfs/locks/{id}/unlock", post(lfs_unlock));
     }
     if role.serves_transfer() {
         app = app
@@ -860,9 +1030,14 @@ fn register_oci_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
 /// real clients (mc, the AWS SDKs, pyarrow) canonicalize bucket paths with a
 /// trailing slash (`PUT /ac.assets/`, `GET /ac.assets/?location=`), and axum
 /// does not match `/{bucket}` against the trailing-slash form.
-fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
+fn register_s3_routes(
+    app: Router<Arc<AppState>>,
+    role: ServerRole,
+    config: &ServerConfig,
+) -> Router<Arc<AppState>> {
+    let mut routes = Router::new();
     if role.serves_api() {
-        app = app
+        routes = routes
             // Service-level `GET /` — `ListBuckets` (the caller's single bucket).
             .route("/", axum::routing::get(s3_list_buckets))
             .route(
@@ -890,7 +1065,7 @@ fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Route
                     .delete(s3_delete_object),
             );
     }
-    app
+    app.merge(protocol_routes::protect_s3_signing(routes, config))
 }
 
 fn authorize(
@@ -919,6 +1094,7 @@ pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: us
 fn build_hub_state(
     app_state: &AppState,
     task_tracker: Arc<crate::task_tracking::EmbeddedTaskTracker>,
+    background: &mut RouterBackgroundTasks,
 ) -> Result<shardline_hub_api::routes::HubState, ServerError> {
     let hub_auth = app_state
         .auth
@@ -942,9 +1118,16 @@ fn build_hub_state(
                 if let Err(e) = shardline_index::hub::ensure_hub_tables(&hub_root) {
                     tracing::warn!("failed to create hub tables: {e}");
                 }
-                Ok(shardline_index::hub::BoxedHubStore::from_store(
-                    sqlite_store,
-                ))
+                let native_records =
+                    shardline_index::LocalRecordStore::open(root_dir.to_path_buf());
+                Ok(
+                    shardline_index::hub::BoxedHubStore::from_store(sqlite_store)
+                        .with_xet_identity_lookup(move |scope, sha256| {
+                            native_records
+                                .xet_file_identity(scope, sha256)
+                                .map_err(|error| Box::new(error) as _)
+                        }),
+                )
             },
             |pg_url| -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
                 let pool = sqlx::postgres::PgPoolOptions::new()
@@ -981,11 +1164,13 @@ fn build_hub_state(
                     let sweep_store = store.clone();
                     let sweep_cipher = cipher.clone();
                     let sweep_config = app_state.config.clone();
-                    let _sweep_handle = tokio::task::spawn_blocking(move || {
-                        crate::hub_secret_upgrade::run(
+                    let sweep_stopped = background.stopped_flag();
+                    background.register(tokio::task::spawn_blocking(move || {
+                        let _report = crate::hub_secret_upgrade::run_until_stopped(
                             &sweep_config, &sweep_store, &sweep_cipher, &task_tracker,
-                        )
-                    });
+                            &|| sweep_stopped.load(Ordering::Relaxed),
+                        );
+                    }));
                     Some(cipher)
                 }
                 Err(e) => {
@@ -1026,6 +1211,11 @@ fn endpoint_body_limit(
 /// non-success status and the delivery fails instead of being followed.
 fn build_webhook_delivery_client() -> Option<reqwest::Client> {
     match reqwest::Client::builder()
+        .dns_resolver(Arc::new(
+            shardline_hub_api::routes::webhooks::PublicWebhookDnsResolver,
+        ))
+        // A proxy could resolve the destination itself, bypassing our resolver.
+        .no_proxy()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -1204,6 +1394,13 @@ async fn gc_write_barrier_middleware(
             Err(_) => return ServerError::RequestTimedOut.into_response(),
         };
         let response = session.scope(next.run(request)).await;
+        if response
+            .extensions()
+            .get::<shard_progress::StreamingPublication>()
+            .is_some()
+        {
+            return shard_progress::retain_postgres_owner(response, session);
+        }
         session.finish().await;
         return response;
     }
@@ -1214,25 +1411,37 @@ async fn gc_write_barrier_middleware(
             .acquire_gc_write_barrier(state.config.root_dir()),
     )
     .await;
-    let _guard = match barrier {
+    let guard = match barrier {
         Ok(Ok(guard)) => guard,
         Ok(Err(error)) => return error.into_response(),
         Err(_) => return ServerError::RequestTimedOut.into_response(),
     };
-    next.run(request).await
+    let response = next.run(request).await;
+    if response
+        .extensions()
+        .get::<shard_progress::StreamingPublication>()
+        .is_some()
+    {
+        return shard_progress::retain_local_owner(response, guard);
+    }
+    response
 }
 
 async fn request_timeout_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
-    tokio::time::timeout(timeouts::REQUEST_TOTAL, next.run(request))
+    let response = tokio::time::timeout(timeouts::REQUEST_TOTAL, next.run(request))
         .await
-        .unwrap_or_else(|_| ServerError::RequestTimedOut.into_response())
+        .unwrap_or_else(|_| ServerError::RequestTimedOut.into_response());
+    response_idle::wrap(response, timeouts::RESPONSE_IDLE)
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod shutdown_upload_tests;
 
 #[cfg(test)]
 mod e2e_tests;

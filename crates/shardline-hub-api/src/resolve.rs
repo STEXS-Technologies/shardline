@@ -28,8 +28,8 @@ pub fn resolve_file_from_store(
 /// Resolves a file download request, namespacing LFS object reads by the
 /// provided repository scope.
 ///
-/// Returns `DownloadResult::Inline` for files ≤1 MiB, or `DownloadResult::Redirect`
-/// for larger files that should be fetched from the LFS endpoint.
+/// Returns `DownloadResult::LfsRedirect` for LFS-backed files of any size.
+/// Other files stream directly from the resolve route.
 ///
 /// # Errors
 ///
@@ -49,12 +49,7 @@ pub fn resolve_file_from_store_scoped(
         .find(|f| f.path == file_path)
         .ok_or(HubApiError::NotFound)?;
 
-    if file.size <= MAX_INLINE_SIZE {
-        Ok(DownloadResult::Inline {
-            size: file.size,
-            sha: file.sha.clone(),
-        })
-    } else if file.is_lfs {
+    if file.is_lfs {
         Ok(DownloadResult::LfsRedirect {
             oid: file.sha.clone(),
             size: file.size,
@@ -66,9 +61,6 @@ pub fn resolve_file_from_store_scoped(
         })
     }
 }
-
-/// Maximum inline file size (1 MiB).
-const MAX_INLINE_SIZE: u64 = 1_048_576;
 
 /// Result of resolving a file download.
 #[derive(Debug)]
@@ -167,79 +159,34 @@ mod tests {
 
     // --- Inline vs redirect logic tests ---
     //
-    // These tests document the expected decision boundary from `resolve_file_from_store`
-    // without needing a full `HubState`. The logic is:
-    //   file.size <= MAX_INLINE_SIZE         → Inline
-    //   file.size > MAX_INLINE_SIZE && is_lfs → LfsRedirect
-    //   file.size > MAX_INLINE_SIZE && !is_lfs → Inline (streamed by the route)
-
     #[test]
-    fn small_file_should_be_inline() {
-        // A file ≤ 1 MiB should produce Inline.
-        let size = 1_048_576; // exactly 1 MiB
-        let is_lfs = false;
-        let result = resolve_download_variant(size, is_lfs);
-        assert!(matches!(result, DownloadResult::Inline { .. }));
-    }
-
-    #[test]
-    fn large_lfs_file_should_redirect() {
-        let size = 1_048_577; // just above 1 MiB
-        let is_lfs = true;
-        let result = resolve_download_variant(size, is_lfs);
-        assert!(matches!(result, DownloadResult::LfsRedirect { .. }));
-    }
-
-    #[test]
-    fn large_non_lfs_file_should_be_inline() {
-        let size = 5_000_000;
-        let is_lfs = false;
-        let result = resolve_download_variant(size, is_lfs);
-        assert!(matches!(result, DownloadResult::Inline { .. }));
-    }
-
-    #[test]
-    fn zero_size_file_should_be_inline() {
-        let result = resolve_download_variant(0, false);
-        assert!(matches!(result, DownloadResult::Inline { .. }));
-    }
-
-    /// Mirrors the decision logic in `resolve_file_from_store` for unit-test purposes.
-    fn resolve_download_variant(size: u64, is_lfs: bool) -> DownloadResult {
-        const MAX_INLINE: u64 = 1_048_576;
-
-        if size <= MAX_INLINE {
-            DownloadResult::Inline {
-                size,
-                sha: String::new(),
-            }
-        } else if is_lfs {
-            DownloadResult::LfsRedirect {
-                oid: String::new(),
-                size,
-            }
-        } else {
-            DownloadResult::Inline {
-                size,
-                sha: String::new(),
+    fn persisted_storage_kind_controls_resolution_on_both_sides_of_old_size_boundary() {
+        for size in [0, 1, 32 * 1024, 1_048_576, 1_048_577, 5_000_000] {
+            for is_lfs in [false, true] {
+                let sha = "a".repeat(64);
+                let files = [shardline_index::hub::HubFileEntry {
+                    path: "file.bin".to_owned(),
+                    size,
+                    sha: sha.clone(),
+                    is_lfs,
+                }];
+                let (_root, state) = setup_resolve_state(&files, &[]);
+                let result = resolve_file_from_store(&state, "sha_resolve", "file.bin").unwrap();
+                match result {
+                    DownloadResult::LfsRedirect { oid, size: actual } => {
+                        assert!(is_lfs);
+                        assert_eq!((oid, actual), (sha, size));
+                    }
+                    DownloadResult::Inline {
+                        sha: actual,
+                        size: length,
+                    } => {
+                        assert!(!is_lfs);
+                        assert_eq!((actual, length), (sha, size));
+                    }
+                }
             }
         }
-    }
-
-    // --- Additional edge cases ---
-
-    #[test]
-    fn exactly_at_inline_boundary_should_be_inline() {
-        // size == MAX_INLINE_SIZE (1 MiB) → Inline
-        let result = resolve_download_variant(1_048_576, true);
-        assert!(matches!(result, DownloadResult::Inline { .. }));
-    }
-
-    #[test]
-    fn one_byte_over_inline_boundary_lfs_should_redirect() {
-        // size == MAX_INLINE_SIZE + 1 and is_lfs → LfsRedirect
-        let result = resolve_download_variant(1_048_577, true);
-        assert!(matches!(result, DownloadResult::LfsRedirect { .. }));
     }
 
     #[test]
@@ -419,7 +366,7 @@ mod tests {
         let result = resolve_file_from_store(&state, "sha_resolve", "big.txt").unwrap();
         match &result {
             DownloadResult::Inline { size, .. } => {
-                // size <= MAX_INLINE_SIZE → Inline
+                // Non-LFS content streams directly regardless of size.
                 assert!(*size <= 1_048_576);
             }
             _ => assert!(
@@ -431,8 +378,8 @@ mod tests {
 
     #[test]
     fn resolve_file_from_store_large_non_lfs_file_above_max_inline() {
-        // size > MAX_INLINE_SIZE (1 MiB) and !is_lfs → Inline (else branch)
-        let size = super::MAX_INLINE_SIZE + 1;
+        // Non-LFS content above the old 1 MiB boundary still streams directly.
+        let size = 1_048_577;
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "huge.txt".into(),
             size,

@@ -9,6 +9,40 @@ use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 #[tokio::test]
+async fn public_upload_preserves_advertised_chunks_in_postgres() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        eprintln!("SKIPPED: advertised chunk fixture requires DATABASE_URL");
+        return;
+    };
+    let backend = fixture.postgres();
+    let content = Bytes::from_static(b"postgres advertised chunk compatibility");
+    let uploaded = backend
+        .upload_file("advertised-chunks.bin", content.clone(), None)
+        .await
+        .unwrap();
+    assert!(!uploaded.chunks.is_empty());
+    for chunk in &uploaded.chunks {
+        let stored = backend.read_chunk(&chunk.hash).await.unwrap();
+        assert_eq!(
+            backend.chunk_length(&chunk.hash).await.unwrap(),
+            stored.len() as u64
+        );
+        let raw = lz4_flex::decompress_size_prepended(&stored).unwrap();
+        let start = usize::try_from(chunk.offset).unwrap();
+        let end = start + usize::try_from(chunk.length).unwrap();
+        assert_eq!(raw, content.get(start..end).unwrap());
+    }
+    assert_eq!(
+        backend
+            .download_file("advertised-chunks.bin", None, None)
+            .await
+            .unwrap(),
+        content
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn healthy_upload_owner_preserves_body_and_digest_errors() {
     use axum::response::IntoResponse;
     use shardline_index::{UploadIntentState, UploadIntentStore};
@@ -471,14 +505,29 @@ async fn scoped_file_recovery_distinguishes_colliding_legacy_labels() {
 }
 
 #[tokio::test]
-async fn released_server_preserves_unfinished_scoped_file_evidence() {
+async fn historical_server_preserves_unfinished_scoped_file_evidence() {
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_LEGACY_RECOVERY_BINARY")
+    else {
+        return;
+    };
+    verify_released_file_recovery(binary, true).await;
+}
+
+#[tokio::test]
+async fn released_server_recovers_scoped_file_checkpoints_without_inventing_completion() {
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_N_MINUS_ONE_BINARY")
+    else {
+        return;
+    };
+    verify_released_file_recovery(binary, false).await;
+}
+
+async fn verify_released_file_recovery(binary: String, historical: bool) {
     use sha2::Digest;
     use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
-    let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
-        eprintln!("SKIPPED: rollback fixture requires SHARDLINE_N_MINUS_ONE_BINARY");
-        return;
-    };
     let Some(fixture) = PostgresFixture::new().await else {
         eprintln!("SKIPPED: rollback fixture requires DATABASE_URL");
         return;
@@ -594,26 +643,31 @@ async fn released_server_preserves_unfinished_scoped_file_evidence() {
             .unwrap()
             .unwrap()
             .state();
-        let after = serde_json::to_value(
-            fixture
-                .index()
-                .reliability_events(intent.intent_id())
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let events = fixture
+            .index()
+            .reliability_events(intent.intent_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_lifecycle_chain_ends_at(&events, state).unwrap();
+        let after = serde_json::to_value(events).unwrap();
+        if historical
+            || !matches!(
+                checkpoint,
+                UploadIntentState::Stored | UploadIntentState::MetadataCommitted
+            )
+        {
+            assert_eq!(state, *checkpoint);
+        } else {
+            assert!(state == *checkpoint || state == UploadIntentState::Visible);
+        }
+        let original = before.as_array().unwrap();
         assert_eq!(
-            state,
-            *checkpoint,
-            "released recovery changed {}: {logs}",
-            intent.intent_id()
+            after.as_array().unwrap().get(..original.len()).unwrap(),
+            original.as_slice()
         );
-        assert_eq!(
-            after,
-            *before,
-            "released recovery changed {} history",
-            intent.intent_id()
-        );
+        if state == *checkpoint {
+            assert_eq!(after, *before);
+        }
     }
     assert_eq!(
         fixture
@@ -623,7 +677,11 @@ async fn released_server_preserves_unfinished_scoped_file_evidence() {
             .unwrap()
             .unwrap()
             .state(),
-        UploadIntentState::Visible
+        if historical {
+            UploadIntentState::Visible
+        } else {
+            UploadIntentState::Created
+        }
     );
     assert_eq!(
         fixture
@@ -632,7 +690,7 @@ async fn released_server_preserves_unfinished_scoped_file_evidence() {
             .await
             .unwrap()
             .len(),
-        5
+        if historical { 5 } else { 1 }
     );
     fixture
         .postgres()
@@ -929,7 +987,7 @@ async fn file_upload_owner_loss_during_publication_returns_a_fresh_request_error
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_upload_recovery_preserves_each_durable_boundary() {
+async fn native_upload_recovery_preserves_each_named_boundary() {
     use shardline_cas::{UploadLifecycleBoundary as Boundary, arm_upload_interruption};
     use shardline_index::{UploadIntentState, UploadIntentStore};
     for boundary in [
@@ -978,9 +1036,11 @@ async fn native_upload_recovery_preserves_each_durable_boundary() {
         let expected = match boundary {
             Boundary::AfterIntentCreated => UploadIntentState::Created,
             Boundary::AfterStoring | Boundary::AfterObjectWork => UploadIntentState::Storing,
-            Boundary::AfterStored => UploadIntentState::Stored,
-            Boundary::AfterMetadataCommitted => UploadIntentState::MetadataCommitted,
-            Boundary::AfterVisible => UploadIntentState::Visible,
+            // Completion events share one transaction after domain publication;
+            // these hooks observe the same committed Visible state.
+            Boundary::AfterStored | Boundary::AfterMetadataCommitted | Boundary::AfterVisible => {
+                UploadIntentState::Visible
+            }
         };
         assert_eq!(
             fixture
@@ -1833,14 +1893,14 @@ async fn native_shard_publication_rejects_a_deleted_validated_xorb() {
         &shard,
         None,
         crate::ShardMetadataLimits::default(),
-        |records, mappings, references| {
-            validated = Some((records, mappings, references));
+        |records, mappings, references, identities| {
+            validated = Some((records, mappings, references, identities));
             async { Ok(()) }
         },
     )
     .await
     .unwrap();
-    let (records, mappings, references) = validated.unwrap();
+    let (records, mappings, references, identities) = validated.unwrap();
     assert!(!records.is_empty());
     assert!(!mappings.is_empty());
     let physical = crate::xet_adapter::xorb_object_key(&hash).unwrap();
@@ -1857,7 +1917,13 @@ async fn native_shard_publication_rejects_a_deleted_validated_xorb() {
         .await
         .unwrap();
     let pending = backend
-        .commit_validated_native_shard(&records, &mappings, &references)
+        .commit_validated_native_shard_with_descriptors(
+            &records,
+            &mappings,
+            &references,
+            &identities,
+            &[],
+        )
         .await;
     let deleted = backend.object_store().delete_if_present(&physical).unwrap();
     assert_eq!(deleted, shardline_storage::DeleteOutcome::Deleted);

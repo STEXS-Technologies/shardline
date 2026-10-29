@@ -42,6 +42,28 @@ pub struct S3ObjectEntry {
     pub updated_at_unix_seconds: i64,
 }
 
+/// Computes the canonical integrity binding for derived multipart attributes.
+pub(crate) fn s3_multipart_count_proof(
+    scope_namespace: &str,
+    object_key: &str,
+    file_id: &str,
+    content_hash: &str,
+    part_count: u32,
+    updated_at_unix_seconds: i64,
+) -> Result<String, shardline_reliability::ReliabilityError> {
+    Ok(shardline_reliability::canonical_state_digest(&(
+        "shardline-s3-multipart-count-v1",
+        scope_namespace,
+        object_key,
+        file_id,
+        content_hash,
+        part_count,
+        updated_at_unix_seconds,
+    ))?
+    .as_str()
+    .to_owned())
+}
+
 /// Metadata precondition applied at the S3 object's publication transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum S3PublishCondition {
@@ -75,6 +97,46 @@ pub trait S3ObjectIndexStore: Send + Sync {
     /// Returns the adapter error when persistence fails.
     async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), Self::Error>;
 
+    /// Stores a newly written object with its multipart part count.
+    ///
+    /// The default preserves source compatibility for custom stores. Such a
+    /// store continues to publish the object, but reports the optional count
+    /// as unavailable until it implements this metadata extension.
+    async fn upsert_s3_object_with_multipart_count(
+        &self,
+        entry: &S3ObjectEntry,
+        _part_count: u32,
+    ) -> Result<(), Self::Error> {
+        self.upsert_s3_object(entry).await
+    }
+
+    /// Returns the verified multipart part count for this exact object
+    /// snapshot. The default keeps existing custom stores compatible.
+    async fn s3_multipart_part_count(
+        &self,
+        _entry: &S3ObjectEntry,
+    ) -> Result<Option<u32>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Resolves the object row and its derived multipart count together.
+    /// Built-in stores override this so both values come from one database
+    /// snapshot; the compatibility default uses the verified entry binding.
+    async fn scan_s3_object_exact_with_multipart_count(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, Self::Error> {
+        let Some(entry) = self
+            .scan_s3_object_exact(scope_namespace, object_key)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let count = self.s3_multipart_part_count(&entry).await?;
+        Ok(Some((entry, count)))
+    }
+
     /// Atomically replaces an S3 object row only when its current value equals
     /// `expected`. `None` means create only when the key is absent.
     ///
@@ -90,6 +152,31 @@ pub trait S3ObjectIndexStore: Send + Sync {
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
     ) -> Result<bool, Self::Error>;
+
+    /// Replaces evidence-bound S3 metadata without invalidating verified
+    /// derived metadata such as multipart part counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when persistence fails.
+    async fn compare_and_swap_s3_object_metadata(
+        &self,
+        expected: &S3ObjectEntry,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, Self::Error> {
+        self.compare_and_swap_s3_object(Some(expected), replacement)
+            .await
+    }
+
+    /// Atomically publishes an object and its multipart part count.
+    async fn compare_and_swap_s3_object_with_multipart_count(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+        _part_count: u32,
+    ) -> Result<bool, Self::Error> {
+        self.compare_and_swap_s3_object(expected, replacement).await
+    }
 
     /// Deletes one S3 object index row, returning whether a row was removed.
     ///

@@ -10,9 +10,8 @@ use shardline_protocol::SecretBytes;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn background_upgrade_preserves_rotation_while_its_update_waits() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("SKIPPED: background secret race needs an owned migrated PostgreSQL fixture");
+async fn postgres_background_upgrade_preserves_rotation_while_its_update_waits() {
+    let Some(url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
     let pool = sqlx::postgres::PgPoolOptions::new()

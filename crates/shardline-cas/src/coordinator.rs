@@ -106,6 +106,48 @@ where
     I: shardline_index::UploadIntentStore + Send + Sync,
     <I as shardline_index::UploadIntentStore>::Error: std::error::Error + Send + Sync + 'static,
 {
+    /// Selects an attempt for an immutable, content-addressed upload retry.
+    ///
+    /// Callers must verify the content identity and use idempotent persistence.
+    /// Failed attempts remain terminal; a successor records a new attempt without
+    /// erasing failure evidence. Concurrent retries select the same successor.
+    /// In-flight and visible attempts retain their existing lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for storage failures, conflicting immutable identities,
+    /// or exhausted attempt numbering.
+    pub async fn content_addressed_upload_attempt(
+        &self,
+        original: &shardline_index::UploadIntent,
+    ) -> Result<shardline_index::UploadIntent, CasError> {
+        let mut candidate = original.clone();
+        let mut generation = 0_u64;
+        loop {
+            let Some(stored) = self
+                .index
+                .intent_by_id(candidate.intent_id())
+                .await
+                .map_err(CasError::from_record)?
+            else {
+                return Ok(candidate);
+            };
+            if !stored.has_same_identity(&candidate) {
+                return Err(CasError::InvalidUploadTransition);
+            }
+            if stored.state() != shardline_index::UploadIntentState::Failed {
+                return Ok(candidate);
+            }
+            generation = generation.checked_add(1).ok_or(CasError::Overflow)?;
+            candidate = shardline_index::UploadIntent::new(
+                format!("{}-retry-{generation}", original.intent_id()),
+                original.object_key().to_owned(),
+                original.object_hash().to_owned(),
+                original.object_length(),
+            );
+        }
+    }
+
     /// Executes upload work within the coordinator-owned durable intent lifecycle.
     ///
     /// The configured index is the only store used for the lifecycle, preventing
@@ -203,39 +245,18 @@ where
                     UploadLifecycleBoundary::AfterObjectWork,
                 )
                 .map_err(E::from)?;
-                self.transition_upload_in_scope(
-                    &tenant,
-                    &repository,
-                    intent.intent_id(),
-                    shardline_index::UploadIntentState::Stored,
-                )
-                .await
-                .map_err(E::from)?;
+                self.complete_upload_in_scope(&tenant, &repository, intent.intent_id())
+                    .await
+                    .map_err(E::from)?;
                 upload_lifecycle_failpoint(
                     intent.intent_id(),
                     UploadLifecycleBoundary::AfterStored,
                 )
                 .map_err(E::from)?;
-                self.transition_upload_in_scope(
-                    &tenant,
-                    &repository,
-                    intent.intent_id(),
-                    shardline_index::UploadIntentState::MetadataCommitted,
-                )
-                .await
-                .map_err(E::from)?;
                 upload_lifecycle_failpoint(
                     intent.intent_id(),
                     UploadLifecycleBoundary::AfterMetadataCommitted,
                 )
-                .map_err(E::from)?;
-                self.transition_upload_in_scope(
-                    &tenant,
-                    &repository,
-                    intent.intent_id(),
-                    shardline_index::UploadIntentState::Visible,
-                )
-                .await
                 .map_err(E::from)?;
                 upload_lifecycle_failpoint(
                     intent.intent_id(),
@@ -779,6 +800,93 @@ mod tests {
     }
 
     #[test]
+    fn content_addressed_retry_preserves_failed_history_and_rejects_collisions() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index = MemoryIndexStore::new();
+            let coordinator = CasCoordinator::new(
+                index.clone(),
+                (),
+                (),
+                CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+            );
+            let original = UploadIntent::new(
+                "xorb-v2-test-42".to_owned(),
+                "xorbs/test".to_owned(),
+                "abcdef".to_owned(),
+                42,
+            );
+            coordinator.begin_upload(&original).await.unwrap();
+            coordinator
+                .transition_upload(original.intent_id(), UploadIntentState::Failed)
+                .await
+                .unwrap();
+            let successor = coordinator
+                .content_addressed_upload_attempt(&original)
+                .await
+                .unwrap();
+            assert_eq!(successor.intent_id(), "xorb-v2-test-42-retry-1");
+            let concurrent = coordinator
+                .content_addressed_upload_attempt(&original)
+                .await
+                .unwrap();
+            assert!(successor.has_same_identity(&concurrent));
+            coordinator.begin_upload(&successor).await.unwrap();
+            coordinator
+                .transition_upload(successor.intent_id(), UploadIntentState::Failed)
+                .await
+                .unwrap();
+            let retry = coordinator
+                .content_addressed_upload_attempt(&original)
+                .await
+                .unwrap();
+            assert_eq!(retry.intent_id(), "xorb-v2-test-42-retry-2");
+            let result: Result<(), CasError> = coordinator
+                .with_upload_intent(&retry, || async { Ok(()) })
+                .await;
+            result.unwrap();
+            assert_eq!(
+                index
+                    .intent_by_id(original.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                UploadIntentState::Failed
+            );
+            assert_eq!(
+                index
+                    .intent_by_id(successor.intent_id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state(),
+                UploadIntentState::Failed
+            );
+            assert!(
+                retry.has_same_identity(
+                    &coordinator
+                        .content_addressed_upload_attempt(&original)
+                        .await
+                        .unwrap()
+                )
+            );
+            let conflict = UploadIntent::new(
+                original.intent_id().to_owned(),
+                "xorbs/other".to_owned(),
+                "different".to_owned(),
+                42,
+            );
+            assert!(matches!(
+                coordinator
+                    .content_addressed_upload_attempt(&conflict)
+                    .await,
+                Err(CasError::InvalidUploadTransition)
+            ));
+        });
+    }
+
+    #[test]
     fn with_upload_intent_retry_after_ambiguous_error_can_complete() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let index = MemoryIndexStore::new();
@@ -862,9 +970,9 @@ mod tests {
             UploadLifecycleBoundary::AfterStoring | UploadLifecycleBoundary::AfterObjectWork => {
                 UploadIntentState::Storing
             }
-            UploadLifecycleBoundary::AfterStored => UploadIntentState::Stored,
-            UploadLifecycleBoundary::AfterMetadataCommitted => UploadIntentState::MetadataCommitted,
-            UploadLifecycleBoundary::AfterVisible => UploadIntentState::Visible,
+            UploadLifecycleBoundary::AfterStored
+            | UploadLifecycleBoundary::AfterMetadataCommitted
+            | UploadLifecycleBoundary::AfterVisible => UploadIntentState::Visible,
         }
     }
 

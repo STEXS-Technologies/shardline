@@ -1,4 +1,7 @@
-use std::io::Write;
+use std::{
+    collections::VecDeque,
+    io::{self, ErrorKind, IoSlice, Write},
+};
 
 use shardline_xet_core::merklehash::aggregated_hashes::{
     file_hash, file_hash_with_salt, xorb_hash,
@@ -218,6 +221,113 @@ fn hashed_write_multiple_writes() {
     let combined = b"part1part2part3";
     assert_eq!(writer.hash(), compute_data_hash(combined));
     assert_eq!(writer.into_inner(), combined);
+}
+
+struct ScriptedWriter {
+    outcomes: VecDeque<Result<usize, ErrorKind>>,
+    accepted: Vec<u8>,
+}
+
+impl ScriptedWriter {
+    fn new(outcomes: impl IntoIterator<Item = Result<usize, ErrorKind>>) -> Self {
+        Self {
+            outcomes: outcomes.into_iter().collect(),
+            accepted: Vec::new(),
+        }
+    }
+}
+
+impl Write for ScriptedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let limit = self.outcomes.pop_front().unwrap_or(Ok(bytes.len()))?;
+        let count = limit.min(bytes.len());
+        self.accepted.extend_from_slice(bytes.get(..count).unwrap());
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn hashed_write_short_write_retries_match_accepted_content() {
+    let data: Vec<u8> = (0..4097).map(|value| (value % 251) as u8).collect();
+    for limit in [1, 3, 63, 64, 65, 1023] {
+        let mut writer = HashedWrite::new(ScriptedWriter::new(std::iter::repeat_n(
+            Ok(limit),
+            data.len(),
+        )));
+        writer.write_all(&data).unwrap();
+        assert_eq!(writer.hash(), compute_data_hash(&data), "limit {limit}");
+        assert_eq!(writer.into_inner().accepted, data);
+    }
+}
+
+#[test]
+fn hashed_write_interruption_and_failure_preserve_the_accepted_prefix() {
+    let mut writer = HashedWrite::new(ScriptedWriter::new([
+        Ok(3),
+        Err(ErrorKind::Interrupted),
+        Ok(2),
+        Err(ErrorKind::BrokenPipe),
+    ]));
+    let error = writer.write_all(b"abcdefghij").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+    assert_eq!(writer.hash(), compute_data_hash(b"abcde"));
+    // Resume after the bytes the writer accepted, rather than hashing rejected
+    // attempts or the same prefix again during write_all's internal retries.
+    writer.write_all(b"fghij").unwrap();
+    assert_eq!(writer.hash(), compute_data_hash(b"abcdefghij"));
+    assert_eq!(writer.into_inner().accepted, b"abcdefghij");
+}
+
+#[test]
+fn hashed_write_zero_progress_and_empty_writes_do_not_change_the_digest() {
+    let mut writer = HashedWrite::new(ScriptedWriter::new([Ok(3), Ok(0)]));
+    let error = writer.write_all(b"abcdefghij").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::WriteZero);
+    assert_eq!(writer.hash(), compute_data_hash(b"abc"));
+    assert_eq!(writer.write(b"").unwrap(), 0);
+    assert_eq!(writer.hash(), compute_data_hash(b"abc"));
+    assert_eq!(writer.into_inner().accepted, b"abc");
+}
+
+#[test]
+fn hashed_write_vectored_hashes_only_the_accepted_prefix() {
+    let mut writer = HashedWrite::new(ScriptedWriter::new([Ok(3)]));
+    let buffers = [
+        IoSlice::new(b""),
+        IoSlice::new(b"abcde"),
+        IoSlice::new(b"fgh"),
+    ];
+    assert_eq!(writer.write_vectored(&buffers).unwrap(), 3);
+    assert_eq!(writer.hash(), compute_data_hash(b"abc"));
+    assert_eq!(writer.into_inner().accepted, b"abc");
+}
+
+#[test]
+fn hashed_write_xorb_decoding_matches_content_under_short_writes() {
+    use shardline_xet_core::xorb_object::{
+        CompressionScheme,
+        xorb_chunk_format::deserialize_chunks_to_writer,
+        xorb_format_test_utils::{ChunkSize, build_xorb_object},
+    };
+
+    for scheme in [
+        CompressionScheme::None,
+        CompressionScheme::LZ4,
+        CompressionScheme::ByteGrouping4LZ4,
+    ] {
+        let (_, encoded, raw, _) = build_xorb_object(3, ChunkSize::Fixed(257), scheme).unwrap();
+        for limit in [1, 7, 64] {
+            let sink = ScriptedWriter::new(std::iter::repeat_n(Ok(limit), raw.len()));
+            let mut writer = HashedWrite::new(sink);
+            deserialize_chunks_to_writer(&mut io::Cursor::new(&encoded), &mut writer).unwrap();
+            assert_eq!(writer.hash(), compute_data_hash(&raw));
+            assert_eq!(writer.into_inner().accepted, raw);
+        }
+    }
 }
 
 /// DataHash hex roundtrip for various values

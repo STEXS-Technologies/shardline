@@ -40,6 +40,20 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
+    pub(crate) const fn record_store(&self) -> &LocalRecordStore {
+        &self.record_store
+    }
+
+    pub(crate) fn xet_file_identity(
+        &self,
+        repository_scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<shardline_index::XetFileIdentity>, ServerError> {
+        self.record_store
+            .xet_file_identity(repository_scope, sha256)
+            .map_err(ServerError::from)
+    }
+
     /// Creates a local backend and initializes its directory structure.
     ///
     /// Initialization prepares the existing GC lock file when permissions allow.
@@ -131,7 +145,7 @@ impl LocalBackend {
             // Initialize and migrate SQLite before the server begins accepting
             // concurrent protocol requests. Lazy first-use initialization lets
             // simultaneous uploads race while creating the schema/import marker.
-            index_store: LocalIndexStore::new(root.clone())?,
+            index_store: LocalIndexStore::new_with_persistent_connection(root.clone())?,
             metadata_root: std::path::absolute(&root)?,
             record_store: LocalRecordStore::open(root),
             public_base_url,
@@ -407,7 +421,10 @@ impl LocalBackend {
                 }
                 let target_state = match ObjectKey::parse(intent.object_key()) {
                     Ok(key) => match AsyncObjectStore::metadata(&self.object_store, &key).await? {
-                        Some(metadata) if metadata.length() != intent.object_length() => {
+                        Some(metadata) if metadata.length() != intent.object_length()
+                            && !crate::upload_intent_recovery::native_xorb_has_equivalent_encoding(
+                                intent, self.object_store.clone(), &self.stream_work_pool,
+                            ).await? => {
                             Some(UploadIntentState::Failed)
                         }
                         Some(_) if intent.state() == UploadIntentState::MetadataCommitted => {
@@ -459,7 +476,7 @@ impl LocalBackend {
         Ok(pending_files)
     }
 
-    pub(super) async fn read_record(
+    pub(crate) async fn read_record(
         &self,
         file_id: &str,
         content_hash: Option<&str>,
@@ -482,24 +499,36 @@ impl LocalBackend {
         self.read_record(file_id, None, None).await
     }
 
-    /// Upserts one S3 object listing-index row.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index write fails.
-    pub(crate) async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), ServerError> {
-        self.index_store.upsert_s3_object(entry).await?;
+    pub(crate) async fn upsert_s3_object_with_multipart_count(
+        &self,
+        entry: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<(), ServerError> {
+        self.index_store
+            .upsert_s3_object_with_multipart_count(entry, part_count)
+            .await?;
         Ok(())
     }
 
-    /// Atomically replaces an S3 object row if its current value matches.
-    pub(crate) async fn compare_and_swap_s3_object(
+    pub(crate) async fn compare_and_swap_s3_object_with_multipart_count(
         &self,
         expected: Option<&S3ObjectEntry>,
         replacement: &S3ObjectEntry,
+        part_count: u32,
     ) -> Result<bool, ServerError> {
         self.index_store
-            .compare_and_swap_s3_object(expected, replacement)
+            .compare_and_swap_s3_object_with_multipart_count(expected, replacement, part_count)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn compare_and_swap_s3_object_metadata(
+        &self,
+        expected: &S3ObjectEntry,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .compare_and_swap_s3_object_metadata(expected, replacement)
             .await
             .map_err(ServerError::from)
     }
@@ -564,6 +593,17 @@ impl LocalBackend {
     ) -> Result<Option<S3ObjectEntry>, ServerError> {
         self.index_store
             .scan_s3_object_exact(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn scan_s3_object_exact_with_multipart_count(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, ServerError> {
+        self.index_store
+            .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
             .await
             .map_err(ServerError::from)
     }

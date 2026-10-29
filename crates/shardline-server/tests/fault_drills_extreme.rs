@@ -9,7 +9,7 @@
 //! integration test builds its own crate; duplication keeps `fault_drills.rs`
 //! a frozen regression gate). The harness is extended additively with:
 //!   - a reconstruction-cache mode (default `Disabled`; `with_redis_cache` /
-//!     `with_memory_cache` + `set_redis_cache` for mid-life switches),
+//!     `with_memory_cache`),
 //!   - `s3_delete` (DELETE verb),
 //!   - chunk-set helpers (`chunk_file_paths`, `corrupt_file`,
 //!     `new_chunk_files`, `session_dir_count`), and a seeded LCG for drill 6.
@@ -17,7 +17,9 @@
 //! Same philosophy as `fault_drills.rs`: every kill is synchronized on
 //! *on-disk evidence* (a new chunk file appearing) or on a body that is
 //! provably not at EOF — never a sleep guess. After each kill the harness
-//! restarts on the SAME root directory, modeling a process crash + restart.
+//! aborts the server task and reopens the SAME root directory. This does not
+//! terminate the OS process or its blocking tasks; deployment chaos tests cover
+//! actual process SIGKILL separately.
 //!
 //! Notes on the reconstruction cache: RedisReconstructionCache::new* only
 //! performs `redis::Client::open` (URL parse, no TCP), and per-op connection
@@ -54,8 +56,10 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+
+mod readiness;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
 };
@@ -180,12 +184,6 @@ impl DrillHarness {
         self
     }
 
-    /// Switch the cache mode mid-life (used by drill 2b to move from a live
-    /// Redis to a dead one across a restart).
-    fn set_redis_cache(&mut self, url: String) {
-        self.cache_mode = CacheMode::Redis(url);
-    }
-
     fn build_config(&self, addr: SocketAddr) -> ServerConfig {
         let mut config = ServerConfig::new(
             addr,
@@ -237,14 +235,9 @@ impl DrillHarness {
         self.graceful_shutdown = Some(shutdown_tx);
         self.base_url = base_url.clone();
 
-        // Readiness: any HTTP response (even 401/404) proves the router is up.
-        let client = self.client.clone();
-        loop {
-            match client.get(format!("{base_url}/healthz")).send().await {
-                Ok(_response) => return,
-                Err(_error) => tokio::time::sleep(Duration::from_millis(10)).await,
-            }
-        }
+        readiness::wait_for_health(&self.client, &base_url)
+            .await
+            .expect("healthy chaos fixture");
     }
 
     async fn restart(&mut self) {
@@ -487,17 +480,7 @@ async fn wait_part_evidence(
     }
 }
 
-/// One-shot TCP reachability probe used to SKIP-gate drills needing live
-/// external services (Postgres / Redis).
-async fn require_tcp(host: &str, port: u16) -> bool {
-    matches!(
-        tokio::time::timeout(Duration::from_millis(250), TcpStream::connect((host, port))).await,
-        Ok(Ok(_stream))
-    )
-}
-
-/// Migrate the local dev Postgres via the in-process path (the server does not
-/// self-migrate). Reachable-but-unmigratable is a hard failure, not a skip.
+/// Migrate the owned PostgreSQL fixture; the server does not self-migrate.
 async fn ensure_dev_postgres_migrated(url: &str) {
     let mut last = None;
     for _ in 0..5 {
@@ -515,7 +498,7 @@ async fn ensure_dev_postgres_migrated(url: &str) {
             }
         }
     }
-    panic!("failed to connect+migrate PG {url}: {last:?}");
+    panic!("failed to connect+migrate PostgreSQL fixture: {last:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -770,16 +753,18 @@ async fn drill_extreme_2a_dead_redis_boots_and_serves() {
 }
 
 /// 2b: live Redis for the write+first read, then the server is killed and
-/// restarted with a DEAD Redis URL on the SAME root — the object must still
-/// serve byte-exact from the disk fallback (cache lost mid-life).
+/// restarted with the same URL after the owned Redis container stops. Objects
+/// must remain byte-exact. This checks S3 availability with an unavailable cache;
+/// the S3 GET path does not itself use the Xet reconstruction cache.
+#[cfg(feature = "docker")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_extreme_2b_live_redis_then_redis_down() {
-    if !require_tcp("127.0.0.1", 6379).await {
-        eprintln!("SKIP: drill_extreme_2b_live_redis_then_redis_down — 127.0.0.1:6379 unreachable");
-        return;
-    }
-    let mut harness =
-        DrillHarness::new(3600).with_redis_cache("redis://127.0.0.1:6379/0".to_owned());
+    let stack = shardline_test_support::DockerLocalStack::builder()
+        .with_redis()
+        .start()
+        .unwrap()
+        .expect("Redis outage drill requires Docker");
+    let mut harness = DrillHarness::new(3600).with_redis_cache(stack.redis_url().unwrap());
     harness.spawn_server().await;
 
     let key = "redis-down";
@@ -791,10 +776,10 @@ async fn drill_extreme_2b_live_redis_then_redis_down() {
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(sha256_hex(&resp.bytes().await.unwrap()), expected);
 
-    // Redis goes away mid-life: restart on the same root with a dead URL.
+    // Stop the actual configured service; do not substitute an unrelated URL.
     harness.kill_hard().await;
     harness.settle(Duration::from_millis(50)).await;
-    harness.set_redis_cache(DEAD_REDIS_URL.to_owned());
+    stack.stop_redis().unwrap();
     harness.restart().await;
 
     for round in 0..2 {
@@ -941,27 +926,24 @@ async fn drill_extreme_3_stale_read_pinned_snapshot() {
 }
 
 // ===========================================================================
-// DRILL 4 — POSTGRES KILL-MID-TRANSACTION (SKIP-gated on live Postgres)
+// DRILL 4 — PostgreSQL-backed upload interruption (owned Docker fixture)
 // ===========================================================================
 
 /// With the Postgres metadata backend, an in-flight overwrite killed after
-/// chunk evidence (provably inside the upload transaction, pre-publish) must
+/// persisted container evidence while EOF is withheld (before publication) must
 /// leave the committed v1 byte-exact; a subsequent full PUT must restore the
 /// metadata path functionality post-crash.
+#[cfg(feature = "docker")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drill_extreme_4_postgres_kill_mid_transaction() {
-    if !require_tcp("127.0.0.1", 5432).await {
-        eprintln!(
-            "SKIP: drill_extreme_4_postgres_kill_mid_transaction — 127.0.0.1:5432 unreachable"
-        );
-        return;
-    }
-    ensure_dev_postgres_migrated(
-        "postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline",
-    )
-    .await;
-    let mut harness = DrillHarness::new(3600)
-        .with_postgres("postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline");
+    let stack = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .start()
+        .unwrap()
+        .expect("PostgreSQL upload drill requires Docker");
+    let postgres_url = stack.postgres_url().unwrap();
+    ensure_dev_postgres_migrated(&postgres_url).await;
+    let mut harness = DrillHarness::new(3600).with_postgres(&postgres_url);
     harness.spawn_server().await;
 
     let key = "pg-extreme";
@@ -984,9 +966,12 @@ async fn drill_extreme_4_postgres_kill_mid_transaction() {
             .send()
             .await
     });
-    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(512 * 1024, 46))))
-        .await
-        .unwrap();
+    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
+        36 * 1024 * 1024,
+        46,
+    ))))
+    .await
+    .unwrap();
 
     let root = harness.root.clone();
     wait_until(Duration::from_secs(5), "chunk evidence (PG)", || {
@@ -1046,7 +1031,8 @@ async fn drill_extreme_5_repeated_kill_cycles() {
         // payloads and the aborted overwrite would dedup 100% against the
         // previous cycle (no new chunk evidence). Use distinct odd seeds.
         let payload = deterministic_bytes(256 * 1024 + 17 * i as usize, 101 + 2 * i);
-        let overwrite = deterministic_bytes(512 * 1024, 201 + 2 * i);
+        // Flush a complete direct-packing batch before withholding EOF.
+        let overwrite = deterministic_bytes(36 * 1024 * 1024, 201 + 2 * i);
         // Dropping the HTTP serve task is not an OS process kill: already
         // running blocking object-store writes can finish after a checkpoint.
         // Independently derive the finite chunk budget from the same CDC
@@ -1253,8 +1239,10 @@ async fn drill_extreme_6_concurrency_chaos_bounded() {
                     .await
             });
             tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
-                512 * 1024,
-                300 + r as u64,
+                36 * 1024 * 1024,
+                // The generator normalizes seed | 1; use distinct odd seeds
+                // so later rounds cannot reuse an earlier aborted container.
+                301 + 2 * r as u64,
             ))))
             .await
             .unwrap();
@@ -1431,9 +1419,12 @@ async fn drill_extreme_8_multiversion_overwrite_kills() {
             .send()
             .await
     });
-    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(512 * 1024, 25))))
-        .await
-        .unwrap();
+    tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
+        36 * 1024 * 1024,
+        25,
+    ))))
+    .await
+    .unwrap();
     let root = harness.root.clone();
     wait_until(Duration::from_secs(5), "v2 chunk evidence", || {
         count_chunk_files(&root) > chunks_before

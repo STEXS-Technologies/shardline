@@ -1,0 +1,12 @@
+DROP TRIGGER IF EXISTS shardline_hub_creation_record ON shardline_hub_repos;
+DROP TRIGGER IF EXISTS shardline_hub_creation_guard ON shardline_hub_repos;
+DROP FUNCTION IF EXISTS shardline_hub_creation_record();
+DROP FUNCTION IF EXISTS shardline_hub_creation_guard();
+DROP TABLE IF EXISTS shardline_hub_creation_events;
+DROP TABLE IF EXISTS shardline_hub_creation_denials;
+DROP TABLE IF EXISTS shardline_hub_creation_policies;
+DROP FUNCTION IF EXISTS shardline_hub_creation_policy_lock();
+DROP INDEX IF EXISTS shardline_hub_repos_creation_namespace;
+ALTER TABLE shardline_hub_repos DROP COLUMN creation_subject;
+ALTER TABLE shardline_hub_repos DROP COLUMN creation_issuer;
+ALTER TABLE shardline_hub_repos DROP COLUMN creation_authorized;

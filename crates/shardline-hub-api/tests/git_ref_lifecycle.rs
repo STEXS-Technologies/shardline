@@ -318,7 +318,9 @@ async fn sqlite_git_ref_lifecycle() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_git_ref_lifecycle() {
-    let Ok(url) = std::env::var("SHARDLINE_GIT_REF_TEST_DATABASE_URL") else {
+    let Some(url) =
+        shardline_test_support::postgres_fixture_url("SHARDLINE_GIT_REF_TEST_DATABASE_URL")
+    else {
         return;
     };
     let root = tempfile::TempDir::new().unwrap();

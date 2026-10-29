@@ -554,7 +554,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 "INSERT INTO shardline_file_reconstructions (file_id, terms)
                  VALUES ($1, $2)
                  ON CONFLICT (file_id)
-                 DO UPDATE SET terms = EXCLUDED.terms, updated_at = now()",
+                 DO UPDATE SET terms = EXCLUDED.terms, updated_at = now()
+                 WHERE shardline_file_reconstructions.terms IS DISTINCT FROM EXCLUDED.terms",
             )
             .bind(xet_hash_hex_string(file_id.hash()))
             .bind(Json(record))
@@ -776,7 +777,9 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                  ON CONFLICT (chunk_hash)
                  DO UPDATE SET
                     shard_object_key = EXCLUDED.shard_object_key,
-                    updated_at = now()",
+                    updated_at = now()
+                 WHERE shardline_dedupe_shards.shard_object_key
+                       IS DISTINCT FROM EXCLUDED.shard_object_key",
             )
             .bind(xet_hash_hex_string(mapping.chunk_hash()))
             .bind(mapping.shard_object_key().as_str())
@@ -982,7 +985,13 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                     observed_length = EXCLUDED.observed_length,
                     first_seen_unreachable_at_unix_seconds =
                         EXCLUDED.first_seen_unreachable_at_unix_seconds,
-                    delete_after_unix_seconds = EXCLUDED.delete_after_unix_seconds",
+                    delete_after_unix_seconds = EXCLUDED.delete_after_unix_seconds
+                 WHERE shardline_quarantine_candidates.observed_length
+                           IS DISTINCT FROM EXCLUDED.observed_length
+                    OR shardline_quarantine_candidates.first_seen_unreachable_at_unix_seconds
+                           IS DISTINCT FROM EXCLUDED.first_seen_unreachable_at_unix_seconds
+                    OR shardline_quarantine_candidates.delete_after_unix_seconds
+                           IS DISTINCT FROM EXCLUDED.delete_after_unix_seconds",
             )
             .bind(candidate.object_key().as_str())
             .bind(u64_to_i64(candidate.observed_length())?)
@@ -2293,6 +2302,14 @@ impl UploadIntentStore for super::PostgresIndexStore {
         Ok(true)
     }
 
+    async fn transition_intent_batch_with_events(
+        &self,
+        intent_id: &str,
+        transitions: &[(UploadIntentState, LifecycleEvent)],
+    ) -> Result<bool, Self::Error> {
+        super::upload_transitions::commit(self, intent_id, transitions).await
+    }
+
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
         let row = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
             "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE intent_id = $1"
@@ -3247,6 +3264,61 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn pg_unchanged_dedupe_mapping_does_not_refresh_timestamp() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let chunk_hash = ShardlineHash::from_bytes([17; 32]);
+        let original = crate::DedupeShardMapping::new(
+            chunk_hash,
+            shardline_storage::ObjectKey::parse("shards/aa/unchanged.shard").unwrap(),
+        );
+        let replacement = crate::DedupeShardMapping::new(
+            chunk_hash,
+            shardline_storage::ObjectKey::parse("shards/bb/replacement.shard").unwrap(),
+        );
+
+        store.upsert_dedupe_shard_mapping(&original).await.unwrap();
+        sqlx::query(
+            "UPDATE shardline_dedupe_shards
+             SET updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'
+             WHERE chunk_hash = $1",
+        )
+        .bind(crate::xet_hash_hex_string(chunk_hash))
+        .execute(&pool)
+        .await
+        .unwrap();
+        store.upsert_dedupe_shard_mapping(&original).await.unwrap();
+        let (stored_key, stored_at): (String, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            "SELECT shard_object_key, updated_at FROM shardline_dedupe_shards
+                 WHERE chunk_hash = $1",
+        )
+        .bind(crate::xet_hash_hex_string(chunk_hash))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_key, original.shard_object_key().as_str());
+        assert_eq!(stored_at.timestamp(), 946_684_800);
+
+        store
+            .upsert_dedupe_shard_mapping(&replacement)
+            .await
+            .unwrap();
+        let (stored_key, stored_at): (String, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            "SELECT shard_object_key, updated_at FROM shardline_dedupe_shards
+                 WHERE chunk_hash = $1",
+        )
+        .bind(crate::xet_hash_hex_string(chunk_hash))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_key, replacement.shard_object_key().as_str());
+        assert!(stored_at.timestamp() > 946_684_800);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn pg_provider_repository_state_concurrent_partial_updates_are_merged() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -3542,6 +3614,87 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean evidence fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_identical_quarantine_observation_skips_row_update_but_keeps_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let object_key = shardline_storage::ObjectKey::parse("gc/replayed-noop-cost").unwrap();
+        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
+            .bind(object_key.as_str())
+            .execute(&pool)
+            .await
+            .expect("clean quarantine fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .execute(&pool)
+        .await
+        .expect("clean quarantine evidence fixture");
+
+        let candidate = QuarantineCandidate::new(object_key.clone(), 4, 100, 200).unwrap();
+        store
+            .upsert_quarantine_candidate(&candidate)
+            .await
+            .expect("insert quarantine candidate");
+        let original_xmin = sqlx::query_scalar::<_, String>(
+            "SELECT xmin::text FROM shardline_quarantine_candidates WHERE object_key = $1",
+        )
+        .bind(object_key.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("read inserted tuple version");
+        let original_event_count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("count initial evidence");
+
+        store
+            .upsert_quarantine_candidate(&candidate)
+            .await
+            .expect("replay quarantine candidate");
+
+        let xmin = sqlx::query_scalar::<_, String>(
+            "SELECT xmin::text FROM shardline_quarantine_candidates WHERE object_key = $1",
+        )
+        .bind(object_key.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("read replayed tuple version");
+        let event_count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("count replay evidence");
+        assert_eq!(xmin, original_xmin, "identical row should not be rewritten");
+        assert_eq!(event_count, original_event_count + 1);
+
+        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
+            .bind(object_key.as_str())
+            .execute(&pool)
+            .await
+            .expect("clean quarantine fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .execute(&pool)
+        .await
+        .expect("clean quarantine evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4960,6 +5113,45 @@ mod tests {
             store.list_reconstruction_file_ids().await.unwrap().len(),
             519
         );
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_replaying_identical_reconstruction_skips_row_update() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let file_id = crate::FileId::new(ShardlineHash::from_bytes([11; 32]));
+        let reconstruction = FileReconstruction::new(vec![]);
+        let file_id_hex = crate::xet_hash_hex_string(file_id.hash());
+
+        store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .await
+            .expect("initial insert should succeed");
+        let initial_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_file_reconstructions WHERE file_id = $1",
+        )
+        .bind(&file_id_hex)
+        .fetch_one(&pool)
+        .await
+        .expect("read initial row version");
+
+        store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .await
+            .expect("identical replay should succeed");
+        let replay_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_file_reconstructions WHERE file_id = $1",
+        )
+        .bind(&file_id_hex)
+        .fetch_one(&pool)
+        .await
+        .expect("read replayed row version");
+        assert_eq!(initial_xmin, replay_xmin);
+
         pool.close().await;
     }
 

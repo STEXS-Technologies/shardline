@@ -1,5 +1,5 @@
 //! Evidence I/O on an existing server pool, separate from execution authority.
-use std::{fmt, future::Future, time::Duration};
+use std::{cell::Cell, fmt, future::Future, time::Duration};
 
 use penelope::core::task::Digest;
 use shardline_index::{PostgresIndexStore, PostgresMetadataStoreError, PostgresTaskArtifact};
@@ -7,6 +7,27 @@ use sqlx::{Connection, PgPool, Postgres, pool::PoolConnection};
 
 use super::{TaskEvidenceStore, resolved_postgres_deployment_fingerprint};
 use crate::{ServerBackend, ServerConfig, ServerError};
+
+tokio::task_local! {
+    // Per-operation context, including when synchronous history calls run on
+    // blocking threads. It never changes authority or database behavior.
+    static IO_PHASE: Cell<&'static str>;
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "task metadata {operation} exceeded its five-second deadline (phase={phase}, pool_size={pool_size}, pool_idle={pool_idle})"
+)]
+struct MetadataTimeout {
+    operation: &'static str,
+    phase: &'static str,
+    // Numeric pool observations help distinguish resource pressure without
+    // exposing connection strings, evidence keys or payloads in diagnostics.
+    pool_size: u32,
+    pool_idle: usize,
+    #[source]
+    source: tokio::time::error::Elapsed,
+}
 
 #[derive(Clone)]
 pub(super) struct PostgresTaskMetadata {
@@ -233,6 +254,7 @@ impl PostgresTaskMetadata {
             .acquire()
             .await
             .map_err(PostgresMetadataStoreError::from)?;
+        IO_PHASE.with(|phase| phase.set("checking target"));
         if self.close_after_io {
             connection.close_on_drop();
         }
@@ -245,6 +267,7 @@ impl PostgresTaskMetadata {
                 "task metadata target changed",
             )));
         }
+        IO_PHASE.with(|phase| phase.set("executing"));
         Ok(connection)
     }
 
@@ -253,6 +276,7 @@ impl PostgresTaskMetadata {
         connection: PoolConnection<Postgres>,
         result: Result<T, ServerError>,
     ) -> Result<T, ServerError> {
+        IO_PHASE.with(|phase| phase.set("finishing"));
         if self.close_after_io {
             let closed = connection
                 .close()
@@ -265,20 +289,34 @@ impl PostgresTaskMetadata {
         result
     }
 
-    fn run<T>(&self, work: impl Future<Output = Result<T, ServerError>>) -> Result<T, ServerError> {
+    fn run<T>(
+        &self,
+        operation: &'static str,
+        work: impl Future<Output = Result<T, ServerError>>,
+    ) -> Result<T, ServerError> {
         // All host call sites use blocking inspection/receipt threads. The
         // captured server handle also works there without a thread-local handle.
-        self.handle.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), work)
-                .await
-                .map_err(|error| {
-                    ServerError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, error))
-                })?
-        })
+        self.handle
+            .block_on(IO_PHASE.scope(Cell::new("acquiring connection"), async {
+                tokio::time::timeout(Duration::from_secs(5), work)
+                    .await
+                    .map_err(|error| {
+                        ServerError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            MetadataTimeout {
+                                operation,
+                                phase: IO_PHASE.with(Cell::get),
+                                pool_size: self.pool.size(),
+                                pool_idle: self.pool.num_idle(),
+                                source: error,
+                            },
+                        ))
+                    })?
+            }))
     }
 
     pub(super) fn publish(&self, key: &str, bytes: &[u8]) -> Result<(), ServerError> {
-        self.run(async {
+        self.run("publish", async {
             let mut connection = self.connection().await?;
             let result = PostgresIndexStore::publish_task_artifact_on_connection(
                 &mut connection,
@@ -297,7 +335,7 @@ impl PostgresTaskMetadata {
         bytes: &[u8],
         maximum_runs: u64,
     ) -> Result<bool, ServerError> {
-        self.run(async {
+        self.run("publish bounded", async {
             let mut connection = self.connection().await?;
             let result = PostgresIndexStore::publish_task_artifact_bounded_on_connection(
                 &mut connection,
@@ -312,7 +350,7 @@ impl PostgresTaskMetadata {
     }
 
     pub(super) fn admission_full(&self, maximum_runs: u64) -> Result<bool, ServerError> {
-        self.run(async {
+        self.run("check admission", async {
             let mut connection = self.connection().await?;
             let result = PostgresIndexStore::task_history_admission_full_on_connection(
                 &mut connection,
@@ -329,7 +367,7 @@ impl PostgresTaskMetadata {
         key: &str,
         maximum: u64,
     ) -> Result<Option<PostgresTaskArtifact>, ServerError> {
-        self.run(async {
+        self.run("read", async {
             let mut connection = self.connection().await?;
             let result =
                 PostgresIndexStore::read_task_artifact_on_connection(&mut connection, key, maximum)
@@ -344,7 +382,7 @@ impl PostgresTaskMetadata {
         prefix: &str,
         after: Option<&str>,
     ) -> Result<Vec<(String, u64)>, ServerError> {
-        self.run(async {
+        self.run("list page", async {
             let mut connection = self.connection().await?;
             let result = PostgresIndexStore::task_artifact_page_on_connection(
                 &mut connection,
@@ -362,7 +400,7 @@ impl PostgresTaskMetadata {
         prefix: &str,
         after: Option<&str>,
     ) -> Result<Vec<(String, PostgresTaskArtifact)>, ServerError> {
-        self.run(async {
+        self.run("read bounded page", async {
             let mut connection = self.connection().await?;
             let result = PostgresIndexStore::task_artifact_bounded_page_on_connection(
                 &mut connection,
@@ -376,7 +414,7 @@ impl PostgresTaskMetadata {
     }
 
     pub(super) fn delete(&self, key: &str) -> Result<(), ServerError> {
-        self.run(async {
+        self.run("delete", async {
             let mut connection = self.connection().await?;
             let result =
                 PostgresIndexStore::delete_task_artifact_on_connection(&mut connection, key)
@@ -391,7 +429,7 @@ impl PostgresTaskMetadata {
         if keys.is_empty() {
             return Ok(());
         }
-        self.run(async {
+        self.run("delete batch", async {
             let mut connection = self.connection().await?;
             let result =
                 PostgresIndexStore::delete_task_artifacts_on_connection(&mut connection, keys)
@@ -403,7 +441,7 @@ impl PostgresTaskMetadata {
     }
 
     pub(super) fn finish_retirement(&self, id: &str) -> Result<(), ServerError> {
-        self.run(async {
+        self.run("finish retirement", async {
             let mut connection = self.connection().await?;
             let result = async {
                 let mut transaction = connection

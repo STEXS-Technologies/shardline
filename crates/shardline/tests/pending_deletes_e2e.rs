@@ -85,8 +85,7 @@ fn unavailable_postgres_inspection_gives_recovery_guidance_without_starting_work
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_pending_delete_cli_paginates_without_changing_attempts() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
-        eprintln!("SKIPPED: pending-delete CLI fixture requires DATABASE_URL");
+    let Some(database_url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
     let admin = sqlx::PgPool::connect(&database_url).await.unwrap();

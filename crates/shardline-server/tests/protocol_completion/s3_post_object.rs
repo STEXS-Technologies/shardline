@@ -1,0 +1,618 @@
+use super::*;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use hmac::{Hmac, Mac};
+use serde_json::json;
+use sha2::Sha256;
+
+#[tokio::test]
+#[ignore = "requires BOTOCORE_PYTHON with boto3"]
+async fn native_boto3_presigned_post_uploads_and_reads_object() {
+    let root = tempfile::tempdir().unwrap();
+    let credential = token("writer", "aws-resume", TokenScope::Write);
+    let server = start_configured(
+        root.path(),
+        ServerFrontend::S3,
+        true,
+        None,
+        None,
+        Some(signing_identity(credential)),
+    )
+    .await;
+    let endpoint = server.base.clone();
+    let python = std::env::var("BOTOCORE_PYTHON").expect("BOTOCORE_PYTHON must be configured");
+    let output = tokio::task::spawn_blocking(move || {
+        shardline_test_support::native_client_output(
+            std::process::Command::new(python)
+            .arg("-c")
+            .arg(
+                r#"
+import base64, gzip, hashlib, sys, urllib.request, urllib.error, urllib.parse
+import boto3
+from botocore.config import Config
+
+endpoint = sys.argv[1]
+bucket = 'aws-resume.locks'
+payload = b'native boto3 browser form upload'
+checksum = base64.b64encode(hashlib.sha256(payload).digest()).decode()
+client = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
+    aws_access_key_id='SIGNINGKEY', aws_secret_access_key='legacy-token-bridge',
+    config=Config(signature_version='s3v4'))
+post = client.generate_presigned_post(
+    Bucket=bucket,
+    Key='uploads/${filename}',
+    Fields={'success_action_status': '201', 'Content-Type': 'application/x-shardline-model',
+        'x-amz-meta-model': 'release-1',
+        'x-amz-tagging': 'channel=stable&model=weights',
+        'acl': 'bucket-owner-full-control',
+        'x-amz-storage-class': 'STANDARD',
+        'x-amz-checksum-sha256': checksum, 'x-ignore-client-note': 'ignored'},
+    Conditions=[
+        {'bucket': bucket}, ['starts-with', '$key', 'uploads/'],
+        {'success_action_status': '201'}, {'Content-Type': 'application/x-shardline-model'},
+        {'x-amz-meta-model': 'release-1'},
+        {'x-amz-tagging': 'channel=stable&model=weights'},
+        {'acl': 'bucket-owner-full-control'},
+        {'x-amz-storage-class': 'STANDARD'},
+        {'x-amz-checksum-sha256': checksum},
+        ['content-length-range', 1, 1024],
+    ],
+    ExpiresIn=300,
+)
+boundary = 'shardline-boto3-post-boundary'
+body = bytearray()
+for name, value in post['fields'].items():
+    body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="weights.bin"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
+body.extend(payload)
+body.extend(f'\r\n--{boundary}--\r\n'.encode())
+request = urllib.request.Request(post['url'], data=bytes(body), method='POST',
+    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+with urllib.request.urlopen(request) as response:
+    assert response.status == 201, (response.status, response.read())
+    assert b'<Key>uploads/weights.bin</Key>' in response.read()
+assert client.get_object(Bucket=bucket, Key='uploads/weights.bin')['Body'].read() == payload
+assert client.head_object(Bucket=bucket, Key='uploads/weights.bin')['ContentType'] == 'application/x-shardline-model'
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/weights.bin')['TagSet'] == [
+    {'Key': 'channel', 'Value': 'stable'}, {'Key': 'model', 'Value': 'weights'}]
+
+# The ACL-disabled bucket accepts its owner-only canned ACL but refuses public
+# grants with S3's specific error before publishing an object.
+public_post = client.generate_presigned_post(
+    Bucket=bucket, Key='uploads/public.bin', Fields={'acl': 'public-read'},
+    Conditions=[{'bucket': bucket}, {'key': 'uploads/public.bin'},
+        {'acl': 'public-read'}, ['content-length-range', 1, 1024]],
+    ExpiresIn=300)
+boundary = 'shardline-boto3-public-acl-boundary'
+body = bytearray()
+for name, value in public_post['fields'].items():
+    body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="public.bin"\r\n\r\npublic\r\n--{boundary}--\r\n'.encode())
+request = urllib.request.Request(public_post['url'], data=bytes(body), method='POST',
+    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+try:
+    urllib.request.urlopen(request)
+    raise AssertionError('public ACL form was accepted')
+except urllib.error.HTTPError as response:
+    assert response.code == 400, (response.code, response.read())
+    assert b'<Code>AccessControlListNotSupported</Code>' in response.read()
+
+# STANDARD is the default storage class and is safe to accept as an explicit
+# browser-form option; a non-default class must fail rather than be ignored.
+unsupported_post = client.generate_presigned_post(
+    Bucket=bucket, Key='uploads/glacier.bin',
+    Fields={'x-amz-storage-class': 'GLACIER'},
+    Conditions=[{'bucket': bucket}, {'key': 'uploads/glacier.bin'},
+        {'x-amz-storage-class': 'GLACIER'}, ['content-length-range', 1, 1024]],
+    ExpiresIn=300)
+boundary = 'shardline-boto3-glacier-boundary'
+body = bytearray()
+for name, value in unsupported_post['fields'].items():
+    body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="weights.bin"\r\n\r\nglacier\r\n--{boundary}--\r\n'.encode())
+request = urllib.request.Request(unsupported_post['url'], data=bytes(body), method='POST',
+    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+try:
+    urllib.request.urlopen(request)
+    raise AssertionError('non-standard storage class was accepted')
+except urllib.error.HTTPError as response:
+    assert response.code == 501, (response.code, response.read())
+
+# Exercise the normal object header, the dedicated tagging APIs, copy defaults
+# and replacement semantics, and multipart upload persistence through Boto3.
+client.put_object(Bucket=bucket, Key='uploads/tag-source.bin', Body=payload,
+    Tagging='team=storage&stage=initial')
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin')['TagSet'] == [
+    {'Key': 'stage', 'Value': 'initial'}, {'Key': 'team', 'Value': 'storage'}]
+client.put_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin', Tagging={'TagSet': [
+    {'Key': 'stage', 'Value': 'verified'}, {'Key': 'team', 'Value': 'storage'}]})
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin')['TagSet'] == [
+    {'Key': 'stage', 'Value': 'verified'}, {'Key': 'team', 'Value': 'storage'}]
+client.copy_object(Bucket=bucket, Key='uploads/tag-copy.bin', CopySource={
+    'Bucket': bucket, 'Key': 'uploads/tag-source.bin'})
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-copy.bin')['TagSet'] == [
+    {'Key': 'stage', 'Value': 'verified'}, {'Key': 'team', 'Value': 'storage'}]
+client.copy_object(Bucket=bucket, Key='uploads/tag-replace.bin', CopySource={
+    'Bucket': bucket, 'Key': 'uploads/tag-source.bin'}, TaggingDirective='REPLACE',
+    Tagging='release=1')
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-replace.bin')['TagSet'] == [
+    {'Key': 'release', 'Value': '1'}]
+upload = client.create_multipart_upload(Bucket=bucket, Key='uploads/tag-multipart.bin',
+    Tagging='workflow=release')
+part = client.upload_part(Bucket=bucket, Key='uploads/tag-multipart.bin',
+    UploadId=upload['UploadId'], PartNumber=1, Body=payload)
+client.complete_multipart_upload(Bucket=bucket, Key='uploads/tag-multipart.bin',
+    UploadId=upload['UploadId'], MultipartUpload={'Parts': [
+        {'PartNumber': 1, 'ETag': part['ETag']}]})
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-multipart.bin')['TagSet'] == [
+    {'Key': 'workflow', 'Value': 'release'}]
+client.delete_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin')
+assert client.get_object_tagging(Bucket=bucket, Key='uploads/tag-source.bin')['TagSet'] == []
+
+# Native SDK signed policy plus browser-style form, with a redirect destination
+# that already has a query parameter. The response must preserve it and append
+# the stored object's bucket, expanded key, and ETag.
+redirect_payload = gzip.compress(b'native boto3 redirect upload')
+redirect_url = 'https://uploads.example.test/complete?state=kept'
+redirect_post = client.generate_presigned_post(
+    Bucket=bucket, Key='redirect/${filename}',
+    Fields={'success_action_redirect': redirect_url, 'Content-Encoding': 'gzip'},
+    Conditions=[{'bucket': bucket}, ['starts-with', '$key', 'redirect/'],
+        {'success_action_redirect': redirect_url}, {'Content-Encoding': 'gzip'},
+        ['content-length-range', 1, 1024]],
+    ExpiresIn=300)
+boundary = 'shardline-boto3-redirect-boundary'
+body = bytearray()
+for name, value in redirect_post['fields'].items():
+    body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="weights.bin"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
+body.extend(redirect_payload)
+body.extend(f'\r\n--{boundary}--\r\n'.encode())
+request = urllib.request.Request(redirect_post['url'], data=bytes(body), method='POST',
+    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+try:
+    urllib.request.build_opener(NoRedirect).open(request)
+    raise AssertionError('expected HTTP 303 redirect')
+except urllib.error.HTTPError as response:
+    assert response.code == 303, (response.code, response.read())
+    redirected = urllib.parse.urlparse(response.headers['Location'])
+    values = urllib.parse.parse_qs(redirected.query)
+    assert redirected.path == '/complete', redirected
+    assert values['state'] == ['kept'], values
+    assert values['bucket'] == [bucket], values
+    assert values['key'] == ['redirect/weights.bin'], values
+    assert values['etag'] == ['"' + hashlib.md5(redirect_payload).hexdigest() + '"'], values
+assert client.get_object(Bucket=bucket, Key='redirect/weights.bin')['Body'].read() == redirect_payload
+assert client.head_object(Bucket=bucket, Key='redirect/weights.bin')['ContentEncoding'] == 'gzip'
+"#,
+            )
+            .arg(&endpoint),
+            std::time::Duration::from_secs(180),
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "native boto3 PostObject failed with status {} (client output kept private)",
+        output.status
+    );
+}
+
+#[tokio::test]
+async fn signed_browser_post_object_expands_filename_and_checks_policy_before_publish() {
+    let root = tempfile::tempdir().unwrap();
+    let credential = token("writer", "aws-resume", TokenScope::Write);
+    let server = start_configured(
+        root.path(),
+        ServerFrontend::S3,
+        true,
+        None,
+        None,
+        Some(signing_identity(credential.clone())),
+    )
+    .await;
+    let client = Client::new();
+    let url = format!("{}/aws-resume.locks", server.base);
+    let file = b"browser form upload bytes";
+    let response = post_object_form(&client, &url, file, PostObjectFormOptions::default()).await;
+    let status = response.status();
+    let xml = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::CREATED, "{xml}");
+    assert!(xml.contains("<Key>uploads/weights model.bin</Key>"));
+    assert!(xml.contains(&format!(
+        "<Location>{}/aws-resume.locks/uploads/weights%20model.bin</Location>",
+        server.base
+    )));
+
+    let object_url = format!("{url}/uploads/weights%20model.bin");
+    let response = signed_request(&client, reqwest::Method::GET, &object_url, b"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/x-shardline-model"
+    );
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "max-age=3600"
+    );
+    assert_eq!(
+        response.headers().get("content-disposition").unwrap(),
+        "inline; filename=weights.bin"
+    );
+    assert_eq!(
+        response.headers().get("expires").unwrap(),
+        "Wed, 21 Oct 2030 07:28:00 GMT"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amz-website-redirect-location")
+            .unwrap(),
+        "/latest"
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), file);
+
+    let response = client
+        .get(&object_url)
+        .bearer_auth(&credential)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amz-checksum-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        STANDARD.encode(Sha256::digest(file))
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amz-meta-model")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "release-1"
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), file);
+
+    // A validly shaped form with a damaged policy signature must not replace
+    // the already-published object.
+    let response = post_object_form(
+        &client,
+        &url,
+        b"tampered request",
+        PostObjectFormOptions {
+            corrupt_signature: true,
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = post_object_form(
+        &client,
+        &url,
+        b"wrong key",
+        PostObjectFormOptions {
+            invalid_key: true,
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = post_object_form(
+        &client,
+        &url,
+        b"bad checksum",
+        PostObjectFormOptions {
+            invalid_checksum: true,
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = post_object_form(
+        &client,
+        &url,
+        b"too large",
+        PostObjectFormOptions {
+            too_large_for_policy: true,
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = post_object_form(&client, &url, b"", PostObjectFormOptions::default()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = signed_request(&client, reqwest::Method::GET, &object_url, b"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), file);
+}
+
+#[tokio::test]
+async fn signed_browser_post_redirects_with_bucket_key_and_etag() {
+    let root = tempfile::tempdir().unwrap();
+    let credential = token("writer", "aws-resume", TokenScope::Write);
+    let server = start_configured(
+        root.path(),
+        ServerFrontend::S3,
+        true,
+        None,
+        None,
+        Some(signing_identity(credential)),
+    )
+    .await;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let url = format!("{}/aws-resume.locks", server.base);
+    let response = post_object_form(
+        &client,
+        &url,
+        b"redirected upload",
+        PostObjectFormOptions {
+            redirect_url: Some("https://uploads.example.test/complete?state=kept"),
+            ..PostObjectFormOptions::default()
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = url::Url::parse(
+        response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let params: std::collections::HashMap<_, _> = location.query_pairs().into_owned().collect();
+    assert_eq!(location.path(), "/complete");
+    assert_eq!(params.get("state").map(String::as_str), Some("kept"));
+    assert_eq!(
+        params.get("bucket").map(String::as_str),
+        Some("aws-resume.locks")
+    );
+    assert_eq!(
+        params.get("key").map(String::as_str),
+        Some("uploads/weights model.bin")
+    );
+    assert_eq!(
+        params.get("etag").map(String::as_str),
+        Some("\"8497bf831fcbba8ab40264f7b909f903\"")
+    );
+}
+
+#[tokio::test]
+async fn signed_browser_post_large_stream_rejects_late_failures_without_replacing_object() {
+    let root = tempfile::tempdir().unwrap();
+    let server = start_configured(
+        root.path(),
+        ServerFrontend::S3,
+        true,
+        None,
+        None,
+        Some(signing_identity(token(
+            "writer",
+            "aws-resume",
+            TokenScope::Write,
+        ))),
+    )
+    .await;
+    let client = Client::new();
+    let url = format!("{}/aws-resume.locks", server.base);
+    let object_url = format!("{url}/uploads/weights%20model.bin");
+    let previous = b"previous acknowledged object";
+    let response =
+        post_object_form(&client, &url, previous, PostObjectFormOptions::default()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    // Cross the 32 MiB packing boundary before discovering invalid trailing
+    // syntax or a final checksum mismatch. Provisional immutable objects must
+    // never publish a replacement, even when all payload bytes were received.
+    let large = vec![0x5a; 34 * 1024 * 1024 + 17];
+    for options in [
+        PostObjectFormOptions {
+            trailing_field: true,
+            ..Default::default()
+        },
+        PostObjectFormOptions {
+            truncated: true,
+            ..Default::default()
+        },
+        PostObjectFormOptions {
+            invalid_checksum: true,
+            ..Default::default()
+        },
+    ] {
+        let response = post_object_form(&client, &url, &large, options).await;
+        let status = response.status();
+        let error = response.text().await.unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        let response = signed_request(&client, reqwest::Method::GET, &object_url, b"")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), previous);
+    }
+    let response = post_object_form(&client, &url, &large, PostObjectFormOptions::default()).await;
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let response = signed_request(&client, reqwest::Method::GET, &object_url, b"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let downloaded = response.bytes().await.unwrap();
+    assert_eq!(downloaded.len(), large.len());
+    assert_eq!(Sha256::digest(&downloaded), Sha256::digest(&large));
+}
+
+#[derive(Default)]
+struct PostObjectFormOptions<'redirect> {
+    corrupt_signature: bool,
+    invalid_key: bool,
+    invalid_checksum: bool,
+    too_large_for_policy: bool,
+    trailing_field: bool,
+    truncated: bool,
+    redirect_url: Option<&'redirect str>,
+}
+
+async fn post_object_form(
+    client: &Client,
+    url: &str,
+    file: &[u8],
+    options: PostObjectFormOptions<'_>,
+) -> reqwest::Response {
+    let PostObjectFormOptions {
+        corrupt_signature,
+        invalid_key,
+        invalid_checksum,
+        too_large_for_policy,
+        trailing_field,
+        truncated,
+        redirect_url,
+    } = options;
+    let now = chrono::Utc::now();
+    let date = now.format("%Y%m%d").to_string();
+    let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let credential = format!("SIGNINGKEY/{date}/us-east-1/s3/aws4_request");
+    let checksum = if invalid_checksum {
+        STANDARD.encode(Sha256::digest(b"not the request body"))
+    } else {
+        STANDARD.encode(Sha256::digest(file))
+    };
+    let content_md5 = STANDARD.encode(md5::Md5::digest(file));
+    let policy_max = if too_large_for_policy {
+        4
+    } else {
+        file.len().max(1024)
+    };
+    let mut conditions = json!([
+        { "bucket": "aws-resume.locks" },
+        ["starts-with", "$key", "uploads/"],
+        { "x-amz-algorithm": "AWS4-HMAC-SHA256" },
+        { "x-amz-credential": credential },
+        { "x-amz-date": timestamp },
+        { "Content-Type": "application/x-shardline-model" },
+        { "Cache-Control": "max-age=3600" },
+        { "Content-Disposition": "inline; filename=weights.bin" },
+        { "Expires": "Wed, 21 Oct 2030 07:28:00 GMT" },
+        { "x-amz-website-redirect-location": "/latest" },
+        { "x-amz-meta-model": "release-1" },
+        { "x-amz-checksum-sha256": checksum },
+        { "Content-MD5": content_md5 },
+        { "success_action_status": "201" },
+        ["content-length-range", 1, policy_max]
+    ]);
+    if let Some(redirect_url) = redirect_url {
+        conditions
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "success_action_redirect": redirect_url }));
+    }
+    let policy = STANDARD.encode(
+        serde_json::to_vec(&json!({
+            "expiration": now
+                .checked_add_signed(chrono::Duration::minutes(5))
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "conditions": conditions
+        }))
+        .unwrap(),
+    );
+    let mut signature = sign_post_policy(&policy, &date);
+    if corrupt_signature {
+        signature.replace_range(0..1, if signature.starts_with('0') { "1" } else { "0" });
+    }
+    let key = if invalid_key {
+        "other/${filename}"
+    } else {
+        "uploads/${filename}"
+    };
+    let mut fields = vec![
+        ("key", key.to_owned()),
+        ("Content-Type", "application/x-shardline-model".to_owned()),
+        ("Cache-Control", "max-age=3600".to_owned()),
+        (
+            "Content-Disposition",
+            "inline; filename=weights.bin".to_owned(),
+        ),
+        ("Expires", "Wed, 21 Oct 2030 07:28:00 GMT".to_owned()),
+        ("x-amz-website-redirect-location", "/latest".to_owned()),
+        ("x-amz-meta-model", "release-1".to_owned()),
+        ("x-amz-checksum-sha256", checksum),
+        ("Content-MD5", content_md5),
+        ("success_action_status", "201".to_owned()),
+        ("x-amz-algorithm", "AWS4-HMAC-SHA256".to_owned()),
+        ("x-amz-credential", credential),
+        ("x-amz-date", timestamp),
+        ("policy", policy),
+        ("x-amz-signature", signature),
+    ];
+    if let Some(redirect_url) = redirect_url {
+        fields.push(("success_action_redirect", redirect_url.to_owned()));
+    }
+    let boundary = "shardline-post-object-test-boundary";
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"folder/weights model.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(file);
+    if trailing_field {
+        body.extend_from_slice(format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"x-ignore-late\"\r\n\r\nlate\r\n--{boundary}--\r\n").as_bytes());
+    } else if !truncated {
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    }
+    client
+        .post(url)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+fn sign_post_policy(policy: &str, date: &str) -> String {
+    let mut key = b"AWS4legacy-token-bridge".to_vec();
+    for part in [date.as_bytes(), b"us-east-1", b"s3", b"aws4_request"] {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(part);
+        key = mac.finalize().into_bytes().to_vec();
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+    mac.update(policy.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}

@@ -4,6 +4,21 @@ use std::os::unix::{fs::MetadataExt, process::ExitStatusExt};
 use std::{fs, process::Command, thread, time::Instant};
 
 struct StopOnDrop(std::process::Child);
+impl StopOnDrop {
+    fn wait_until_exit(&mut self) -> std::process::ExitStatus {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.0.try_wait().expect("inspect owned copy process") {
+                return status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "owned copy process exceeded exit deadline"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
         let _kill = self.0.kill();
@@ -49,6 +64,22 @@ fn legacy_completed_copy_archive_is_read_without_rewriting_or_replay() {
 fn legacy_interrupted_copy_archive_is_read_without_rewriting_or_replay() {
     verify_copy_history(
         CopyProfile::LegacyInterrupted,
+        CopyInterruption::KillAcceptedPut,
+    );
+}
+
+#[test]
+fn released_completed_copy_history_is_read_without_replay() {
+    verify_copy_history(
+        CopyProfile::ReleasedCompleted,
+        CopyInterruption::KillAcceptedPut,
+    );
+}
+
+#[test]
+fn released_interrupted_copy_history_is_read_without_replay() {
+    verify_copy_history(
+        CopyProfile::ReleasedInterrupted,
         CopyInterruption::KillAcceptedPut,
     );
 }
@@ -109,6 +140,8 @@ enum CopyProfile {
     UnsafeHistory,
     LegacyCompleted,
     LegacyInterrupted,
+    ReleasedCompleted,
+    ReleasedInterrupted,
 }
 
 fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
@@ -119,13 +152,23 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         profile,
         CopyProfile::LegacyCompleted | CopyProfile::LegacyInterrupted
     );
-    let completed = matches!(profile, CopyProfile::LegacyCompleted);
+    let released = matches!(
+        profile,
+        CopyProfile::ReleasedCompleted | CopyProfile::ReleasedInterrupted
+    );
+    let completed = matches!(
+        profile,
+        CopyProfile::LegacyCompleted | CopyProfile::ReleasedCompleted
+    );
     let unrelated_database = matches!(profile, CopyProfile::ConfiguredDatabaseS3Source);
     let binary = std::env::var_os("CARGO_BIN_EXE_shardline")
         .expect("set CARGO_BIN_EXE_shardline to the current optimized binary");
     let producer = if legacy {
         std::env::var_os("SHARDLINE_ARCHIVE_PREDECESSOR_BINARY")
             .expect("set SHARDLINE_ARCHIVE_PREDECESSOR_BINARY to the pre-project-history binary")
+    } else if released {
+        std::env::var_os("SHARDLINE_N_MINUS_ONE_BINARY")
+            .expect("set SHARDLINE_N_MINUS_ONE_BINARY to the adjacent released binary")
     } else {
         binary.clone()
     };
@@ -265,8 +308,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         );
         assert!(
             child.0.try_wait().unwrap().is_none(),
-            "{}",
-            fs::read_to_string(scratch.path().join("cli.stderr")).unwrap()
+            "copy process exited before the response fault"
         );
         thread::sleep(Duration::from_millis(5));
     }
@@ -284,7 +326,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         );
     }
     if !history_available {
-        assert!(child.0.wait().unwrap().success());
+        assert!(child.wait_until_exit().success());
         assert!(
             fs::read_to_string(scratch.path().join("cli.stdout"))
                 .unwrap()
@@ -311,7 +353,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         return;
     }
     if completed {
-        assert!(child.0.wait().unwrap().success());
+        assert!(child.wait_until_exit().success());
     } else if matches!(
         interruption,
         CopyInterruption::TerminateAcceptedPut
@@ -329,14 +371,17 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
             None
         };
         assert!(
-            Command::new("kill")
-                .arg("-TERM")
-                .arg(child.0.id().to_string())
-                .status()
-                .unwrap()
-                .success()
+            shardline_test_support::native_client_output(
+                Command::new("kill")
+                    .arg("-TERM")
+                    .arg(child.0.id().to_string()),
+                Duration::from_secs(5)
+            )
+            .unwrap()
+            .status
+            .success()
         );
-        assert_eq!(child.0.wait().unwrap().signal(), Some(15));
+        assert_eq!(child.wait_until_exit().signal(), Some(15));
         if let Some(connection) = &_held_completion {
             assert_eq!(
                 connection
@@ -348,7 +393,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
         }
     } else {
         child.0.kill().unwrap();
-        child.0.wait().unwrap();
+        child.wait_until_exit();
     }
     if local_source {
         fs::write(source.path().join("chunks/copy-cut/later"), b"never replay").unwrap();
@@ -390,7 +435,9 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
     } else if local_source {
         history_command.arg("--root").arg(source.path());
     }
-    let history = history_command.output().unwrap();
+    let history =
+        shardline_test_support::native_client_output(&mut history_command, Duration::from_secs(60))
+            .unwrap();
     if !local_source && !legacy {
         assert!(
             source
@@ -399,11 +446,7 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
                 .is_file()
         );
     }
-    assert!(
-        history.status.success(),
-        "{}",
-        String::from_utf8_lossy(&history.stderr)
-    );
+    assert!(history.status.success(), "{}", history.status);
     let page: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
     if unrelated_database {
         assert_eq!(
@@ -466,18 +509,16 @@ fn verify_copy_history(profile: CopyProfile, interruption: CopyInterruption) {
                 .find(|path| path.file_name().is_some_and(|name| name == "tasks.sqlite"))
                 .and_then(|path| path.parent())
                 .expect("predecessor must retain its native journal");
-            let native = Command::new(&binary)
-                .env_clear()
-                .current_dir(source.path())
-                .args(["history", "--archive", "--root"])
-                .arg(workspace)
-                .output()
-                .unwrap();
-            assert!(
-                native.status.success(),
-                "{}",
-                String::from_utf8_lossy(&native.stderr)
-            );
+            let native = shardline_test_support::native_client_output(
+                Command::new(&binary)
+                    .env_clear()
+                    .current_dir(source.path())
+                    .args(["history", "--archive", "--root"])
+                    .arg(workspace),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+            assert!(native.status.success(), "{}", native.status);
             let native_page: serde_json::Value = serde_json::from_slice(&native.stdout).unwrap();
             assert_eq!(
                 native_page

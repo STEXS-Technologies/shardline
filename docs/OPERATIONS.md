@@ -17,6 +17,25 @@ services:
 That separation defines how to run Shardline safely, how to scale it, and how to recover
 it.
 
+## Request and download deadlines
+
+Admission and handler work have a five-minute deadline through response headers.
+After headers, a response producer is stopped if it supplies no nonempty data
+for five minutes. This includes clients that stop reading and stalled backend
+reads. Downloads that keep making progress can take longer than five minutes.
+
+An expired response fails as an incomplete transfer; it does not become a
+successful empty download. Clients should retry through their normal protocol.
+Stopping the producer releases its resources, but bytes already handed to the
+HTTP transport retain their buffer charges until their last owner drops them.
+This is a response-producer deadline, not a TCP acknowledgement deadline.
+
+The built-in HTTP server also closes connections with an outstanding socket
+write that makes no progress for five minutes. Closing the connection releases
+its transport-held buffers. Idle keep-alive connections do not start this timer,
+and progressing writes renew it. Applications that serve Shardline's router
+through their own HTTP server must enforce socket write deadlines there.
+
 ## High Availability
 
 Shardline availability depends on three layers:
@@ -100,7 +119,8 @@ Back up the durable boundaries, not the cache.
 
 Required backups:
 
-- Postgres-compatible metadata database
+- metadata database: native PostgreSQL backups, or native SQLite backups for
+  each local metadata database as described in [Disaster Recovery](DISASTER_RECOVERY.md)
 - provider catalog configuration and webhook secrets
 - token-signing key material
 - provider bootstrap API key

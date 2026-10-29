@@ -6,13 +6,14 @@ use shardline_reliability::MaintenanceArtifactProof;
 use std::{
     fs::{self, OpenOptions},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::{Duration, Instant},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod maintenance_support;
+use maintenance_support::process::OwnedProcess;
 
 fn command(state: &Path, root: &Path, operation: &str) -> Command {
     let mut command = Command::new(binary());
@@ -24,6 +25,17 @@ fn command(state: &Path, root: &Path, operation: &str) -> Command {
         .args(["--task-id", "test-task", operation, "--root"])
         .arg(root);
     command
+}
+
+fn run_operation(state: &Path, root: &Path, operation: &str) -> Result<std::process::Output> {
+    run_cli(&mut command(state, root, operation))
+}
+
+fn run_cli(command: &mut Command) -> Result<std::process::Output> {
+    Ok(shardline_test_support::native_client_output(
+        command,
+        Duration::from_secs(120),
+    )?)
 }
 
 fn journal(state: &Path) -> std::path::PathBuf {
@@ -77,13 +89,18 @@ fn ordinary_maintenance_preserves_existing_writable_files_under_read_only_root()
     }
     let sandbox = tempfile::tempdir()?;
     let root = sandbox.path().join("deployment");
-    let bootstrap = Command::new(binary())
-        .env_clear()
-        .current_dir(sandbox.path())
-        .args(["index", "rebuild", "--root"])
-        .arg(&root)
-        .output()?;
-    assert!(bootstrap.status.success(), "{bootstrap:?}");
+    let bootstrap = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(sandbox.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(&root),
+    )?;
+    assert!(
+        bootstrap.status.success(),
+        "bootstrap failed: {}",
+        bootstrap.status
+    );
     fs::remove_dir_all(root.join(".shardline-maintenance"))?;
     // A running deployment keeps its SQLite sidecars open. The database and
     // sidecars remain writable even when operators disallow new root entries.
@@ -121,15 +138,19 @@ fn ordinary_maintenance_preserves_existing_writable_files_under_read_only_root()
         vec!["repair", "lifecycle"],
         vec!["gc", "--mark"],
     ] {
-        let output = Command::new(binary())
-            .env_clear()
-            .current_dir(sandbox.path())
-            .args(&arguments)
-            .arg("--root")
-            .arg(&root)
-            .output()?;
-        assert!(output.status.success(), "{arguments:?}: {output:?}");
-        assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+        let output = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(sandbox.path())
+                .args(&arguments)
+                .arg("--root")
+                .arg(&root),
+        )?;
+        assert!(output.status.success(), "{arguments:?}: {}", output.status);
+        assert!(
+            output.stderr.is_empty(),
+            "maintenance emitted an unexpected diagnostic"
+        );
         assert!(!root.join(".shardline-maintenance").exists());
         assert_eq!(fs::metadata(&root)?.permissions().mode() & 0o777, 0o555);
     }
@@ -179,22 +200,22 @@ fn first_maintenance_initializes_tracking_without_narrowing_deployment_permissio
         fs::create_dir_all(&reference)?;
         let expected_mode = fs::metadata(&reference)?.permissions().mode() & 0o777;
         let root = sandbox.path().join("actual/nested/deployment");
-        let output = Command::new(binary())
-            .env_clear()
-            .current_dir(sandbox.path())
-            .args(arguments)
-            .arg("--root")
-            .arg(&root)
-            .output()?;
+        let output = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(sandbox.path())
+                .args(arguments)
+                .arg("--root")
+                .arg(&root),
+        )?;
         assert!(
             output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+            "maintenance failed: {}",
+            output.status
         );
         assert!(
             output.stderr.is_empty(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+            "maintenance emitted an unexpected diagnostic"
         );
         for directory in [
             root.clone(),
@@ -240,12 +261,13 @@ fn invalid_root_preserves_original_validation_status_without_duplicate_tracking_
     let sandbox = tempfile::tempdir()?;
     let root = sandbox.path().join("not-a-directory");
     fs::write(&root, b"existing deployment diagnostic fixture")?;
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(sandbox.path())
-        .args(["fsck", "--root"])
-        .arg(&root)
-        .output()?;
+    let output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(sandbox.path())
+            .args(["fsck", "--root"])
+            .arg(&root),
+    )?;
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -285,18 +307,15 @@ fn normal_commands_allocate_fresh_runs_and_publish_evidence_without_setup() -> R
         fs::create_dir(&root)?;
         let mut results = Vec::new();
         for _ in 0..2 {
-            let output = Command::new(binary())
-                .env_clear()
-                .current_dir(&root)
-                .args(&arguments)
-                .arg("--root")
-                .arg(&root)
-                .output()?;
-            assert!(
-                output.status.success(),
-                "{arguments:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let output = run_cli(
+                Command::new(binary())
+                    .env_clear()
+                    .current_dir(&root)
+                    .args(&arguments)
+                    .arg("--root")
+                    .arg(&root),
+            )?;
+            assert!(output.status.success(), "{arguments:?}: {}", output.status);
             assert!(!String::from_utf8_lossy(&output.stdout).contains("maintenance.task:"));
             results.push(output);
         }
@@ -407,17 +426,14 @@ fn shared_publication_failure_preserves_existing_command_and_local_supervision()
             "CREATE TRIGGER deny_task_publication BEFORE INSERT ON shardline_task_artifacts_v1
              BEGIN SELECT RAISE(ABORT, 'fixture denies shared publication'); END;",
         )?;
-        let output = Command::new(binary())
-            .env_clear()
-            .current_dir(&root)
-            .args(["index", "rebuild", "--root"])
-            .arg(&root)
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(&root)
+                .args(["index", "rebuild", "--root"])
+                .arg(&root),
+        )?;
+        assert!(output.status.success(), "{}", output.status);
         assert!(
             root.join("metadata.sqlite3").exists(),
             "shared audit permissions must not break existing maintenance"
@@ -455,17 +471,14 @@ fn shared_publication_failure_preserves_existing_command_and_local_supervision()
             }
         }
         metadata.execute_batch("DROP TRIGGER deny_task_publication")?;
-        let subsequent = Command::new(binary())
-            .env_clear()
-            .current_dir(&root)
-            .args(["index", "rebuild", "--root"])
-            .arg(&root)
-            .output()?;
-        assert!(
-            subsequent.status.success(),
-            "{}",
-            String::from_utf8_lossy(&subsequent.stderr)
-        );
+        let subsequent = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(&root)
+                .args(["index", "rebuild", "--root"])
+                .arg(&root),
+        )?;
+        assert!(subsequent.status.success(), "{}", subsequent.status);
         assert_eq!(maintenance_identities(&root)?.len(), 2);
         assert_private_scratch_cleaned(&root)?;
         assert_eq!(
@@ -485,17 +498,14 @@ fn ordinary_gc_dry_run_does_not_require_or_write_deployment_audit_storage() -> R
         root.path().join("chunks/_shardline_tasks/v1/manifests"),
         b"unwritable audit namespace",
     )?;
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["gc", "--root"])
-        .arg(root.path())
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["gc", "--root"])
+            .arg(root.path()),
+    )?;
+    assert!(output.status.success(), "{}", output.status);
     assert!(String::from_utf8_lossy(&output.stdout).contains("mode: dry-run"));
     assert!(!root.path().join(".shardline-maintenance").exists());
     assert_eq!(
@@ -503,21 +513,17 @@ fn ordinary_gc_dry_run_does_not_require_or_write_deployment_audit_storage() -> R
         b"unwritable audit namespace"
     );
     let fresh = root.path().join("fresh/nested/deployment");
-    let fresh_output = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["gc", "--root"])
-        .arg(&fresh)
-        .output()?;
-    assert!(
-        fresh_output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&fresh_output.stderr)
-    );
+    let fresh_output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["gc", "--root"])
+            .arg(&fresh),
+    )?;
+    assert!(fresh_output.status.success(), "{}", fresh_output.status);
     assert!(
         fresh_output.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&fresh_output.stderr)
+        "dry-run emitted an unexpected diagnostic"
     );
     assert!(String::from_utf8_lossy(&fresh_output.stdout).contains("mode: dry-run"));
     assert!(fresh.is_dir());
@@ -534,17 +540,14 @@ fn ordinary_commands_preserve_non_utf8_paths() -> Result<()> {
         .path()
         .join(OsString::from_vec(b"deployment-\xff".to_vec()));
     fs::create_dir(&root)?;
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(&root)
-        .args(["index", "rebuild", "--root"])
-        .arg(&root)
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(&root)
+            .args(["index", "rebuild", "--root"])
+            .arg(&root),
+    )?;
+    assert!(output.status.success(), "{}", output.status);
     assert!(root.join("metadata.sqlite3").exists());
     assert_eq!(maintenance_identities(&root)?.len(), 1);
     Ok(())
@@ -553,13 +556,6 @@ fn ordinary_commands_preserve_non_utf8_paths() -> Result<()> {
 #[test]
 fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Result<()> {
     use shardline_server::task_tracking::{TaskEvidenceStore, TaskRunIdentity, TaskRunState};
-    struct StopOnDrop(std::process::Child);
-    impl Drop for StopOnDrop {
-        fn drop(&mut self) {
-            let _kill = self.0.kill();
-            let _wait = self.0.wait();
-        }
-    }
     let root = tempfile::tempdir()?;
     let barrier = OpenOptions::new()
         .create(true)
@@ -568,15 +564,13 @@ fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Resul
         .write(true)
         .open(root.path().join(".gc-write-barrier.lock"))?;
     barrier.lock()?;
-    let child = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["index", "rebuild", "--root"])
-        .arg(root.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let mut child = StopOnDrop(child);
+    let mut child = OwnedProcess::spawn(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(root.path()),
+    )?;
     let state = root.path().join(".shardline-maintenance");
     let mut interrupted = None;
     wait_for(|| {
@@ -606,17 +600,14 @@ fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Resul
     barrier.unlock()?;
     // An intentional integrity scan may run, but exporting old evidence must
     // neither retry the interrupted rebuild nor append a success to its journal.
-    let output = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["fsck", "--root"])
-        .arg(root.path())
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["fsck", "--root"])
+            .arg(root.path()),
+    )?;
+    assert!(output.status.success(), "{}", output.status);
     let connection = Connection::open_with_flags(
         directory.join("tasks.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -644,16 +635,19 @@ fn killed_ordinary_maintenance_remains_unresolved_and_is_not_replayed() -> Resul
 #[test]
 fn ordinary_maintenance_uses_the_original_cli_process() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut child = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["index", "rebuild", "--root"])
-        .arg(root.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let pid = child.id();
-    while child.try_wait()?.is_none() {
+    let mut child = OwnedProcess::spawn(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(root.path()),
+    )?;
+    let pid = child.0.id();
+    let started = Instant::now();
+    while child.0.try_wait()?.is_none() {
+        if started.elapsed() >= Duration::from_secs(120) {
+            return Err("ordinary maintenance process exceeded observation deadline".into());
+        }
         if let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) {
             for task in tasks {
                 if let Ok(children) = fs::read_to_string(task?.path().join("children")) {
@@ -666,12 +660,8 @@ fn ordinary_maintenance_uses_the_original_cli_process() -> Result<()> {
         }
         thread::sleep(Duration::from_millis(1));
     }
-    let output = child.wait_with_output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let status = child.0.wait()?;
+    assert!(status.success(), "maintenance process failed: {}", status);
     let manifests = maintenance_identities(root.path())?;
     assert_eq!(manifests.len(), 1);
     let identity = manifests.first().ok_or("missing run")?;
@@ -691,12 +681,13 @@ fn ordinary_commands_relocate_finished_legacy_history_incrementally() -> Result<
     let config = shardline::load_server_config(Some(root.path()), None)?;
     let deployment = deployment_fingerprint(&config)?;
     let objects = shardline_server::object_store_from_config(&config)?;
-    let seed = Command::new(binary())
-        .env_clear()
-        .current_dir(root.path())
-        .args(["index", "rebuild", "--root"])
-        .arg(root.path())
-        .output()?;
+    let seed = run_cli(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(root.path())
+            .args(["index", "rebuild", "--root"])
+            .arg(root.path()),
+    )?;
     assert!(seed.status.success());
     let legacy = TaskEvidenceStore::from_config(&config)?;
     let id = legacy
@@ -755,17 +746,14 @@ fn ordinary_commands_relocate_finished_legacy_history_incrementally() -> Result<
         shardline_storage::ObjectPrefix::parse(&format!("_shardline_tasks/v1/runs/{id}/"))?;
     let before = objects.list_prefix(&prefix)?.len();
     for invocation in 0..2 {
-        let output = Command::new(binary())
-            .env_clear()
-            .current_dir(root.path())
-            .args(["index", "rebuild", "--root"])
-            .arg(root.path())
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(root.path())
+                .args(["index", "rebuild", "--root"])
+                .arg(root.path()),
+        )?;
+        assert!(output.status.success(), "{}", output.status);
         assert!(String::from_utf8_lossy(&output.stdout).contains("scanned_version_records: 0"));
         assert_eq!(fs::read(&payload)?, b"preserved payload bytes");
         assert_eq!(
@@ -835,13 +823,13 @@ fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counte
         if dry_run {
             command.arg("--dry-run");
         }
-        Ok(command.output()?)
+        run_cli(&mut command)
     };
     let dry = invoke(true)?;
     assert!(
         dry.status.success(),
-        "{}",
-        String::from_utf8_lossy(&dry.stderr)
+        "migration dry run failed: {}",
+        dry.status
     );
     assert!(!destination.path().join("chunks/test/object").exists());
     assert!(!source.path().join("chunks/_shardline_tasks/v1").exists());
@@ -852,11 +840,7 @@ fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counte
             .exists()
     );
     let real = invoke(false)?;
-    assert!(
-        real.status.success(),
-        "{}",
-        String::from_utf8_lossy(&real.stderr)
-    );
+    assert!(real.status.success(), "migration failed: {}", real.status);
     assert_eq!(
         fs::read(destination.path().join("chunks/test/object"))?,
         bytes
@@ -866,14 +850,13 @@ fn ordinary_storage_migration_tracks_at_destination_and_preserves_dry_run_counte
     let repeated = invoke(false)?;
     assert!(
         repeated.status.success(),
-        "{}",
-        String::from_utf8_lossy(&repeated.stderr)
+        "repeated migration failed: {}",
+        repeated.status
     );
     for output in [dry, real, repeated] {
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("scanned_objects: 1"),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
+            "migration did not report exactly one scanned object"
         );
     }
     Ok(())
@@ -902,20 +885,21 @@ fn storage_copy_preserves_success_when_destination_history_publication_fails() -
          BEGIN SELECT RAISE(ABORT, 'fixture denies destination history'); END;",
     )?;
     let invoke = || -> Result<std::process::Output> {
-        Ok(Command::new(binary())
-            .env_clear()
-            .current_dir(source.path())
-            .args(["storage", "migrate", "--from", "local", "--from-root"])
-            .arg(source.path())
-            .args(["--to", "local", "--to-root"])
-            .arg(destination.path())
-            .output()?)
+        run_cli(
+            Command::new(binary())
+                .env_clear()
+                .current_dir(source.path())
+                .args(["storage", "migrate", "--from", "local", "--from-root"])
+                .arg(source.path())
+                .args(["--to", "local", "--to-root"])
+                .arg(destination.path()),
+        )
     };
     let output = invoke()?;
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "storage copy failed: {}",
+        output.status
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("scanned_objects: 1"));
     assert_eq!(fs::read(source.path().join("chunks/test/object"))?, bytes);
@@ -932,8 +916,8 @@ fn storage_copy_preserves_success_when_destination_history_publication_fails() -
     let next = invoke()?;
     assert!(
         next.status.success(),
-        "{}",
-        String::from_utf8_lossy(&next.stderr)
+        "storage copy retry failed: {}",
+        next.status
     );
     assert_eq!(
         fs::read(destination.path().join("chunks/test/object"))?,
@@ -954,22 +938,18 @@ fn real_workflows_commit_native_checkpoints_and_reuse_completed_history() -> Res
         let root = sandbox.path().join("deployment");
         fs::create_dir(&root)?;
         let state = sandbox.path().join("maintenance");
-        let first = command(&state, &root, operation).output()?;
-        assert!(
-            first.status.success(),
-            "{operation}: {}",
-            String::from_utf8_lossy(&first.stderr)
-        );
+        let first = run_operation(&state, &root, operation)?;
+        assert!(first.status.success(), "{operation}: {}", first.status);
         let connection = Connection::open(journal(&state))?;
         let records: u32 =
             connection.query_row("SELECT count(*) FROM penelope_records_v1", [], |row| {
                 row.get(0)
             })?;
-        let repeated = command(&state, &root, operation).output()?;
+        let repeated = run_operation(&state, &root, operation)?;
         assert!(
             repeated.status.success(),
             "repeat {operation}: {}",
-            String::from_utf8_lossy(&repeated.stderr)
+            repeated.status
         );
         assert_eq!(
             connection.query_row("SELECT count(*) FROM penelope_records_v1", [], |row| row
@@ -989,7 +969,7 @@ fn real_workflows_commit_native_checkpoints_and_reuse_completed_history() -> Res
                 .join("artifacts")
                 .join(hex::encode(proof.artifact.digest.0)),
         )?)?;
-        let different = command(
+        let different = run_cli(&mut command(
             &state,
             &root,
             if operation == "fsck" {
@@ -997,8 +977,7 @@ fn real_workflows_commit_native_checkpoints_and_reuse_completed_history() -> Res
             } else {
                 "fsck"
             },
-        )
-        .output()?;
+        ))?;
         assert!(!different.status.success());
         assert!(String::from_utf8_lossy(&different.stderr).contains("different request"));
     }
@@ -1011,7 +990,7 @@ fn completed_task_rejects_materialized_report_tampering() -> Result<()> {
     let root = sandbox.path().join("deployment");
     fs::create_dir(&root)?;
     let state = sandbox.path().join("maintenance");
-    assert!(command(&state, &root, "fsck").output()?.status.success());
+    assert!(run_operation(&state, &root, "fsck")?.status.success());
     let directory = journal(&state)
         .parent()
         .ok_or("state directory")?
@@ -1024,7 +1003,7 @@ fn completed_task_rejects_materialized_report_tampering() -> Result<()> {
             .join(hex::encode(proof.artifact.digest.0)),
         b"altered",
     )?;
-    assert!(!command(&state, &root, "fsck").output()?.status.success());
+    assert!(!run_operation(&state, &root, "fsck")?.status.success());
     Ok(())
 }
 
@@ -1041,10 +1020,7 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
         .open(root.join(".gc-write-barrier.lock"))?;
     barrier.lock()?;
     let state = sandbox.path().join("maintenance");
-    let mut controller = command(&state, &root, "index-rebuild")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let mut controller = OwnedProcess::spawn(&mut command(&state, &root, "index-rebuild"))?;
     wait_for(|| {
         Connection::open_with_flags(journal(&state), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok().and_then(|connection|
             connection.query_row("SELECT EXISTS(SELECT 1 FROM penelope_runtime_v1 WHERE pid IS NOT NULL AND acknowledged IS NOT NULL)", [], |row| row.get::<_, bool>(0)).ok()).unwrap_or(false)
@@ -1052,10 +1028,10 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
     let worker_pid: u32 =
         Connection::open_with_flags(journal(&state), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
             .query_row("SELECT pid FROM penelope_runtime_v1", [], |row| row.get(0))?;
-    let concurrent = command(&state, &root, "index-rebuild").output()?;
+    let concurrent = run_operation(&state, &root, "index-rebuild")?;
     assert!(!concurrent.status.success());
-    controller.kill()?;
-    let _status = controller.wait()?;
+    controller.0.kill()?;
+    let _status = controller.0.wait()?;
     let deadline = Instant::now() + Duration::from_secs(5);
     let worker_stopped = loop {
         let stopped = match fs::read_to_string(format!("/proc/{worker_pid}/stat")) {
@@ -1072,7 +1048,7 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
         thread::sleep(Duration::from_millis(5));
     };
     // Recovery cleans up a surviving fixture child even if this assertion fails.
-    let recovery = command(&state, &root, "index-rebuild").output()?;
+    let recovery = run_operation(&state, &root, "index-rebuild")?;
     assert!(
         worker_stopped,
         "optional worker survived controller termination"
@@ -1080,8 +1056,7 @@ fn interrupted_mutation_is_fenced_and_remains_unknown() -> Result<()> {
     assert!(!recovery.status.success());
     assert!(
         String::from_utf8_lossy(&recovery.stderr).contains("effects remain unknown"),
-        "{}",
-        String::from_utf8_lossy(&recovery.stderr)
+        "interrupted effects must retain their unresolved diagnostic"
     );
     let connection = Connection::open(journal(&state))?;
     assert!(
@@ -1103,8 +1078,7 @@ fn state_inside_deployment_and_untrusted_worker_invocation_are_rejected() -> Res
     let root = sandbox.path().join("deployment");
     fs::create_dir(&root)?;
     assert!(
-        !command(&root.join("state"), &root, "fsck")
-            .output()?
+        !run_operation(&root.join("state"), &root, "fsck")?
             .status
             .success()
     );
@@ -1112,17 +1086,17 @@ fn state_inside_deployment_and_untrusted_worker_invocation_are_rejected() -> Res
     let alias = sandbox.path().join("alias");
     fs::create_dir(&alias)?;
     assert!(
-        !command(&alias.join("../deployment/state"), &root, "fsck")
-            .output()?
+        !run_operation(&alias.join("../deployment/state"), &root, "fsck")?
             .status
             .success()
     );
     assert!(!root.join("state").exists());
-    let worker = Command::new(binary())
-        .args(["maintenance-worker", "--journal"])
-        .arg(root.join("missing.sqlite"))
-        .args(["--scope", "00", "--generation", "1"])
-        .output()?;
+    let worker = run_cli(
+        Command::new(binary())
+            .args(["maintenance-worker", "--journal"])
+            .arg(root.join("missing.sqlite"))
+            .args(["--scope", "00", "--generation", "1"]),
+    )?;
     assert!(!worker.status.success());
     assert!(!root.join("missing.sqlite").exists());
     Ok(())
@@ -1136,20 +1110,14 @@ fn explicit_configuration_reaches_workers_and_changed_targets_cannot_resume() ->
     let state = sandbox.path().join("maintenance");
     let config = sandbox.path().join("active config.toml");
     fs::write(&config, "[server]\nfrontends = [\"s3\"]\n")?;
-    let output = command(&state, &root, "fsck")
-        .arg("--config")
-        .arg(&config)
-        .output()?;
+    let output = run_cli(command(&state, &root, "fsck").arg("--config").arg(&config))?;
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "configured maintenance failed: {}",
+        output.status
     );
     fs::write(&config, "[server]\nfrontends = [\"xet\"]\n")?;
-    let changed = command(&state, &root, "fsck")
-        .arg("--config")
-        .arg(&config)
-        .output()?;
+    let changed = run_cli(command(&state, &root, "fsck").arg("--config").arg(&config))?;
     assert!(!changed.status.success());
     assert!(String::from_utf8_lossy(&changed.stderr).contains("different request"));
     Ok(())
@@ -1178,14 +1146,15 @@ async fn migration_copies_real_objects_and_pins_the_destination() -> Result<()> 
         )
         .await?;
     let state = sandbox.path().join("maintenance");
-    let first = command(&state, &root, "storage-migrate")
-        .args(["--from", "local", "--to", "local", "--to-root"])
-        .arg(&destination)
-        .output()?;
+    let first = run_cli(
+        command(&state, &root, "storage-migrate")
+            .args(["--from", "local", "--to", "local", "--to-root"])
+            .arg(&destination),
+    )?;
     assert!(
         first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
+        "supervised storage migration failed: {}",
+        first.status
     );
     let directory = journal(&state)
         .parent()
@@ -1198,17 +1167,21 @@ async fn migration_copies_real_objects_and_pins_the_destination() -> Result<()> 
             .join("artifacts")
             .join(hex::encode(proof.artifact.digest.0)),
     )?;
-    assert!(!report.contains("inserted_objects: 0"), "{report}");
+    assert!(
+        !report.contains("inserted_objects: 0"),
+        "migration must insert objects"
+    );
     assert!(destination.join("chunks").is_dir());
     let other = sandbox.path().join("other");
     fs::create_dir(&other)?;
     assert!(
-        !command(&state, &root, "storage-migrate")
-            .args(["--from", "local", "--to", "local", "--to-root"])
-            .arg(&other)
-            .output()?
-            .status
-            .success()
+        !run_cli(
+            command(&state, &root, "storage-migrate")
+                .args(["--from", "local", "--to", "local", "--to-root"])
+                .arg(&other)
+        )?
+        .status
+        .success()
     );
     Ok(())
 }
@@ -1235,12 +1208,14 @@ async fn a_completed_scan_with_missing_objects_preserves_failure_exit_status() -
         .await?;
     fs::remove_dir_all(root.join("chunks"))?;
     fs::create_dir(root.join("chunks"))?;
-    let ordinary = Command::new(binary())
-        .env_clear()
-        .current_dir(&root)
-        .args(["fsck", "--root"])
-        .arg(&root)
-        .output()?;
+    let ordinary = shardline_test_support::native_client_output(
+        Command::new(binary())
+            .env_clear()
+            .current_dir(&root)
+            .args(["fsck", "--root"])
+            .arg(&root),
+        Duration::from_secs(60),
+    )?;
     assert_eq!(ordinary.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&ordinary.stdout).contains("maintenance.task:"));
     let config = shardline_server::ServerConfig::new(
@@ -1260,14 +1235,60 @@ async fn a_completed_scan_with_missing_objects_preserves_failure_exit_status() -
         summaries.first().ok_or("missing outcome")?.state,
         shardline_server::task_tracking::TaskRunState::Failed
     );
+    // Ordinary inline execution stores a JSON outcome; supervised workers
+    // retain the existing human-readable FSCK report instead.
+    let database = Connection::open(root.join("metadata.sqlite3"))?;
+    let inline_report: Vec<u8> = database.query_row(
+        "SELECT payload FROM shardline_task_artifacts_v1
+         WHERE artifact_key GLOB '*/artifacts/*'
+           AND CAST(payload AS TEXT) LIKE 'maintenance.success: false%'
+         LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let outcome: serde_json::Value = serde_json::from_slice(
+        inline_report
+            .split(|byte| *byte == b'\n')
+            .nth(1)
+            .ok_or("missing inline FSCK outcome")?,
+    )?;
+    assert_eq!(outcome.get("exit_code"), Some(&serde_json::json!(1)));
+    assert_eq!(outcome.get("schema"), Some(&serde_json::json!(1)));
     let state = sandbox.path().join("maintenance");
-    let result = command(&state, &root, "fsck").output()?;
-    assert!(!result.status.success());
+    let result = shardline_test_support::native_client_output(
+        &mut command(&state, &root, "fsck"),
+        Duration::from_secs(60),
+    )?;
+    assert_eq!(result.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&result.stdout).contains("maintenance.status: completed"),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
+        "completed scan must retain its completion diagnostic"
     );
-    assert!(!command(&state, &root, "fsck").output()?.status.success());
+    let directory = journal(&state)
+        .parent()
+        .ok_or("state directory")?
+        .to_path_buf();
+    let proof =
+        MaintenanceArtifactProof::from_json(&fs::read(directory.join("result-proof.json"))?)?;
+    let artifact = directory
+        .join("artifacts")
+        .join(hex::encode(proof.artifact.digest.0));
+    let report = fs::read(&artifact)?;
+    proof.artifact.verify_materialized(report.as_slice())?;
+    assert!(report.starts_with(b"maintenance.success: false\n"));
+    assert_eq!(
+        shardline_test_support::native_client_output(
+            &mut command(&state, &root, "fsck"),
+            Duration::from_secs(60),
+        )?
+        .status
+        .code(),
+        Some(1)
+    );
+    assert_eq!(
+        fs::read(artifact)?,
+        report,
+        "replay must preserve the failed result"
+    );
     Ok(())
 }

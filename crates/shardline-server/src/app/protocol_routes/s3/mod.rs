@@ -9,12 +9,18 @@
 //! typed [`AuthorizedRepository`] capability that storage entry points require;
 //! handlers then dispatch on the query sub-resources.
 
+mod acl;
 pub(super) mod aws_chunked;
 pub(super) mod bucket;
+mod checksum;
 pub(super) mod listing;
 pub(super) mod multipart;
 pub(super) mod object;
+mod object_headers;
+pub(crate) mod post_object;
 mod repository;
+pub(crate) mod signing;
+mod tagging;
 
 pub(crate) use bucket::{
     s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_list_buckets,
@@ -24,6 +30,7 @@ pub(crate) use object::{
     s3_delete_object, s3_get_object, s3_head_object, s3_post_object, s3_put_object,
 };
 pub(super) use repository::*;
+pub(crate) use signing::protect as protect_s3_signing;
 
 #[cfg(test)]
 mod poc_audit;

@@ -77,3 +77,22 @@ fn history_is_rejected_before_loading_legacy_callers_env_file()
     assert!(error.to_string().contains("shardline::run"));
     Ok(())
 }
+
+#[test]
+fn repository_policy_is_rejected_before_loading_legacy_callers_env_file()
+-> Result<(), Box<dyn std::error::Error>> {
+    let error = CliCommand::parse([
+        "shardline",
+        "--env-file",
+        "/nonexistent/shardline-policy.env",
+        "admin",
+        "repository-policy",
+        "--namespace",
+        "alice",
+    ])
+    .err()
+    .ok_or("legacy parsing unexpectedly admitted repository policy dispatch")?;
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    assert!(error.to_string().contains("shardline::run"));
+    Ok(())
+}

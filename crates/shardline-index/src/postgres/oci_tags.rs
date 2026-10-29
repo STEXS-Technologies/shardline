@@ -357,7 +357,8 @@ impl PostgresIndexStore {
             "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (scope_namespace, repository, tag)
-             DO UPDATE SET digest_hex = EXCLUDED.digest_hex",
+             DO UPDATE SET digest_hex = EXCLUDED.digest_hex
+             WHERE shardline_oci_tags.digest_hex IS DISTINCT FROM EXCLUDED.digest_hex",
         )
         .bind(&entry.scope_namespace)
         .bind(&entry.repository)
@@ -440,7 +441,8 @@ impl OciTagStore for PostgresIndexStore {
             "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (scope_namespace, repository, tag)
-             DO UPDATE SET digest_hex = EXCLUDED.digest_hex",
+             DO UPDATE SET digest_hex = EXCLUDED.digest_hex
+             WHERE shardline_oci_tags.digest_hex IS DISTINCT FROM EXCLUDED.digest_hex",
         )
         .bind(&entry.scope_namespace)
         .bind(&entry.repository)
@@ -716,6 +718,100 @@ mod tests {
         .execute(pool)
         .await
         .expect("clean OCI tag evidence fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_identical_oci_tag_replay_appends_evidence_without_new_row_version() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        cleanup_tags(&pool, "oci-pg-replay").await;
+        let store = PostgresIndexStore::new(pool);
+        let original = OciTagEntry {
+            scope_namespace: "oci-pg-replay".to_owned(),
+            repository: "team/assets".to_owned(),
+            tag: "latest".to_owned(),
+            digest_hex: "a".repeat(64),
+        };
+        store.upsert_oci_tag(&original).await.unwrap();
+        let first_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_oci_tags
+             WHERE scope_namespace = $1 AND repository = $2 AND tag = $3",
+        )
+        .bind(&original.scope_namespace)
+        .bind(&original.repository)
+        .bind(&original.tag)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        let before_replay_events: i64 = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM shardline_reliability_events
+             WHERE operation_kind = 'OciTag'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+
+        store.upsert_oci_tag(&original).await.unwrap();
+        let replay_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_oci_tags
+             WHERE scope_namespace = $1 AND repository = $2 AND tag = $3",
+        )
+        .bind(&original.scope_namespace)
+        .bind(&original.repository)
+        .bind(&original.tag)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        let after_replay_events: i64 = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM shardline_reliability_events
+             WHERE operation_kind = 'OciTag'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            first_xmin, replay_xmin,
+            "identical replay must not rewrite the tag row"
+        );
+        assert_eq!(
+            after_replay_events,
+            before_replay_events + 1,
+            "identical replay must still append its reliability event"
+        );
+        assert_eq!(
+            store
+                .oci_tag(
+                    &original.scope_namespace,
+                    &original.repository,
+                    &original.tag
+                )
+                .await
+                .unwrap(),
+            Some(original.clone()),
+            "the updated evidence chain must validate against the materialized row"
+        );
+
+        let changed = OciTagEntry {
+            digest_hex: "b".repeat(64),
+            ..original.clone()
+        };
+        store.upsert_oci_tag(&changed).await.unwrap();
+        let changed_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_oci_tags
+             WHERE scope_namespace = $1 AND repository = $2 AND tag = $3",
+        )
+        .bind(&changed.scope_namespace)
+        .bind(&changed.repository)
+        .bind(&changed.tag)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_ne!(
+            replay_xmin, changed_xmin,
+            "a changed digest must still create a new tag row version"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

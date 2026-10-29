@@ -70,6 +70,22 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
         }
     }
     let command = match command {
+        Ok(crate::command::ParsedCommand::RepositoryPolicy(policy_args)) => {
+            return match crate::repository_creation_policy::run(
+                &policy_args.namespace,
+                policy_args.root.as_deref(),
+                policy_args.policy_file.as_deref(),
+                policy_args.clear,
+            )
+            .await
+            {
+                Ok(value) => match serde_json::to_string_pretty(&value) {
+                    Ok(text) => stdout_text(format_args!("{text}\n")),
+                    Err(error) => report_output_error(&error),
+                },
+                Err(error) => error_chain_status(error.as_ref(), ExitCode::from(2)),
+            };
+        }
         Ok(crate::command::ParsedCommand::History(history_args)) => {
             let inspection_subject = if history_args.pending_deletes {
                 "Pending-delete state"

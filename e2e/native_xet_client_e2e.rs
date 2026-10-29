@@ -1,3 +1,6 @@
+mod deployment_probe_requirements;
+mod native_client_policy;
+mod native_xet_requirements;
 mod support;
 
 use std::{
@@ -39,7 +42,6 @@ use tokio::{
     net::TcpListener,
     spawn,
     task::{JoinSet, spawn_blocking},
-    time::sleep,
 };
 use xet_client::{
     cas_client::auth::{AuthConfig, AuthError, TokenInfo, TokenRefresher},
@@ -84,13 +86,16 @@ fn shardline_accepts_native_xet_upload_and_download_flows() {
 #[test]
 fn shardline_accepts_native_xet_upload_and_download_flows_with_s3_when_configured() {
     let services = DockerLocalStack::builder().with_minio().start();
+    native_client_policy::require_available(
+        "Docker/MinIO native Xet backend",
+        matches!(&services, Ok(Some(_))),
+    );
     let Ok(Some(services)) = services else {
         return;
     };
-    let Some(raw) = services.s3_raw_config(Some(&services.unique_s3_key_prefix("native-xet-e2e")))
-    else {
-        return;
-    };
+    let raw = services
+        .s3_raw_config(Some(&services.unique_s3_key_prefix("native-xet-e2e")))
+        .expect("started MinIO must provide an S3 configuration");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
         .with_credentials(
@@ -1804,14 +1809,6 @@ fn mutate_bytes(base: &[u8], start: usize, end: usize, value: u8) -> Result<Vec<
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), TestError> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20)).await?;
+    Ok(())
 }

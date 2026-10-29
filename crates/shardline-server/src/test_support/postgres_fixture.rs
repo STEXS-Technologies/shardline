@@ -15,9 +15,7 @@ pub(crate) struct PostgresFixture {
 
 impl PostgresFixture {
     pub(crate) async fn new() -> Option<Self> {
-        let Ok(database_url) = std::env::var("DATABASE_URL") else {
-            return None;
-        };
+        let database_url = shardline_test_support::postgres_fixture_url("DATABASE_URL")?;
         let admin = PgPool::connect(&database_url).await.unwrap();
         let mut nonce = [0_u8; 8];
         getrandom::fill(&mut nonce).unwrap();
@@ -29,6 +27,7 @@ impl PostgresFixture {
         let tables: Vec<String> = sqlx::query_scalar(
             "SELECT tablename FROM pg_tables WHERE schemaname='public'
              AND tablename LIKE 'shardline_%' AND tablename<>'shardline_task_artifacts_v1'
+             AND tablename NOT IN ('shardline_hub_creation_policies','shardline_hub_creation_denials','shardline_hub_creation_events')
              ORDER BY tablename",
         )
         .fetch_all(&admin)
@@ -38,6 +37,35 @@ impl PostgresFixture {
             let quoted = format!("\"{}\"", table.replace('"', "\"\""));
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "CREATE TABLE {schema}.{quoted} (LIKE public.{quoted} INCLUDING ALL)"
+            )))
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
+        // The owner migration installs the policy guard and its tables together.
+        // Do not clone its ALTER TABLE additions without installation history.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE {schema}.shardline_hub_repos
+                 DROP COLUMN IF EXISTS creation_authorized,
+                 DROP COLUMN IF EXISTS creation_issuer,
+                 DROP COLUMN IF EXISTS creation_subject"
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
+        // LIKE INCLUDING ALL does not copy foreign keys. Preserve the new
+        // descriptor/member relation inside the disposable schema as well.
+        let has_xet_chunks: bool = sqlx::query_scalar(
+            "SELECT to_regclass(format('%I.shardline_xet_chunks',$1)) IS NOT NULL",
+        )
+        .bind(&schema)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        if has_xet_chunks {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.shardline_xet_chunks ADD FOREIGN KEY (xorb_hash)
+                 REFERENCES {schema}.shardline_xet_xorbs(xorb_hash) ON DELETE CASCADE"
             )))
             .execute(&admin)
             .await
@@ -79,6 +107,22 @@ impl PostgresFixture {
         .unwrap()
         .with_single_connection_pools(url.as_str())
         .unwrap();
+        // Reinstall the schema-bound guard rather than copying triggers whose
+        // functions resolve tables in public. Retain its real owner history;
+        // older additive fixtures still exercise their existing adoption path.
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261024000000_hub_creation_policy.up.sql"
+        ))
+        .execute(backend.index_store().pool())
+        .await
+        .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO {schema}.shardline_frontend_schema_v1
+             SELECT * FROM public.shardline_frontend_schema_v1 WHERE version='20261024000000'"
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
         Some(Self {
             _root: root,
             config,
@@ -95,6 +139,19 @@ impl PostgresFixture {
             None
         };
         backend.expect("fixture constructs PostgreSQL")
+    }
+
+    /// Complete owner-installed additive state before exercising router startup.
+    /// Raw migration tests deliberately keep `new()`'s cloned history untouched.
+    pub(crate) async fn migrate(&self) {
+        crate::database_migration::run_database_migration(
+            &crate::database_migration::DatabaseMigrationOptions::new(
+                self.config.index_postgres_url().unwrap().to_owned(),
+                crate::database_migration::DatabaseMigrationCommand::Up { steps: None },
+            ),
+        )
+        .await
+        .unwrap();
     }
 
     pub(crate) fn index(&self) -> &PostgresIndexStore {

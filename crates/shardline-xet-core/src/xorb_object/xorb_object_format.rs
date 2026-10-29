@@ -16,6 +16,9 @@ use crate::{
     utils::serialization_utils::*,
 };
 
+#[cfg(test)]
+mod footerless_io_tests;
+
 pub type XorbObjectIdent = [u8; 7];
 pub(crate) const XORB_OBJECT_FORMAT_IDENT: XorbObjectIdent = *b"XETBLOB";
 pub(crate) const XORB_OBJECT_FORMAT_VERSION_V0: u8 = 0;
@@ -500,6 +503,15 @@ impl Default for XorbObject {
 }
 
 impl XorbObject {
+    fn checked_info_start(container_length: u64, info_length: u64) -> Result<u64, CoreError> {
+        container_length
+            .checked_sub(size_of::<u64>() as u64)
+            .and_then(|end| end.checked_sub(info_length))
+            .ok_or_else(|| {
+                CoreError::MalformedData("Xorb info length exceeds container length".to_owned())
+            })
+    }
+
     pub fn get_info_length<R: Read + Seek>(reader: &mut R) -> Result<u64, CoreError> {
         reader.seek(SeekFrom::End(-(size_of::<u64>() as i64)))?;
         let mut info_length = [0u8; 8];
@@ -510,9 +522,11 @@ impl XorbObject {
 
     pub fn deserialize<R: Read + Seek>(reader: &mut R) -> Result<Self, CoreError> {
         let info_length = Self::get_info_length(reader)?;
-        reader.seek(SeekFrom::End(
-            -(size_of::<u64>() as i64 + info_length as i64),
-        ))?;
+        // Reading the terminal length left the cursor at the container end.
+        // Check unsigned bounds before seeking; a client-supplied u64 length
+        // must never overflow signed relative-offset arithmetic.
+        let info_start = Self::checked_info_start(reader.stream_position()?, info_length)?;
+        reader.seek(SeekFrom::Start(info_start))?;
         let (info, total_bytes_read) = XorbObjectInfoV1::deserialize(reader)?;
         if u64::from(total_bytes_read) != info_length {
             return Err(CoreError::MalformedData(
@@ -577,8 +591,33 @@ impl XorbObject {
         xorb: XorbObject,
         hash: &MerkleHash,
         max_decoded_bytes: usize,
-        mut decoded_buffer: Vec<u8>,
+        decoded_buffer: Vec<u8>,
     ) -> Result<Option<ValidatedXorbWithData>, CoreError> {
+        Self::validate_xorb_object_with_info_data_and_visitor(
+            reader,
+            xorb,
+            hash,
+            max_decoded_bytes,
+            decoded_buffer,
+            &mut |_, _| Ok(()),
+        )
+    }
+
+    /// Visits decoded members after their individual checks, without retaining
+    /// payloads. Visitor results are provisional until full validation succeeds:
+    /// a later member or the aggregate container commitment can still fail.
+    /// Visitors must not publish content or other durable effects.
+    pub fn validate_xorb_object_with_info_data_and_visitor<R: Read + Seek>(
+        reader: &mut R,
+        xorb: XorbObject,
+        hash: &MerkleHash,
+        max_decoded_bytes: usize,
+        mut decoded_buffer: Vec<u8>,
+        visitor: &mut dyn FnMut(u64, &[u8]) -> std::io::Result<()>,
+    ) -> Result<Option<ValidatedXorbWithData>, CoreError> {
+        if xorb.info.num_chunks == 0 {
+            return Ok(None);
+        }
         decoded_buffer.clear();
         let mut decoded = (max_decoded_bytes != 0).then_some(decoded_buffer);
         let mut hash_chunks = Vec::with_capacity(xorb.info.num_chunks as usize);
@@ -586,8 +625,11 @@ impl XorbObject {
         let mut unpacked_chunk_offset: u64 = 0;
         let mut start_offset: u64 = 0;
 
+        // Encoded chunks are contiguous. Validate their declared boundaries
+        // against bytes consumed below, without discarding a buffered reader's
+        // remaining payload before every member.
+        reader.seek(SeekFrom::Start(0))?;
         for idx in 0..xorb.info.num_chunks {
-            reader.seek(SeekFrom::Start(start_offset))?;
             let Some((data, compressed_chunk_length, chunk_uncompressed_length)) =
                 deserialize_chunk(reader).ok_for_format_error()?
             else {
@@ -636,6 +678,7 @@ impl XorbObject {
                 warn!("XORB Validation: Chunk unpacked byte offset does not match Info object.");
                 return Ok(None);
             }
+            visitor(idx, &data)?;
             if let Some(retained) = &mut decoded {
                 if data.len() > max_decoded_bytes.saturating_sub(retained.len()) {
                     decoded = None;
@@ -649,7 +692,7 @@ impl XorbObject {
         let cur_position = reader.stream_position()?;
         let expected_position = cumulative_compressed_length;
         let expected_from_end_position =
-            reader.seek(SeekFrom::End(0))? - xorb.info_length - size_of::<u64>() as u64;
+            Self::checked_info_start(reader.seek(SeekFrom::End(0))?, xorb.info_length)?;
         if cur_position != expected_position || cur_position != expected_from_end_position {
             warn!("XORB Validation: Content bytes after known chunks in Info object.");
             return Ok(None);
@@ -780,29 +823,105 @@ pub fn reconstruct_xorb_with_footer(
     raw_data: &[u8],
 ) -> Result<(XorbObject, MerkleHash), CoreError> {
     let mut reader = Cursor::new(raw_data);
-    let estimated_chunks = raw_data
-        .len()
+    reconstruct_xorb_with_footer_from_reader(writer, &mut reader, raw_data.len() as u64)
+}
+
+/// Normalizes a seekable Xorb stream without buffering the serialized container.
+/// Decompression is bounded to one declared chunk and 64 MiB in aggregate.
+/// The caller must bound the serialized input length and chunk-table size.
+pub fn reconstruct_xorb_with_footer_from_reader(
+    writer: &mut impl Write,
+    reader: &mut (impl Read + Seek),
+    raw_length: u64,
+) -> Result<(XorbObject, MerkleHash), CoreError> {
+    let info = inspect_footerless_chunks(reader, raw_length, |header, payload| {
+        write_chunk_header(writer, header)?;
+        writer.write_all(payload)?;
+        Ok(())
+    })?;
+    let computed_hash = info.xorb_hash;
+    let (xorb_obj, _) = XorbObject::serialize_given_info(writer, info)?;
+    Ok((xorb_obj, computed_hash))
+}
+
+/// Verifies a complete standard footerless chunk stream without copying its
+/// encoded payload. The caller must compare the computed root with its trusted
+/// expected hash before publishing or appending the returned footer metadata.
+///
+/// # Errors
+/// Rejects malformed/truncated input, excessive decompression, more than 8,192
+/// chunks, trailing non-chunk bytes, and I/O failures.
+pub fn inspect_footerless_xorb_from_reader(
+    reader: &mut (impl Read + Seek),
+    raw_length: u64,
+) -> Result<XorbObjectInfoV1, CoreError> {
+    let mut count = 0_usize;
+    let info = inspect_footerless_chunks(reader, raw_length, |_, _| {
+        count += 1;
+        if count > 8192 {
+            return Err(CoreError::MalformedData(
+                "footerless chunk limit exceeded".to_owned(),
+            ));
+        }
+        Ok(())
+    })?;
+    if info.chunk_boundary_offsets.last().copied() != Some(raw_length) || count == 0 {
+        return Err(CoreError::MalformedData(
+            "incomplete footerless chunk stream".to_owned(),
+        ));
+    }
+    Ok(info)
+}
+
+fn inspect_footerless_chunks(
+    reader: &mut (impl Read + Seek),
+    raw_length: u64,
+    mut visit: impl FnMut(&XorbChunkHeader, &[u8]) -> Result<(), CoreError>,
+) -> Result<XorbObjectInfoV1, CoreError> {
+    reader.seek(SeekFrom::Start(0))?;
+    let estimated_chunks = usize::try_from(raw_length)
+        .unwrap_or(usize::MAX)
         .checked_div(TARGET_CHUNK_SIZE.load(Ordering::Relaxed) as usize)
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(8192);
     let mut chunk_hash_and_size: Vec<(MerkleHash, u64)> =
         Vec::with_capacity(estimated_chunks.max(16));
     let mut info = XorbObjectInfoV1::default();
     let mut total_decompressed_bytes: u64 = 0;
 
-    while (reader.position() as usize) < raw_data.len() {
-        let chunk_header = match deserialize_chunk_header(&mut reader) {
+    let mut position = 0_u64;
+    while position < raw_length {
+        let chunk_header = match deserialize_chunk_header(reader) {
             Ok(header) => header,
             Err(CoreError::ChunkHeaderParse) => break,
             Err(e) => return Err(e),
         };
 
         let compressed_len = chunk_header.get_compressed_length() as usize;
+        let packed_end = position
+            .checked_add(size_of::<XorbChunkHeader>() as u64)
+            .and_then(|start| start.checked_add(compressed_len as u64))
+            .filter(|end| *end <= raw_length);
+        let Some(packed_end) = packed_end else {
+            return Err(CoreError::MalformedData(
+                "chunk exceeds bounded serialized input".to_owned(),
+            ));
+        };
         let mut compressed_buf = vec![0u8; compressed_len];
         reader
             .read_exact(&mut compressed_buf)
             .map_err(|e| CoreError::MalformedData(format!("Failed to read chunk data: {e}")))?;
+        position = packed_end;
 
         let declared_uncompressed_len = u64::from(chunk_header.get_uncompressed_length());
+        if total_decompressed_bytes
+            .checked_add(declared_uncompressed_len)
+            .is_none_or(|total| total > MAX_DECOMPRESSED_OUTPUT_BYTES)
+        {
+            return Err(CoreError::MalformedData(
+                "decompressed output exceeds normalization limit".to_owned(),
+            ));
+        }
         let uncompressed_data = {
             // Bound per-chunk decompression to the header's declared
             // uncompressed length DURING decompression (not after), so a crafted
@@ -853,8 +972,7 @@ pub fn reconstruct_xorb_with_footer(
             info.unpacked_chunk_offsets.last().unwrap_or(&0) + uncompressed_data.len() as u64,
         );
 
-        write_chunk_header(writer, &chunk_header)?;
-        writer.write_all(&compressed_buf)?;
+        visit(&chunk_header, &compressed_buf)?;
     }
 
     let computed_hash = xorb_hash(&chunk_hash_and_size);
@@ -862,9 +980,7 @@ pub fn reconstruct_xorb_with_footer(
     info.num_chunks = chunk_hash_and_size.len() as u64;
     info.fill_in_boundary_offsets();
 
-    let (xorb_obj, _) = XorbObject::serialize_given_info(writer, info)?;
-
-    Ok((xorb_obj, computed_hash))
+    Ok(info)
 }
 
 #[cfg(test)]
@@ -1302,6 +1418,77 @@ mod tests {
     }
 
     #[test]
+    fn buffered_validation_reads_members_sequentially_and_rejects_middle_corruption() {
+        use crate::xorb_object::xorb_format_test_utils::{ChunkSize, build_xorb_object};
+
+        struct CountingReader {
+            bytes: Cursor<Vec<u8>>,
+            reads: usize,
+            bytes_read: usize,
+            absolute_seeks: usize,
+        }
+        impl Read for CountingReader {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                let length = self.bytes.read(output)?;
+                self.bytes_read += length;
+                Ok(length)
+            }
+        }
+        impl Seek for CountingReader {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.absolute_seeks += usize::from(matches!(position, SeekFrom::Start(_)));
+                self.bytes.seek(position)
+            }
+        }
+
+        for scheme in [
+            CompressionScheme::None,
+            CompressionScheme::LZ4,
+            CompressionScheme::ByteGrouping4LZ4,
+        ] {
+            let (object, payload, _, _) =
+                build_xorb_object(512, ChunkSize::Fixed(512), scheme).unwrap();
+            let mut serialized = payload;
+            let footer_length = object.info.serialize(&mut serialized).unwrap();
+            serialized.extend_from_slice(&(footer_length as u64).to_le_bytes());
+            let length = serialized.len();
+            let hash = object.info.xorb_hash;
+            let mut source = CountingReader {
+                bytes: Cursor::new(serialized.clone()),
+                reads: 0,
+                bytes_read: 0,
+                absolute_seeks: 0,
+            };
+            let validated = XorbObject::validate_xorb_object(
+                &mut std::io::BufReader::with_capacity(65536, &mut source),
+                &hash,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(validated.info.num_chunks, 512);
+            assert!(
+                source.absolute_seeks <= 4,
+                "seeks must not scale with member count"
+            );
+            assert!(source.reads < 20, "small headers must use buffered reads");
+            assert!(
+                source.bytes_read <= length * 2,
+                "do not repeatedly prefetch each member"
+            );
+
+            let middle = usize::try_from(object.info.chunk_boundary_offsets[255]).unwrap()
+                + std::mem::size_of::<XorbChunkHeader>();
+            serialized[middle] ^= 1;
+            let result = XorbObject::validate_xorb_object(
+                &mut std::io::BufReader::new(Cursor::new(serialized)),
+                &hash,
+            );
+            assert!(result.is_err() || result.unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn validate_xorb_object_bad_footer_returns_none() {
         let mut buf = vec![0u8; 100];
         let footer_len = 50u32;
@@ -1320,6 +1507,16 @@ mod tests {
         write_u64(&mut buf, info_len).unwrap();
         let result =
             XorbObject::validate_xorb_object(&mut Cursor::new(&buf), &MerkleHash::default());
+        assert!(result.is_err() || result.unwrap().is_none());
+
+        // Pre-parsed metadata must reject an empty container too, independently
+        // of the input cursor's position.
+        let parsed = XorbObject::deserialize(&mut Cursor::new(&buf)).unwrap();
+        let result = XorbObject::validate_xorb_object_with_info(
+            &mut Cursor::new(&buf),
+            parsed,
+            &MerkleHash::default(),
+        );
         assert!(result.is_err() || result.unwrap().is_none());
     }
 

@@ -10,9 +10,11 @@ pub enum UploadLifecycleBoundary {
     AfterStoring,
     /// Object-store work returned success, before the `Stored` state commit.
     AfterObjectWork,
-    /// The durable intent advanced to `Stored`.
+    /// The `Stored` event is durable. Completion batching may already have
+    /// advanced the intent through `Visible` at this observation point.
     AfterStored,
-    /// The durable intent advanced to `MetadataCommitted`.
+    /// The `MetadataCommitted` event is durable. Completion batching may already
+    /// have advanced the intent through `Visible` at this observation point.
     AfterMetadataCommitted,
     /// The durable intent advanced to `Visible`.
     AfterVisible,
@@ -36,7 +38,10 @@ pub(crate) fn upload_lifecycle_failpoint(
 }
 
 #[cfg(any(test, feature = "test-fault-injection"))]
-pub use enabled::{UploadLifecycleFailpointGuard, arm_upload_interruption};
+pub use enabled::{
+    UploadLifecycleFailpointGuard, arm_upload_interruption, arm_upload_process_pause,
+    arm_upload_process_pause_for_prefix,
+};
 
 #[cfg(any(test, feature = "test-fault-injection"))]
 mod enabled {
@@ -47,10 +52,12 @@ mod enabled {
 
     use super::UploadLifecycleBoundary;
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     struct ArmedFault {
         boundary: UploadLifecycleBoundary,
         registration_id: u64,
+        pause_marker: Option<std::path::PathBuf>,
+        match_prefix: bool,
     }
 
     static NEXT_REGISTRATION_ID: std::sync::atomic::AtomicU64 =
@@ -92,6 +99,8 @@ mod enabled {
                 ArmedFault {
                     boundary,
                     registration_id,
+                    pause_marker: None,
+                    match_prefix: false,
                 },
             );
         UploadLifecycleFailpointGuard {
@@ -100,16 +109,77 @@ mod enabled {
         }
     }
 
+    /// Pauses a test process at a durable boundary until its parent kills it.
+    /// The marker is written only after reaching that boundary. This facility
+    /// is unavailable in builds without the explicit fault-injection feature.
+    #[must_use]
+    pub fn arm_upload_process_pause(
+        intent_id: String,
+        boundary: UploadLifecycleBoundary,
+        marker: std::path::PathBuf,
+    ) -> UploadLifecycleFailpointGuard {
+        let guard = arm_upload_interruption(intent_id, boundary);
+        if let Some(fault) = FAILPOINTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(&guard.intent_id)
+        {
+            fault.pause_marker = Some(marker);
+        }
+        guard
+    }
+
+    /// Pauses a matching upload whose exact identity is chosen by a stock client.
+    /// Only explicit test-fault-injection builds expose this process-kill hook.
+    /// The marker records the actual matched intent, never a client credential.
+    ///
+    /// # Panics
+    /// Panics if `prefix` is empty, preventing an accidental match of all uploads.
+    #[must_use]
+    pub fn arm_upload_process_pause_for_prefix(
+        prefix: String,
+        boundary: UploadLifecycleBoundary,
+        marker: std::path::PathBuf,
+    ) -> UploadLifecycleFailpointGuard {
+        assert!(!prefix.is_empty(), "upload fault prefix must be nonempty");
+        let guard = arm_upload_process_pause(prefix, boundary, marker);
+        if let Some(fault) = FAILPOINTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(&guard.intent_id)
+        {
+            fault.match_prefix = true;
+        }
+        guard
+    }
+
     pub(super) fn hit(
         intent_id: &str,
         boundary: UploadLifecycleBoundary,
     ) -> Result<(), crate::CasError> {
-        let interrupted = FAILPOINTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(intent_id)
-            .is_some_and(|armed| armed.boundary == boundary);
-        if interrupted {
+        let fault = {
+            let failpoints = FAILPOINTS.lock().unwrap_or_else(|error| error.into_inner());
+            failpoints
+                .get(intent_id)
+                .filter(|armed| armed.boundary == boundary)
+                .or_else(|| {
+                    failpoints.iter().find_map(|(prefix, armed)| {
+                        (armed.match_prefix
+                            && armed.boundary == boundary
+                            && intent_id.starts_with(prefix))
+                        .then_some(armed)
+                    })
+                })
+                .cloned()
+        };
+        if let Some(fault) = fault {
+            if let Some(marker) = fault.pause_marker {
+                std::fs::write(marker, intent_id.as_bytes())
+                    .map_err(|error| crate::CasError::ObjectStore(error.to_string()))?;
+                loop {
+                    std::thread::park();
+                }
+            }
             Err(crate::CasError::InjectedUploadInterruption { boundary })
         } else {
             Ok(())

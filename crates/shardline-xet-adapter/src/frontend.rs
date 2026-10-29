@@ -10,6 +10,9 @@ pub const XET_TREE_ROUTE: &str = "/api/{provider}/{owner}/{repo}/tree/{rev}";
 pub const XET_PATH_ROUTE: &str = "/api/{provider}/{owner}/{repo}/path/{rev}/{*path}";
 pub const XET_REVISIONS_ROUTE: &str = "/api/{provider}/{owner}/{repo}/revisions";
 pub const XET_REVISION_ROUTE: &str = "/api/{provider}/{owner}/{repo}/revisions/{rev}";
+/// Accept media type used by native Xet metadata clients to disambiguate
+/// metadata routes from overlapping Hub API paths when both frontends run.
+pub const XET_METADATA_ACCEPT: &str = "application/vnd.stexs.xet-metadata+json";
 
 /// Validates that a hash path is a 64-character lowercase hex digest.
 ///

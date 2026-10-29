@@ -1,0 +1,197 @@
+//! Exercise early proof completion and connection reuse on real PostgreSQL.
+
+use super::{repository_covers_xorb_range, repository_xorb_coverage};
+use shardline_index::{
+    FileChunkRecord, FileRecord, PostgresRecordStore, RecordTraversal, StorageRepresentation,
+};
+use shardline_protocol::{ByteRange, RepositoryProvider, RepositoryScope};
+
+#[tokio::test]
+async fn complete_range_proof_releases_postgres_connection_and_preserves_incomplete_errors() {
+    let Some(fixture) = crate::test_support::postgres_fixture::PostgresFixture::new().await else {
+        assert!(
+            std::env::var_os("SHARDLINE_REQUIRE_POSTGRES_TESTS").is_none(),
+            "required PostgreSQL range qualification needs DATABASE_URL"
+        );
+        return;
+    };
+    fixture.migrate().await;
+    let pool = fixture.index().pool().clone();
+    let store = PostgresRecordStore::new(pool.clone());
+    let scope = RepositoryScope::new(RepositoryProvider::Generic, "team", "range", None).unwrap();
+    let hash = "a".repeat(64);
+    let mut record = FileRecord {
+        file_id: "aa".into(),
+        content_hash: "b".repeat(64),
+        total_bytes: 4,
+        chunk_size: 0,
+        storage_repr: StorageRepresentation::WholeFileV1,
+        repository_scope: Some(scope.clone()),
+        chunks: vec![FileChunkRecord {
+            hash: hash.clone(),
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 12,
+        }],
+    };
+    store.commit_file_version_metadata(&record).await.unwrap();
+    let first = store
+        .first_repository_hash_record(&scope, &hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let authoritative: FileRecord = serde_json::from_slice(&first.bytes).unwrap();
+    assert_eq!(authoritative.file_id, "aa");
+    assert!(
+        store
+            .first_repository_hash_record(&scope, &"c".repeat(64))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let outsider =
+        RepositoryScope::new(RepositoryProvider::Generic, "other", "range", None).unwrap();
+    assert!(
+        store
+            .first_repository_hash_record(&outsider, &hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    record.file_id = "bb".into();
+    record.chunks[0].packed_start = 12;
+    record.chunks[0].packed_end = 24;
+    store.commit_file_version_metadata(&record).await.unwrap();
+    let mut corrupt = record.clone();
+    corrupt.file_id = "cc".into();
+    store.commit_file_version_metadata(&corrupt).await.unwrap();
+    sqlx::query("UPDATE shardline_file_records SET record='{}' WHERE file_id='cc'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO shardline_record_membership(record_key,scope_key,member_hash)
+         SELECT record_key,scope_key,$1 FROM shardline_file_records WHERE file_id='cc'",
+    )
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The first probe is partial. Traversal must combine aa and bb, then stop
+    // before a later corrupt candidate even when conversion batches read ahead.
+    assert!(
+        repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 23).unwrap())
+            .await
+            .unwrap()
+    );
+    assert!(
+        repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 24).unwrap())
+            .await
+            .is_err()
+    );
+    sqlx::query("DELETE FROM shardline_file_records WHERE file_id='cc'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE shardline_file_records SET record='{}' WHERE file_id='bb'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Reintroduce a stale candidate hint; authority still comes from the record.
+    sqlx::query(
+        "INSERT INTO shardline_record_membership(record_key,scope_key,member_hash)
+         SELECT record_key,scope_key,$1 FROM shardline_file_records WHERE file_id='bb'",
+    )
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for _ in 0..32 {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                repository_covers_xorb_range(
+                    &store,
+                    &hash,
+                    &scope,
+                    ByteRange::new(0, 11).unwrap(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        );
+    }
+    // A hash shared by many records can bias PostgreSQL's generic LIMIT plan
+    // toward a record-key scan. Replan this probe for its actual bound hash;
+    // repeated successful probes must not leave that statement cached.
+    let cached_probes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_prepared_statements
+         WHERE position('ORDER BY m.record_key LIMIT 1' in statement)>0
+           AND position('pg_prepared_statements' in statement)=0",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cached_probes, 0);
+    assert!(
+        repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 12).unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        repository_xorb_coverage(&store, &hash, &scope, None)
+            .await
+            .is_err()
+    );
+    // A successful bounded lookup must not cache authorization across metadata
+    // mutations. Rollback keeps the original authority; committed replacement
+    // removes it even if a stale discovery hint is subsequently reintroduced.
+    let replacement = FileRecord {
+        repository_scope: Some(outsider.clone()),
+        file_id: "aa".into(),
+        ..record.clone()
+    };
+    let replacement_json = serde_json::to_value(&replacement).unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("UPDATE shardline_file_records SET record=$1 WHERE file_id='aa'")
+        .bind(&replacement_json)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(
+        repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 11).unwrap())
+            .await
+            .unwrap()
+    );
+    // Remove the deliberately malformed second candidate so denial below
+    // specifically exercises revoked authority rather than a parsing failure.
+    sqlx::query("DELETE FROM shardline_file_records WHERE file_id='bb'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE shardline_file_records SET record=$1 WHERE file_id='aa'")
+        .bind(&replacement_json)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO shardline_record_membership(record_key,scope_key,member_hash)
+         SELECT record_key,scope_key,$1 FROM shardline_file_records WHERE file_id='aa'
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !repository_covers_xorb_range(&store, &hash, &scope, ByteRange::new(0, 11).unwrap())
+            .await
+            .unwrap()
+    );
+    fixture.finish().await;
+}

@@ -5,7 +5,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 
 use shardline_server_core::AuthorizedRepository;
@@ -20,155 +20,82 @@ use shardline_index::hub::{HubRepoSearchOptions, HubRepoSearchOrder, HubRepoType
 use shardline_protocol::TokenScope;
 
 use super::{
-    HubRepository, HubState, authorize, lfs_object_key, read_object_prefix, repo_type_path,
-    stream_object,
+    HubRepository, HubState, authorize, read_object_prefix, repo_type_path, stream_object,
 };
 
-const MAX_README_FRONT_MATTER_BYTES: usize = 64 * 1024;
+// Include both delimiters as well as the full accepted metadata budget.
+const MAX_README_FRONT_MATTER_BYTES: usize = super::yaml_validation::MAX_CARD_BYTES + 16;
 
 // ---- Repo create (generic, requires Write) ----
 
 pub(crate) async fn repo_create(
     State(state): State<HubState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     repo: HubRepository<true>,
     Json(request): Json<RepoCreateRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), HubApiError> {
+) -> Result<Response, HubApiError> {
     let full_name = request.organization.as_deref().map_or_else(
         || request.name.clone(),
         |organization| format!("{organization}/{}", request.name),
     );
-    // Repository creation is deliberately global: a Write-scoped caller may
-    // create a repository under any namespace. The C1 cross-tenant boundary is
-    // enforced on ACCESS (read/write/delete/commit/resolve all require the
-    // token's repository scope to match the URL repo); a freshly created empty
-    // repository grants no access to existing tenants' content. The extractor
-    // has already required Write scope (and, on this pathless route, performed
-    // no repository binding).
+    // This route has no repository in its path, so bind the requested identity
+    // from the body before checking whether it already exists. A repository
+    // scoped write token may create/retry only that exact repository unless
+    // its issuer explicitly grants creation in the same owner namespace.
+    let (namespace, repository) = split_repo_name(&full_name);
+    repo.require_creation_binding(namespace, repository)?;
     let repo_type: HubRepoType = request.repo_type.into();
-    if let Some(existing) = state
-        .store
-        .get_repo(&full_name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-    {
-        // `huggingface_hub` calls this endpoint before every upload with
-        // `exist_ok=True`, but does not transmit that flag. It accepts the
-        // established 409 conflict response when it contains the existing
-        // repository URL, so the compatibility body is preserved for the
-        // caller's OWN repository. For any other repository it must NEVER be
-        // returned: the full RepoResponse would disclose the victim's
-        // id/private/url/last_modified to a caller with no access, the same
-        // cross-tenant privacy boundary enforced on repo_list/repo_search
-        // (`repo_visible_to_owner`). A caller that does not own the existing
-        // repository gets a minimal conflict body with no repository metadata.
-        let caller_repo_id = repo.capability().claims().map(|claims| {
-            let r = claims.repository();
-            format!("{}/{}", r.owner(), r.name())
-        });
-        if caller_repo_id.as_deref() == Some(existing.repo_id.as_str()) {
-            return Ok((
-                StatusCode::CONFLICT,
-                Json(serde_json::to_value(repo_response_for_request(
-                    &headers, &existing,
-                ))?),
-            ));
-        }
-        return Ok((
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "name": full_name,
-                "message": "repository already exists",
-            })),
-        ));
-    }
-    let created = state
-        .store
-        .create_repo(
-            repo_type,
-            &full_name,
-            request.private || request.visibility.as_deref() == Some("private"),
-        )
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    shardline_metrics::record_hub_api_request("repo_create", "POST", 201);
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::to_value(repo_response_for_request(
-            &headers, &created,
-        ))?),
-    ))
+    let result = super::repo_creation::create(
+        &state,
+        repo.capability(),
+        repo_type,
+        &full_name,
+        super::repo_creation::private_visibility(request.private, request.visibility.as_deref())?,
+    )?;
+    shardline_metrics::record_hub_api_request("repo_create", "POST", result.status().as_u16());
+    Ok(result)
 }
 
 // ---- Repo create (type-specific, requires Write) ----
 
 pub(crate) async fn repo_create_type(
     State(state): State<HubState>,
-    headers: HeaderMap,
-    _repo: HubRepository<true, false>,
+    _headers: HeaderMap,
+    repo: HubRepository<true, false>,
     Path((repo_type, _ns, _repo_name)): Path<(String, String, String)>,
     Json(body): Json<serde_json::Value>,
-) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
-    // SECURITY NOTE: Repository creation is deliberately global (same rationale as
-    // repo_create), so the extractor performs the Write-scope check but skips the
-    // token→repository binding. This means a Write token scoped to alice/own can
-    // create repos in any namespace (e.g. bob/secret). However, the attacker
-    // cannot access repos outside their token scope (binding enforced on all
-    // access paths). The main risk is resource exhaustion via mass repo creation —
-    // operators should implement rate limiting at the reverse proxy layer.
+) -> Result<Response, HubApiError> {
+    // The path provides the requested identity, so bind it to the exact
+    // repository in the write token before reading or creating metadata.
+    repo.require_creation_binding(&_ns, &_repo_name)?;
     let rt = RepoType::from_api_str(&repo_type)
         .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     let name = format!("{_ns}/{_repo_name}");
-    let private = body
-        .get("private")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let created = state
-        .store
-        .create_repo(rt, &name, private)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    shardline_metrics::record_hub_api_request("repo_create_type", "POST", 201);
-    Ok((
-        StatusCode::CREATED,
-        Json(repo_response_for_request(&headers, &created)),
-    ))
+    if !body.is_object() {
+        return Err(HubApiError::BadRequest(
+            "repository creation options must be an object".to_owned(),
+        ));
+    }
+    let options: super::repo_creation::CreationVisibility =
+        serde_json::from_value(body).map_err(|_parse_error| {
+            HubApiError::BadRequest("invalid repository creation options".to_owned())
+        })?;
+    let private =
+        super::repo_creation::private_visibility(options.private, options.visibility.as_deref())?;
+    let result = super::repo_creation::create(&state, repo.capability(), rt, &name, private)?;
+    shardline_metrics::record_hub_api_request("repo_create_type", "POST", result.status().as_u16());
+    Ok(result)
 }
 
-pub(crate) fn repo_response_for_request(
-    headers: &HeaderMap,
+pub(crate) fn repo_response_for_public_base(
+    public_base_url: &str,
     repo: &shardline_index::hub::HubRepo,
 ) -> RepoResponse {
     let mut response = repo_response_from_hub(repo);
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| matches!(*value, "http" | "https"))
-        .unwrap_or("http");
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && !value.contains('/') && !value.contains('\n'))
-        .unwrap_or("localhost");
-    let path = match repo.repo_type {
-        HubRepoType::Model => repo.repo_id.as_str(),
-        HubRepoType::Dataset => {
-            return set_repo_response_url(
-                response,
-                format!("{scheme}://{host}/datasets/{}", repo.repo_id),
-            );
-        }
-        HubRepoType::Space => {
-            return set_repo_response_url(
-                response,
-                format!("{scheme}://{host}/spaces/{}", repo.repo_id),
-            );
-        }
-    };
-    response.url = format!("{scheme}://{host}/{path}");
-    response
-}
-
-fn set_repo_response_url(mut response: RepoResponse, url: String) -> RepoResponse {
-    response.url = url;
+    // The configured public origin is trusted deployment state. Host and
+    // forwarding headers are request input and must not select client targets.
+    response.url = format!("{}{}", public_base_url.trim_end_matches('/'), response.url);
     response
 }
 
@@ -206,49 +133,11 @@ pub(crate) fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> Re
 
 /// Parses YAML front matter from a markdown file's content.
 ///
-/// Extracts the content between `---` delimiters at the start of the file
-/// and parses it as a simple YAML document (key: value pairs), returning
-/// it as a JSON value. Complex nested YAML is not supported; this is
-/// intentionally minimal to match the common HuggingFace README pattern.
+/// Uses the same bounded YAML parser as card validation. Invalid metadata is
+/// omitted without preventing clients from retrieving the original README.
 pub(crate) fn parse_yaml_frontmatter(content: &[u8]) -> Option<serde_json::Value> {
     let text = std::str::from_utf8(content).ok()?;
-    let trimmed = text.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
-    }
-    let rest = &trimmed[3..];
-    let end = rest.find("\n---")?;
-    let yaml_str = rest[..end].trim();
-    if yaml_str.is_empty() {
-        return None;
-    }
-    // Parse simple flat YAML key-value pairs into a JSON object.
-    let mut map = serde_json::Map::new();
-    for line in yaml_str.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim().to_owned();
-            let value = value.trim();
-            // Strip surrounding quotes if present.
-            let value = value
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .or_else(|| value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-                .unwrap_or(value);
-            // Try to parse as JSON primitives; fall back to string.
-            let json_val = serde_json::from_str::<serde_json::Value>(value)
-                .unwrap_or_else(|_| serde_json::Value::String(value.to_owned()));
-            map.insert(key, json_val);
-        }
-    }
-    if map.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(map))
-    }
+    super::yaml_validation::parse_metadata(text).ok().flatten()
 }
 
 // ---- Repo list (requires Read) ----
@@ -375,25 +264,28 @@ fn repo_visible_to_owner(
     repo.repo_id == caller_repo_id
 }
 
-// ---- Validate YAML (requires Read) ----
+// ---- Stateless, bounded card validation ----
 
 pub(crate) async fn validate_yaml(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(_body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, HubApiError> {
-    shardline_metrics::record_hub_api_request("validate_yaml", "POST", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
-
-    // NOTE: This is an intentionally unimplemented stub for HuggingFace Hub API
-    // compatibility. Clients should perform their own YAML validation. This endpoint
-    // returns empty warnings/errors to indicate "validation passed" without actually
-    // validating the content.
-    let response = serde_json::json!({
-        "warnings": [],
-        "errors": []
-    });
-    Ok(Json(response))
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), HubApiError> {
+    // Stock ModelCard.validate() does not send credentials. This endpoint only
+    // parses the supplied text; it never reads or publishes repository data.
+    // Preserve rejection of explicitly supplied invalid credentials.
+    if headers.contains_key(axum::http::header::AUTHORIZATION) {
+        authorize(&state, &headers, TokenScope::Read)?;
+    }
+    let (status, errors) = match super::yaml_validation::validate(&body) {
+        Ok(()) => (StatusCode::OK, Vec::new()),
+        Err(message) => (StatusCode::BAD_REQUEST, vec![message]),
+    };
+    shardline_metrics::record_hub_api_request("validate_yaml", "POST", status.as_u16());
+    Ok((
+        status,
+        Json(serde_json::json!({"warnings": [], "errors": errors})),
+    ))
 }
 
 // ---- Repo modelcard (requires Read) ----
@@ -415,6 +307,8 @@ pub(crate) async fn repo_modelcard(
         .resolve_revision(&name, &entry.default_branch)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(&state, &name, "main", &commit_sha, repo.capability())
+        .await?;
     let files = state
         .store
         .get_files(&commit_sha)
@@ -423,14 +317,26 @@ pub(crate) async fn repo_modelcard(
         .iter()
         .find(|f| f.path == "README.md")
         .ok_or(HubApiError::NotFound)?;
-    let key = lfs_object_key(&readme.sha, repo.capability())
-        .map_err(|error| HubApiError::PathValidation(error.to_string()))?;
+    let key = crate::git::smart_http::file_key_at_revision(
+        &state,
+        &name,
+        "main",
+        &commit_sha,
+        "README.md",
+        repo.capability(),
+    )
+    .await?;
     let length = state
         .object_store
         .metadata(&key)
         .map_err(|error| HubApiError::CasError(error.to_string()))?
         .ok_or(HubApiError::NotFound)?
         .length();
+    if length != readme.size {
+        return Err(HubApiError::CasError(
+            "model card length differs from revision metadata".to_owned(),
+        ));
+    }
     let mut response = stream_object(&state.object_store, key, length).into_response();
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
@@ -462,15 +368,44 @@ pub(crate) async fn repo_revisions(
         .get_repo(&name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RepoNotFound)?;
-    let revisions = state
-        .store
-        .list_revisions(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let visible =
+        crate::revision_access::visible_commits(&state, &name, _repo.capability()).await?;
+    let revisions = if let Some(allowed) = &visible {
+        let mut revisions = Vec::with_capacity(allowed.len());
+        for sha in allowed {
+            if let Some(revision) = state
+                .store
+                .get_revision(&name, sha)
+                .map_err(|error| HubApiError::CasError(error.to_string()))?
+            {
+                revisions.push(revision);
+            }
+        }
+        revisions.sort_by(|left, right| {
+            right
+                .created_at_unix_seconds
+                .cmp(&left.created_at_unix_seconds)
+                .then_with(|| right.sha.cmp(&left.sha))
+        });
+        revisions
+    } else {
+        state
+            .store
+            .list_revisions(&name)
+            .map_err(|error| HubApiError::CasError(error.to_string()))?
+    };
     let response = RevisionListResponse {
         revisions: revisions
             .iter()
             .map(|r| RevisionResponse {
-                ref_name: r.ref_name.clone(),
+                // A reachable commit can originate on a different branch.
+                // Expose it as this credential's history without leaking that name.
+                ref_name: _repo
+                    .capability()
+                    .repository()
+                    .and_then(|scope| scope.revision())
+                    .unwrap_or(&r.ref_name)
+                    .to_owned(),
                 sha: r.sha.clone(),
             })
             .collect(),
@@ -479,6 +414,70 @@ pub(crate) async fn repo_revisions(
 }
 
 // ---- Repo info (requires Read) ----
+
+/// Hugging Face's SDK uses `/refs`, not Shardline's historical `/revisions`.
+/// Read live references so deleted branches never reappear from commit history.
+pub(crate) async fn repo_refs(
+    State(state): State<HubState>,
+    _repo: HubRepository,
+    Path((_repo_type, ns, repo_name)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, HubApiError> {
+    let name = format!("{ns}/{repo_name}");
+    state
+        .store
+        .get_repo(&name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RepoNotFound)?;
+    let refs = state
+        .store
+        .list_refs_bounded(&name, 10_000)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let mut branches = Vec::new();
+    let mut tags = Vec::new();
+    let mut converts = Vec::new();
+    let mut pull_requests = Vec::new();
+    let allowed_refs = crate::revision_access::visible_refs(&state, &name, _repo.capability())?;
+    for reference in refs {
+        if allowed_refs.as_ref().is_some_and(|allowed| {
+            !allowed.contains(shardline_index::hub::canonical_ref_name(
+                &reference.ref_name,
+            ))
+        }) {
+            continue;
+        }
+        let (items, short_name, full_name) =
+            if let Some(short) = reference.ref_name.strip_prefix("refs/tags/") {
+                (&mut tags, short.to_owned(), reference.ref_name.clone())
+            } else if let Some(short) = reference.ref_name.strip_prefix("refs/heads/") {
+                (&mut branches, short.to_owned(), reference.ref_name.clone())
+            } else if let Some(short) = reference.ref_name.strip_prefix("refs/pr/") {
+                (
+                    &mut pull_requests,
+                    short.to_owned(),
+                    reference.ref_name.clone(),
+                )
+            } else if let Some(short) = reference.ref_name.strip_prefix("refs/convert/") {
+                (&mut converts, short.to_owned(), reference.ref_name.clone())
+            } else if !reference.ref_name.starts_with("refs/") {
+                (
+                    &mut branches,
+                    reference.ref_name.clone(),
+                    format!("refs/heads/{}", reference.ref_name),
+                )
+            } else {
+                continue;
+            };
+        items.push(serde_json::json!({
+            "name": short_name,
+            "ref": full_name,
+            "targetCommit": crate::git::smart_http::public_commit_id(&state, &name, &reference.sha, _repo.capability()).await?,
+        }));
+    }
+    Ok(Json(serde_json::json!({
+        "branches": branches, "tags": tags, "converts": converts,
+        "pullRequests": pull_requests,
+    })))
+}
 
 pub(crate) async fn repo_info(
     State(state): State<HubState>,
@@ -496,15 +495,40 @@ pub(crate) async fn repo_info(
         .ok_or(HubApiError::RepoNotFound)?;
     let mut response = repo_response_from_hub(&entry);
 
-    // Populate card_data from README.md YAML front matter when available.
-    if let Ok(commit_sha) = state.store.resolve_revision(&name, &entry.default_branch)
-        && let Some(sha) = commit_sha
-        && let Ok(files) = state.store.get_files(&sha)
-        && let Some(readme) = files.iter().find(|f| f.path == "README.md")
-        && let Some(content) =
-            read_file_prefix_from_object_store(&state, &readme.sha, repo.capability())
+    // SDK repo_info() needs the same current commit and siblings as the
+    // explicit revision endpoint, rather than an apparently empty repository.
+    if let Some(sha) = state
+        .store
+        .resolve_revision(&name, &entry.default_branch)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
     {
-        response.card_data = parse_yaml_frontmatter(&content);
+        crate::revision_access::authorize_read(&state, &name, "main", &sha, repo.capability())
+            .await?;
+        let files = state
+            .store
+            .get_files(&sha)
+            .map_err(|e| HubApiError::CasError(e.to_string()))?;
+        if files.iter().any(|file| file.path == "README.md")
+            && let Some(content) =
+                read_file_prefix_from_object_store(&state, &name, "main", &sha, repo.capability())
+                    .await
+        {
+            response.card_data = parse_yaml_frontmatter(&content);
+        }
+        response.sha = Some(
+            crate::git::smart_http::public_commit_id(&state, &name, &sha, repo.capability())
+                .await?,
+        );
+        response.siblings = Some(
+            files
+                .into_iter()
+                .map(|file| {
+                    serde_json::json!({
+                        "rfilename": file.path, "size": file.size, "blobId": file.sha,
+                    })
+                })
+                .collect(),
+        );
     }
 
     Ok(Json(response))
@@ -522,17 +546,27 @@ pub(crate) async fn repo_revision_info(
         .get_repo(&name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RepoNotFound)?;
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &rev)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
+    let commit_sha =
+        crate::git::smart_http::resolve_commit_id(&state, &name, &rev, _repo.capability())?
+            .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(&state, &name, &rev, &commit_sha, _repo.capability())
+        .await?;
     let files = state
         .store
         .get_files(&commit_sha)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     let mut response = repo_response_from_hub(&entry);
-    response.sha = Some(commit_sha);
+    response.sha = Some(
+        crate::git::smart_http::public_commit_id(&state, &name, &commit_sha, _repo.capability())
+            .await?,
+    );
+    if files.iter().any(|file| file.path == "README.md")
+        && let Some(content) =
+            read_file_prefix_from_object_store(&state, &name, &rev, &commit_sha, _repo.capability())
+                .await
+    {
+        response.card_data = parse_yaml_frontmatter(&content);
+    }
     response.siblings = Some(
         files
             .into_iter()
@@ -573,14 +607,25 @@ pub(crate) async fn repo_delete_compat(
     delete_repository(&state, &repo, &name)
 }
 
-/// Reads a file from the ObjectStore by its SHA, using the repository-scoped
-/// LFS key so reads find the namespaced writes made by `apply_commit`.
-fn read_file_prefix_from_object_store(
+/// Read bounded README metadata through authorized immutable file membership,
+/// independently of the credential storage namespace used by its writer.
+async fn read_file_prefix_from_object_store(
     state: &HubState,
-    sha: &str,
+    repo: &str,
+    requested: &str,
+    commit: &str,
     auth: &AuthorizedRepository,
 ) -> Option<Vec<u8>> {
-    let key = lfs_object_key(sha, auth).ok()?;
+    let key = crate::git::smart_http::file_key_at_revision(
+        state,
+        repo,
+        requested,
+        commit,
+        "README.md",
+        auth,
+    )
+    .await
+    .ok()?;
     let size = state.object_store.metadata(&key).ok()??.length();
     read_object_prefix(
         &state.object_store,
@@ -612,6 +657,7 @@ fn delete_repository(
     // `(ns, repo)`; the compat endpoint resolves its repository identity from
     // the request body, so re-check the binding against that identity too.
     repo.require_binding(owner, repo_name)?;
+    crate::revision_access::authorize_repository_wide(name, repo.capability())?;
     // Verify repo exists
     let _repo = state
         .store

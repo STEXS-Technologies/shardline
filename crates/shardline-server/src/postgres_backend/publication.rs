@@ -11,11 +11,24 @@ use sqlx::{Connection as _, PgConnection};
 use crate::{ServerError, chunk_store::chunk_object_key, object_store::ServerObjectStore};
 
 impl super::PostgresBackend {
+    #[cfg(test)]
     pub(super) async fn commit_validated_native_shard(
         &self,
         records: &[FileRecord],
         mappings: &[shardline_index::DedupeShardMapping],
         references: &[shardline_storage::ObjectKey],
+    ) -> Result<(), crate::xet_adapter::XetAdapterError> {
+        self.commit_validated_native_shard_with_descriptors(records, mappings, references, &[], &[])
+            .await
+    }
+
+    pub(super) async fn commit_validated_native_shard_with_descriptors(
+        &self,
+        records: &[FileRecord],
+        mappings: &[shardline_index::DedupeShardMapping],
+        references: &[shardline_storage::ObjectKey],
+        identities: &[shardline_index::XetFileIdentity],
+        descriptors: &[shardline_index::XetXorbDescriptor],
     ) -> Result<(), crate::xet_adapter::XetAdapterError> {
         let mut connection = self
             .record_store
@@ -23,35 +36,41 @@ impl super::PostgresBackend {
             .acquire()
             .await
             .map_err(PostgresMetadataStoreError::from)?;
-        self.commit_validated_native_shard_on_connection(
+        self.commit_validated_native_shard_on_connection_with_descriptors(
             &mut connection,
             records,
             mappings,
             references,
+            identities,
+            descriptors,
         )
         .await
     }
 
-    /// Recheck validated native backing objects before the actual transaction
-    /// releases the reference locks. Member chunk keys can live inside an xorb;
-    /// only the physical xorbs and normalized shard bodies require presence.
-    pub(super) async fn commit_validated_native_shard_on_connection(
+    /// Recheck validated native backing objects before the transaction releases
+    /// reference locks, including the Xet identities published with the shard.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn commit_validated_native_shard_on_connection_with_descriptors(
         &self,
         connection: &mut PgConnection,
         records: &[FileRecord],
         mappings: &[shardline_index::DedupeShardMapping],
         references: &[shardline_storage::ObjectKey],
+        identities: &[shardline_index::XetFileIdentity],
+        descriptors: &[shardline_index::XetXorbDescriptor],
     ) -> Result<(), crate::xet_adapter::XetAdapterError> {
         let mut transaction = connection
             .begin()
             .await
             .map_err(PostgresMetadataStoreError::from)?;
         self.record_store
-            .commit_native_shard_metadata_on_connection(
+            .commit_native_shard_metadata_on_connection_with_descriptors(
                 &mut transaction,
                 records,
                 mappings,
                 references,
+                identities,
+                descriptors,
             )
             .await?;
         let protected: bool = sqlx::query_scalar(
@@ -201,6 +220,7 @@ impl super::PostgresBackend {
         entry: &S3ObjectEntry,
         condition: &S3PublishCondition,
         completion_fence: Option<&ResumableCompletionFence>,
+        multipart_part_count: Option<u32>,
     ) -> Result<bool, ServerError> {
         let mut transaction = connection
             .begin()
@@ -208,12 +228,13 @@ impl super::PostgresBackend {
             .map_err(PostgresMetadataStoreError::from)?;
         let published = self
             .record_store
-            .publish_s3_object_on_connection(
+            .publish_s3_object_on_connection_with_multipart_count(
                 &mut transaction,
                 record,
                 entry,
                 condition,
                 completion_fence,
+                multipart_part_count,
             )
             .await?;
         if published {

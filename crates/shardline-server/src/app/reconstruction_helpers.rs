@@ -136,7 +136,8 @@ pub(super) async fn load_reconstruction_response(
     requested_range: Option<ByteRange>,
     auth: &AuthorizedRepository,
 ) -> Result<FileReconstructionResponse, ServerError> {
-    let repository_scope = auth.namespace();
+    let hub_scope = hub_storage_scope(state, file_id, auth).await?;
+    let repository_scope = hub_scope.as_ref().or_else(|| auth.namespace());
     if let Some(requested_range) = requested_range {
         return state
             .backend
@@ -169,6 +170,25 @@ pub(super) async fn load_reconstruction_response(
         .await
 }
 
+pub(super) async fn hub_storage_scope(
+    state: &AppState,
+    file_id: &str,
+    auth: &AuthorizedRepository,
+) -> Result<Option<shardline_protocol::RepositoryScope>, ServerError> {
+    if auth
+        .claims()
+        .is_some_and(|claims| claims.issuer() == shardline_protocol::HUB_XET_READ_TOKEN_ISSUER)
+    {
+        let scope = auth.namespace().ok_or(ServerError::NotFound)?;
+        return state
+            .backend
+            .hub_native_read_scope(scope, file_id)
+            .await
+            .map(Some);
+    }
+    Ok(None)
+}
+
 /// Read a singleton range field without silently choosing one conflicting value.
 pub(super) fn single_range_header(
     headers: &HeaderMap,
@@ -195,9 +215,15 @@ pub(super) async fn load_reconstruction_range_response(
     let header_value = header_value
         .to_str()
         .map_err(|_error| ServerError::InvalidRangeHeader)?;
+    let hub_scope = hub_storage_scope(state, file_id, auth).await?;
     let response = state
         .backend
-        .reconstruction_http_range(file_id, content_hash, header_value, auth.namespace())
+        .reconstruction_http_range(
+            file_id,
+            content_hash,
+            header_value,
+            hub_scope.as_ref().or_else(|| auth.namespace()),
+        )
         .await?;
     Ok(Some(response))
 }
@@ -212,6 +238,19 @@ pub(super) async fn load_reconstruction_v2_response(
     let response =
         load_reconstruction_response(state, file_id, content_hash, requested_range, auth).await?;
     Ok(reconstruction_v2_from_v1(response))
+}
+
+/// Only explicit closed ranges can be proven from published member offsets
+/// before discovering the current serialized object length. Actual response
+/// bounds must still be parsed again against the verified source length.
+pub(super) fn closed_xorb_transfer_range(headers: &HeaderMap) -> Option<ByteRange> {
+    let value = single_range_header(headers, RANGE).ok()??.to_str().ok()?;
+    let (start, end) = value.strip_prefix("bytes=")?.split_once('-')?;
+    if start.is_empty() || end.is_empty() {
+        return None;
+    }
+    let synthetic_length = end.parse::<u64>().ok()?.checked_add(1)?;
+    parse_http_byte_range(value, synthetic_length).ok()
 }
 
 pub(super) fn parse_required_xorb_transfer_range(
@@ -472,6 +511,37 @@ mod tests {
     }
 
     // --- parse_required_xorb_transfer_range tests ---
+
+    #[test]
+    fn closed_xorb_ranges_require_explicit_unambiguous_bounded_offsets() {
+        for value in ["bytes=0-0", "bytes=12-1023"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(RANGE, value.parse().unwrap());
+            assert_eq!(
+                closed_xorb_transfer_range(&headers),
+                Some(parse_required_xorb_transfer_range(&headers, 4096).unwrap())
+            );
+        }
+        for value in [
+            "bytes=-1",
+            "bytes=12-",
+            "bytes=3-2",
+            "bytes=0-1,2-3",
+            "bytes=0-18446744073709551615",
+            "bytes=0-18446744073709551616",
+            "bytes= 0-1",
+            "items=0-1",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(RANGE, value.parse().unwrap());
+            assert!(closed_xorb_transfer_range(&headers).is_none(), "{value}");
+        }
+        let mut headers = HeaderMap::new();
+        assert!(closed_xorb_transfer_range(&headers).is_none());
+        headers.append(RANGE, "bytes=0-1".parse().unwrap());
+        headers.append(RANGE, "bytes=2-3".parse().unwrap());
+        assert!(closed_xorb_transfer_range(&headers).is_none());
+    }
 
     #[test]
     fn xorb_range_valid() {

@@ -22,6 +22,19 @@ pub trait ObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, Self::Error>;
 
+    /// Stores immutable bytes with their bound commitment. Existing adapters
+    /// retain the ordinary verification path unless they override this method.
+    /// # Errors
+    /// Returns storage, conflict or integrity errors.
+    fn put_verified_if_absent(
+        &self,
+        key: &ObjectKey,
+        body: crate::VerifiedObjectBody,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, Self::Error> {
+        self.put_if_absent(key, ObjectBody::from_bytes(body.into_bytes()), integrity)
+    }
+
     /// Reads an inclusive byte range from an object.
     ///
     /// # Errors

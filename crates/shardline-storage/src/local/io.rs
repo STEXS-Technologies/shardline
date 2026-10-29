@@ -10,24 +10,25 @@ use shardline_protocol::ShardlineHash;
 
 use crate::{
     ObjectIntegrity, PutOutcome,
-    local_fs::{hard_link_file_if_absent, verify_existing_object_durable},
+    local_fs::{hard_link_verified_file_if_absent, verify_existing_object_durable},
 };
 
 use super::metadata::{ensure_parent_directories_are_not_symlinked, ensure_regular_file_metadata};
 use super::store::LocalObjectStoreError;
 use super::util::{VERIFY_BUFFER_A, VERIFY_BUFFER_B, VERIFY_BUFFER_BYTES};
 
+#[cfg(test)]
 pub fn verify_file_integrity(
     path: &Path,
     integrity: &ObjectIntegrity,
 ) -> Result<File, LocalObjectStoreError> {
     let file = open_existing_object_file(path)?;
-    verify_open_file_integrity(file.try_clone()?, integrity)?;
+    verify_open_file_integrity(&file, integrity)?;
     Ok(file)
 }
 
 pub fn verify_open_file_integrity(
-    mut file: File,
+    mut file: &File,
     integrity: &ObjectIntegrity,
 ) -> Result<(), LocalObjectStoreError> {
     file.seek(SeekFrom::Start(0))?;
@@ -71,21 +72,40 @@ pub fn link_temporary_file_if_absent(
     path: &Path,
     temporary: &Path,
     verified_source: &File,
-    _integrity: &ObjectIntegrity,
-    temporary_bytes: Option<&[u8]>,
+    integrity: &ObjectIntegrity,
 ) -> Result<PutOutcome, LocalObjectStoreError> {
     ensure_parent_directories_are_not_symlinked(root, path)?;
-    match hard_link_file_if_absent(root, path, temporary, verified_source) {
+    match hard_link_verified_file_if_absent(root, path, temporary, verified_source, Some(integrity))
+    {
         Ok(()) => {
             remove_temporary_file(temporary)?;
             Ok(PutOutcome::Inserted)
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            let outcome = existing_object_outcome(root, path, verified_source, temporary_bytes);
+            let outcome = existing_object_outcome(root, path, integrity);
             remove_temporary_file(temporary)?;
             outcome
         }
         Err(error) => {
+            // Preserve the public integrity error classifications when the
+            // anchored filesystem helper carries them through an I/O error.
+            if let Some(integrity_error) = error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<LocalObjectStoreError>())
+            {
+                if matches!(
+                    integrity_error,
+                    LocalObjectStoreError::IntegrityHashMismatch
+                ) {
+                    return Err(LocalObjectStoreError::IntegrityHashMismatch);
+                }
+                if matches!(
+                    integrity_error,
+                    LocalObjectStoreError::IntegrityLengthMismatch
+                ) {
+                    return Err(LocalObjectStoreError::IntegrityLengthMismatch);
+                }
+            }
             remove_temporary_file(temporary)?;
             Err(LocalObjectStoreError::Io(error))
         }
@@ -95,16 +115,11 @@ pub fn link_temporary_file_if_absent(
 pub fn existing_object_outcome(
     root: &Path,
     path: &Path,
-    verified_source: &File,
-    temporary_bytes: Option<&[u8]>,
+    integrity: &ObjectIntegrity,
 ) -> Result<PutOutcome, LocalObjectStoreError> {
     verify_existing_object_durable(root, path, |anchored_path| {
         let existing = open_existing_object_file(anchored_path)?;
-        if let Some(temporary_bytes) = temporary_bytes {
-            ensure_file_matches_bytes(existing.try_clone()?, temporary_bytes)?;
-        } else {
-            ensure_files_match(existing.try_clone()?, verified_source.try_clone()?)?;
-        }
+        verify_open_file_integrity(&existing, integrity)?;
         Ok::<File, LocalObjectStoreError>(existing)
     })?;
     Ok(PutOutcome::AlreadyExists)

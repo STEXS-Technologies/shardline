@@ -95,13 +95,59 @@ impl Drop for SwitchingTcpProxy {
 }
 
 fn docker(args: &[&str]) -> std::process::Output {
-    Command::new("docker").args(args).output().unwrap()
+    shardline_test_support::native_client_output(
+        Command::new("docker").args(args),
+        Duration::from_secs(120),
+    )
+    .expect("Docker command failed to start or exceeded its deadline")
 }
 
 fn failover_stack_available() -> bool {
-    docker(&["inspect", PRIMARY_CONTAINER, STANDBY_CONTAINER])
-        .status
-        .success()
+    let available = shardline_test_support::native_client_output(
+        Command::new("docker").args(["inspect", PRIMARY_CONTAINER, STANDBY_CONTAINER]),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success());
+    shardline_test_support::require_native_client("PostgreSQL failover pair", available)
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_failover_pair_cannot_pass_required_qualification() {
+    use std::os::unix::fs::PermissionsExt;
+    for scripted in [false, true] {
+        let directory = TempDir::new().unwrap();
+        if scripted {
+            let executable = directory.path().join("docker");
+            std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for required in [false, true] {
+            let output = shardline_test_support::native_client_output(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "running_server_recovers_after_real_primary_promotion",
+                        "--nocapture",
+                    ])
+                    .env_clear()
+                    .env("PATH", directory.path())
+                    .env(
+                        "SHARDLINE_REQUIRE_NATIVE_CLIENTS",
+                        if required { "1" } else { "0" },
+                    ),
+                Duration::from_secs(20),
+            )
+            .unwrap();
+            assert_eq!(output.status.success(), !required);
+            if required {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("required native client PostgreSQL failover pair")
+                );
+            }
+        }
+    }
 }
 
 fn mint_token() -> String {

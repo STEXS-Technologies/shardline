@@ -95,7 +95,7 @@ Run the fast deterministic schedule:
 
 ```bash
 SHARDLINE_CHAOS_SCALE=1 SHARDLINE_CHAOS_SEED=2436552524 \
-  cargo nextest run -p shardline-server --test chaos_runner --no-tests=pass
+  cargo nextest run -p shardline-server --test chaos_runner
 ```
 
 Run Loom models:
@@ -113,7 +113,7 @@ scripts/shardline/fuzz.sh
 Deployment drills require the Docker fault stack described by the test and CI workflow:
 
 ```bash
-cargo nextest run -p shardline-server --test deployment_chaos --no-tests=pass
+cargo nextest run -p shardline-server --test deployment_chaos
 ```
 
 Run the real PostgreSQL streaming-replica promotion drill:
@@ -121,7 +121,7 @@ Run the real PostgreSQL streaming-replica promotion drill:
 ```bash
 docker compose -f docker-compose.postgres-failover.yml up -d --wait
 cargo nextest run -p shardline-server --test postgres_failover \
-  -E 'test(running_server_recovers_after_real_primary_promotion)' --no-tests=pass
+  -E 'test(running_server_recovers_after_real_primary_promotion)'
 docker compose -f docker-compose.postgres-failover.yml down
 ```
 

@@ -139,11 +139,26 @@ async fn native_shard_publication_and_retries_have_independent_repository_eviden
 }
 
 #[tokio::test]
-async fn released_server_preserves_every_new_native_checkpoint() {
-    let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
-        eprintln!("SKIPPED: native rollback requires SHARDLINE_N_MINUS_ONE_BINARY");
+async fn historical_server_preserves_every_new_native_checkpoint() {
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_LEGACY_RECOVERY_BINARY")
+    else {
         return;
     };
+    verify_released_native_recovery(binary, true).await;
+}
+
+#[tokio::test]
+async fn released_server_recovers_every_native_checkpoint() {
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_N_MINUS_ONE_BINARY")
+    else {
+        return;
+    };
+    verify_released_native_recovery(binary, false).await;
+}
+
+async fn verify_released_native_recovery(binary: String, historical: bool) {
     let Some(fixture) = PostgresFixture::new().await else {
         eprintln!("SKIPPED: native rollback requires DATABASE_URL");
         return;
@@ -171,10 +186,23 @@ async fn released_server_preserves_every_new_native_checkpoint() {
         Some(fixture.config.index_postgres_url().unwrap().to_owned()),
     )
     .await;
-    crate::test_support::native_upload_rollback::assert_preserved(fixture.index(), &cases, &logs)
+    if historical {
+        crate::test_support::native_upload_rollback::assert_preserved(
+            fixture.index(),
+            &cases,
+            &logs,
+        )
         .await;
+    } else {
+        crate::test_support::native_upload_rollback::assert_recovered(
+            fixture.index(),
+            &cases,
+            &logs,
+        )
+        .await;
+    }
     for case in &cases {
-        if case.state == UploadIntentState::Created {
+        if historical && case.state == UploadIntentState::Created {
             assert!(
                 fixture
                     .index()

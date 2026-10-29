@@ -6,6 +6,8 @@ use thiserror::Error;
 
 use crate::parse_xet_hash_hex;
 
+mod first_candidate;
+
 /// Boxed asynchronous record-store operation.
 pub type RecordStoreFuture<'operation, T, E> =
     Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'operation>>;
@@ -153,6 +155,38 @@ pub struct FileRecord {
     pub repository_scope: Option<RepositoryScope>,
     /// Ordered chunks needed to reconstruct the file.
     pub chunks: Vec<FileChunkRecord>,
+}
+
+/// Maps a Hub/LFS SHA-256 identity to its native Xet file identity.
+///
+/// This bridge is populated from Xet shard metadata and lets Hub commit and
+/// read paths resolve ordinary LFS pointers to native CAS content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XetFileIdentity {
+    /// Repository scope that owns this file. Revision is ignored for lookup.
+    pub repository_scope: RepositoryScope,
+    /// Standard SHA-256 used by Hub LFS pointers.
+    pub sha256: String,
+    /// Native Xet file identifier used by reconstruction requests.
+    pub file_id: String,
+    /// Reconstructed file size in bytes.
+    pub total_bytes: u64,
+}
+
+impl XetFileIdentity {
+    /// Returns the stable repository key used for identity persistence.
+    #[must_use]
+    pub fn repository_key(&self) -> String {
+        Self::repository_key_for_scope(&self.repository_scope)
+    }
+
+    /// Returns the stable repository key for any revision of a repository.
+    #[must_use]
+    pub fn repository_key_for_scope(scope: &RepositoryScope) -> String {
+        crate::record_key::repository_record_scope_key(
+            &RepositoryRecordScope::from_repository_scope(scope),
+        )
+    }
 }
 
 /// File-record reconstruction storage layout.
@@ -326,6 +360,16 @@ pub trait RecordTraversal {
     /// Adapter-specific record locator.
     type Locator: Clone + Eq + Ord + Send + Sync;
 
+    /// Pages derived native member references as `(xorb_hash, ordinal, chunk_hash)`.
+    /// These hints may conservatively retain objects; they grant no read access.
+    /// Adapters without native member storage return an empty page.
+    fn native_chunk_reference_page(
+        &self,
+        _after: Option<(String, i64)>,
+    ) -> RecordStoreFuture<'_, Vec<(String, i64, String)>, Self::Error> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// Lists visible latest-file record locators.
     fn list_latest_record_locators(&self)
     -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error>;
@@ -408,6 +452,49 @@ pub trait RecordTraversal {
 
             Ok(())
         })
+    }
+
+    /// Visits candidate records for one exact repository revision and member hash.
+    /// Indexed adapters narrow the candidate set. The compatibility default
+    /// visits repository records across revisions; callers must validate the
+    /// authoritative record's scope and members before granting access.
+    fn visit_repository_hash_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        repository: &'operation RepositoryScope,
+        _hash_hex: &'operation str,
+        mut visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move {
+            let scope = RepositoryRecordScope::from_repository_scope(repository);
+            self.visit_repository_latest_records(&scope, &mut visitor)
+                .await?;
+            self.visit_repository_version_records(&scope, &mut visitor)
+                .await
+        })
+    }
+
+    /// Reads at most the first candidate for a repository/member lookup.
+    /// Indexed adapters narrow scope and hash; the compatibility default may
+    /// return other revisions or members, like the candidate traversal itself.
+    /// The returned metadata must still be verified before granting access.
+    /// A caller falling back to a complete traversal must discard any partial
+    /// proof from this lookup: the fallback may observe a newer snapshot.
+    fn first_repository_hash_record<'operation>(
+        &'operation self,
+        repository: &'operation RepositoryScope,
+        hash_hex: &'operation str,
+    ) -> RecordStoreFuture<'operation, Option<StoredRecord<Self::Locator>>, Self::Error>
+    where
+        Self: Sync,
+        Self::Error: Send + 'operation,
+    {
+        first_candidate::read(self, repository, hash_hex)
     }
 
     /// Lists immutable version-record locators.
@@ -1199,6 +1286,40 @@ mod tests {
         fn version_record_locator(&self, _record: &FileRecord) -> Self::Locator {
             DefaultVisitLocator("version".to_owned())
         }
+    }
+
+    #[tokio::test]
+    async fn default_first_candidate_handles_empty_latest_and_version_records() {
+        let store = DefaultVisitStore::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::Generic, "team", "repo", None).unwrap();
+        assert!(
+            store
+                .first_repository_hash_record(&scope, "hash")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store.write_version("v1", b"version".to_vec());
+        assert_eq!(
+            store
+                .first_repository_hash_record(&scope, "hash")
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"version"
+        );
+        store.write_latest("k1", b"latest".to_vec());
+        assert_eq!(
+            store
+                .first_repository_hash_record(&scope, "hash")
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"latest"
+        );
     }
 
     #[tokio::test]

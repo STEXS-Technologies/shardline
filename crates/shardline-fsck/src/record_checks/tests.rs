@@ -1665,17 +1665,16 @@ async fn scan_record_tree_latest_native_xet_valid_xorb_clean() {
         report.inspected_chunk_references, 1,
         "expected 1 chunk reference"
     );
-    // The xorb's chunk hashes use keyed blake3 (Xet), while chunk_hash uses
-    // regular blake3, so the comparison produces ChunkHashMismatch issues.
-    // Verify the code path exercised correctly.
+    // Native members must be checked against Xet's keyed data hash, matching
+    // the fully validated descriptor, rather than the object storage digest.
     let chunk_hash_mismatches: usize = report
         .issues
         .iter()
         .filter(|i| i.kind == FsckIssueKind::ChunkHashMismatch)
         .count();
     assert_eq!(
-        chunk_hash_mismatches, 2,
-        "expected 2 ChunkHashMismatch (one per chunk), got: {report:?}"
+        chunk_hash_mismatches, 0,
+        "healthy native members must not produce hash mismatches: {report:?}"
     );
     // Also expect MissingVersionRecord since there's no version record
     assert!(

@@ -31,7 +31,7 @@ use shardline_xet_core::{
     },
 };
 use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, time::sleep};
+use tokio::{net::TcpListener, spawn};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_authorization_mints_repository_scoped_tokens_for_server_access() {
@@ -290,14 +290,7 @@ fn non_zero_ttl() -> Result<NonZeroU64, ServerE2eInvariantError> {
 
 async fn wait_for_health(base_url: &str) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
-    for _attempt in 0..100 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status() == StatusCode::OK
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(25)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(&client, base_url, "healthz", 100, Duration::from_millis(25))
+        .await?;
+    Ok(())
 }

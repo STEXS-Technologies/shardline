@@ -173,6 +173,7 @@ impl PostgresIndexStore {
             .execute(&mut *transaction)
             .await?;
         super::task_history_scope::initialize_task_history_scope(&mut transaction, &schema).await?;
+        super::oci_referrers::initialize(transaction.as_mut(), &schema).await?;
         transaction.commit().await
     }
 
@@ -345,6 +346,35 @@ impl PostgresIndexStore {
         }
     }
 
+    /// Protects a read reply's object set until its transaction finishes.
+    ///
+    /// The first key is mandatory; unresolved optional keys are omitted from
+    /// the returned set. Returns None if owner migration has not installed the
+    /// additive guard. Callers must then retain their single-object protocol.
+    ///
+    /// # Errors
+    /// Returns a pending-delete error or a database failure.
+    pub async fn try_require_remote_delete_batch_settled(
+        transaction: &mut Transaction<'_, Postgres>,
+        object_keys: &[ObjectKey],
+    ) -> Result<Option<Vec<String>>, PostgresMetadataStoreError> {
+        let initialized = query_scalar::<_, bool>(
+            "SELECT to_regprocedure(format('%I.shardline_remote_delete_read_batch_v1(text,text[])', current_schema())) IS NOT NULL",
+        )
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !initialized {
+            return Ok(None);
+        }
+        let keys: Vec<_> = object_keys.iter().map(ObjectKey::as_str).collect();
+        let settled =
+            query_scalar("SELECT shardline_remote_delete_read_batch_v1(current_schema(), $1)")
+                .bind(keys)
+                .fetch_one(&mut **transaction)
+                .await?;
+        Ok(Some(settled))
+    }
+
     /// Rejects a pending delete in the same transaction as a later publication.
     ///
     /// Hold the transaction until the protected mutation commits. An independent
@@ -382,6 +412,160 @@ impl PostgresIndexStore {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn read_batch_guards_commute_and_block_every_advertised_delete() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let keys = [
+            ObjectKey::parse("cohort/first").unwrap(),
+            ObjectKey::parse("cohort/second").unwrap(),
+        ];
+        let mut left = pool.begin().await.unwrap();
+        let mut right = pool.begin().await.unwrap();
+        assert_eq!(
+            PostgresIndexStore::try_require_remote_delete_batch_settled(&mut left, &keys)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        let reversed = [keys[1].clone(), keys[0].clone()];
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                PostgresIndexStore::try_require_remote_delete_batch_settled(&mut right, &reversed)
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .len(),
+            2
+        );
+        right.rollback().await.unwrap();
+        for key in &keys {
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    store.begin_remote_delete(key)
+                )
+                .await
+                .is_err()
+            );
+        }
+        left.commit().await.unwrap();
+        for key in &keys {
+            let permit = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                store.begin_remote_delete(key),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(store.finish_remote_delete(&permit).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn read_batch_rejects_pending_deletes_and_preserves_pre_extension_fallback() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let key = ObjectKey::parse("cohort/pending").unwrap();
+        let permit = store.begin_remote_delete(&key).await.unwrap();
+        let live = ObjectKey::parse("cohort/live").unwrap();
+        let mut optional_check = pool.begin().await.unwrap();
+        let settled = PostgresIndexStore::try_require_remote_delete_batch_settled(
+            &mut optional_check,
+            &[live.clone(), key.clone()],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(settled, vec![live.as_str().to_owned()]);
+        optional_check.rollback().await.unwrap();
+        let mut pending_check = pool.begin().await.unwrap();
+        let error = PostgresIndexStore::try_require_remote_delete_batch_settled(
+            &mut pending_check,
+            std::slice::from_ref(&key),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is_remote_delete_pending());
+        pending_check.rollback().await.unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        query("DROP FUNCTION shardline_remote_delete_read_batch_v1(TEXT, TEXT[])")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // A later schema may already have the extension. Its same-named
+        // function must not be mistaken for a guard installed in this schema.
+        let foreign = super::super::connect_isolated_postgres().await.unwrap();
+        let foreign_schema: String = query_scalar("SELECT current_schema()")
+            .fetch_one(&foreign)
+            .await
+            .unwrap();
+        let mut legacy_check = pool.begin().await.unwrap();
+        let _: String = query_scalar(
+            "SELECT set_config('search_path', format('%I,%I,public', current_schema(), $1::TEXT), true)",
+        )
+        .bind(foreign_schema)
+        .fetch_one(&mut *legacy_check)
+        .await
+        .unwrap();
+        assert!(
+            PostgresIndexStore::try_require_remote_delete_batch_settled(
+                &mut legacy_check,
+                std::slice::from_ref(&key)
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        PostgresIndexStore::require_remote_delete_settled(&mut legacy_check, &key)
+            .await
+            .unwrap();
+        legacy_check.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_batch_rejects_cross_schema_checks_and_stale_snapshots() {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
+            return;
+        };
+        let schema_error = query(
+            "SELECT shardline_remote_delete_read_batch_v1('public', ARRAY['cohort/foreign'])",
+        )
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        assert_eq!(
+            schema_error.as_database_error().unwrap().code().as_deref(),
+            Some("42501")
+        );
+        let store = PostgresIndexStore::new(pool.clone());
+        let key = ObjectKey::parse("cohort/stale-snapshot").unwrap();
+        let mut stale = pool.begin().await.unwrap();
+        query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *stale)
+            .await
+            .unwrap();
+        let _: i64 = query_scalar("SELECT epoch FROM shardline_resource_fences WHERE domain='maintenance-remote-delete-snapshot' AND resource='global'")
+            .fetch_one(&mut *stale).await.unwrap();
+        let permit = store.begin_remote_delete(&key).await.unwrap();
+        assert!(store.finish_remote_delete(&permit).await.unwrap());
+        let error = PostgresIndexStore::try_require_remote_delete_batch_settled(&mut stale, &[key])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PostgresMetadataStoreError::Sqlx(ref error)
+            if error.as_database_error().is_some_and(|database| database.code().as_deref() == Some("40001"))));
+        stale.rollback().await.unwrap();
+    }
     use crate::{AsyncIndexStore, RecordTraversal, RetentionHold};
 
     #[tokio::test]
@@ -812,11 +996,34 @@ mod tests {
                     .bind(&keys)
             };
             let mut acquire = Box::pin(statement.execute(&mut *publication));
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(100), &mut acquire)
+            // Observe the actual wait rather than assuming all preceding SQL
+            // and advisory locks finish within a fixed scheduling interval.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        result = &mut acquire => panic!(
+                            "publication completed before the reference-slot blocker: {result:?}"
+                        ),
+                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    }
+                    let waiting: bool = query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1
+                         AND locktype='advisory' AND classid=1397507140
+                         AND objid::bigint=$2 AND objsubid=2
+                         AND mode='ShareLock' AND NOT granted)",
+                    )
+                    .bind(pid)
+                    .bind(i64::from(blocked_slot))
+                    .fetch_one(&pool)
                     .await
-                    .is_err()
-            );
+                    .unwrap();
+                    if waiting {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("publication did not reach the blocked reference slot");
             let slots: Vec<i64> = query_scalar(
                 "SELECT objid::bigint FROM pg_locks WHERE pid=$1 AND locktype='advisory'
                  AND classid=1397507140 AND objsubid=2 AND mode='ShareLock' AND granted
@@ -1225,13 +1432,18 @@ mod tests {
         let role = format!("{schema}_writer");
         let identifier = format!("\"{}\"", schema.replace('"', "\"\""));
         let role_identifier = format!("\"{}\"", role.replace('"', "\"\""));
+        // This role is created after fixture migration. Match the derived-index
+        // grants that frontend installation mirrors for existing record writers;
+        // do not grant access to retention or remote-delete fencing tables.
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE {role_identifier};
              GRANT USAGE ON SCHEMA {identifier} TO {role_identifier};
              GRANT SELECT, INSERT, UPDATE ON {identifier}.shardline_dedupe_shards,
                  {identifier}.shardline_file_records,
                  {identifier}.shardline_file_reconstructions,
-                 {identifier}.shardline_stored_objects TO {role_identifier};"
+                 {identifier}.shardline_stored_objects TO {role_identifier};
+             GRANT SELECT, INSERT, DELETE ON {identifier}.shardline_record_membership
+                 TO {role_identifier};"
         )))
         .execute(&pool)
         .await

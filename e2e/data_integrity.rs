@@ -1,3 +1,8 @@
+mod data_integrity_requirements;
+mod data_integrity_xet_fixtures;
+mod native_client_policy;
+mod support;
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -93,28 +98,34 @@ async fn try_start_server(
         .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
         .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())?
         .with_provider_runtime(
-        config_path,
-        b"test-api-key-16bytes".to_vec(),
-        "test-issuer".to_owned(),
-        NonZeroU64::new(3600).unwrap(),
-    )?;
+            config_path,
+            b"test-api-key-16bytes".to_vec(),
+            "test-issuer".to_owned(),
+            NonZeroU64::new(3600).unwrap(),
+        )?;
     let config = modify_config(config)?;
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
-    for _attempt in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
-            && resp.status().is_success()
-        {
-            return Ok((base_url, server));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if support::wait_for_endpoint(
+        &client,
+        &base_url,
+        "healthz",
+        50,
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .is_ok()
+    {
+        return Ok((base_url, server));
     }
     if server.is_finished() {
         let result = server.await;
         let msg = format!("server exited prematurely: {result:?}");
         return Err(msg.into());
     }
-    Err("server did not become healthy".into())
+    server.abort();
+    let _ = server.await;
+    Err("server did not become healthy within its deadline".into())
 }
 
 fn write_provider_config(
@@ -151,12 +162,29 @@ fn mint_token(
     repo: &str,
     revision: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    mint_token_with_revision(subject, owner, repo, Some(revision))
+}
+
+fn mint_repository_token(
+    subject: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    mint_token_with_revision(subject, owner, repo, None)
+}
+
+fn mint_token_with_revision(
+    subject: &str,
+    owner: &str,
+    repo: &str,
+    revision: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!")?;
     let repository = shardline_protocol::RepositoryScope::new(
         shardline_protocol::RepositoryProvider::GitHub,
         owner,
         repo,
-        Some(revision),
+        revision,
     )?;
     let claims = shardline_protocol::TokenClaims::new(
         "local",
@@ -259,10 +287,9 @@ async fn xet_write_token_issuance_succeeds() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_when_role_api_only() {
-    let (base_url, server) =
-        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], Ok)
-            .await
-            .unwrap();
+    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], Ok)
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -3352,20 +3379,8 @@ async fn xet_batch_reconstruction_multiple_files() {
 
     let hash_a = upload_xorb(&client, &base_url, &token, b"batch multi A").await;
     let hash_b = upload_xorb(&client, &base_url, &token, b"batch multi B").await;
-    let file_a = upload_shard(
-        &client,
-        &base_url,
-        &token,
-        &[(b"batch multi A content", &hash_a)],
-    )
-    .await;
-    let file_b = upload_shard(
-        &client,
-        &base_url,
-        &token,
-        &[(b"batch multi B content", &hash_b)],
-    )
-    .await;
+    let file_a = upload_shard(&client, &base_url, &token, &[(b"batch multi A", &hash_a)]).await;
+    let file_b = upload_shard(&client, &base_url, &token, &[(b"batch multi B", &hash_b)]).await;
 
     let batch = client
         .get(format!(
@@ -3499,10 +3514,7 @@ async fn xet_shard_multiple_chunks() {
         &client,
         &base_url,
         &token,
-        &[
-            (b"multi chunk content A", &hash_a),
-            (b"multi chunk content B", &hash_b),
-        ],
+        &[(b"multi chunk A", &hash_a), (b"multi chunk B", &hash_b)],
     )
     .await;
     assert_eq!(file_hash.len(), 64, "file hash should be 64 hex chars");
@@ -5282,7 +5294,7 @@ async fn bazel_put_ac_invalid_hash_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oci_referrers_api_not_supported() {
+async fn oci_referrers_for_unknown_subject_returns_empty_index() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
@@ -5295,7 +5307,10 @@ async fn oci_referrers_api_not_supported() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "referrers API not implemented");
+    assert_eq!(resp.status(), 200);
+    let index: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(index["schemaVersion"], 2);
+    assert!(index["manifests"].as_array().unwrap().is_empty());
 
     server.abort();
 }
@@ -5733,15 +5748,15 @@ async fn lfs_objects_survive_gc_when_referenced() {
 }
 
 async fn wait_for_health(base_url: &str, client: &Client) {
-    for _attempt in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
-            && resp.status().is_success()
-        {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("server did not become healthy at {base_url}");
+    support::wait_for_endpoint(
+        client,
+        base_url,
+        "healthz",
+        50,
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .expect("data-integrity fixture must become healthy within its deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7544,10 +7559,9 @@ async fn verify_wrong_signing_key_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_role_api_rejects_blob_upload() {
-    let (base_url, server) =
-        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], Ok)
-            .await
-            .unwrap();
+    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], Ok)
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let repo = "test-owner/test-repo";
@@ -8834,6 +8848,7 @@ async fn postgres_backend_lfs_round_trip() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -8988,20 +9003,7 @@ async fn config_validation_chunk_size_too_large() {
     // Server should start successfully even with a very large chunk size.
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
-    let mut healthy = false;
-    for _ in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
-            && resp.status().is_success()
-        {
-            healthy = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert!(
-        healthy,
-        "server with large chunk size should become healthy"
-    );
+    wait_for_health(&base_url, &client).await;
     server.abort();
 
     // Invalid chunk sizes (non-power-of-two and/or over the 1 GiB cap) must be
@@ -9376,6 +9378,7 @@ async fn s3_backend_lfs_round_trip() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -9410,6 +9413,7 @@ async fn s3_backend_lfs_round_trip() {
             ServerFrontend::Lfs,
             ServerFrontend::Oci,
             ServerFrontend::BazelHttp,
+            ServerFrontend::S3,
         ]
         .iter()
         .copied(),
@@ -9488,6 +9492,29 @@ async fn s3_backend_lfs_round_trip() {
         .unwrap();
     assert_eq!(bazel_get.status(), 200, "s3 Bazel GET");
 
+    // S3 PutObject streams through FileUploadIngestor. Use enough varied data
+    // to create multiple CDC chunks, then read it back through the published
+    // file record so the MinIO-backed Xorb path is checked end to end.
+    let s3_content: Vec<u8> = (0..512 * 1024)
+        .map(|index| ((index * 31 + index / 251) % 256) as u8)
+        .collect();
+    let s3_object = client
+        .put(format!("{base_url}/test-owner.test-repo/packed.bin"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(s3_content.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(s3_object.status(), 200, "s3 object PUT");
+    let s3_get = client
+        .get(format!("{base_url}/test-owner.test-repo/packed.bin"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(s3_get.status(), 200, "s3 object GET");
+    assert_eq!(s3_get.bytes().await.unwrap().as_ref(), s3_content);
+
     server.abort();
 }
 
@@ -9498,6 +9525,7 @@ async fn s3_backend_dedup_cross_frontend() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -9596,6 +9624,7 @@ async fn postgres_backend_oci_manifest_push_pull() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -10175,29 +10204,34 @@ async fn xet_multiple_files_sharing_single_xorb() {
         serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
-    // Multiple files sharing the same xorb
-    let shared_content = b"shared xorb content for multiple files";
-    let xorb_hash = upload_xorb(&client, &base_url, &xet_token, shared_content).await;
-
-    let files: [&[u8]; 3] = [
+    let contents: [&[u8]; 3] = [
         b"first file header",
         b"second file body here",
         b"third file footer end",
     ];
 
-    let mut file_hashes = Vec::new();
-    for file_content in &files {
-        let fh = upload_shard(
-            &client,
-            &base_url,
-            &xet_token,
-            &[(file_content, &xorb_hash)],
-        )
-        .await;
-        file_hashes.push(fh);
+    let fixture = data_integrity_xet_fixtures::shared_xorb_files(&contents);
+    let uploaded = client
+        .post(format!("{base_url}/v1/xorbs/default/{}", fixture.hash))
+        .bearer_auth(&xet_token)
+        .body(fixture.serialized)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), 200);
+    for file in &fixture.files {
+        let uploaded = client
+            .post(format!("{base_url}/v1/shards"))
+            .bearer_auth(&xet_token)
+            .body(file.shard.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(uploaded.status(), 200);
     }
 
-    for (i, fh) in file_hashes.iter().enumerate() {
+    for (i, file) in fixture.files.iter().enumerate() {
+        let fh = &file.hash;
         let recon = client
             .get(format!("{base_url}/v1/reconstructions/{fh}"))
             .header("Authorization", format!("Bearer {xet_token}"))
@@ -10210,7 +10244,30 @@ async fn xet_multiple_files_sharing_single_xorb() {
             "file {i} reconstruction from shared xorb"
         );
         let body: serde_json::Value = recon.json().await.unwrap();
-        assert!(body.get("terms").is_some(), "file {i} has terms");
+        assert_eq!(body["terms"].as_array().unwrap().len(), 1);
+        assert_eq!(body["terms"][0]["hash"], fixture.hash);
+        assert_eq!(body["terms"][0]["range"]["start"], i);
+        assert_eq!(body["terms"][0]["range"]["end"], i + 1);
+        let fetch = &body["fetch_info"][&fixture.hash][0];
+        // Official clients fetch this signed range without the CAS bearer.
+        let response = client
+            .get(fetch["url"].as_str().unwrap())
+            .header(
+                "Range",
+                format!(
+                    "bytes={}-{}",
+                    fetch["url_range"]["start"], fetch["url_range"]["end"]
+                ),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 206);
+        let packed = response.bytes().await.unwrap();
+        let (decoded, _, _) =
+            shardline_xet_core::xorb_object::deserialize_chunk(&mut std::io::Cursor::new(packed))
+                .unwrap();
+        assert_eq!(decoded, contents[i]);
     }
 
     server.abort();
@@ -10553,8 +10610,9 @@ async fn hub_webhook_create_and_list() {
 
     // Repo-scoped tokens: `require_repository_binding` requires each repo's
     // operations to use a token scoped to that exact `{ns}/{repo}`.
-    let model_token = mint_token("test-subject", "test-owner", "test-model", "main").unwrap();
-    let model2_token = mint_token("test-subject", "test-owner", "test-model2", "main").unwrap();
+    let model_token = mint_repository_token("test-subject", "test-owner", "test-model").unwrap();
+    let model2_token = mint_repository_token("test-subject", "test-owner", "test-model2").unwrap();
+    let branch_token = mint_token("test-subject", "test-owner", "test-model", "main").unwrap();
 
     // Create a model repo so we can attach a webhook to it.
     let create = client
@@ -10571,7 +10629,23 @@ async fn hub_webhook_create_and_list() {
         create.text().await.unwrap()
     );
 
-    // Create a webhook on the model repo.
+    // Webhooks expose events across refs; branch-limited credentials cannot
+    // register them, even with Write permission for their own branch.
+    let denied = client
+        .post(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
+        .bearer_auth(&branch_token)
+        .json(&serde_json::json!({
+            "url": "https://example.com/webhook", "events": ["push", "delete"],
+            "secret": "my-secret"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+
+    // Create a webhook on the model repo with repository-wide authority.
     let create_wh = client
         .post(format!(
             "{base_url}/api/models/test-owner/test-model/webhooks"
@@ -10601,6 +10675,16 @@ async fn hub_webhook_create_and_list() {
     let events = wh["events"].as_array().unwrap();
     assert!(events.iter().any(|e| e.as_str() == Some("push")));
     assert!(events.iter().any(|e| e.as_str() == Some("delete")));
+
+    let denied = client
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
+        .bearer_auth(&branch_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
 
     // List webhooks — should contain the one we just created.
     let list = client
@@ -10650,7 +10734,8 @@ async fn hub_webhook_delete() {
 
     // Repo-scoped token: `require_repository_binding` requires the token's
     // `RepositoryScope` to match `test-owner/test-model` exactly.
-    let model_token = mint_token("test-subject", "test-owner", "test-model", "main").unwrap();
+    let model_token = mint_repository_token("test-subject", "test-owner", "test-model").unwrap();
+    let branch_token = mint_token("test-subject", "test-owner", "test-model", "main").unwrap();
 
     // Create a model repo.
     let create = client
@@ -10675,6 +10760,28 @@ async fn hub_webhook_delete() {
     assert_eq!(create_wh.status(), 201);
     let wh: serde_json::Value = create_wh.json().await.unwrap();
     let wh_id = wh["id"].as_str().expect("webhook id missing");
+
+    let denied = client
+        .delete(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks/{wh_id}"
+        ))
+        .bearer_auth(&branch_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+    let preserved: serde_json::Value = client
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
+        .bearer_auth(&model_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preserved["webhooks"].as_array().unwrap().len(), 1);
 
     // Delete the webhook.
     let del = client
@@ -10713,8 +10820,7 @@ async fn hub_dataset_operations() {
 
     // Repo-scoped token: `require_repository_binding` requires the token's
     // `RepositoryScope` to match `test-owner/test-dataset` exactly.
-    let dataset_token =
-        mint_token("test-subject", "test-owner", "test-dataset", "main").unwrap();
+    let dataset_token = mint_token("test-subject", "test-owner", "test-dataset", "main").unwrap();
 
     // Create a dataset repo.
     let create = client
@@ -11128,7 +11234,10 @@ async fn sqlite_dedupe_mapping_roundtrip() {
         chunks_after, chunks_after_first,
         "dedupe mapping should prevent chunk growth"
     );
-    assert_eq!(objects_after, objects_after_first, "duplicate uploads added objects");
+    assert_eq!(
+        objects_after, objects_after_first,
+        "duplicate uploads added objects"
+    );
     assert_eq!(
         object_bytes_after, object_bytes_after_first,
         "duplicate uploads added stored bytes"
@@ -12402,6 +12511,7 @@ async fn s3_backend_oci_session_upload() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };
@@ -12550,6 +12660,7 @@ async fn s3_backend_oci_session_abort() {
         .start()
         .unwrap();
     let Some(docker) = docker else {
+        native_client_policy::require_available("Docker data-integrity backend", false);
         eprintln!("SKIP: Docker not available");
         return;
     };

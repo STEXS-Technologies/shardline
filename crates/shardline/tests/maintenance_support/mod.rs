@@ -1,4 +1,5 @@
 mod archive_inspection;
+mod fsck_outcomes;
 mod gc_interruptions;
 mod local_history;
 mod native_interruptions;
@@ -6,6 +7,7 @@ mod postgres_fixture;
 mod postgres_interruptions;
 mod postgres_mutation_interruptions;
 mod postgres_rebuild_interruptions;
+pub(super) mod process;
 mod rebuild_derived_interruptions;
 mod rebuild_interruptions;
 mod repair_interruptions;

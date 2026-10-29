@@ -1,10 +1,50 @@
 mod support;
 
-use std::{env::var, error::Error, num::NonZeroUsize, path::PathBuf, process::Command};
+use std::{
+    env::var,
+    error::Error,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    process::{Command, Output},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use shardline_server::LocalBackend;
 use support::CliE2eInvariantError;
+
+fn run(command: &mut Command) -> std::io::Result<Output> {
+    shardline_test_support::native_client_output(command, Duration::from_secs(120))
+}
+
+fn verify_packed_payloads(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    let relative = Path::new("chunks/xorbs/default");
+    let mut verified = false;
+    for prefix in std::fs::read_dir(source.join(relative))? {
+        for object in std::fs::read_dir(prefix?.path())? {
+            let path = object?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "xorb")
+            {
+                let key = path.strip_prefix(source)?;
+                if std::fs::read(&path)? != std::fs::read(destination.join(key))? {
+                    return Err(CliE2eInvariantError::new(
+                        "migration changed packed payload bytes",
+                    )
+                    .into());
+                }
+                verified = true;
+            }
+        }
+    }
+    if !verified {
+        return Err(
+            CliE2eInvariantError::new("migration must verify a persisted packed payload").into(),
+        );
+    }
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_migrate_copies_local_objects_idempotently() {
@@ -38,7 +78,7 @@ async fn exercise_storage_migrate_local_to_local() -> Result<(), Box<dyn Error>>
         .await?;
 
     let shardline_bin = shardline_binary()?;
-    let first = Command::new(&shardline_bin)
+    let first = run(Command::new(&shardline_bin)
         .env_remove("SHARDLINE_ROOT_DIR")
         .args([
             "storage",
@@ -57,8 +97,7 @@ async fn exercise_storage_migrate_local_to_local() -> Result<(), Box<dyn Error>>
                 .path()
                 .to_str()
                 .ok_or("destination path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if !first.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "first migration failed: {}",
@@ -74,7 +113,9 @@ async fn exercise_storage_migrate_local_to_local() -> Result<(), Box<dyn Error>>
         return Err(CliE2eInvariantError::new("migration did not copy any objects").into());
     }
 
-    let second = Command::new(shardline_bin)
+    verify_packed_payloads(source.path(), destination.path())?;
+
+    let second = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_ROOT_DIR")
         .args([
             "storage",
@@ -93,8 +134,7 @@ async fn exercise_storage_migrate_local_to_local() -> Result<(), Box<dyn Error>>
                 .path()
                 .to_str()
                 .ok_or("destination path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if !second.status.success() {
         return Err(CliE2eInvariantError::new(format!(
             "second migration failed: {}",
@@ -112,6 +152,7 @@ async fn exercise_storage_migrate_local_to_local() -> Result<(), Box<dyn Error>>
         );
     }
 
+    verify_packed_payloads(source.path(), destination.path())?;
     Ok(())
 }
 
@@ -135,7 +176,7 @@ async fn exercise_storage_migrate_rejects_symlinked_local_root() -> Result<(), B
     symlink(redirected.path(), &root_link)?;
 
     let shardline_bin = shardline_binary()?;
-    let output = Command::new(shardline_bin)
+    let output = run(Command::new(shardline_bin)
         .env_remove("SHARDLINE_ROOT_DIR")
         .args([
             "storage",
@@ -153,8 +194,7 @@ async fn exercise_storage_migrate_rejects_symlinked_local_root() -> Result<(), B
                 .path()
                 .to_str()
                 .ok_or("destination path was not valid utf-8")?,
-        ])
-        .output()?;
+        ]))?;
     if output.status.success() {
         return Err(CliE2eInvariantError::new(
             "storage migration unexpectedly accepted a symlinked local root",
@@ -166,18 +206,9 @@ async fn exercise_storage_migrate_rejects_symlinked_local_root() -> Result<(), B
 }
 
 fn shardline_binary() -> Result<PathBuf, Box<dyn Error>> {
-    if let Ok(path) = var("CARGO_BIN_EXE_shardline") {
-        return Ok(PathBuf::from(path));
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let Some(workspace_root) = manifest_dir.ancestors().nth(2) else {
-        return Err(CliE2eInvariantError::new("workspace root could not be resolved").into());
-    };
-    let binary = workspace_root
-        .join("target")
-        .join("debug")
-        .join("shardline");
+    let binary = var("CARGO_BIN_EXE_shardline")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_BIN_EXE_shardline")));
     if !binary.is_file() {
         return Err(CliE2eInvariantError::new(format!(
             "shardline binary was not built at {}",

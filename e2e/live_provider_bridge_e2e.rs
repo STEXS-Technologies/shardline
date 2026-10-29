@@ -1,10 +1,11 @@
+mod live_provider_bridge_requirements;
 mod support;
 
 use std::{
     collections::HashMap,
     env::var,
     error::Error,
-    fs::{create_dir_all, read, read_dir, write as write_file},
+    fs::{create_dir_all, read, write as write_file},
     io::{Cursor, Error as IoError},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
@@ -24,20 +25,22 @@ use axum::{
     serve as serve_http,
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use hex::encode;
 use reqwest::{Client, header::RANGE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, from_slice, json, to_vec};
 use sha2::{Digest, Sha256};
-use shardline_index::{FileChunkRecord, FileRecord, parse_xet_hash_hex};
-use shardline_protocol::TokenScope;
+use shardline_index::{
+    FileChunkRecord, FileRecord, LocalRecordStore, RecordTraversal, RepositoryRecordScope,
+    parse_xet_hash_hex,
+};
+use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_server::{
     FileReconstructionResponse, ProviderTokenIssueRequest, ProviderTokenIssueResponse,
     ServerConfig, ServerStatsResponse, serve_with_listener, try_for_each_serialized_xorb_chunk,
     validate_serialized_xorb,
 };
 use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, time::sleep};
+use tokio::{net::TcpListener, spawn};
 
 type TestError = Box<dyn Error + Send + Sync>;
 
@@ -45,15 +48,34 @@ const LIVE_PROVIDER_BOOTSTRAP_KEY: &str = "live-provider-bootstrap-key";
 const LIVE_PROVIDER_TOKEN_TTL_SECONDS: u64 = 300;
 const LIVE_GITHUB_API_BASE_URL: &str = "https://api.github.com";
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_provider_bridge_supports_private_github_and_gitea_repositories() {
-    if !(command_available("git") && command_available("git-lfs") && command_available("git-xet")) {
-        return;
-    }
+fn live_http_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+}
 
-    let Some(config) = LiveBridgeConfig::from_env().await else {
-        return;
-    };
+fn live_revision() -> &'static str {
+    static REVISION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    REVISION.get_or_init(|| {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("live fixture clock precedes the Unix epoch")
+            .as_nanos();
+        format!("shardline-qualification-{}-{nonce}", std::process::id())
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live GitHub and Gitea test repositories and credentials"]
+async fn live_provider_bridge_supports_private_github_and_gitea_repositories() {
+    assert!(
+        command_available("git") && command_available("git-lfs") && command_available("git-xet"),
+        "explicit live-provider qualification requires git, git-lfs and git-xet"
+    );
+    let config = LiveBridgeConfig::from_env()
+        .await
+        .expect("live-provider qualification configuration");
 
     let result = exercise_live_provider_bridge_flow(config).await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -85,7 +107,7 @@ async fn exercise_live_provider_bridge_flow(config: LiveBridgeConfig) -> Result<
     let shardline_server =
         spawn(async move { serve_with_listener(shardline_config, shardline_listener).await });
 
-    let client = Client::new();
+    let client = live_http_client()?;
     wait_for_health(&client, &shardline_base_url).await?;
 
     let bridge_listener =
@@ -159,13 +181,15 @@ async fn exercise_provider_repository_flow(
     let stats_after_first_push =
         read_server_stats_for_repository(client, &bridge_state.shardline_api_base_url, config)
             .await?;
-    let first_chunk_delta = stats_after_first_push
-        .chunks
-        .checked_sub(first_stats.chunks)
-        .ok_or_else(|| ServerE2eInvariantError::new("initial chunk count unexpectedly shrank"))?;
-    if first_chunk_delta == 0 {
+    let first_object_delta = stats_after_first_push
+        .object_bytes
+        .checked_sub(first_stats.object_bytes)
+        .ok_or_else(|| {
+            ServerE2eInvariantError::new("initial retained bytes unexpectedly shrank")
+        })?;
+    if first_object_delta == 0 {
         return Err(
-            ServerE2eInvariantError::new("initial push recorded no new chunk objects").into(),
+            ServerE2eInvariantError::new("initial push retained no new object bytes").into(),
         );
     }
 
@@ -193,21 +217,33 @@ async fn exercise_provider_repository_flow(
     let stats_after_second_push =
         read_server_stats_for_repository(client, &bridge_state.shardline_api_base_url, config)
             .await?;
-    let second_chunk_delta = stats_after_second_push
-        .chunks
-        .checked_sub(stats_after_first_push.chunks)
-        .ok_or_else(|| ServerE2eInvariantError::new("updated chunk count unexpectedly shrank"))?;
-    if second_chunk_delta == 0 {
+    let second_object_delta = stats_after_second_push
+        .object_bytes
+        .checked_sub(stats_after_first_push.object_bytes)
+        .ok_or_else(|| {
+            ServerE2eInvariantError::new("updated retained bytes unexpectedly shrank")
+        })?;
+    if second_object_delta == 0 {
         return Err(ServerE2eInvariantError::new(
-            "second push recorded no new chunk objects for the changed region",
+            "second push retained no new object bytes for the changed region",
         )
         .into());
     }
-    if second_chunk_delta >= first_chunk_delta {
+    if second_object_delta >= first_object_delta {
         return Err(ServerE2eInvariantError::new(format!(
-            "{} second push uploaded too many new chunks: first_delta={first_chunk_delta} second_delta={second_chunk_delta}",
+            "{} second push did not physically reuse existing content: first_delta={first_object_delta} second_delta={second_object_delta}",
             config.provider
         ))
+        .into());
+    }
+    if stats_after_first_push.chunks != 0
+        || stats_after_second_push.chunks != 0
+        || stats_after_first_push.chunk_bytes != 0
+        || stats_after_second_push.chunk_bytes != 0
+    {
+        return Err(ServerE2eInvariantError::new(
+            "native provider upload retained redundant standalone chunk copies",
+        )
         .into());
     }
 
@@ -216,7 +252,8 @@ async fn exercise_provider_repository_flow(
         &config.provider,
         &config.owner,
         &config.repo,
-    )?;
+    )
+    .await?;
     if version_records.len() < 2 {
         return Err(ServerE2eInvariantError::new(format!(
             "{} repository stored fewer than two version records",
@@ -322,8 +359,12 @@ fn write_commit_and_push_asset(
     write_file(worktree.join("asset.bin"), asset_bytes)?;
     run_git_with_home(worktree, git_home, ["add", ".gitattributes", "asset.bin"])?;
     run_git_with_home(worktree, git_home, ["commit", "-m", commit_message])?;
-    run_git_with_home(worktree, git_home, ["branch", "-M", "main"])?;
-    run_git_with_home(worktree, git_home, ["push", "-u", "origin", "main"])?;
+    run_git_with_home(worktree, git_home, ["branch", "-M", live_revision()])?;
+    run_git_with_home(
+        worktree,
+        git_home,
+        ["push", "-u", "origin", live_revision()],
+    )?;
     Ok(())
 }
 
@@ -370,7 +411,7 @@ fn clone_and_verify_repository(
         ]);
     run_command_checked(&mut git_xet_install, "git-xet install --local")?;
 
-    run_git_with_home(worktree, git_home, ["checkout", "main"])?;
+    run_git_with_home(worktree, git_home, ["checkout", live_revision()])?;
     if read(worktree.join("asset.bin"))? != verification.second_bytes {
         return Err(ServerE2eInvariantError::new(format!(
             "{} clone did not materialize latest asset bytes",
@@ -388,7 +429,7 @@ fn clone_and_verify_repository(
         .into());
     }
 
-    run_git_with_home(worktree, git_home, ["checkout", "main"])?;
+    run_git_with_home(worktree, git_home, ["checkout", live_revision()])?;
     if read(worktree.join("asset.bin"))? != verification.second_bytes {
         return Err(ServerE2eInvariantError::new(format!(
             "{} checkout did not restore the latest asset bytes",
@@ -704,22 +745,22 @@ async fn resolve_provider_subject(
             ));
         }
     };
-    let response = request.send().await.map_err(|error| {
+    let response = request.send().await.map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
-            format!("provider subject lookup failed: {error}"),
+            "provider subject lookup failed".to_owned(),
         )
     })?;
-    let response = response.error_for_status().map_err(|error| {
+    let response = response.error_for_status().map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
-            format!("provider rejected bridge credentials: {error}"),
+            "provider rejected bridge credentials".to_owned(),
         )
     })?;
-    let payload = response.json::<Value>().await.map_err(|error| {
+    let payload = response.json::<Value>().await.map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
-            format!("provider identity response was invalid: {error}"),
+            "provider identity response was invalid".to_owned(),
         )
     })?;
     let Some(subject) = payload.get("login").and_then(Value::as_str) else {
@@ -742,7 +783,8 @@ async fn reconstruct_lfs_object(
         repository.provider,
         repository.owner,
         repository.repo,
-    )?;
+    )
+    .await?;
     for record in records
         .iter()
         .filter(|record| record.total_bytes == expected_size)
@@ -984,7 +1026,7 @@ async fn issue_provider_token_with_key(
             subject: repository.subject.to_owned(),
             owner: repository.owner.to_owned(),
             repo: repository.repo.to_owned(),
-            revision: Some("main".to_owned()),
+            revision: Some(live_revision().to_owned()),
             scope: match scope {
                 TokenScopeRequest::Read => TokenScope::Read,
                 TokenScopeRequest::Write => TokenScope::Write,
@@ -1025,16 +1067,9 @@ async fn read_server_stats_for_repository(
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), TestError> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20))
+        .await
+        .map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]
@@ -1044,11 +1079,36 @@ struct LiveBridgeConfig {
 }
 
 impl LiveBridgeConfig {
-    async fn from_env() -> Option<Self> {
-        let client = Client::new();
-        let github = LiveProviderConfig::github_from_env(&client).await.ok()?;
-        let gitea = LiveProviderConfig::gitea_from_env(&client).await.ok()?;
-        Some(Self { github, gitea })
+    async fn from_env() -> Result<Self, TestError> {
+        // Validate the complete opt-in fixture before contacting either forge.
+        for name in [
+            "SHARDLINE_LIVE_GITHUB_OWNER",
+            "SHARDLINE_LIVE_GITHUB_REPO",
+            "SHARDLINE_LIVE_GITHUB_TOKEN",
+            "SHARDLINE_LIVE_GITEA_BASE_URL",
+            "SHARDLINE_LIVE_GITEA_OWNER",
+            "SHARDLINE_LIVE_GITEA_REPO",
+            "SHARDLINE_LIVE_GITEA_TOKEN",
+        ] {
+            if !var(name).is_ok_and(|value| !value.trim().is_empty()) {
+                return Err(ServerE2eInvariantError::new(format!(
+                    "missing live-provider fixture variable {name}"
+                ))
+                .into());
+            }
+        }
+        let client = live_http_client()?;
+        let github = LiveProviderConfig::github_from_env(&client)
+            .await
+            .map_err(|_| {
+                ServerE2eInvariantError::new("live GitHub fixture identity lookup failed")
+            })?;
+        let gitea = LiveProviderConfig::gitea_from_env(&client)
+            .await
+            .map_err(|_| {
+                ServerE2eInvariantError::new("live Gitea fixture identity lookup failed")
+            })?;
+        Ok(Self { github, gitea })
     }
 }
 
@@ -1073,9 +1133,7 @@ impl LiveProviderConfig {
         let subject =
             resolve_live_subject(client, LIVE_GITHUB_API_BASE_URL, "github", &token).await?;
         let clone_url = format!("https://github.com/{owner}/{repo}.git");
-        let encoded_token = percent_encode_component(&token);
-        let auth_remote_url =
-            format!("https://x-access-token:{encoded_token}@github.com/{owner}/{repo}.git");
+        let auth_remote_url = authenticated_git_url(&clone_url, "x-access-token", &token)?;
 
         Ok(Self {
             provider: "github".to_owned(),
@@ -1098,13 +1156,7 @@ impl LiveProviderConfig {
         let subject = resolve_live_subject(client, &base_url, "gitea", &token).await?;
         let trimmed_base = base_url.trim_end_matches('/');
         let clone_url = format!("{trimmed_base}/{owner}/{repo}.git");
-        let encoded_token = percent_encode_component(&token);
-        let auth_remote_url = format!("{trimmed_base}/{owner}/{repo}.git");
-        let auth_remote_url = auth_remote_url.replacen(
-            "https://",
-            &format!("https://{subject}:{encoded_token}@"),
-            1,
-        );
+        let auth_remote_url = authenticated_git_url(&clone_url, &subject, &token)?;
 
         Ok(Self {
             provider: "gitea".to_owned(),
@@ -1128,6 +1180,21 @@ impl LiveProviderConfig {
             self.repo
         )
     }
+}
+
+fn authenticated_git_url(base: &str, subject: &str, token: &str) -> Result<String, TestError> {
+    let mut url = reqwest::Url::parse(base)
+        .map_err(|_| ServerE2eInvariantError::new("invalid live-provider Git URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(
+            ServerE2eInvariantError::new("unsupported live-provider Git URL scheme").into(),
+        );
+    }
+    url.set_username(&percent_encode_component(subject))
+        .map_err(|_| ServerE2eInvariantError::new("invalid live-provider Git identity"))?;
+    url.set_password(Some(&percent_encode_component(token)))
+        .map_err(|_| ServerE2eInvariantError::new("invalid live-provider Git credential"))?;
+    Ok(url.into())
 }
 
 fn configure_bridge_auth_header(
@@ -1200,7 +1267,7 @@ fn write_provider_config(
                         "owner": github.owner,
                         "name": github.repo,
                         "visibility": "private",
-                        "default_revision": "main",
+                        "default_revision": live_revision(),
                         "clone_url": github.clone_url,
                         "read_subjects": [github.subject],
                         "write_subjects": [github.subject]
@@ -1216,7 +1283,7 @@ fn write_provider_config(
                         "owner": gitea.owner,
                         "name": gitea.repo,
                         "visibility": "private",
-                        "default_revision": "main",
+                        "default_revision": live_revision(),
                         "clone_url": gitea.clone_url,
                         "read_subjects": [gitea.subject],
                         "write_subjects": [gitea.subject]
@@ -1229,47 +1296,27 @@ fn write_provider_config(
     Ok(path)
 }
 
-fn read_version_records(
+async fn read_version_records(
     storage_root: &Path,
     provider: &str,
     owner: &str,
     repo: &str,
 ) -> Result<Vec<FileRecord>, TestError> {
-    let repository_root = storage_root
-        .join("file_versions")
-        .join(provider)
-        .join(encode(owner))
-        .join(encode(repo))
-        .join(encode("main"));
-    let mut record_paths = Vec::new();
-    collect_files(&repository_root, &mut record_paths)?;
-    record_paths
-        .iter()
-        .map(|path| {
-            let record_bytes = read(path)?;
-            Ok(from_slice(&record_bytes)?)
-        })
-        .collect()
-}
-
-fn collect_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), TestError> {
-    if !root.exists() {
-        return Ok(());
+    let provider = match provider {
+        "github" => RepositoryProvider::GitHub,
+        "gitea" => RepositoryProvider::Gitea,
+        _ => return Err(ServerE2eInvariantError::new("unsupported live record provider").into()),
+    };
+    let store = LocalRecordStore::open(storage_root.to_path_buf());
+    let scope = RepositoryRecordScope::new(provider, owner, repo);
+    let locators = RecordTraversal::list_repository_version_record_locators(&store, &scope).await?;
+    let mut records = Vec::with_capacity(locators.len());
+    for locator in &locators {
+        let bytes = RecordTraversal::read_record_bytes(&store, locator).await?;
+        records.push(from_slice::<FileRecord>(&bytes)?);
     }
-
-    for entry in read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
-            collect_files(&path, files)?;
-        } else if metadata.is_file() {
-            files.push(path);
-        }
-    }
-
-    files.sort();
-    Ok(())
+    records.sort_by(|left, right| left.file_id.cmp(&right.file_id));
+    Ok(records)
 }
 
 fn percent_encode_component(value: &str) -> String {
@@ -1337,7 +1384,10 @@ fn with_test_home<'command>(command: &'command mut Command, home: &Path) -> &'co
 }
 
 fn run_command(command: &mut Command) -> Result<Output, TestError> {
-    Ok(command.output()?)
+    Ok(shardline_test_support::native_client_output(
+        command,
+        std::time::Duration::from_secs(300),
+    )?)
 }
 
 fn run_command_checked(command: &mut Command, description: &str) -> Result<(), TestError> {
@@ -1351,16 +1401,16 @@ fn run_command_checked(command: &mut Command, description: &str) -> Result<(), T
 
 fn command_error(description: &str, output: &Output) -> IoError {
     ServerE2eInvariantError::new(format!(
-        "{description} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "{description} failed with status {}",
+        output.status
     ))
     .into()
 }
 
 fn command_available(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+    shardline_test_support::native_client_output(
+        Command::new(program).arg("--version"),
+        std::time::Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success())
 }

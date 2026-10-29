@@ -58,6 +58,17 @@ impl S3Error {
         }
     }
 
+    /// ACL writes are disabled for the S3 frontend's bucket-owner-enforced
+    /// ownership model.
+    #[must_use]
+    pub fn acl_not_supported() -> Self {
+        Self {
+            code: "AccessControlListNotSupported",
+            message: "The bucket does not allow ACLs".to_owned(),
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
     /// The requested byte range could not be satisfied.
     #[must_use]
     pub fn invalid_range() -> Self {

@@ -63,8 +63,9 @@ records are served raw. Xorb-backed files use a single-GET fast path.
 All three formats are handled:
 
 - Individual chunk paths and xorb container paths are referenced by the GC.
-- Xorb containers are resolved to their constituent chunk hashes.
-- Xorb cache sidecar files are deleted when their parent xorb is swept.
+- Xorb containers are validated before their constituent chunk hashes are used.
+- Legacy Xorb cache sidecars are not trusted for membership; their cleanup
+  remains tied to their parent Xorb.
 
 ## Compatibility
 

@@ -34,6 +34,8 @@ async fn verify_full_capacity(incremental: bool) {
     let scope = scope.expect("actual PostgreSQL history scope");
     let store = store.require_metadata_publication();
     let deployment = deployment_fingerprint(&fixture.config).unwrap();
+    let index_pool = fixture.index().pool().clone();
+    let runtime = tokio::runtime::Handle::current();
     let payload = fixture
         .config
         .root_dir()
@@ -70,14 +72,14 @@ async fn verify_full_capacity(incremental: bool) {
         let mut slowest = std::time::Duration::ZERO;
         loop {
             let batch_started = std::time::Instant::now();
-            let before = incremental.then(|| run_artifact_count(&store));
+            let before = incremental.then(|| run_artifact_count(&runtime, &index_pool));
             let count = if incremental {
                 store.prune_completed_incrementally(deployment, now).unwrap()
             } else {
                 store.prune_completed(deployment, now).unwrap()
             };
             if let Some(before) = before {
-                let after = run_artifact_count(&store);
+                let after = run_artifact_count(&runtime, &index_pool);
                 assert!(before >= after);
                 assert!(before.checked_sub(after).unwrap() <= 256, "automatic cleanup exceeded its artifact budget");
             }
@@ -122,16 +124,18 @@ async fn verify_full_capacity(incremental: bool) {
     fixture.finish().await;
 }
 
-fn run_artifact_count(store: &TaskEvidenceStore) -> usize {
-    let mut count = 0_usize;
-    store
-        .visit_prefix(
-            &ObjectPrefix::parse(&format!("{TASK_EVIDENCE_PREFIX}runs/")).unwrap(),
-            |_| {
-                count = count.checked_add(1).unwrap();
-                Ok(())
-            },
+fn run_artifact_count(runtime: &tokio::runtime::Handle, pool: &sqlx::PgPool) -> usize {
+    runtime.block_on(async {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_task_artifacts_v1
+             WHERE artifact_key >= $1 COLLATE \"C\"
+               AND artifact_key < $2 COLLATE \"C\"",
         )
+        .bind(format!("{TASK_EVIDENCE_PREFIX}runs/"))
+        .bind(format!("{TASK_EVIDENCE_PREFIX}runs0"))
+        .fetch_one(pool)
+        .await
         .unwrap();
-    count
+        usize::try_from(count).unwrap()
+    })
 }

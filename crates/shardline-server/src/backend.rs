@@ -36,6 +36,12 @@ use crate::{
     xet_adapter::{FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse},
 };
 
+mod dedup;
+mod delta;
+mod hub_read;
+mod lfs_locks;
+mod xorb_authorization;
+
 #[cfg(test)]
 pub(crate) mod s3_delete_fault_injection {
     use std::sync::{LazyLock, Mutex};
@@ -98,6 +104,8 @@ pub(crate) struct S3ObjectReadSnapshot {
     pub user_metadata: Vec<(String, String)>,
     /// Validator paired with the same row/version, absent for legacy fallback.
     pub etag: Option<String>,
+    /// Multipart part count when verified sidecar metadata is available.
+    pub multipart_part_count: Option<u32>,
     /// Last-Modified paired with the same row/version.
     pub updated_at_unix_seconds: Option<i64>,
 }
@@ -467,8 +475,7 @@ impl ServerBackend {
         Ok(PreparedS3Object { record, response })
     }
 
-    /// Atomically makes a prepared S3 object visible through its lock-owning
-    /// Postgres connection.
+    #[cfg(test)]
     pub(crate) async fn publish_s3_object_locked(
         &self,
         guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
@@ -476,6 +483,26 @@ impl ServerBackend {
         entry: &S3ObjectEntry,
         condition: &S3PublishCondition,
         completion_fence: Option<&ResumableCompletionFence>,
+    ) -> Result<bool, ServerError> {
+        self.publish_s3_object_locked_with_multipart_count(
+            guard,
+            prepared,
+            entry,
+            condition,
+            completion_fence,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_s3_object_locked_with_multipart_count(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        prepared: &PreparedS3Object,
+        entry: &S3ObjectEntry,
+        condition: &S3PublishCondition,
+        completion_fence: Option<&ResumableCompletionFence>,
+        multipart_part_count: Option<u32>,
     ) -> Result<bool, ServerError> {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
@@ -490,6 +517,7 @@ impl ServerBackend {
                 entry,
                 condition,
                 completion_fence,
+                multipart_part_count,
             )
             .await?;
         Ok(published)
@@ -646,6 +674,22 @@ impl ServerBackend {
             .await?)
     }
 
+    pub(crate) async fn list_scoped_inflight_resumable_sessions(
+        &self,
+        scope: &str,
+        protocol: shardline_index::ResumableSessionProtocol,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResumableSession>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .list_scoped_inflight_resumable_sessions(scope, protocol, after, limit)
+            .await?)
+    }
+
     pub(crate) async fn resumable_session_snapshot(
         &self,
         session_id: &str,
@@ -685,6 +729,35 @@ impl ServerBackend {
         aggregate_max_bytes: u64,
         max_active_parts: usize,
     ) -> Result<PublishResumablePartOutcome, ServerError> {
+        self.publish_resumable_part_bounded_with_checksum(
+            session_id,
+            part_number,
+            staging_key,
+            size_bytes,
+            etag,
+            range,
+            None,
+            session_max_bytes,
+            aggregate_max_bytes,
+            max_active_parts,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn publish_resumable_part_bounded_with_checksum(
+        &self,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        range: Option<ResumablePartRange>,
+        checksum: Option<(&str, &str)>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, ServerError> {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
@@ -695,30 +768,23 @@ impl ServerBackend {
         {
             let connection = connection.as_mut().ok_or(ServerError::StaleResourceFence)?;
             return Ok(
-                shardline_index::PostgresIndexStore::publish_resumable_part_bounded_on_connection(
-                    connection,
-                    session_id,
-                    part_number,
-                    staging_key,
-                    size_bytes,
-                    etag,
-                    range,
-                    session_max_bytes,
-                    aggregate_max_bytes,
-                    max_active_parts,
+                shardline_index::PostgresIndexStore::publish_resumable_part_bounded_on_connection_with_checksum(
+                    connection, session_id, part_number, staging_key, size_bytes, etag, range,
+                    checksum, session_max_bytes, aggregate_max_bytes, max_active_parts,
                 )
                 .await?,
             );
         }
         Ok(backend
             .index_store()
-            .publish_resumable_part_bounded(
+            .publish_resumable_part_bounded_with_checksum(
                 session_id,
                 part_number,
                 staging_key,
                 size_bytes,
                 etag,
                 range,
+                checksum,
                 session_max_bytes,
                 aggregate_max_bytes,
                 max_active_parts,
@@ -834,62 +900,101 @@ impl ServerBackend {
         }
     }
 
-    /// Resolves the authoritative size and BLAKE3 content hash for a protocol
-    /// object, for the S3 `HeadObject` response.
-    ///
-    /// The size prefers the direct object length and falls back to the record
-    /// ([`Self::object_length`]); the content hash always comes from the
-    /// authoritative `FileRecord` (empty when only a direct object exists).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError::NotFound`] when neither a direct object nor a
-    /// record exists.
-    pub(crate) async fn s3_object_metadata(
+    /// Resolves a Hub SHA-256 to its repository-scoped native Xet identity.
+    pub(crate) async fn xet_file_identity(
         &self,
-        object_key: &ObjectKey,
-    ) -> Result<(u64, String), ServerError> {
-        let file_id = protocol_object_file_id(object_key);
-        // One record read: size and content hash come from the same record
-        // snapshot, so a concurrent overwrite can never yield a torn HEAD
-        // (size from the old version, hash from the new).
-        match self.protocol_file_record(&file_id).await {
-            Ok(record) => Ok((record.total_bytes, record.content_hash)),
-            Err(ServerError::NotFound) => {
-                let size = self.object_length(object_key).await?;
-                Ok((size, String::new()))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Upserts one S3 object listing-index row.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index write fails.
-    pub(crate) async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), ServerError> {
+        repository_scope: &RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<shardline_index::XetFileIdentity>, ServerError> {
         match self {
-            Self::Local(backend) => backend.upsert_s3_object(entry).await,
-            Self::Postgres(backend) => backend.upsert_s3_object(entry).await,
+            Self::Local(backend) => backend.xet_file_identity(repository_scope, sha256),
+            Self::Postgres(backend) => backend.xet_file_identity(repository_scope, sha256).await,
         }
     }
 
-    /// Atomically replaces an S3 object row if its current value matches.
-    pub(crate) async fn compare_and_swap_s3_object(
+    /// Opens a bounded-memory stream for a logical file, optionally enforcing repository scope.
+    pub(crate) async fn read_file_stream_scoped(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        range: Option<ByteRange>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<(ServerByteStream, u64), ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .read_file_stream_scoped(file_id, content_hash, range, repository_scope)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .read_file_stream_scoped(file_id, content_hash, range, repository_scope)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn upsert_s3_object_with_multipart_count(
+        &self,
+        entry: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .upsert_s3_object_with_multipart_count(entry, part_count)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .upsert_s3_object_with_multipart_count(entry, part_count)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn compare_and_swap_s3_object_with_multipart_count(
         &self,
         expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+        part_count: u32,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .compare_and_swap_s3_object_with_multipart_count(
+                        expected,
+                        replacement,
+                        part_count,
+                    )
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .compare_and_swap_s3_object_with_multipart_count(
+                        expected,
+                        replacement,
+                        part_count,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn compare_and_swap_s3_object_metadata(
+        &self,
+        expected: &S3ObjectEntry,
         replacement: &S3ObjectEntry,
     ) -> Result<bool, ServerError> {
         match self {
             Self::Local(backend) => {
                 backend
-                    .compare_and_swap_s3_object(expected, replacement)
+                    .compare_and_swap_s3_object_metadata(expected, replacement)
                     .await
             }
             Self::Postgres(backend) => {
                 backend
-                    .compare_and_swap_s3_object(expected, replacement)
+                    .compare_and_swap_s3_object_metadata(expected, replacement)
                     .await
             }
         }
@@ -978,6 +1083,25 @@ impl ServerBackend {
             Self::Postgres(backend) => {
                 backend
                     .scan_s3_object_exact(scope_namespace, object_key)
+                    .await
+            }
+        }
+    }
+
+    async fn scan_s3_object_exact_with_multipart_count(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<(S3ObjectEntry, Option<u32>)>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .scan_s3_object_exact_with_multipart_count(scope_namespace, object_key)
                     .await
             }
         }
@@ -1239,23 +1363,14 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn read_xorb_range_stream(
+    pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
-        total_length: u64,
-        range: ByteRange,
-    ) -> Result<ServerByteStream, ServerError> {
+        total_length: Option<u64>,
+    ) -> Result<crate::download_stream::VerifiedXorb, ServerError> {
         match self {
-            Self::Local(backend) => {
-                backend
-                    .read_xorb_range_stream(hash_hex, total_length, range)
-                    .await
-            }
-            Self::Postgres(backend) => {
-                backend
-                    .read_xorb_range_stream(hash_hex, total_length, range)
-                    .await
-            }
+            Self::Local(backend) => backend.prepare_xorb_range(hash_hex, total_length).await,
+            Self::Postgres(backend) => backend.prepare_xorb_range(hash_hex, total_length).await,
         }
     }
 
@@ -1266,6 +1381,45 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.read_dedupe_shard_stream(hash_hex).await,
             Self::Postgres(backend) => backend.read_dedupe_shard_stream(hash_hex).await,
+        }
+    }
+
+    pub(crate) async fn first_xorb_coverage(
+        &self,
+        hash: &str,
+        scope: &RepositoryScope,
+    ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
+        #[cfg(test)]
+        count_repository_reference_probe_for_tests(hash);
+        match self {
+            Self::Local(backend) => {
+                crate::record_store::first_xorb_coverage(backend.record_store(), hash, scope).await
+            }
+            Self::Postgres(backend) => {
+                crate::record_store::first_xorb_coverage(backend.record_store(), hash, scope).await
+            }
+        }
+    }
+
+    pub(crate) async fn repository_xorb_coverage(
+        &self,
+        hash: &str,
+        scope: &RepositoryScope,
+        requested: Option<ByteRange>,
+    ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
+        #[cfg(test)]
+        count_repository_reference_probe_for_tests(hash);
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .repository_xorb_coverage(hash, scope, requested)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .repository_xorb_coverage(hash, scope, requested)
+                    .await
+            }
         }
     }
 
@@ -1338,6 +1492,17 @@ impl ServerBackend {
         object_key: &ObjectKey,
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, ServerError> {
+        self.put_object_owned_bytes_if_absent(object_key, bytes.into())
+            .await
+    }
+
+    /// Preserve shared payload ownership, including buffered-request admission,
+    /// through queued or detached storage work.
+    pub(crate) async fn put_object_owned_bytes_if_absent(
+        &self,
+        object_key: &ObjectKey,
+        bytes: bytes::Bytes,
+    ) -> Result<PutOutcome, ServerError> {
         let object_store = self.object_store();
         let integrity = ObjectIntegrity::new(
             crate::local_backend::chunk_hash(&bytes),
@@ -1346,29 +1511,10 @@ impl ServerBackend {
         Ok(AsyncObjectStore::put_if_absent(
             &object_store,
             object_key,
-            ObjectBody::from_vec(bytes),
+            ObjectBody::from_bytes(bytes),
             &integrity,
         )
         .await?)
-    }
-
-    pub(crate) async fn put_object_file_if_absent(
-        &self,
-        object_key: &ObjectKey,
-        path: &std::path::Path,
-        integrity: &ObjectIntegrity,
-    ) -> Result<PutOutcome, ServerError> {
-        let object_store = self.object_store();
-        let key = object_key.clone();
-        let path = path.to_owned();
-        let integrity = *integrity;
-        tokio::task::spawn_blocking(move || {
-            object_store
-                .put_content_addressed_file(&key, &path, &integrity)
-                .map_err(ServerError::from)
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?
     }
 
     pub(crate) async fn put_sha256_addressed_object_bytes_if_absent(
@@ -1637,12 +1783,16 @@ impl ServerBackend {
         key: &str,
         object_key: &ObjectKey,
     ) -> Result<S3ObjectReadSnapshot, ServerError> {
-        if let Some(entry) = self.scan_s3_object_exact(scope_namespace, key).await? {
+        if let Some((entry, multipart_part_count)) = self
+            .scan_s3_object_exact_with_multipart_count(scope_namespace, key)
+            .await?
+        {
             return Ok(S3ObjectReadSnapshot {
                 total_bytes: entry.size_bytes,
                 record_content_hash: Some(entry.content_hash),
                 user_metadata: entry.user_metadata,
                 etag: Some(entry.etag),
+                multipart_part_count,
                 updated_at_unix_seconds: Some(entry.updated_at_unix_seconds),
             });
         }
@@ -1659,6 +1809,7 @@ impl ServerBackend {
                 record_content_hash: None,
                 user_metadata: Vec::new(),
                 etag: None,
+                multipart_part_count: None,
                 updated_at_unix_seconds: None,
             }),
             Err(ServerError::NotFound) => {
@@ -1669,6 +1820,7 @@ impl ServerBackend {
                     record_content_hash: Some(record.content_hash),
                     user_metadata: Vec::new(),
                     etag: None,
+                    multipart_part_count: None,
                     updated_at_unix_seconds: None,
                 })
             }
@@ -2153,6 +2305,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         ref other @ (ServerError::RequestBodyRead(_)
         | ServerError::RequestBodyTooLarge
         | ServerError::RequestBodyMd5Mismatch
+        | ServerError::RequestBodyChecksumMismatch
         | ServerError::RequestQueryTooLarge
         | ServerError::InvalidAdminQuery
         | ServerError::RequestBodyFrameOutOfBounds

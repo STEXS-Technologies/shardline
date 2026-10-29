@@ -8,16 +8,24 @@ Cargo metadata.
 
 Run `python3 scripts/check-publish-dependencies.py` before preparing a release.
 Workspace `[patch]` and `[replace]` entries do not propagate to downstream
-crates.io consumers. Both the coordinated publisher and release workflow reject
-them before publication.
+crates.io consumers. This strict check rejects all such overrides. The
+coordinated publisher and release workflow use
+`python3 scripts/check-publish-dependencies.py --allow-reviewed-hyper-patch`:
+they permit only the exact reviewed Hyper revision and warn about the downstream
+limitation. Every other override still blocks publication.
 
 The temporary Hyper patch supplies the HTTP/1 connection-shutdown fix from
 [upstream PR 4222](https://github.com/hyperium/hyper/pull/4222). Until a published
-Hyper version contains that fix, crate publication remains blocked. Keep the
+Hyper version contains that fix, repository-built binaries and crates.io library
+consumers have different HTTP/1 shutdown behavior. Crate publication is allowed
+under the reviewed exception; it does not establish equivalent reliability for
+downstream applications. See
+[published crates and Hyper](RELIABILITY_ARCHITECTURE.md#published-crates-and-hyper)
+for the affected race and the downstream workspace patch option. Keep the
 patch for repository builds. When the fix is released, require that version in
 the manifests of published crates that depend on Hyper, update both lockfiles,
-remove the patches from both workspace manifests, and test a separate consumer
-without workspace overrides.
+remove the patches from both workspace manifests and the reviewed publication
+exception, and test a separate consumer without workspace overrides.
 Do not remove the patch merely to pass the publication check.
 
 Publishing is triggered only by pushing a release tag. Manual runs of the Release

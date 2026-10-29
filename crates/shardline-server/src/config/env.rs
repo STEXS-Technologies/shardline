@@ -65,6 +65,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let Some(max_request_body_bytes) = NonZeroUsize::new(raw_max_request_body_bytes) else {
         return Err(ServerConfigError::ZeroMaxRequestBodyBytes);
     };
+    let max_xorb_body_bytes = max_xorb_body_bytes_from_env(max_request_body_bytes)?;
     let shard_metadata_limits = ShardMetadataLimits::new(
         load_non_zero_usize_env(
             "SHARDLINE_MAX_SHARD_FILES",
@@ -418,6 +419,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_server_frontends(server_frontends)?
         .with_object_storage(object_storage_adapter, s3_object_store_config)
         .with_max_request_body_bytes(max_request_body_bytes)
+        .with_max_xorb_body_bytes(max_xorb_body_bytes)
         .with_shard_metadata_limits(shard_metadata_limits)
         .with_upload_max_in_flight_chunks(upload_max_in_flight_chunks)
         .with_transfer_max_in_flight_chunks(transfer_max_in_flight_chunks)
@@ -444,6 +446,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_max_tree_entries_per_repo(max_tree_entries_per_repo)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
+    if let Ok(path) = var("SHARDLINE_S3_SIGNING_IDENTITIES_FILE") {
+        config = config.with_s3_signing_identities_file(std::path::Path::new(&path))?;
+    }
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
     config.cache.redis_tls = reconstruction_cache_redis_tls;
     if config.cache.adapter == ReconstructionCacheAdapter::Redis
@@ -794,6 +799,21 @@ pub(super) fn load_secret_from_env_or_file_with_conflict_check(
     }
 }
 
+fn max_xorb_body_bytes_from_env(
+    general_limit: NonZeroUsize,
+) -> Result<NonZeroUsize, ServerConfigError> {
+    load_non_zero_usize_env(
+        "SHARDLINE_MAX_XORB_BODY_BYTES",
+        if var("SHARDLINE_MAX_REQUEST_BODY_BYTES").is_ok() {
+            general_limit
+        } else {
+            super::DEFAULT_MAX_XORB_BODY_BYTES
+        },
+        ServerConfigError::MaxXorbBodyBytes,
+        || ServerConfigError::ZeroMaxXorbBodyBytes,
+    )
+}
+
 fn load_non_zero_usize_env(
     name: &str,
     default: NonZeroUsize,
@@ -851,6 +871,10 @@ pub fn load_server_config_from_env_with_toml(
             srv.max_request_body_bytes.map(|v| v.to_string()),
         );
         set_if_unset("SHARDLINE_CHUNK_SIZE", srv.chunk_size.clone());
+        set_if_unset(
+            "SHARDLINE_MAX_XORB_BODY_BYTES",
+            srv.max_xorb_body_bytes.map(|v| v.to_string()),
+        );
         set_if_unset(
             "SHARDLINE_CHUNK_SIZE_BYTES",
             srv.chunk_size_bytes.map(|v| v.to_string()),
@@ -1113,6 +1137,39 @@ mod interpolate_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn xorb_wire_limit_preserves_explicit_general_limit_and_rejects_invalid_override() {
+        let general = std::num::NonZeroUsize::new(1024).unwrap();
+        remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
+        remove_env_var("SHARDLINE_MAX_XORB_BODY_BYTES");
+        assert_eq!(
+            super::max_xorb_body_bytes_from_env(general).unwrap().get(),
+            128 * 1024 * 1024
+        );
+        set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "1024");
+        assert_eq!(
+            super::max_xorb_body_bytes_from_env(general).unwrap(),
+            general
+        );
+        set_env_var("SHARDLINE_MAX_XORB_BODY_BYTES", "2048");
+        assert_eq!(
+            super::max_xorb_body_bytes_from_env(general).unwrap().get(),
+            2048
+        );
+        set_env_var("SHARDLINE_MAX_XORB_BODY_BYTES", "0");
+        assert!(matches!(
+            super::max_xorb_body_bytes_from_env(general),
+            Err(super::ServerConfigError::ZeroMaxXorbBodyBytes)
+        ));
+        set_env_var("SHARDLINE_MAX_XORB_BODY_BYTES", "invalid");
+        assert!(matches!(
+            super::max_xorb_body_bytes_from_env(general),
+            Err(super::ServerConfigError::MaxXorbBodyBytes(_))
+        ));
+        remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
+        remove_env_var("SHARDLINE_MAX_XORB_BODY_BYTES");
+    }
+
     #[test]
     fn load_server_config_rejects_chunk_size_below_cdc_minimum() {
         for size in [1, 2, 64, 127] {

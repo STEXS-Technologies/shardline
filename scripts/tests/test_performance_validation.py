@@ -2,8 +2,13 @@
 
 from pathlib import Path
 from collections import Counter
+import os
+import selectors
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -12,9 +17,67 @@ from performance_validation.measurements import (  # noqa: E402
     RequestTrace, inventory_summary, percentiles, request_summary, scale_efficiency,
 )
 from performance_validation.workload import payload  # noqa: E402
+from performance_validation.database import resource_delta  # noqa: E402
 
 
 class PerformanceValidationTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_trace_shutdown_stops_descendants_holding_the_reader_pipe(self):
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / "escaped-trace"
+            child = ("import time; from pathlib import Path; "
+                     "print('ready', flush=True); time.sleep(1); "
+                     f"Path({str(marker)!r}).touch(); time.sleep(10)")
+            parent = ("import subprocess,sys; "
+                      f"subprocess.Popen([sys.executable,'-c',{child!r}]).wait()")
+            process = subprocess.Popen([sys.executable, "-c", parent],
+                                       stdout=subprocess.PIPE, text=True,
+                                       start_new_session=True)
+            trace = object.__new__(RequestTrace)
+            trace.process = process
+            trace.owns_process_group = True
+            trace.thread = threading.Thread(target=lambda: process.stdout.read(), daemon=True)
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    self.assertTrue(selector.select(timeout=3), "trace child did not start")
+                self.assertEqual(process.stdout.readline().strip(), "ready")
+                trace.thread.start()
+                started = time.monotonic()
+                trace.close()
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertFalse(trace.thread.is_alive())
+                time.sleep(1.2)
+                self.assertFalse(marker.exists())
+            finally:
+                # Own only this test's session, including on assertion failure.
+                import signal
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=3)
+
+    def test_block_io_deltas_preserve_devices_and_include_newly_active_devices(self):
+        before = {"cpu_seconds": 4, "block_io_by_device": {
+            "259:0": {"rbytes": 100, "wbytes": 200}}}
+        after = {"cpu_seconds": 7, "peak_memory_bytes": 512, "block_io_by_device": {
+            "259:0": {"rbytes": 150, "wbytes": 240},
+            "253:0": {"rbytes": 50, "wbytes": 40}}}
+        result = resource_delta(before, after)
+        self.assertEqual(result["cpu_seconds"], 3)
+        self.assertEqual(result["peak_memory_bytes"], 512)
+        self.assertEqual(result["block_io_by_device"], {
+            "259:0": {"rbytes": 50, "wbytes": 40},
+            "253:0": {"rbytes": 50, "wbytes": 40}})
+        self.assertEqual(before["block_io_by_device"]["259:0"]["rbytes"], 100)
+
+    def test_reset_or_disappearing_device_invalidates_block_io_measurement(self):
+        before = {"cpu_seconds": 0, "block_io_by_device": {"259:0": {"wbytes": 200}}}
+        for devices in ({"259:0": {"wbytes": 100}}, {}, {"259:0": {}}):
+            with self.assertRaisesRegex(RuntimeError, "block I/O"):
+                resource_delta(before, {"cpu_seconds": 1, "block_io_by_device": devices})
+
     def test_inventory_counts_both_packed_and_fallback_bytes(self):
         result = inventory_summary([
             {"Key": "aa/" + "a" * 64, "Size": 100},

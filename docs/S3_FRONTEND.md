@@ -1,11 +1,7 @@
 # S3 Frontend — Compatibility & Scope
 
-**Status:** implemented on `feat/s3-frontend` — every operation in the
-SUPPORTED matrix below is implemented and covered by the client-shaped e2e
-suite (`crates/shardline-server/tests/s3_frontend_e2e.rs`); targeting a
-post-1.5.0 release.
-**Tracking issue:** #15.
-**Design review:** oracle, 2026-08-13.
+**Status:** scoped S3 compatibility contract; see the operation matrix and
+current evidence in [Compatibility Status](COMPATIBILITY_STATUS.md).
 
 ## Purpose
 
@@ -30,9 +26,11 @@ as out of scope until a real client need appears.
    The frontend bridges: the client's `access_key` **is** the Shardline bearer
    token (minted via `shardline admin token`, scoped to `{owner}.{name}`),
    extracted from the `Authorization: AWS4-HMAC-SHA256 Credential=...` header.
-   The SigV4 signature is **not verified** (the access key *is* the credential;
+   In this compatibility mode the SigV4 signature is **not verified** (the access key *is* the credential;
    requires TLS in production — documented deviation). A plain
    `Authorization: Bearer` is also accepted for tooling that supports it.
+   Operators can additionally register signing identities as described below;
+   those access keys require cryptographically valid signatures.
 3. **Multipart + CDC.** `UploadPart` bodies stream to per-part temp files;
    `CompleteMultipartUpload` feeds the parts sequentially through **one CDC
    pass**, producing a single `FileRecord` — preserving whole-object dedup and
@@ -60,51 +58,170 @@ as out of scope until a real client need appears.
 
 ### Supported (this branch)
 
-All operations in this table are **implemented** and exercised by the
-client-shaped e2e suite (`crates/shardline-server/tests/s3_frontend_e2e.rs`):
-pyarrow (PUT/GET/Range/multipart), Polars / object_store (HeadObject),
-S3A (bucket probes), and DuckDB (ListObjectsV2) shapes, over both the SigV4
-access-key and Bearer auth forms.
+Operations in this table are **implemented** and exercised by the
+client-shaped e2e suites in `crates/shardline-server/tests/s3_frontend_e2e.rs`
+and `crates/shardline-server/tests/protocol_completion.rs`: pyarrow
+(PUT/GET/Range/multipart), Polars / object_store (HeadObject), S3A (bucket
+probes), DuckDB (ListObjectsV2), and Boto3-generated signed browser forms.
+Coverage uses both SigV4 access-key and Bearer authentication where the
+operation supports them.
 
 | Operation | Notes |
 |---|---|
 | `PutObject` | streamed through the CDC ingestor; body ≤ `SHARDLINE_S3_MAX_PART_BYTES` (default 1 GiB); larger must use multipart |
-| `GetObject` (+ `Range`) | existing range path; `bytes=a-b`, `bytes=a-`, `bytes=-N`; 206 / 416 |
-| `HeadObject` | size + ETag |
+| `GetObject` (+ `Range`) | existing range path; `bytes=a-b`, `bytes=a-`, `bytes=-N`; 206 / 416; stored checksums when requested with `x-amz-checksum-mode: ENABLED`; `response-*` overrides for cache control, content disposition/encoding/language/type and expiry apply only to full `200` responses |
+| `HeadObject` | size + ETag; stored checksum headers when requested with `x-amz-checksum-mode: ENABLED`; `response-*` overrides for cache control, content disposition/encoding/language/type and expiry |
+| `GetObjectAttributes` (partial) | `GET ?attributes` with `x-amz-object-attributes`; selected ETag, object size and stored checksum from one verified snapshot. `StorageClass` is omitted for STANDARD objects as S3 does. Newly completed multipart uploads report `ObjectParts.PartsCount`; `x-amz-max-parts` and `x-amz-part-number-marker` page the part list with `NextPartNumberMarker`. COMPOSITE uploads also report verified part sizes/checksums, and FULL_OBJECT uploads report the verified whole-object checksum. Unnegotiated and legacy multipart objects report the count only. Legacy objects with unknown multipart counts return `NotImplemented` rather than guessing. |
 | `DeleteObject` | removes direct object **and** record (S3 semantics) |
 | `CreateMultipartUpload` | `POST /{key}?uploads` |
 | `UploadPart` | `PUT ?partNumber&uploadId` → part file |
+| `UploadPartCopy` | same multipart PUT with `x-amz-copy-source`; pinned same-bucket source, optional explicit byte range and source conditions; normal part quotas and verified publication apply |
 | `CompleteMultipartUpload` | single CDC pass → record + ETag |
 | `AbortMultipartUpload` | `DELETE ?uploadId`; discards session |
+| `ListParts` | `GET ?uploadId`; paginated persisted part metadata, including negotiated COMPOSITE checksums and optional CRC32/CRC32C/CRC64NVME FULL_OBJECT part checksums |
+| `ListMultipartUploads` | `GET /{bucket}?uploads`; prefix, delimiter, key/upload markers and URL encoding |
 | `HeadBucket` | stub (S3A / object_store connect-probe) |
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
-| `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
+| `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; `fetch-owner=true` returns the stable repository-scoped owner ID; zero object-store reads — the index rows carry size/ETag/mtime |
+| `ListObjects` v1 | bare `GET /{bucket}`; `prefix`/`delimiter`/`max-keys`/`marker`; emits `NextMarker` when truncated |
+| `PostObject` (browser form) | path-style `POST /{bucket}` with a configured SigV4 signing identity and signed policy; checks bucket, exact/prefix fields and content-length-range before atomic publication; supports `${filename}`, standard object HTTP metadata (`Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Expires`, and `x-amz-website-redirect-location`), `x-amz-meta-*`, `x-amz-tagging`, explicit `x-amz-storage-class: STANDARD`, `acl: bucket-owner-full-control`, `x-ignore-*`, success status/redirect fields, `Content-MD5`, and CRC32/CRC32C/SHA-1/SHA-256 checksums. Other ACLs, storage classes and encryption options are rejected. |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
 | Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete, CompleteMultipartUpload and CopyObject destination; both conditions apply, repeated tag lists are combined, and malformed fields return `400 InvalidArgument`. Weak tags cannot satisfy `If-Match`. Mismatches return `412 PreconditionFailed`, except Get/Head `If-None-Match` returns empty `304 Not Modified` with ETag; missing `If-Match` targets return `404 NoSuchKey`. Failed multipart conditions preserve the existing object and allow retry of the upload session. |
 | Copy source conditions | CopyObject evaluates `x-amz-copy-source-if-match` / `if-none-match` and `if-modified-since` / `if-unmodified-since` against validators from the same pinned source version. Tag conditions take precedence over corresponding date conditions. Legacy sources lacking validators fail closed for concrete conditions; wildcard conditions still use known source existence. |
+| Read date conditions | GetObject, HeadObject and supported GetObjectAttributes honor `If-Modified-Since` (`304`) and `If-Unmodified-Since` (`412`) using the same committed timestamp as their other metadata. `If-Match` takes precedence over `If-Unmodified-Since`; `If-None-Match` takes precedence over `If-Modified-Since`. Invalid/repeated dates and dates on legacy records without a known modification time are ignored. |
 | Conditional ranges | GetObject honors one matching strong `If-Range` ETag; stale, weak, malformed, repeated or date validators return the entire representation (`200`). Date validators are conservatively ignored because the route does not have a strong date validator. |
 | `ListBuckets` | service-level `GET /`; lists the caller's single `{owner}.{name}` bucket |
+| `GetBucketAcl` / `GetObjectAcl` | reports one full-control grant to the repository owner; ACLs cannot be used to grant access |
+| `GetBucketOwnershipControls` | reports the fixed `BucketOwnerEnforced` mode; ownership controls cannot be changed |
+| ACL writes | `bucket-owner-full-control` is accepted on object uploads; ACL subresource writes and other ACL grants fail with `400 AccessControlListNotSupported` |
+| `GetBucketVersioning` / `ListObjectVersions` | `GetBucketVersioning` returns the empty configuration because Shardline has never enabled versioning. `ListObjectVersions` reports one current `null` version per live object, supports key pagination and includes an opaque repository-scoped owner ID; enabling/suspending versioning, historical versions and delete markers are unsupported |
 
 ### Planned (near-term follow-up)
 
-None — the originally planned operations (`DeleteObjects`, conditional
-requests, `ListBuckets`) are all supported; `CopyObject` was pulled in ahead
-of schedule (Spark rename-commit / `object_store::copy` shape).
+The remaining protocol work includes the unsupported operations below. The current partial attributes response follows the field-selection shape of the
+[S3 GetObjectAttributes API](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html).
+Version selectors and unsupported encryption, payer and expected-owner options
+fail explicitly instead of silently returning attributes for a different request.
+The v1 listing is selected by a bare bucket GET; an explicit `list-type=1`
+parameter is not accepted and returns `501 NotImplemented`.
 
-### Out-until-demand (explicitly excluded; respond `501 NotImplemented`)
+### Not yet implemented (respond `501 NotImplemented`)
 
 | Operation | Reconsider when |
 |---|---|
-| `ListParts` / `ListMultipartUploads` | a multipart-resume workflow |
-| `ListObjectsV1` | implemented — a bare `GET /{bucket}` (no `list-type=2`) serves the v1 envelope (`marker`/`NextMarker`), the path `s3cmd ls` uses |
-| Multi-range `GetObject` (`bytes=a,b`) | a client using multi-range |
-| `PostObject` (form upload) | — |
-| Object tagging / attributes / restore / select / torrent / legal-hold / retention / ACL | — |
-| Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListBucketMultipartUploads`, `ListObjectVersions` | explicit ruling: no admin/AWS-side surface |
+| Restore / select / torrent / legal-hold / retention | not implemented |
+| Bucket policy / lifecycle / versioning / CORS / notification / encryption / replication / website, `DeleteBucket` | not yet implemented |
+
+The bucket and object ACL reads reflect Shardline's fixed `BucketOwnerEnforced`
+model. ACLs do not grant access; repository-scoped authorization remains
+authoritative. ACL updates return `400 AccessControlListNotSupported`, matching
+S3 behavior when ACLs are disabled. Object writes may omit ACLs or specify only
+`bucket-owner-full-control`. Encryption, expected-owner and requester-payer
+options fail explicitly. Object writes accept `x-amz-storage-class: STANDARD`,
+which is the default storage class; other classes are rejected.
+
+`PostObject` currently supports the signed path-style form described above. A
+valid HTTP(S) `success_action_redirect` (or deprecated `redirect`) receives a
+`303 See Other`; Shardline appends the stored bucket, expanded key and ETag to
+the destination's query parameters. Existing query parameters are preserved.
+Unparseable or non-HTTP(S) redirect values are ignored, following S3 behavior.
+The form accepts only `acl: bucket-owner-full-control`; other ACLs, storage
+classes and encryption settings are rejected. Object tags are stored in the
+object's evidence-bound private
+metadata and are available through `GetObjectTagging`, `PutObjectTagging`, and
+`DeleteObjectTagging`. `PutObjectTagging` verifies the supplied Content-MD5 or
+supported request checksum before committing the tag change. These features
+need upgraded replicas during a
+mixed-version rollout because older writers may discard tags on same-key
+updates. Forms without a valid
+SigV4 policy are rejected; bearer-token authentication alone is not accepted
+for browser forms. The file part must be last and is size-bounded. The server
+authenticates the policy and fields before streaming file bytes into normal
+verified ingestion, without a complete-file scratch copy or memory buffer.
+Size, checksum and trailing-form checks must all pass before object metadata
+publishes. A failure preserves the existing object; any provisional immutable
+chunks remain unreferenced and eligible for ordinary garbage collection.
+
+`CreateMultipartUpload` supports negotiated `CRC32`, `CRC32C`, `SHA1`, and `SHA256`
+with the default or explicit `COMPOSITE` type, and `CRC32`, `CRC32C`, or
+`CRC64NVME` with `FULL_OBJECT`. CRC64NVME defaults to `FULL_OBJECT`; its
+`COMPOSITE` form is rejected. Composite uploads require and verify the echoed
+part checksums. Full-object uploads accept optional part checksums and verify
+the assembled object's checksum before publication; a mismatch leaves the
+previous object and multipart session intact so the client can retry. The
+completed checksum is retained with the object and returned by checksum-enabled
+reads and `GetObjectAttributes`. S3 `Content-Type` is retained separately from
+user metadata and returned by GET and HEAD, including values received from
+signed browser forms. No schema migration is required. Legacy CRC32
+multipart metadata remains readable. Active `ListParts` exposes negotiated
+checksum data when it is available.
+The in-progress `ListParts` response includes the negotiated algorithm and
+checksum type, plus part checksums where available. If an older binary wrote an
+active checksum-enabled upload without persisting its part checksum, the
+upgraded server derives it from the stored part after verifying the part's content.
+Local sessions retain checksums in their integrity-protected metadata, bound to
+the immutable part filename. PostgreSQL sessions retain them with session state,
+bound to the part generation. Both backends derive missing or stale values from
+verified bytes.
+Checksum headers on single `PutObject` are validated before publication and
+retained for later `GetObjectAttributes` reads and `GetObject`/`HeadObject`
+requests using `x-amz-checksum-mode: ENABLED`. During a rolling deployment, keep
+each checksummed object's reads and writes on upgraded replicas, or wait until
+all replicas are upgraded before enabling new checksum or content-type writes.
+A 1.12.1 replica can read the object bytes but may expose private metadata as
+ordinary `x-amz-meta-*` metadata and will return the default content type for
+objects written with the new content-type property. Existing CRC32 uploads and
+objects remain readable.
+Existing objects have no durable part-count metadata; those counts remain unknown
+and are not inferred from CDC chunks or legacy records. Botocore 1.x real-client
+coverage exercises negotiated multipart CRC32, SHA-1 and SHA-256 COMPOSITE,
+CRC64NVME FULL_OBJECT, active `ListParts`, completion, and attribute responses,
+plus single-PUT checksum HEAD and attributes. The Rust HTTP integration suite
+covers CRC32C and SHA-256 negotiation, CRC64NVME FULL_OBJECT checksum failure
+and retry, active `ListParts`, completion, attributes, and byte-for-byte object
+reads. A single-PUT object has no `ObjectParts` response.
+
+For general-purpose S3 buckets, AWS only returns individual `ObjectParts.Part`
+entries when an additional checksum was applied to the object. Shardline follows
+that behavior: negotiated CRC32/CRC32C/SHA-1/SHA-256 COMPOSITE objects include checksummed parts;
+FULL_OBJECT objects return a verified whole-object checksum and total count, and
+part checksums when the upload supplied them. Unnegotiated and legacy multipart
+objects return the verified total count only.
 
 ## Protocol deviations (documented)
+
+AWS S3 does not support multiple byte ranges in one `GetObject` request. Shardline
+rejects such a request with `416 InvalidRange`, matching its single-range parser
+and the AWS service's documented limitation. See the [AWS GetObject range
+documentation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html).
+
+Multipart uploads support `GET ?uploadId=...` (`ListParts`) with
+`part-number-marker` and `max-parts` pagination. Part metadata survives local
+restarts and is shared through PostgreSQL in distributed deployments. Completed,
+aborted, expired, and differently scoped uploads are not exposed. Older local
+sessions without saved ETags recover those checksums from the protected part
+files. Bucket-wide discovery supports prefix/delimiter filtering and key/upload
+markers across restart, including PostgreSQL replicas with separate local roots.
+New sessions retain their initiation time; legacy PostgreSQL sessions without
+that timestamp remain discoverable but omit the historical `Initiated` field.
+Discovery retains one response page plus one look-ahead entry while scanning
+verified metadata; it does not read part bodies. PostgreSQL can continue from
+an aborted marker upload while its verified session metadata is retained.
+Filesystem deployments save the returned page's last upload position in the
+existing SQLite metadata database before sending a truncated response. This
+allows continuation after that upload is deleted, including after a restart,
+without changing existing upload IDs or retaining part files. The position is
+retained for the configured upload-session TTL; expired records are cleaned in
+bounded batches as new positions are saved. Finish paging within that window,
+or restart the listing. These corruption-checked records only guide pagination;
+they never authorize an upload, a deletion or an object publication.
+An expired position follows the unknown manual-marker rules: equal-key uploads
+are filtered by upload-ID order. It cannot recover the earlier chronological
+position, so restart the listing after the retention window to avoid omissions.
+Native Botocore pagination is tested with repeated keys, page sizes of 1, 3 and
+7, and stop/resume tokens on SQLite and PostgreSQL.
 
 - **ETag** is the hex MD5 of the object bytes — the S3 convention for
   single-part PUTs, and the MD5 of the assembled bytes at multipart completion
@@ -112,7 +229,7 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
   like AWS. User metadata (`x-amz-meta-*`) is captured on PutObject and
   CreateMultipartUpload, propagated by CopyObject (`x-amz-metadata-directive`),
   and returned on Head/GetObject.
-- **SigV4 signature is not verified** — the access key *is* the credential;
+- **Legacy token bridge does not verify SigV4 signatures** — the access key *is* the credential;
   production requires TLS.
 - **Bucket names** are `{owner}.{name}`; owners containing `.` are not addressable.
 - **`Content-MD5`** is optional and verified when supplied on PutObject,
@@ -121,6 +238,12 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
   return `400 InvalidDigest`, and a payload mismatch returns `400 BadDigest`
   before publication or deletion. Upload checks hash the decoded payload,
   including AWS chunked uploads, with constant memory.
+- **S3 payload checksum headers** (`x-amz-checksum-crc32`, `crc32c`,
+  `crc64nvme`, `sha1`, and `sha256`) are optional and verified as the decoded
+  `PutObject` or `UploadPart` body streams. A mismatch returns `400 BadDigest`
+  before publication; a valid supplied checksum is echoed on success. These
+  values are not persisted for later attributes reporting. AWS-chunked signed
+  trailer checksums continue through the separate SigV4 trailer verifier.
 - **Multipart part identity** is the quoted MD5 of that part's bytes.
   Completion accepts that MD5 with or without the surrounding quotes and requires
   the identity returned by the successful UploadPart for every selected part,
@@ -151,6 +274,68 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
   transfer-only role does not serve S3.
 
 ### Authentication (operator)
+
+For rclone S3 remotes, set `acl = bucket-owner-full-control` (or
+`RCLONE_CONFIG_REMOTE_ACL=bucket-owner-full-control` for a remote named `remote`).
+Older clients can otherwise send an ACL that Shardline rejects with
+`400 AccessControlListNotSupported`. Shardline uses `BucketOwnerEnforced` ownership;
+this setting does not grant public access or change repository permissions.
+
+To use real signing keys, set `SHARDLINE_S3_SIGNING_IDENTITIES_FILE` to a secret
+JSON file containing an array like this:
+
+```json
+[{"access_key":"CLIENTKEY","secret_key":"replace-with-a-long-random-secret","token":"existing-scoped-Shardline-token","region":"us-east-1"}]
+```
+
+Give the client the access key and secret key. Keep the bound token on the
+server. Its normal expiry, permissions and repository restrictions still apply.
+
+Generate presigned URLs using the Shardline S3 endpoint. Downloads are served
+through Shardline, including when MinIO or another S3-compatible service stores
+the bytes. Clients do not receive backend download URLs or backend credentials.
+
+Registered keys require valid SigV4 signatures and support presigned GET/PUT URLs;
+signed payload hashes are checked before publication. Use TLS, including with
+the standard `UNSIGNED-PAYLOAD` signing mode. An optional `session_token` field
+requires that token in signed request headers or presigned URLs. Missing or
+changed session tokens fail; neither signing nor session credentials can outlive
+or expand the permissions of their bound Shardline token. This does not provide
+an AWS STS credential-issuance service. Classic signed streaming uploads
+(`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`) verify every chunk signature, the final
+zero chunk and the declared decoded length before publication. Corrupt or
+incomplete streams cannot replace a published object. Signed trailer uploads
+(`STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER`) additionally verify the trailer
+signature and each declared CRC32, CRC32C, CRC64NVME, SHA-1 or SHA-256 checksum.
+Missing, repeated or undeclared trailers fail before publication.
+Native MinIO Go v7.0.95 signed streams and all five supported checksum trailers are exercised for object
+uploads and multipart parts on SQLite, PostgreSQL with local storage, and
+PostgreSQL with MinIO storage. These checks reject corrupted replacements and
+verify exact object bytes after a graceful server restart. A valid signature over
+an incorrect checksum returns `400 BadDigest`; corrupt signed payloads return
+`403`. Mid-body TCP disconnects are also exercised for classic streams and all
+five trailer algorithms without replacing existing objects or acknowledged
+parts. These disconnect tests do not establish server-crash recovery.
+Its LF-delimited checksum
+trailer format is accepted only in signed mode; chunk headers and the trailer
+signature line still require CRLF. Broader client-version and remote-failure
+qualification remains separate.
+`STREAMING-UNSIGNED-PAYLOAD-TRAILER` checks the same declared checksums and
+decoded length but has no chunk or trailer MAC. As with `UNSIGNED-PAYLOAD`, use
+TLS to protect these uploads in transit; a checksum is not authentication.
+An incorrect trailer checksum returns `400 BadDigest`. Invalid signature or
+stream framing is rejected before publication; neither failure replaces an
+existing object or an acknowledged multipart part.
+SigV4A remains unsupported for registered keys.
+Native MinIO signed-session checks on SQLite and PostgreSQL accept the configured
+session token and reject missing or substituted tokens without replacing stored
+content. Existing Bearer reads remain available. These checks cover classic
+signed streams and signed CRC32 trailers, not session-presigned URLs or STS issuance.
+The file is bounded to 1 MiB, loaded
+at startup, and must be readable only by the operator/server account. Restart
+replicas after changing it. Existing token clients need no configuration change.
+
+For the existing token-as-access-key setup:
 
 The server must run with the Local auth provider and a signing key; the CLI
 must mint with the **same** key material.
@@ -188,7 +373,10 @@ durability guarantees:
 - **Write integrity** — `PutObject` and `CompleteMultipartUpload` stream through
   the shared `FileUploadIngestor` (CDC chunking, per-chunk BLAKE3 + BLAKE3-root
   content hash), stored content-addressed with `ObjectIntegrity` (hash + size
-  verified at the store boundary). Identical to Xet/LFS/OCI/Bazel/Hub uploads.
+  verified at the store boundary). LFS, OCI, Bazel and regular Hub uploads reuse
+  this ingestion core. Native Xet uploads retain their wire-format member and
+  container verification, then use the same storage integrity and publication
+  boundaries; they do not run CDC again over an uploaded Xorb.
 - **Read integrity** — `GetObject` / `Range` reconstruct via the shared
   record-reconstruction path, which verifies every chunk hash against the
   `FileRecord` before returning bytes. A corrupted or wrong chunk fails rather
@@ -260,4 +448,4 @@ environment.
 > implementation detail; operators and user documentation refer to it as the S3
 > listing index.
 
-`UploadPartCopy` is unsupported and returns `501 NotImplemented` before reading the body or changing the part. Multipart operations require exactly their supported recognized operation selectors; conflicting or repeated selectors are rejected before mutation. Unrecognized extension query fields remain ignored. `CopyObject` requires one valid `x-amz-copy-source` header; malformed or repeated fields return `400 InvalidArgument` and preserve the destination.
+`UploadPartCopy` is implemented for same-bucket sources, optional explicit byte ranges, and source conditions. It pins the source record version before reading, verifies the selected bytes, and publishes the part through the same durable quota and session path as `UploadPart`. A process-kill drill verifies that an interrupted copy does not expose a partial part and that the session can be retried after restart. Multipart operations require exactly their supported recognized operation selectors; conflicting or repeated selectors are rejected before mutation. Unrecognized extension query fields remain ignored. `CopyObject` requires one valid `x-amz-copy-source` header; malformed or repeated fields return `400 InvalidArgument` and preserve the destination.

@@ -26,6 +26,18 @@ impl From<ServerError> for OciError {
     }
 }
 
+pub(crate) fn protocol_error_response(
+    status: axum::http::StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
+    (
+        status,
+        Json(serde_json::json!({"errors":[{"code":code,"message":message,"detail":null}]})),
+    )
+        .into_response()
+}
+
 impl IntoResponse for OciError {
     fn into_response(self) -> Response {
         let status = self.0.status_code();

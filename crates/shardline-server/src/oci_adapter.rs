@@ -1,6 +1,6 @@
 pub(crate) use shardline_oci_adapter::{
-    OciReference, abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
-    append_upload_bytes, create_upload_session, delete_upload_session,
+    OciReference, abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes_owned,
+    append_upload_bytes_owned, create_upload_session, delete_upload_session,
     finalize_s3_multipart_upload_session, lock_upload_sessions, new_upload_session_id,
     oci_blob_location, oci_manifest_location, oci_manifest_prefix, oci_tag_key, oci_tag_prefix,
     parse_reference, read_upload_session, touch_upload_session, upload_body_integrity,

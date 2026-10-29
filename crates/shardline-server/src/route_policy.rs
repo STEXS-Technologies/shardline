@@ -130,7 +130,22 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
     );
 
     // Reconstruction routes — authenticated
+    registry.register(
+        "GET",
+        "/v2/file-chunk-hashes/{file_id}",
+        RouteAuthPolicy::Authenticated,
+    );
+    registry.register(
+        "HEAD",
+        "/v1/files/{file_id}",
+        RouteAuthPolicy::Authenticated,
+    );
     registry.register("GET", "/v1/reconstructions", RouteAuthPolicy::Authenticated);
+    registry.register(
+        "POST",
+        "/v1/reconstructions",
+        RouteAuthPolicy::Authenticated,
+    );
     registry.register(
         "GET",
         "/v1/reconstructions/{file_id}",
@@ -139,6 +154,7 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
 
     // Shard upload — write
     registry.register("POST", "/v1/shards", RouteAuthPolicy::AuthenticatedWrite);
+    registry.register("POST", "/v2/shards", RouteAuthPolicy::AuthenticatedWrite);
 
     // Chunk read — authenticated
     registry.register(
@@ -295,6 +311,16 @@ mod tests {
         let entries: Vec<_> = registry.entries().collect();
         let unique: std::collections::HashSet<_> = entries.iter().map(|(k, _)| *k).collect();
         assert_eq!(entries.len(), unique.len(), "Duplicate route registered");
+    }
+
+    #[test]
+    fn xet_batch_reconstruction_post_requires_read_authentication() {
+        let mut registry = RoutePolicyRegistry::new();
+        register_route_policies(&mut registry);
+        assert_eq!(
+            registry.policy("POST", "/v1/reconstructions"),
+            Some(RouteAuthPolicy::Authenticated)
+        );
     }
 
     #[test]

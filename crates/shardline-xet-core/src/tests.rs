@@ -954,6 +954,32 @@ fn xorb_object_get_info_length() {
 }
 
 #[test]
+fn xorb_object_oversized_footer_lengths_are_invalid_input() {
+    for length in [
+        i64::MAX as u64 - 7,
+        i64::MAX as u64,
+        i64::MAX as u64 + 1,
+        u64::MAX,
+    ] {
+        let mut reader = Cursor::new(length.to_le_bytes());
+        assert!(XorbObject::deserialize(&mut reader).is_err());
+    }
+}
+
+#[test]
+fn xorb_object_validation_rejects_forged_parsed_footer_length() {
+    let (mut object, chunk_data, _, _) =
+        build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::LZ4).unwrap();
+    let mut bytes = chunk_data;
+    let info_length = object.info.serialize(&mut bytes).unwrap();
+    bytes.extend_from_slice(&(info_length as u64).to_le_bytes());
+    let hash = object.info.xorb_hash;
+    object.info_length = u64::MAX;
+    let result = XorbObject::validate_xorb_object_with_info(&mut Cursor::new(bytes), object, &hash);
+    assert!(result.is_err() || result.unwrap().is_none());
+}
+
+#[test]
 fn xorb_object_get_contents_length() {
     let mut info = XorbObjectInfoV1::default();
     info.xorb_hash = compute_data_hash(b"contents");

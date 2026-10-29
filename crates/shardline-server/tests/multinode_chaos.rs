@@ -76,6 +76,9 @@ use axum::{
     serve as serve_http,
 };
 use reqwest::Client;
+
+mod multinode_probe_tests;
+mod readiness;
 use sha2::{Digest, Sha256};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{
@@ -394,57 +397,41 @@ async fn spawn_role(
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(format!("server at {base_url} did not become healthy").into())
+    readiness::wait_for_health(client, base_url)
+        .await
+        .map_err(Into::into)
 }
 
 async fn wait_for_ready(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..100 {
-        if let Ok(response) = client.get(format!("{base_url}/readyz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(format!("server at {base_url} did not become ready").into())
+    readiness::wait_for_endpoint(client, base_url, "readyz")
+        .await
+        .map_err(Into::into)
 }
 
 /// Asserts the stopped server can no longer be reached (raw connect probe to
 /// bypass reqwest connection pooling).
-async fn wait_for_server_down(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if client
-            .get(format!("{base_url}/healthz"))
-            .send()
-            .await
-            .is_err()
-        {
-            return Ok(());
+async fn wait_for_server_down(_client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
+    let address: SocketAddr = base_url
+        .strip_prefix("http://")
+        .ok_or("shutdown fixture requires a local HTTP socket address")?
+        .parse()?;
+    let probe = async {
+        loop {
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await;
+            if matches!(result, Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused)
+            {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
         }
-        let raw = tokio::net::TcpStream::connect(
-            base_url
-                .trim_start_matches("http://")
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("bad base url {base_url}: {error}"))?,
-        )
-        .await;
-        if raw.is_err() {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(format!("server at {base_url} did not go down after stop").into())
+    };
+    tokio::time::timeout(Duration::from_secs(10), probe)
+        .await
+        .map_err(Into::into)
 }
 
 /// Probes the authenticated admin status endpoint for the process' server
@@ -824,7 +811,7 @@ impl MultiNodeHarness {
     async fn warm_reconstruction_plan(
         &self,
         file_id: &str,
-    ) -> Result<(String, String), Box<dyn Error>> {
+    ) -> Result<(String, String, String), Box<dyn Error>> {
         let resp = self
             .client
             .get(format!(
@@ -840,23 +827,18 @@ impl MultiNodeHarness {
             200,
             "reconstruction plan for {file_id}"
         );
-        let json: serde_json::Value = resp.json().await?;
-        let fetch_info = json
-            .get("fetch_info")
-            .and_then(serde_json::Value::as_object)
-            .ok_or("reconstruction response missing fetch_info")?;
-        let (hash, entries) = fetch_info
-            .iter()
+        let plan: shardline_server::FileReconstructionResponse = resp.json().await?;
+        let (hash, entries) = plan
+            .fetch_info
+            .into_iter()
             .next()
             .ok_or("reconstruction fetch_info empty")?;
-        let url = entries
-            .as_array()
-            .and_then(|entries| entries.first())
-            .and_then(|entry| entry.get("url"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or("reconstruction fetch entry missing url")?
-            .to_owned();
-        Ok((hash.clone(), url))
+        let fetch = entries
+            .into_iter()
+            .next()
+            .ok_or("reconstruction fetch entry missing")?;
+        let range = format!("bytes={}-{}", fetch.url_range.start, fetch.url_range.end);
+        Ok((hash, fetch.url, range))
     }
 }
 
@@ -958,7 +940,8 @@ async fn exercise_kill_role_mid_traffic(killed: ServerRole) -> Result<(), Box<dy
         .xet_upload("mn-seed.bin", deterministic_bytes(384 * 1024, 7))
         .await?;
     let recon_file_id = xet_info.hash();
-    let (xorb_hash, _fetch_url) = harness.warm_reconstruction_plan(recon_file_id).await?;
+    let (xorb_hash, _fetch_url, _fetch_range) =
+        harness.warm_reconstruction_plan(recon_file_id).await?;
 
     // Fixed mid-traffic kill point at iteration 3, evidence-synced: the PUT at
     // iteration 3 must ACK first; for a transfer kill, chunk files must exist
@@ -1153,7 +1136,22 @@ async fn exercise_partition_between_api_and_transfer() -> Result<(), Box<dyn Err
         .xet_upload("mn-partition-seed.bin", deterministic_bytes(384 * 1024, 9))
         .await?;
     let recon_file_id = xet_info.hash();
-    let (xorb_hash, transfer_url) = harness.warm_reconstruction_plan(recon_file_id).await?;
+    let (xorb_hash, transfer_url, transfer_range) =
+        harness.warm_reconstruction_plan(recon_file_id).await?;
+    // Signed reconstruction URLs authorize their advertised range, not an
+    // arbitrary 64 KiB prefix. Check the real grant before fault injection.
+    let baseline = harness
+        .client
+        .get(&transfer_url)
+        .header("Range", &transfer_range)
+        .send()
+        .await?;
+    assert_eq!(
+        baseline.status().as_u16(),
+        206,
+        "advertised headerless transfer grant works before partition"
+    );
+    let baseline_bytes = baseline.bytes().await?;
 
     // Baseline chunk-route status while both roles are healthy (the route is
     // forwarded and served; after reconnect it must be served again, never 502).
@@ -1202,8 +1200,7 @@ async fn exercise_partition_between_api_and_transfer() -> Result<(), Box<dyn Err
     let xorb_fetch = harness
         .client
         .get(&transfer_url)
-        .header("Authorization", format!("Bearer {}", harness.token))
-        .header("Range", "bytes=0-65535")
+        .header("Range", &transfer_range)
         .send()
         .await?;
     assert_eq!(
@@ -1234,20 +1231,21 @@ async fn exercise_partition_between_api_and_transfer() -> Result<(), Box<dyn Err
     // Recovery within 5s: the captured transfer URL serves its xorb range again.
     let fetch_ok = {
         let client = harness.client.clone();
-        let token = harness.token.clone();
         let url = transfer_url.clone();
+        let range = transfer_range.clone();
         move || {
             let client = client.clone();
-            let token = token.clone();
             let url = url.clone();
+            let range = range.clone();
+            let expected = baseline_bytes.clone();
             async move {
-                let resp = client
-                    .get(&url)
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Range", "bytes=0-65535")
-                    .send()
-                    .await;
-                matches!(resp, Ok(r) if r.status().as_u16() == 206)
+                let resp = client.get(&url).header("Range", range).send().await;
+                match resp {
+                    Ok(response) if response.status().as_u16() == 206 => {
+                        response.bytes().await.is_ok_and(|bytes| bytes == expected)
+                    }
+                    _ => false,
+                }
             }
         }
     };
@@ -1361,7 +1359,8 @@ async fn exercise_mid_traffic_upgrade(
         .xet_upload("mn-upgrade-seed.bin", deterministic_bytes(384 * 1024, 11))
         .await?;
     let recon_file_id = xet_info.hash();
-    let (xorb_hash, _fetch_url) = harness.warm_reconstruction_plan(recon_file_id).await?;
+    let (xorb_hash, _fetch_url, _fetch_range) =
+        harness.warm_reconstruction_plan(recon_file_id).await?;
 
     // Bounded mid-traffic loop; at iteration 3 the upgraded role is stopped
     // (upgrade-stop: listener dropped before the call returns). Evidence-synced

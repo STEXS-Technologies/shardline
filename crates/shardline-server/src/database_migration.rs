@@ -1,4 +1,5 @@
 use futures_util::TryStreamExt;
+mod frontend_schema;
 use serde_json::{from_value, to_value};
 use shardline_index::{ResumableSessionState, UploadIntentState};
 use shardline_protocol::SecretString;
@@ -232,12 +233,20 @@ pub enum DatabaseMigrationError {
     /// The database URL was empty.
     #[error("database URL must not be empty")]
     EmptyDatabaseUrl,
+    /// The migration pool cannot provide a lock connection and a work connection.
+    #[error(
+        "database migration pool must allow at least two connections; configured maximum is {configured}"
+    )]
+    MigrationPoolCapacity { configured: u32 },
     /// Postgres access failed.
     #[error(transparent)]
     Sqlx(#[from] SqlxError),
     /// Migration history contains a version unknown to the running binary.
     #[error("database contains an unknown shardline migration version: {0}")]
     UnknownAppliedMigration(String),
+    /// An additive frontend installation is missing or inconsistent.
+    #[error("frontend schema is incompatible for {0}; run shardline db migrate up")]
+    FrontendSchemaIncompatible(String),
     /// The database has no migration history table.
     #[error(
         "shardline database schema history is missing; run `shardline db migrate up` before starting the server"
@@ -540,7 +549,61 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 35] = [
     },
 ];
 
-/// Returns the bundled Shardline migration list in application order.
+// These tables extend frontend capabilities without changing the released
+// storage schema. Their installation history must not prevent old restarts.
+const FRONTEND_MIGRATIONS: [DatabaseMigration; 8] = [
+    DatabaseMigration {
+        version: "20261021000000",
+        name: "xet_file_identities",
+        up_sql: include_str!("../migrations/20261021000000_xet_file_identities.up.sql"),
+        down_sql: include_str!("../migrations/20261021000000_xet_file_identities.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261022000000",
+        name: "lfs_locks",
+        up_sql: include_str!("../migrations/20261022000000_lfs_locks.up.sql"),
+        down_sql: include_str!("../migrations/20261022000000_lfs_locks.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023000000",
+        name: "s3_multipart_counts",
+        up_sql: include_str!("../migrations/20261023000000_s3_multipart_counts.up.sql"),
+        down_sql: include_str!("../migrations/20261023000000_s3_multipart_counts.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023010000",
+        name: "record_membership",
+        up_sql: include_str!("../migrations/20261023010000_record_membership.up.sql"),
+        down_sql: include_str!("../migrations/20261023010000_record_membership.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023020000",
+        name: "xet_xorb_descriptors",
+        up_sql: include_str!("../migrations/20261023020000_xet_xorb_descriptors.up.sql"),
+        down_sql: include_str!("../migrations/20261023020000_xet_xorb_descriptors.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023030000",
+        name: "hub_object_locations",
+        up_sql: include_str!("../migrations/20261023030000_hub_object_locations.up.sql"),
+        down_sql: include_str!("../migrations/20261023030000_hub_object_locations.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261023040000",
+        name: "xet_file_aliases",
+        up_sql: include_str!("../migrations/20261023040000_xet_file_aliases.up.sql"),
+        down_sql: include_str!("../migrations/20261023040000_xet_file_aliases.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261024000000",
+        name: "hub_creation_policy",
+        up_sql: include_str!("../migrations/20261024000000_hub_creation_policy.up.sql"),
+        down_sql: include_str!("../migrations/20261024000000_hub_creation_policy.down.sql"),
+    },
+];
+
+/// Returns core-ledger migrations in application order. The owner upgrade also
+/// installs additive frontend capabilities with separate installation history.
 #[must_use]
 pub const fn bundled_database_migrations() -> &'static [DatabaseMigration] {
     &SHARDLINE_MIGRATIONS
@@ -548,11 +611,18 @@ pub const fn bundled_database_migrations() -> &'static [DatabaseMigration] {
 
 /// Applies pending Shardline migrations to an existing Postgres pool.
 ///
+/// The pool must allow at least two connections. The migration lock is held on
+/// one connection while migration reads and writes use another.
+///
 /// # Errors
 ///
 /// Returns [`DatabaseMigrationError`] when the migration history is inconsistent or
 /// when Postgres rejects the schema updates.
 pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
+    let configured = pool.options().get_max_connections();
+    if configured < 2 {
+        return Err(DatabaseMigrationError::MigrationPoolCapacity { configured });
+    }
     ensure_migration_history_table(pool).await?;
     let _migration_guard = acquire_migration_lock(pool).await?;
     verify_applied_migrations(pool).await?;
@@ -560,6 +630,7 @@ pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigr
     for migration in pending_migrations(pool).await? {
         apply_one_migration(pool, migration, None).await?;
     }
+    frontend_schema::install(pool).await?;
     shardline_index::PostgresIndexStore::new(pool.clone())
         .initialize_remote_delete_guard()
         .await?;
@@ -595,7 +666,7 @@ pub async fn check_database_schema_compatibility(
             pending_count: pending.len(),
         });
     }
-    Ok(())
+    frontend_schema::check(pool).await
 }
 
 /// Executes a Shardline database-migration command against Postgres.
@@ -662,6 +733,8 @@ pub async fn run_database_migration(
                 applied_count = applied_count.saturating_add(1);
             }
             if pending_migrations(&pool).await?.is_empty() {
+                applied_count =
+                    applied_count.saturating_add(frontend_schema::install(&pool).await?);
                 shardline_index::PostgresIndexStore::new(pool.clone())
                     .initialize_remote_delete_guard()
                     .await?;
@@ -684,6 +757,7 @@ pub async fn run_database_migration(
     };
 
     if matches!(options.command(), DatabaseMigrationCommand::Verify) {
+        frontend_schema::check(&pool).await?;
         verify_reliability_events(&pool).await?;
     }
     if let DatabaseMigrationCommand::Backfill { batch_size } = options.command() {
@@ -2471,7 +2545,11 @@ async fn verify_applied_migrations(pool: &PgPool) -> Result<(), DatabaseMigratio
         if RETIRED_MIGRATION_VERSIONS.contains(&applied.version.as_str()) {
             continue;
         }
-        let Some(migration) = migration_by_version(&applied.version) else {
+        let Some(migration) = migration_by_version(&applied.version).or_else(|| {
+            FRONTEND_MIGRATIONS
+                .iter()
+                .find(|migration| migration.version == applied.version)
+        }) else {
             return Err(DatabaseMigrationError::UnknownAppliedMigration(
                 applied.version,
             ));
@@ -2517,6 +2595,12 @@ async fn applied_migrations_in_order(
     let mut migrations = Vec::with_capacity(applied.len());
     for entry in applied {
         if RETIRED_MIGRATION_VERSIONS.contains(&entry.version.as_str()) {
+            continue;
+        }
+        if FRONTEND_MIGRATIONS
+            .iter()
+            .any(|migration| migration.version == entry.version)
+        {
             continue;
         }
         let Some(migration) = migration_by_version(&entry.version) else {
@@ -2604,7 +2688,13 @@ async fn load_applied_migrations(pool: &PgPool) -> Result<Vec<AppliedMigration>,
 async fn migration_status_entries(
     pool: &PgPool,
 ) -> Result<Vec<DatabaseMigrationStatusEntry>, DatabaseMigrationError> {
-    let applied = load_applied_migrations(pool).await?;
+    let mut applied = load_applied_migrations(pool).await?;
+    applied.retain(|entry| {
+        !FRONTEND_MIGRATIONS
+            .iter()
+            .any(|migration| migration.version == entry.version)
+    });
+    applied.extend(frontend_schema::status_history(pool).await?);
     Ok(migration_status_entries_from_history(&applied))
 }
 
@@ -2612,7 +2702,10 @@ fn migration_status_entries_from_history(
     applied: &[AppliedMigration],
 ) -> Vec<DatabaseMigrationStatusEntry> {
     let mut statuses = Vec::with_capacity(SHARDLINE_MIGRATIONS.len());
-    for migration in SHARDLINE_MIGRATIONS {
+    for migration in SHARDLINE_MIGRATIONS
+        .iter()
+        .chain(FRONTEND_MIGRATIONS.iter())
+    {
         let applied_entry = applied
             .iter()
             .find(|entry| entry.version == migration.version);
@@ -2643,15 +2736,15 @@ fn migration_checksum(migration: &DatabaseMigration) -> String {
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use sqlx::{PgPool, Row, query};
+    use sqlx::{PgPool, Row, postgres::PgPoolOptions, query};
 
     use super::{
         DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand,
         DatabaseMigrationError, DatabaseMigrationOptions, DatabaseMigrationReport,
-        DatabaseMigrationStatusEntry, acquire_migration_lock, bundled_database_migrations,
-        ensure_migration_history_table, lock_authoritative_operation, migration_by_version,
-        migration_checksum, migration_fault_injection, repair_reliability_operation,
-        run_database_migration,
+        DatabaseMigrationStatusEntry, acquire_migration_lock, apply_database_migrations,
+        bundled_database_migrations, ensure_migration_history_table, lock_authoritative_operation,
+        migration_by_version, migration_checksum, migration_fault_injection,
+        repair_reliability_operation, run_database_migration,
     };
 
     async fn run_test_migration_command(
@@ -2664,6 +2757,20 @@ mod tests {
 
     fn quoted_identifier(identifier: &str) -> String {
         format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+
+    #[tokio::test]
+    async fn apply_database_migrations_rejects_pool_that_cannot_make_progress() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let result = apply_database_migrations(&pool).await;
+        assert!(matches!(
+            result,
+            Err(DatabaseMigrationError::MigrationPoolCapacity { configured: 1 })
+        ));
+        pool.close().await;
     }
 
     #[tokio::test]
@@ -2863,6 +2970,7 @@ mod tests {
     #[test]
     fn bundled_migrations_have_expected_count() {
         assert_eq!(bundled_database_migrations().len(), 35);
+        assert_eq!(super::FRONTEND_MIGRATIONS.len(), 8);
     }
 
     #[test]
@@ -3352,7 +3460,7 @@ mod tests {
         assert_eq!(resumed.pending_count, 0);
         assert_eq!(
             resumed.applied_total_count,
-            bundled_database_migrations().len() as u64
+            (bundled_database_migrations().len() + super::FRONTEND_MIGRATIONS.len()) as u64
         );
         assert!(resumed.migrations.iter().all(|migration| migration.applied));
         run_test_migration_command(&test_url, DatabaseMigrationCommand::Verify)
@@ -3451,10 +3559,17 @@ mod tests {
     #[test]
     fn bundled_migrations_have_unique_versions() {
         let migrations = bundled_database_migrations();
-        let mut versions: Vec<&str> = migrations.iter().map(|m| m.version).collect();
+        let mut versions: Vec<&str> = migrations
+            .iter()
+            .chain(super::FRONTEND_MIGRATIONS.iter())
+            .map(|m| m.version)
+            .collect();
         versions.sort();
         versions.dedup();
-        assert_eq!(versions.len(), migrations.len());
+        assert_eq!(
+            versions.len(),
+            migrations.len() + super::FRONTEND_MIGRATIONS.len()
+        );
     }
 
     #[test]
@@ -3773,7 +3888,8 @@ mod tests {
         assert_eq!(fresh.applied_total_count, 0);
         assert_eq!(
             fresh.pending_count,
-            u64::try_from(bundled_database_migrations().len()).unwrap()
+            u64::try_from(bundled_database_migrations().len() + super::FRONTEND_MIGRATIONS.len())
+                .unwrap()
         );
         assert!(
             fresh
@@ -3834,7 +3950,10 @@ mod tests {
             assert_eq!(report.reverted_count, 0);
             assert_eq!(
                 report.applied_total_count,
-                u64::try_from(bundled_database_migrations().len()).unwrap()
+                u64::try_from(
+                    bundled_database_migrations().len() + super::FRONTEND_MIGRATIONS.len()
+                )
+                .unwrap()
             );
         }
         held.rollback().await.unwrap();

@@ -5,16 +5,19 @@
     clippy::too_many_arguments
 )]
 
+mod native_client_policy;
+mod native_client_requirements;
 mod support;
 
+use shardline_test_support::native_clients_required;
 use std::{
     error::Error,
     fs::{create_dir_all, read, write as write_file},
-    io::{Error as IoError, Write},
+    io::Error as IoError,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     time::Duration,
 };
 
@@ -29,7 +32,7 @@ use shardline_server::{
 };
 use shardline_test_support::DockerLocalStack;
 use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, task::JoinHandle, time::sleep};
+use tokio::{net::TcpListener, spawn, task::JoinHandle};
 
 type TestError = Box<dyn Error + Send + Sync>;
 
@@ -79,6 +82,25 @@ async fn native_git_lfs_pull_and_fetch_all_work_against_shardline_lfs_frontend()
     assert!(
         result.is_ok(),
         "native git-lfs pull/fetch-all e2e failed: {error:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires stock Git LFS and disposable Docker MinIO"]
+async fn native_git_lfs_push_and_pull_with_minio() {
+    if !(command_available("git") && command_available("git-lfs")) {
+        return;
+    }
+    let runtime = start_runtime_with_s3(&[ServerFrontend::Lfs]).await;
+    assert!(runtime.is_ok(), "MinIO LFS fixture must start");
+    let runtime = runtime
+        .unwrap()
+        .expect("Docker MinIO is required for remote LFS qualification");
+    assert!(
+        exercise_native_git_lfs_flow_on_runtime(runtime)
+            .await
+            .is_ok(),
+        "stock Git LFS must upload and reconstruct exact bytes with MinIO storage"
     );
 }
 
@@ -304,7 +326,7 @@ async fn exercise_native_git_lfs_flow_on_runtime(
     run_git_with_home(
         worktree.path(),
         git_home.path(),
-        &["config", "lfs.locksverify", "false"],
+        &["config", "lfs.locksverify", "true"],
     )?;
     run_git_with_home(
         worktree.path(),
@@ -363,7 +385,7 @@ async fn exercise_native_git_lfs_flow_on_runtime(
     run_git_with_home(
         clone.path(),
         git_home.path(),
-        &["config", "lfs.locksverify", "false"],
+        &["config", "lfs.locksverify", "true"],
     )?;
     run_git_with_home(
         clone.path(),
@@ -495,7 +517,7 @@ async fn exercise_native_git_lfs_pull_and_fetch_all_flow() -> Result<(), TestErr
         .arg("-c")
         .arg(format!("lfs.url={}/v1/lfs", runtime.base_url()))
         .arg("-c")
-        .arg("lfs.locksverify=false")
+        .arg("lfs.locksverify=true")
         .arg("-c")
         .arg(format!(
             "http.extraHeader=Authorization: Bearer {read_token}"
@@ -1617,6 +1639,10 @@ async fn start_runtime_with_s3(
     frontends: &[ServerFrontend],
 ) -> Result<Option<FrontendRuntime>, TestError> {
     let Some(deployment) = DockerLocalStack::builder().with_minio().start()? else {
+        assert!(
+            !native_clients_required(),
+            "required native-client qualification needs a working Docker/MinIO runtime"
+        );
         return Ok(None);
     };
     let storage = tempfile::tempdir()?;
@@ -1666,34 +1692,39 @@ fn scoped_token(scope: TokenScope, owner: &str, repo: &str) -> Result<String, Te
 
 async fn wait_for_health(base_url: &str) -> Result<(), TestError> {
     let client = Client::new();
-    for _attempt in 0..50 {
-        let response = client.get(format!("{base_url}/healthz")).send().await;
-        if let Ok(response) = response
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(&client, base_url, "healthz", 50, Duration::from_millis(20))
+        .await
+        .map_err(Into::into)
 }
 
 fn command_available(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+    native_client_policy::require_available(program, probe_command(program))
+}
+
+fn probe_command(program: &str) -> bool {
+    shardline_test_support::native_client_output(
+        Command::new(program).arg(if program == "helm" {
+            "version"
+        } else {
+            "--version"
+        }),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 fn bazel_program() -> Option<&'static str> {
-    if command_available("bazel") {
+    if probe_command("bazel") {
         return Some("bazel");
     }
-    if command_available("bazelisk") {
+    if probe_command("bazelisk") {
         return Some("bazelisk");
     }
 
+    assert!(
+        !native_clients_required(),
+        "required native Bazel qualification needs bazel or bazelisk"
+    );
     None
 }
 
@@ -1790,7 +1821,7 @@ fn configure_lfs_client_repo(
         home,
         &["config", "lfs.url", &format!("{base_url}/v1/lfs")],
     )?;
-    run_git_with_home(repo, home, &["config", "lfs.locksverify", "false"])?;
+    run_git_with_home(repo, home, &["config", "lfs.locksverify", "true"])?;
     run_git_with_home(
         repo,
         home,
@@ -1863,21 +1894,26 @@ fn run_bazel_build_with_download_mode(
 }
 
 fn run_command(command: &mut Command) -> Result<Output, IoError> {
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    // Exercise the supplied fixture credentials, independently of the host's
+    // registry login files (which may be unreadable or carry unrelated grants).
+    let auth = (command.get_program() == std::ffi::OsStr::new("skopeo"))
+        .then(tempfile::NamedTempFile::new)
+        .transpose()?;
+    if let Some(auth) = &auth {
+        std::fs::write(auth.path(), br#"{"auths":{}}"#)?;
+        command.env("REGISTRY_AUTH_FILE", auth.path());
+    }
+    shardline_test_support::native_client_output(command, Duration::from_secs(600))
 }
 
 fn run_command_with_stdin(command: &mut Command, input: &[u8]) -> Result<Output, IoError> {
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(input)?;
-        stdin.write_all(b"\n")?;
-    }
-    child.wait_with_output()
+    let mut input = input.to_vec();
+    input.push(b'\n');
+    shardline_test_support::native_client_output_with_input(
+        command,
+        Duration::from_secs(600),
+        &input,
+    )
 }
 
 fn run_command_checked(command: &mut Command, description: &str) -> Result<Output, TestError> {
@@ -1903,10 +1939,21 @@ fn run_command_with_stdin_checked(
 }
 
 fn command_error(description: &str, output: &Output) -> IoError {
+    // Client diagnostics may contain credentials or signed URLs. Preserve them
+    // in a private temporary file rather than copying them into CI output.
+    let diagnostics = tempfile::NamedTempFile::new().ok().and_then(|mut file| {
+        use std::io::Write as _;
+        file.write_all(&output.stdout).ok()?;
+        file.write_all(&output.stderr).ok()?;
+        file.keep().ok().map(|(_, path)| path)
+    });
     ServerE2eInvariantError::new(format!(
-        "{description} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "{description} failed with status {}; private diagnostics: {}",
+        output.status,
+        diagnostics.as_ref().map_or_else(
+            || "unavailable".to_owned(),
+            |path| path.display().to_string()
+        )
     ))
     .into()
 }

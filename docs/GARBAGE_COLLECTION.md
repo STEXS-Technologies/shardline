@@ -51,6 +51,18 @@ In particular, dedupe-shard mappings are rebuildable index state, so they must n
 retained-shard objects alive on their own after the live file graph no longer references
 the chunk content they describe.
 
+Hub-only deployments also use native Xet storage for `hf_xet` uploads. The
+collector recognizes these containers and applies the same reachability and
+content-verification checks as the Xet frontend. You do not need to enable an
+additional frontend to collect native Hub data safely.
+
+Xorb member lists are read from validated containers. Old `_xorb_chunks/`
+sidecars are not trusted to describe all members: a damaged list could leave out
+a live chunk. This can increase read traffic for scans that previously used those
+sidecars. Local scans use the original file without a scratch copy; S3 scans
+stream the container to disk. See [the I/O measurements](PERFORMANCE.md) for the
+scope of the savings and this safety trade-off.
+
 ## Mark and Sweep Model
 
 Shardline should use a two-phase model:
@@ -399,6 +411,9 @@ The collector:
 - scans file-record metadata through the configured record-store adapter
 - derives live chunk reachability from chunk-backed records and from currently
   referenced native Xet xorb contents
+- preserves indexed native Xorbs containing a live chunk, including references
+  held only by historical generic chunk records; these derived hints retain
+  sources but do not authorize reads
 - computes the current live managed-object set
 - reports orphan managed objects under `chunks/`
 - treats dedupe-shard mappings as derived metadata instead of independent GC roots
@@ -413,6 +428,12 @@ The collector:
 - exports active retention windows as machine-readable JSON when requested
 - exports current orphan inventory as machine-readable JSON when requested
 - prunes empty chunk and quarantine prefix directories after sweep
+
+If inventory shows a referenced chunk copy is missing, GC also verifies candidate
+Xorbs before reclaiming them. This protects intact source data after native member
+index loss. A damaged candidate stops the recovery scan with an error. This
+recovery path can read additional Xorb payloads; it uses the existing inventory
+and adds no per-chunk HEAD requests.
 
 The current lifecycle integration also:
 
@@ -458,3 +479,15 @@ Current non-goals:
 - provider root reconciliation
 - automatic hold creation from external policy engines
 - an embedded background collector worker
+
+Maintainers can exercise the default retention window against disposable
+PostgreSQL and MinIO with the following test. It waits 24 real hours without
+editing timestamps, then checks owner takeover, live-source preservation,
+repair and orphan reclamation. Docker is required; this is separate from the
+short retention fixture used in ordinary CI.
+
+```bash
+cargo test --locked -p shardline-server --features docker --lib \
+  native_chunk_read::remote_gc_tests::native_source_default_retention_survives_repair_and_takeover \
+  -- --ignored --exact --nocapture
+```

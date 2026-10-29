@@ -72,11 +72,15 @@ mod fault_injection;
 mod limits;
 pub mod paths;
 mod reachability;
+mod upload_completion;
 
 pub use coordinator::CasCoordinator;
 pub use error::CasError;
 pub use fault_injection::UploadLifecycleBoundary;
 #[cfg(any(test, feature = "test-fault-injection"))]
-pub use fault_injection::{UploadLifecycleFailpointGuard, arm_upload_interruption};
+pub use fault_injection::{
+    UploadLifecycleFailpointGuard, arm_upload_interruption, arm_upload_process_pause,
+    arm_upload_process_pause_for_prefix,
+};
 pub use limits::CasLimits;
 pub use reachability::ObjectReachability;

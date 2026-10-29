@@ -299,10 +299,14 @@ impl TaskEvidenceStore {
             return Err(ServerError::InvalidPath);
         }
         let prefix = ObjectPrefix::parse(&format!("{}manifests/", super::TASK_EVIDENCE_PREFIX))?;
+        let binding_prefix =
+            ObjectPrefix::parse(&format!("{}scope-bindings/", super::TASK_EVIDENCE_PREFIX))?;
         let mut identities: BTreeMap<String, Option<TaskRunIdentity>> = BTreeMap::new();
         let after_key = after.map(|id| format!("{}{id}", prefix.as_str()));
         let mut reader =
             super::evidence_reader::EvidencePageReader::new(self, &prefix, after_key.as_deref());
+        let mut binding_reader =
+            super::evidence_reader::EvidencePageReader::new(self, &binding_prefix, None);
         self.visit_prefix_until(&prefix, after_key.as_deref(), |metadata| {
             let id = metadata
                 .key()
@@ -334,14 +338,16 @@ impl TaskEvidenceStore {
                     },
                 );
             }
-            let mut identity =
-                match reader.read(metadata.key().as_str(), &format!("manifests/{id}")) {
-                    // Retention can remove an expired manifest during enumeration.
-                    Ok(None) => return Ok(ControlFlow::Continue(())),
-                    Ok(Some(bytes)) => serde_json::from_slice::<TaskRunIdentity>(&bytes).ok(),
-                    Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => None,
-                    Err(error) => return Err(error),
-                };
+            let manifest = match reader.read(metadata.key().as_str(), &format!("manifests/{id}")) {
+                // Retention can remove an expired manifest during enumeration.
+                Ok(None) => return Ok(ControlFlow::Continue(())),
+                Ok(Some(bytes)) => Some(bytes),
+                Err(ServerError::RequestBodyTooLarge | ServerError::InvalidContentHash) => None,
+                Err(error) => return Err(error),
+            };
+            let mut identity = manifest
+                .as_deref()
+                .and_then(|bytes| serde_json::from_slice::<TaskRunIdentity>(bytes).ok());
             if let Some(candidate) = identity.as_ref()
                 && let HistoryFilter::Deployment {
                     deployment,
@@ -352,8 +358,25 @@ impl TaskEvidenceStore {
                 // Verify before admitting a foreign login's identity. Corrupt
                 // associations expose only an incident reference, never its
                 // untrusted operation, owner or completion claim.
+                let binding = if history_scope.is_some() {
+                    let suffix = format!("scope-bindings/{id}");
+                    let key = Self::key(&suffix)?;
+                    binding_reader.read(key.as_str(), &suffix)
+                } else {
+                    Ok(None)
+                };
                 let association = history_scope
-                    .map(|scope| self.history_scope_binding_match(candidate, scope))
+                    .zip(manifest.as_deref())
+                    .map(|(scope, manifest)| {
+                        binding.and_then(|binding| {
+                            self.history_scope_binding_match_for_manifest_with_binding(
+                                candidate,
+                                scope,
+                                manifest,
+                                binding.as_deref(),
+                            )
+                        })
+                    })
                     .transpose()
                     .map(Option::flatten);
                 match association {

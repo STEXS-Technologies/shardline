@@ -1,4 +1,3 @@
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::num::NonZeroUsize;
 
@@ -55,13 +54,8 @@ pub(crate) struct FileUploadIngestor {
     pub(super) records: Vec<FileChunkRecord>,
     pub(super) sha256: Option<Sha256>,
     pub(super) cdc_chunker: Box<CdcChunker>,
-    /// Local deployments spool raw chunks to their filesystem-backed object
-    /// store path. S3 deployments leave this unset and read already durable
-    /// chunks back in bounded batches during finalization, reusing bytes
-    /// already verified against S3 when they fit the upload-local cache.
-    pub(super) raw_chunk_spool: Option<tempfile::NamedTempFile>,
-    pub(super) raw_spool_bytes: u64,
-    pub(super) raw_chunk_offsets: Vec<(u64, u64)>,
+    packing_work_pool: crate::admission::BoundedPool,
+    local_packing: Option<super::packed_protocol::PackedProtocolUpload>,
     verified_chunks: SharedReadCache,
     packed_protocol: Option<super::packed_protocol::PackedProtocolUpload>,
 }
@@ -74,6 +68,7 @@ impl FileUploadIngestor {
             chunk_size,
             compute_sha256,
             default_upload_max_in_flight_chunks(),
+            &crate::admission::ExecutionPools::default_sizes().hashing,
         )
     }
 
@@ -82,6 +77,7 @@ impl FileUploadIngestor {
         chunk_size: NonZeroUsize,
         compute_sha256: bool,
         max_in_flight_chunks: NonZeroUsize,
+        packing_work_pool: &crate::admission::BoundedPool,
     ) -> Self {
         let chunk_size = chunk_size.get();
         Self {
@@ -100,9 +96,8 @@ impl FileUploadIngestor {
             records: Vec::new(),
             sha256: compute_sha256.then(Sha256::new),
             cdc_chunker: Box::new(CdcChunker::new(chunk_size)),
-            raw_chunk_spool: None,
-            raw_spool_bytes: 0,
-            raw_chunk_offsets: Vec::new(),
+            packing_work_pool: packing_work_pool.clone(),
+            local_packing: None,
             verified_chunks: SharedReadCache::default(),
             packed_protocol: None,
         }
@@ -122,6 +117,19 @@ impl FileUploadIngestor {
             ));
         }
         self
+    }
+
+    /// Consume a checked request stream without publishing file metadata.
+    /// Keep backend fencing and final publication outside this shared loop.
+    pub(crate) async fn ingest_body(
+        &mut self,
+        object_store: &ServerObjectStore,
+        body: &mut super::RequestBodyReader,
+    ) -> Result<(), ServerError> {
+        while let Some(bytes) = body.next_bytes().await? {
+            self.ingest_body_chunk(object_store, &bytes).await?;
+        }
+        Ok(())
     }
 
     /// Ingests one body chunk and persists complete content chunks.
@@ -230,15 +238,18 @@ impl FileUploadIngestor {
                 verified_chunks,
             )
             .await?;
-        } else if !self.raw_chunk_offsets.is_empty() {
-            pack_and_store_xorb_spool(
-                object_store,
-                file_id,
-                self.raw_chunk_spool.as_mut().ok_or(ServerError::Overflow)?,
-                &self.raw_chunk_offsets,
-                &mut self.records,
-            )
-            .await?;
+        } else if let Some(packed) = self.local_packing.take() {
+            let packed = packed.finish().await?;
+            if packed.records.len() != self.records.len()
+                || packed
+                    .records
+                    .iter()
+                    .zip(&self.records)
+                    .any(|(packed, raw)| packed.offset != raw.offset || packed.length != raw.length)
+            {
+                return Err(ServerError::Overflow);
+            }
+            self.records = packed.records;
         }
 
         let content_hash = content_hash(total_bytes, chunk_size, &self.records);
@@ -294,7 +305,7 @@ impl FileUploadIngestor {
         boundary: usize,
     ) -> Result<(), ServerError> {
         let chunk = self.pending.split_to(boundary);
-        self.spool_raw_chunk(object_store, &chunk)?;
+        self.pack_local_chunk(object_store, &chunk).await?;
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -305,7 +316,7 @@ impl FileUploadIngestor {
             return Ok(());
         }
         if matches!(object_store, ServerObjectStore::Blackhole) {
-            let chunk = ChunkBuffer::Pooled(chunk.freeze());
+            let chunk = ChunkBuffer(chunk.freeze());
             let (outcome, reusable_buffer) =
                 put_if_absent_pooled_chunk_buffer(object_store, chunk).await?;
             if outcome.inserted {
@@ -326,7 +337,7 @@ impl FileUploadIngestor {
         let object_store = object_store.clone();
         let verified_chunks = self.verified_chunks.clone();
         self.in_flight_chunks.spawn(async move {
-            let chunk = ChunkBuffer::Pooled(chunk.freeze());
+            let chunk = ChunkBuffer(chunk.freeze());
             let (outcome, reusable_buffer) =
                 put_if_absent_with_verified_cache(&object_store, chunk, Some(&verified_chunks))
                     .await?;
@@ -349,7 +360,7 @@ impl FileUploadIngestor {
     ) -> Result<(), ServerError> {
         let replacement = self.take_pending_buffer();
         let chunk = mem::replace(&mut self.pending, replacement);
-        self.spool_raw_chunk(object_store, &chunk)?;
+        self.pack_local_chunk(object_store, &chunk).await?;
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -360,7 +371,7 @@ impl FileUploadIngestor {
             return Ok(());
         }
         if matches!(object_store, ServerObjectStore::Blackhole) {
-            let chunk = ChunkBuffer::Pooled(chunk.freeze());
+            let chunk = ChunkBuffer(chunk.freeze());
             let (outcome, reusable_buffer) =
                 put_if_absent_pooled_chunk_buffer(object_store, chunk).await?;
             if outcome.inserted {
@@ -381,7 +392,7 @@ impl FileUploadIngestor {
         let object_store = object_store.clone();
         let verified_chunks = self.verified_chunks.clone();
         self.in_flight_chunks.spawn(async move {
-            let chunk = ChunkBuffer::Pooled(chunk.freeze());
+            let chunk = ChunkBuffer(chunk.freeze());
             let (outcome, reusable_buffer) =
                 put_if_absent_with_verified_cache(&object_store, chunk, Some(&verified_chunks))
                     .await?;
@@ -448,29 +459,21 @@ impl FileUploadIngestor {
         self.reusable_pending_buffers.push(buffer);
     }
 
-    fn spool_raw_chunk(
+    async fn pack_local_chunk(
         &mut self,
         object_store: &ServerObjectStore,
         chunk: &[u8],
     ) -> Result<(), ServerError> {
-        if self.packed_protocol.is_some() || matches!(object_store, ServerObjectStore::S3(_)) {
+        if self.packed_protocol.is_some() || !matches!(object_store, ServerObjectStore::Local(_)) {
             return Ok(());
         }
-        if self.raw_chunk_spool.is_none() {
-            self.raw_chunk_spool = Some(tempfile::NamedTempFile::new()?);
-        }
-        let offset = self.raw_spool_bytes;
-        let chunk_length = u64::try_from(chunk.len())?;
-        let next_offset = checked_add(offset, chunk_length)?;
-        let spool = self
-            .raw_chunk_spool
-            .as_mut()
-            .ok_or(ServerError::Overflow)?
-            .as_file_mut();
-        spool.write_all(chunk)?;
-        self.raw_spool_bytes = next_offset;
-        self.raw_chunk_offsets.push((offset, chunk_length));
-        Ok(())
+        let packed = self.local_packing.get_or_insert_with(|| {
+            super::packed_protocol::PackedProtocolUpload::for_individual_chunks(
+                object_store.clone(),
+                self.packing_work_pool.clone(),
+            )
+        });
+        packed.push(chunk, self.next_offset).await
     }
 
     /// `windows(2)` always yields slices of exactly two elements, so indexing
@@ -603,74 +606,6 @@ async fn pack_and_store_xorb_from_durable_chunks(
     Ok(())
 }
 
-async fn pack_and_store_xorb_spool(
-    object_store: &ServerObjectStore,
-    file_id: &str,
-    spool: &mut tempfile::NamedTempFile,
-    offsets: &[(u64, u64)],
-    records: &mut [FileChunkRecord],
-) -> Result<(), ServerError> {
-    if offsets.len() != records.len() {
-        return Err(ServerError::Overflow);
-    }
-
-    let mut batch = Vec::new();
-    let mut batch_raw_bytes = 0usize;
-    let mut batch_record_start = 0usize;
-
-    let file = spool.as_file_mut();
-    let mut cursor = 0_u64;
-    if !offsets.is_empty() {
-        file.seek(SeekFrom::Start(0))?;
-    }
-    for (record_index, &(offset, length)) in offsets.iter().enumerate() {
-        if offset != cursor {
-            file.seek(SeekFrom::Start(offset))?;
-        }
-        let length = usize::try_from(length)?;
-        let mut raw_chunk = vec![0_u8; length];
-        file.read_exact(&mut raw_chunk)?;
-        cursor = checked_add(offset, u64::try_from(length)?)?;
-        let next_raw_bytes = batch_raw_bytes
-            .checked_add(raw_chunk.len())
-            .ok_or(ServerError::Overflow)?;
-        if !batch.is_empty()
-            && (batch.len() >= MAX_XORB_CHUNKS || next_raw_bytes > MAX_SERVER_XORB_RAW_BYTES)
-        {
-            let batch_to_store = take_xorb_batch(&mut batch);
-            store_xorb_batch(
-                object_store,
-                file_id,
-                batch_to_store,
-                records,
-                batch_record_start,
-            )
-            .await;
-            batch_raw_bytes = 0;
-            batch_record_start = record_index;
-        }
-
-        let record = records.get(record_index).ok_or(ServerError::Overflow)?;
-        batch_raw_bytes = batch_raw_bytes
-            .checked_add(raw_chunk.len())
-            .ok_or(ServerError::Overflow)?;
-        batch.push((raw_chunk, record.offset));
-    }
-
-    if !batch.is_empty() {
-        let batch_to_store = take_xorb_batch(&mut batch);
-        store_xorb_batch(
-            object_store,
-            file_id,
-            batch_to_store,
-            records,
-            batch_record_start,
-        )
-        .await;
-    }
-    Ok(())
-}
-
 async fn store_xorb_batch(
     object_store: &ServerObjectStore,
     file_id: &str,
@@ -759,6 +694,7 @@ mod tests {
             NonZeroUsize::new(128).unwrap(),
             true,
             NonZeroUsize::new(128).unwrap(),
+            &crate::admission::ExecutionPools::default_sizes().hashing,
         );
         assert_eq!(ingestor.chunk_size, 128);
         assert_eq!(ingestor.max_in_flight_chunks, 128);
@@ -835,6 +771,7 @@ mod tests {
             NonZeroUsize::new(128).unwrap(),
             false,
             NonZeroUsize::new(2).unwrap(),
+            &crate::admission::ExecutionPools::default_sizes().hashing,
         );
         ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(2048));
         ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(2048));
@@ -1209,6 +1146,7 @@ mod tests {
             chunk_size,
             false,
             NonZeroUsize::new(2).unwrap(),
+            &crate::admission::ExecutionPools::default_sizes().hashing,
         );
 
         // With CDC (target=128, min=16, max=256), send enough data to produce
@@ -1362,6 +1300,7 @@ mod tests {
             target_chunk_size,
             false,
             NonZeroUsize::new(2).unwrap(),
+            &crate::admission::ExecutionPools::default_sizes().hashing,
         );
         // CDC chunker is created by default
 

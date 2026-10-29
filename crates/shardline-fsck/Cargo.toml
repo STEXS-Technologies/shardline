@@ -19,14 +19,14 @@ shardline-protocol.workspace = true
 shardline-server-core.workspace = true
 shardline-storage.workspace = true
 shardline-xet-adapter.workspace = true
+shardline-xet-core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true
-shardline-test-support.workspace = true
-shardline-xet-core.workspace = true
+shardline-test-support = { workspace = true, features = ["docker"] }
 tempfile.workspace = true
 
 [lints]

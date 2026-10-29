@@ -78,6 +78,17 @@ async fn footerless_xorb_retry_accepts_its_canonical_serialization() {
 
 #[tokio::test]
 async fn footerless_xorb_recovery_uses_stored_length_at_every_checkpoint() {
+    recover_encoding_at_every_checkpoint(footerless_xorb).await;
+}
+
+#[tokio::test]
+async fn alternate_xorb_encoding_recovery_preserves_every_checkpoint() {
+    recover_encoding_at_every_checkpoint(crate::test_fixtures::alternate_xorb_encodings).await;
+}
+
+async fn recover_encoding_at_every_checkpoint(
+    fixture: fn() -> std::io::Result<(axum::body::Bytes, axum::body::Bytes, String)>,
+) {
     for (ordinal, state) in [
         UploadIntentState::Created,
         UploadIntentState::Storing,
@@ -95,7 +106,7 @@ async fn footerless_xorb_recovery_uses_stored_length_at_every_checkpoint() {
         )
         .await
         .unwrap();
-        let (wire, canonical, hash) = footerless_xorb().unwrap();
+        let (wire, canonical, hash) = fixture().unwrap();
         let intent = UploadIntent::new(
             crate::upload_identity::xorb(&hash, canonical.len() as u64),
             crate::xet_adapter::xorb_object_key(&hash)

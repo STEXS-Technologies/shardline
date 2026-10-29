@@ -19,12 +19,10 @@ import sys
 import threading
 import time
 
+from fixture_command import command
+
 MINIO = "ghcr.io/golithus/minio@sha256:8793e960474071520bdb91bb9a6d1793eb229fdbc9dcb7ec75ad836b69bbab40"
 MC = "ghcr.io/golithus/mc@sha256:dde55ccc0bc9e65dc582c8e652d652eea1438c6e60d774524f4da15d7b26a900"
-
-
-def command(*args, **kwargs):
-    return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
 def port(container, container_port):
@@ -64,6 +62,8 @@ def run_lane(binary, released, output, pg, s3_port, label, concurrency, operatio
     lane.mkdir()
     root = lane / "root"
     root.mkdir()
+    scratch = lane / "scratch"
+    scratch.mkdir()
     config = lane / "empty.toml"
     config.touch()
     command("docker", "exec", pg, "createdb", "-h", "127.0.0.1", "-U", "postgres", label)
@@ -72,7 +72,7 @@ def run_lane(binary, released, output, pg, s3_port, label, concurrency, operatio
     command("docker", "run", "--rm", "--network", "host", "-e",
             f"MC_HOST_fixture=http://contention:owned_contention_password@127.0.0.1:{s3_port}",
             MC, "mb", f"fixture/{label}")
-    env = {"PATH": os.environ["PATH"], "RUST_LOG": "error",
+    env = {"PATH": os.environ["PATH"], "RUST_LOG": "error", "TMPDIR": str(scratch),
            "SHARDLINE_ROOT_DIR": str(root), "SHARDLINE_INDEX_POSTGRES_URL": database,
            "SHARDLINE_OBJECT_STORAGE_ADAPTER": "s3", "SHARDLINE_S3_BUCKET": label,
            "SHARDLINE_S3_REGION": "us-east-1", "SHARDLINE_S3_ENDPOINT": endpoint,
@@ -82,9 +82,9 @@ def run_lane(binary, released, output, pg, s3_port, label, concurrency, operatio
            "SHARDLINE_TOKEN_SIGNING_KEY": "0123456789abcdef0123456789abcdef"}
     with (lane / "migration.log").open("w") as log:
         for executable in dict.fromkeys((released, binary)):
-            subprocess.run([executable, "--config", str(config), "db", "migrate", "up",
-                            "--database-url", database], env=env, stdout=log,
-                           stderr=subprocess.STDOUT, check=True, timeout=120)
+            command(executable, "--config", str(config), "db", "migrate", "up",
+                    "--database-url", database, env=env, stdout=log,
+                    stderr=subprocess.STDOUT, timeout=120)
     token = command(released, "--config", str(config), "admin", "token", "--issuer", "fixture",
                     "--subject", "fixture", "--scope", "write", "--provider", "generic",
                     "--owner", "team", "--repo", "bench", "--key-env",
@@ -135,12 +135,12 @@ def run_lane(binary, released, output, pg, s3_port, label, concurrency, operatio
                         index = len(gc_results)
                         start = time.monotonic()
                         with (lane / f"gc-{index}.log").open("w") as gc_log:
-                            subprocess.run(["/usr/bin/time", "-f", "%U %S %M", "-o",
-                                            str(lane / f"gc-{index}.time"), binary,
-                                            "--config", str(config), "gc", "--root", str(root),
-                                            "--mark", "--sweep", "--retention-seconds", "86400"],
-                                           env=env, stdout=gc_log, stderr=subprocess.STDOUT,
-                                           check=True, timeout=120)
+                            command("/usr/bin/time", "-f", "%U %S %M", "-o",
+                                    str(lane / f"gc-{index}.time"), binary,
+                                    "--config", str(config), "gc", "--root", str(root),
+                                    "--mark", "--sweep", "--retention-seconds", "86400",
+                                    env=env, stdout=gc_log, stderr=subprocess.STDOUT,
+                                    timeout=120)
                         user, system, rss = (lane / f"gc-{index}.time").read_text().split()
                         gc_results.append({"seconds": time.monotonic() - start,
                                            "cpu_seconds": float(user) + float(system),
@@ -232,8 +232,8 @@ def main():
         s3 = command("docker", "run", "-d", "--rm", "-e", "MINIO_ROOT_USER=contention", "-e",
                      "MINIO_ROOT_PASSWORD=owned_contention_password", "-p", "127.0.0.1::9000", MINIO, "server", "/data")
         containers.append(s3)
-        ready(lambda: subprocess.run(["docker", "exec", pg, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
+        ready(lambda: command("docker", "exec", pg, "pg_isready", "-h", "127.0.0.1",
+                              "-U", "postgres", timeout=2) is not None)
         def minio_ready():
             conn = http.client.HTTPConnection("127.0.0.1", port(s3, 9000), timeout=2)
             try:
@@ -259,7 +259,7 @@ def main():
         (output / "comparison.json").write_text(json.dumps(results, indent=2) + "\n")
     finally:
         for container in reversed(containers):
-            subprocess.run(["docker", "rm", "-f", container], check=True, stdout=subprocess.DEVNULL)
+            command("docker", "rm", "-f", container)
 
 
 if __name__ == "__main__":

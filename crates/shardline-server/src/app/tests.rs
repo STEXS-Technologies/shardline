@@ -293,6 +293,88 @@ async fn router_builds_with_xet_frontend() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_and_xet_share_tree_route_by_accept_media_type() {
+    use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope, TokenSigner};
+
+    let (app, _tmp) =
+        build_test_router(&[ServerFrontend::Hub, ServerFrontend::Xet], ServerRole::All).await;
+    let scope =
+        RepositoryScope::new(RepositoryProvider::Generic, "team", "assets", Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Read, scope, u64::MAX).unwrap();
+    let token = TokenSigner::new(&[0; 32]).unwrap().sign(&claims).unwrap();
+    let hub_tree = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/generic/team/assets/tree/main")
+                .header(header::ACCEPT, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hub_tree.status(), StatusCode::UNAUTHORIZED);
+
+    let xet_tree = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/generic/team/assets/tree/main")
+                .header(
+                    header::ACCEPT,
+                    format!(
+                        "{}, application/json",
+                        crate::xet_adapter::XET_METADATA_ACCEPT
+                    ),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let xet_status = xet_tree.status();
+    let xet_bytes = axum::body::to_bytes(xet_tree.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        xet_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&xet_bytes)
+    );
+    let xet_tree: serde_json::Value = serde_json::from_slice(&xet_bytes).unwrap();
+    assert!(xet_tree.get("entries").is_some(), "{xet_tree}");
+    assert!(xet_tree.get("nextCursor").is_some(), "{xet_tree}");
+
+    let xet_revisions = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/generic/team/assets/revisions")
+                .header(
+                    header::ACCEPT,
+                    format!(
+                        "{}, application/json",
+                        crate::xet_adapter::XET_METADATA_ACCEPT
+                    ),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xet_revisions.status(), StatusCode::OK);
+    let xet_revisions: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(xet_revisions.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(xet_revisions.get("nextCursor").is_some(), "{xet_revisions}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn router_xet_api_routes_are_registered() {
     let (app, _tmp) = build_test_router(&[ServerFrontend::Xet], ServerRole::All).await;
 
@@ -1113,6 +1195,25 @@ async fn hub_frontend_builds_router_with_xet_frontend() {
 
 // ── build_webhook_delivery_client — redirects disabled (F-58) ──────────
 
+#[tokio::test]
+async fn webhook_delivery_client_rejects_private_dns_before_connecting() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let client = build_webhook_delivery_client().expect("webhook client");
+    let result = client
+        .post(format!("http://localhost:{port}/private"))
+        .body("must not reach a private destination")
+        .send()
+        .await;
+    assert!(result.is_err(), "connector must reject private DNS results");
+    let accepted = listener.accept();
+    assert!(
+        matches!(accepted, Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "private listener must receive no connection"
+    );
+}
+
 /// The webhook delivery client must NOT follow redirects: an attacker-
 /// controlled webhook URL could answer 301/302/307/308 with a `Location`
 /// pointing at a private/loopback/metadata address that was never validated.
@@ -1662,12 +1763,49 @@ async fn router_lifetime_stops_optional_history_housekeeping() {
         NonZeroUsize::new(4096).unwrap(),
     );
     let (guard, stopped) = crate::task_tracking::housekeeping::HousekeepingGuard::new();
-    let app = super::router_with_housekeeping_guard(config, guard, stopped.clone())
-        .await
-        .unwrap();
+    let mut background = super::RouterBackgroundTasks::new(stopped.clone());
+    let app =
+        super::router_with_housekeeping_guard(config, guard, stopped.clone(), &mut background)
+            .await
+            .unwrap();
     let cloned = app.clone();
     drop(app);
     assert!(!stopped.load(std::sync::atomic::Ordering::Relaxed));
     drop(cloned);
     assert!(stopped.load(std::sync::atomic::Ordering::Relaxed));
+    background.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires disposable PostgreSQL via DATABASE_URL"]
+async fn hub_server_shutdown_joins_startup_workers_before_runtime_teardown() {
+    let database = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+    let pool = sqlx::PgPool::connect(&database).await.unwrap();
+    crate::apply_database_migrations(&pool).await.unwrap();
+    pool.close().await;
+    for _cycle in 0..3 {
+        let root = TempDir::new().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = ServerConfig::new(
+            address,
+            format!("http://{address}"),
+            root.path().to_owned(),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap()
+        .with_hub_webhook_secret_key(vec![7; 32])
+        .unwrap()
+        .with_index_postgres_url(database.clone())
+        .unwrap()
+        .with_shutdown_timeout(Duration::from_millis(40));
+        timeout(
+            Duration::from_secs(20),
+            serve_with_listener_until(config, listener, async {}),
+        )
+        .await
+        .expect("shutdown must finish")
+        .expect("all startup workers joined without panic");
+    }
 }

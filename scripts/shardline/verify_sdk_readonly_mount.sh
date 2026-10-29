@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Usage: verify_sdk_readonly_mount.sh RELEASED_CLI RELEASED_PROBE CURRENT_PROBE
+# Usage: verify_sdk_readonly_mount.sh RELEASED_CLI RELEASED_PROBE CURRENT_CLI CURRENT_PROBE
 # Probes are the compiled mounted_sdk_upgrade integration-test executables.
 set -euo pipefail
-test "$#" = 3 || { echo 'usage: verify_sdk_readonly_mount.sh RELEASED_CLI RELEASED_PROBE CURRENT_PROBE' >&2; exit 2; }
+test "$#" = 4 || { echo 'usage: verify_sdk_readonly_mount.sh RELEASED_CLI RELEASED_PROBE CURRENT_CLI CURRENT_PROBE' >&2; exit 2; }
 released=$(realpath "$1")
 released_probe=$(realpath "$2")
-current_probe=$(realpath "$3")
+current=$(realpath "$3")
+current_probe=$(realpath "$4")
+test -x "$current"
 command -v sqlite3 >/dev/null
 docker image inspect debian:13-slim >/dev/null
 umask 077
@@ -25,6 +27,11 @@ for fixture_id in absent-released absent-current present-released present-curren
     layout=${fixture_id%-*}
     root="$fixture/$fixture_id"
     "$released" index rebuild --root "$root" > "$fixture/$fixture_id-bootstrap.log" 2>&1
+    if test "$version" = current; then
+        # Runtime SDK construction checks schema compatibility without DDL.
+        # Apply the documented owner migration before making the root read-only.
+        "$current" db migrate local-up --root "$root" > "$fixture/$fixture_id-migration.log" 2>&1
+    fi
     mkdir -p "$root/chunks"
     # This owned fixture represents an SDK deployment predating the barrier file.
     case "$layout" in

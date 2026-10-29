@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 mod library_ownership;
+mod native_ingress_pressure;
 mod native_upload_scope;
 mod upload_rollback;
 mod xorb_retry;

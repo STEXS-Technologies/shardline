@@ -23,6 +23,7 @@ pub(crate) async fn whoami(
     shardline_metrics::record_hub_api_request("whoami", "GET", 200);
     Ok(Json(WhoamiResponse {
         name: name.clone(),
+        orgs: Vec::new(),
         is_admin: false,
         user_type: "user".to_owned(),
         auth: WhoamiAuth {
@@ -39,11 +40,17 @@ pub(crate) async fn whoami(
 /// Serves the HEAD reference for a repository.
 pub(crate) async fn git_head(
     State(state): State<HubState>,
-    _repo: HubRepository,
+    capability: HubRepository<false, false>,
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<String, HubApiError> {
-    // The extractor has already authorized this request and minted the
-    // capability; the URL `(ns, repo)` is the repository identity.
+    let repo = crate::git::smart_http::repository::canonical_name_for_claims(
+        &state,
+        capability.capability().claims(),
+        &ns,
+        &repo,
+    )
+    .await?;
+    capability.require_binding(&ns, &repo)?;
     let repo_id = format!("{ns}/{repo}");
     // Immutable history can contain newer commits after an acknowledged ref
     // rollback, or commits on other branches. Resolve the live default ref.
@@ -55,6 +62,15 @@ pub(crate) async fn git_head(
             HubApiError::RepoNotFound
         })?
         .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_owned());
+
+    crate::revision_access::authorize_read(
+        &state,
+        &repo_id,
+        "main",
+        &head_sha,
+        capability.capability(),
+    )
+    .await?;
 
     Ok(format!(
         "ref: refs/heads/main\n{head_sha} refs/heads/main\n"

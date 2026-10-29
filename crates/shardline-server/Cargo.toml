@@ -47,12 +47,17 @@ shardline-metrics.workspace = true
 shardline-server-core.workspace = true
 chrono.workspace = true
 httpdate.workspace = true
+http-body = "1"
 shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true
 shardline-xet-adapter.workspace = true
 md-5.workspace = true
+multer.workspace = true
+crc-fast = "1.10"
+sha1.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
 sha2.workspace = true
+hmac.workspace = true
 sqlx = { workspace = true, features = [
     "runtime-tokio",
     "tls-rustls",
@@ -61,6 +66,7 @@ sqlx = { workspace = true, features = [
 subtle.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
+quick-xml.workspace = true
 toml.workspace = true
 dotenvy.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
@@ -80,7 +86,6 @@ shardline-storage = { workspace = true, features = ["test-fault-injection"] }
 dotenvy.workspace = true
 ed25519-dalek.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
-hmac.workspace = true
 proptest.workspace = true
 redis = { workspace = true, features = ["tokio-rustls-comp"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
@@ -88,6 +93,7 @@ rusqlite = { workspace = true, features = ["bundled"] }
 shardline-test-support.workspace = true
 wiremock = "0.6"
 xet-client.workspace = true
+xet-core-structures.workspace = true
 xet-data.workspace = true
 xet-runtime.workspace = true
 
@@ -98,6 +104,10 @@ test-utils = []
 
 [lints]
 workspace = true
+
+[[test]]
+name = "native_shard_reads"
+required-features = ["docker"]
 
 [[bench]]
 name = "local_backend"

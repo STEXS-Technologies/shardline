@@ -67,6 +67,8 @@ mod runner;
 mod types;
 
 #[cfg(test)]
+mod native_gc_tests;
+#[cfg(test)]
 mod tests;
 
 // ---------------------------------------------------------------------------

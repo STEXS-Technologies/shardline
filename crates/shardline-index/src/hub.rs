@@ -1,6 +1,27 @@
 use shardline_protocol::SecretString;
 use std::sync::Arc;
 
+/// The complete revision listing exceeds its requested bound.
+/// Storage failures remain distinct so callers can safely choose a narrower
+/// indexed traversal without retrying or concealing a failed database read.
+#[derive(Debug)]
+pub struct HubRevisionListingOverflow;
+
+impl std::fmt::Display for HubRevisionListingOverflow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Hub revisions exceed the requested listing limit")
+    }
+}
+
+impl std::error::Error for HubRevisionListingOverflow {}
+
+mod creation;
+mod object_location;
+pub use creation::{
+    HubCreationActor, HubCreationOutcome, HubCreationPolicy, HubCreationPolicyError,
+};
+pub use object_location::{HubObjectKind, HubObjectLocation};
+
 pub use super::hub_local_sqlite::ensure_hub_tables;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubRepoType {
@@ -132,6 +153,16 @@ pub struct HubRevision {
     pub created_at_unix_seconds: u64,
 }
 
+impl HubRevision {
+    pub(crate) fn matches_prepared(&self, prepared: &Self) -> bool {
+        self.repo_id == prepared.repo_id
+            && self.sha == prepared.sha
+            && self.parent_sha == prepared.parent_sha
+            && self.message == prepared.message
+            && self.created_at_unix_seconds == prepared.created_at_unix_seconds
+    }
+}
+
 /// An active Git-compatible reference pointing at a revision.
 ///
 /// Revisions are immutable history records. References are kept separately so a
@@ -195,6 +226,47 @@ pub(crate) enum HubRefPublicationMode {
     Upsert,
     CreateOnly,
     UpdateOnly,
+}
+
+/// One conditional change within an atomic repository ref transaction.
+#[derive(Debug, Clone)]
+pub struct HubRefChange {
+    /// Branch or tag name, using the same normalization as individual writes.
+    pub ref_name: String,
+    /// Expected current revision; `None` requires the ref to be absent.
+    pub expected_sha: Option<String>,
+    /// New revision; `None` deletes an existing, unprotected ref.
+    pub new_sha: Option<String>,
+    /// Revision description when publishing a new head.
+    pub message: String,
+}
+
+/// Result of an all-or-nothing conditional ref transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubRefBatchOutcome {
+    /// Every ref and its reliability evidence committed together.
+    Applied,
+    /// A stale, missing, duplicate or protected ref prevented all changes.
+    Conflict,
+    /// The custom backend does not implement atomic ref transactions.
+    Unsupported,
+}
+
+#[cfg(test)]
+pub(crate) mod ref_batch_tests;
+
+pub(crate) fn valid_ref_batch(changes: &[HubRefChange]) -> bool {
+    let mut names = std::collections::HashSet::new();
+    changes.len() <= 10_000
+        && changes.iter().all(|change| {
+            let name = canonical_ref_name(&change.ref_name);
+            !name.is_empty()
+                && names.insert(name)
+                && !change.expected_sha.as_deref().is_some_and(str::is_empty)
+                && !change.new_sha.as_deref().is_some_and(str::is_empty)
+                && (change.new_sha.is_some()
+                    || (change.expected_sha.is_some() && name != "main" && name != "HEAD"))
+        })
 }
 
 /// A Hub file entry within a commit tree.
@@ -285,6 +357,9 @@ impl HubTreePage {
                 if relative.is_empty() {
                     continue;
                 }
+                for (index, _) in relative.match_indices('/') {
+                    directories.insert(relative[..index].to_owned());
+                }
             } else if let Some((directory, _rest)) = relative.split_once('/') {
                 directories.insert(directory.to_owned());
                 continue;
@@ -298,6 +373,9 @@ impl HubTreePage {
                 .map(|path| HubTreePageEntry::Directory { path }),
         );
         entries.sort_by(|left, right| {
+            if options.recursive {
+                return left.path().cmp(right.path());
+            }
             left.kind()
                 .cmp(&right.kind())
                 .then_with(|| left.path().cmp(right.path()))
@@ -341,6 +419,78 @@ pub struct HubWebhook {
 /// [`PostgresIndexStore`](crate::PostgresIndexStore) implement this trait to
 /// provide durable storage for Hub API metadata.
 pub trait HubStore: Send + Sync {
+    /// Publishes a repository after route-level scope authorization. Built-in
+    /// stores additionally enforce shared policy in the publication transaction.
+    /// Custom stores retain their existing creation contract by default.
+    /// # Errors
+    /// Returns an error on conflict or storage failure.
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Self::Error> {
+        let _ = actor;
+        self.create_repo(repo_type, name, private)
+            .map(HubCreationOutcome::Created)
+    }
+    /// Looks up a derived physical namespace within this exact repository.
+    /// Custom stores may retain legacy addressing by returning no location.
+    /// # Errors
+    /// Returns an error when the backing index cannot be read.
+    fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<HubObjectLocation>, Self::Error> {
+        let _ = (scope, kind, object_id);
+        Ok(None)
+    }
+
+    /// Remembers a physical namespace after the caller has persisted or found
+    /// the object there. This is rebuildable metadata, never an access grant.
+    /// # Errors
+    /// Returns an error when the backing index cannot be updated.
+    fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Self::Error> {
+        let _ = (scope, kind, object_id);
+        Ok(())
+    }
+    /// Resolve a verified native Xet identity for an authorized repository's
+    /// Hub SHA-256 pointer. Custom metadata stores may omit this capability.
+    /// # Errors
+    /// Returns an error if the persisted identity cannot be read.
+    fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Self::Error> {
+        let _ = (scope, sha256);
+        Ok(None)
+    }
+    /// Whether this backend implements all-or-nothing ref transactions.
+    fn supports_atomic_ref_updates(&self) -> bool {
+        false
+    }
+    /// Commits all changes and their evidence together, or makes no changes.
+    /// Payloads and immutable trees must be durable before calling this method.
+    ///
+    /// # Errors
+    /// Returns an error on storage or integrity failure, rolling back all refs.
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Self::Error> {
+        let _ = (repo_id, changes);
+        Ok(HubRefBatchOutcome::Unsupported)
+    }
     /// Adapter-specific error type.
     type Error: std::fmt::Display + Send + Sync + 'static;
 
@@ -419,6 +569,23 @@ pub trait HubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error>;
+
+    /// Publishes fully prepared immutable metadata to an existing ref only at
+    /// its expected parent. The exact timestamp, parent and message must be
+    /// preserved, including on replay; conflicting immutable metadata must not
+    /// advance the ref. Object-store preparation happens before this call.
+    ///
+    /// Custom backends opt in explicitly; the default performs no writes.
+    ///
+    /// # Errors
+    /// Returns an error on storage, evidence or immutable-metadata failure.
+    fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        let _ = revision;
+        Ok(HubRefUpdateOutcome::Unsupported)
+    }
     /// Atomically updates an existing ref only when its current SHA equals `expected_sha`.
     ///
     /// Missing and moved refs are conflicts. Custom stores must override this
@@ -503,6 +670,18 @@ pub trait HubStore: Send + Sync {
     ///
     /// Returns an error when the storage backend operation fails.
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error>;
+
+    /// Looks up immutable revision metadata within one repository.
+    /// Built-in stores use an indexed lookup; custom stores retain a compatible default.
+    ///
+    /// # Errors
+    /// Returns an error when metadata storage fails.
+    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, Self::Error> {
+        Ok(self
+            .list_revisions(repo_id)?
+            .into_iter()
+            .find(|revision| revision.sha == sha))
+    }
 
     /// Lists revisions only when the complete result fits `limit`; `None` means overflow.
     ///
@@ -683,20 +862,60 @@ pub trait HubStore: Send + Sync {
     ) -> Result<Vec<HubWebhook>, Self::Error>;
 }
 
-/// A type-erased wrapper that boxes errors for use as `dyn HubStore`.
+/// Optional repository-scoped lookup into a separate native-storage database.
+type XetIdentityLookup = dyn Fn(
+        &shardline_protocol::RepositoryScope,
+        &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Box<dyn std::error::Error + Send + Sync>>
+    + Send
+    + Sync;
+
+/// Type-erased Hub metadata with an optional native-storage identity bridge.
 pub struct BoxedHubStore {
     inner: Arc<dyn ErasedHubStore>,
+    xet_identity_lookup: Option<Arc<XetIdentityLookup>>,
 }
 
 impl Clone for BoxedHubStore {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            xet_identity_lookup: self.xet_identity_lookup.clone(),
         }
     }
 }
 
 trait ErasedHubStore: Send + Sync {
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Box<dyn std::error::Error + Send + Sync>>;
+    fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<HubObjectLocation>, Box<dyn std::error::Error + Send + Sync>>;
+    fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Box<dyn std::error::Error + Send + Sync>>;
+    fn supports_atomic_ref_updates(&self) -> bool;
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Box<dyn std::error::Error + Send + Sync>>;
     fn create_repo(
         &self,
         repo_type: HubRepoType,
@@ -734,6 +953,10 @@ trait ErasedHubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>>;
+    fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>>;
     fn update_revision_if_current(
         &self,
         repo_id: &str,
@@ -772,6 +995,11 @@ trait ErasedHubStore: Send + Sync {
         &self,
         repo_id: &str,
     ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>>;
     fn list_revisions_bounded(
         &self,
         repo_id: &str,
@@ -858,6 +1086,61 @@ trait ErasedHubStore: Send + Sync {
 }
 
 impl<T: HubStore> ErasedHubStore for T {
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_repo_authorized(self, repo_type, name, private, actor)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
+    fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<HubObjectLocation>, Box<dyn std::error::Error + Send + Sync>> {
+        T::object_location(self, scope, kind, object_id)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
+    fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::remember_object_location(self, scope, kind, object_id)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
+    fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Box<dyn std::error::Error + Send + Sync>> {
+        T::lookup_xet_file_identity(self, scope, sha256)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
+    fn supports_atomic_ref_updates(&self) -> bool {
+        T::supports_atomic_ref_updates(self)
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::change_refs_atomically(self, repo_id, changes)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_revision(self, repo_id, sha)
+            .map_err(|error| Box::new(std::io::Error::other(error.to_string())) as _)
+    }
     fn create_repo(
         &self,
         repo_type: HubRepoType,
@@ -909,6 +1192,13 @@ impl<T: HubStore> ErasedHubStore for T {
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(self, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+    fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::publish_prepared_revision(self, revision)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
     fn update_revision_if_current(
@@ -978,11 +1268,7 @@ impl<T: HubStore> ErasedHubStore for T {
                 Box::new(std::io::Error::other(error.to_string()))
                     as Box<dyn std::error::Error + Send + Sync>
             })?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub revisions exceed the requested listing limit",
-                )) as _
-            })
+            .ok_or_else(|| Box::new(HubRevisionListingOverflow) as _)
     }
 
     fn list_revisions(
@@ -1129,12 +1415,106 @@ impl<T: HubStore> ErasedHubStore for T {
 }
 
 impl BoxedHubStore {
+    /// Applies built-in shared creation policy after route scope authorization.
+    /// # Errors
+    /// Returns an error on repository conflict or storage failure.
+    pub fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .create_repo_authorized(repo_type, name, private, actor)
+    }
+    /// Resolves a derived object location for an already authorized repository.
+    /// # Errors
+    /// Returns an error when metadata cannot be read.
+    pub fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<HubObjectLocation>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.object_location(scope, kind, object_id)
+    }
+    /// Records the original physical namespace of an immutable object.
+    /// # Errors
+    /// Returns an error when metadata cannot be persisted.
+    pub fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.remember_object_location(scope, kind, object_id)
+    }
+    /// Read a verified native Xet identity scoped to one repository.
+    /// # Errors
+    /// Returns an error if the backing identity store fails.
+    pub fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Box<dyn std::error::Error + Send + Sync>> {
+        self.xet_identity_lookup.as_ref().map_or_else(
+            || self.inner.lookup_xet_file_identity(scope, sha256),
+            |lookup| lookup(scope, sha256),
+        )
+    }
+
+    /// Connect native identities when Hub metadata and storage records use
+    /// separate databases. The callback must preserve repository scoping.
+    #[must_use]
+    pub fn with_xet_identity_lookup<F>(mut self, lookup: F) -> Self
+    where
+        F: Fn(
+                &shardline_protocol::RepositoryScope,
+                &str,
+            )
+                -> Result<Option<crate::XetFileIdentity>, Box<dyn std::error::Error + Send + Sync>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.xet_identity_lookup = Some(Arc::new(lookup));
+        self
+    }
+    /// Whether the underlying backend supports atomic ref transactions.
+    #[must_use]
+    pub fn supports_atomic_ref_updates(&self) -> bool {
+        self.inner.supports_atomic_ref_updates()
+    }
+    /// Atomically applies conditional ref changes, preserving backend evidence.
+    ///
+    /// # Errors
+    /// Returns an error on storage or integrity failure; no refs are committed.
+    pub fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.change_refs_atomically(repo_id, changes)
+    }
+    /// Reads one immutable, repository-scoped revision without listing history.
+    ///
+    /// # Errors
+    /// Returns an error on metadata storage failure.
+    pub fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.get_revision(repo_id, sha)
+    }
     /// Creates a new `BoxedHubStore` from any `HubStore` implementation.
     pub fn new(
         store: impl HubStore<Error = Box<dyn std::error::Error + Send + Sync>> + 'static,
     ) -> Self {
         Self {
             inner: Arc::new(store),
+            xet_identity_lookup: None,
         }
     }
 
@@ -1144,7 +1524,10 @@ impl BoxedHubStore {
         T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         let erased: Arc<dyn ErasedHubStore> = Arc::new(ErasedAdapter(store));
-        Self { inner: erased }
+        Self {
+            inner: erased,
+            xet_identity_lookup: None,
+        }
     }
 
     /// Creates a repository.
@@ -1226,6 +1609,17 @@ impl BoxedHubStore {
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         self.inner
             .create_revision(repo_id, parent_sha, new_sha, ref_name, message)
+    }
+
+    /// Publishes previously verified metadata without changing its timestamp.
+    ///
+    /// # Errors
+    /// Returns an error on storage, evidence or immutable-metadata failure.
+    pub fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.publish_prepared_revision(revision)
     }
 
     /// Atomically updates an existing ref at exactly `expected_sha`.
@@ -1512,6 +1906,55 @@ impl<T: HubStore> ErasedHubStore for ErasedAdapter<T>
 where
     T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    fn create_repo_authorized(
+        &self,
+        repo_type: HubRepoType,
+        name: &str,
+        private: bool,
+        actor: Option<&HubCreationActor>,
+    ) -> Result<HubCreationOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_repo_authorized(&self.0, repo_type, name, private, actor).map_err(Into::into)
+    }
+    fn object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<Option<HubObjectLocation>, Box<dyn std::error::Error + Send + Sync>> {
+        T::object_location(&self.0, scope, kind, object_id).map_err(Into::into)
+    }
+    fn remember_object_location(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        kind: HubObjectKind,
+        object_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::remember_object_location(&self.0, scope, kind, object_id).map_err(Into::into)
+    }
+    fn lookup_xet_file_identity(
+        &self,
+        scope: &shardline_protocol::RepositoryScope,
+        sha256: &str,
+    ) -> Result<Option<crate::XetFileIdentity>, Box<dyn std::error::Error + Send + Sync>> {
+        T::lookup_xet_file_identity(&self.0, scope, sha256).map_err(Into::into)
+    }
+    fn supports_atomic_ref_updates(&self) -> bool {
+        T::supports_atomic_ref_updates(&self.0)
+    }
+    fn change_refs_atomically(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+    ) -> Result<HubRefBatchOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::change_refs_atomically(&self.0, repo_id, changes).map_err(Into::into)
+    }
+    fn get_revision(
+        &self,
+        repo_id: &str,
+        sha: &str,
+    ) -> Result<Option<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_revision(&self.0, repo_id, sha).map_err(Into::into)
+    }
     fn create_repo(
         &self,
         repo_type: HubRepoType,
@@ -1562,6 +2005,12 @@ where
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
             .map_err(Into::into)
+    }
+    fn publish_prepared_revision(
+        &self,
+        revision: &HubRevision,
+    ) -> Result<HubRefUpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::publish_prepared_revision(&self.0, revision).map_err(Into::into)
     }
     fn update_revision_if_current(
         &self,
@@ -1629,11 +2078,7 @@ where
                 Box::new(std::io::Error::other(error.to_string()))
                     as Box<dyn std::error::Error + Send + Sync>
             })?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub revisions exceed the requested listing limit",
-                )) as _
-            })
+            .ok_or_else(|| Box::new(HubRevisionListingOverflow) as _)
     }
 
     fn list_revisions(

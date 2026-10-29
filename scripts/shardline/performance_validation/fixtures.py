@@ -14,7 +14,13 @@ from .measurements import RequestTrace, inventory_summary
 
 
 def dispose(container):
-    subprocess.run(["docker", "rm", "-f", container], check=True, stdout=subprocess.DEVNULL)
+    command("docker", "rm", "-f", container)
+
+
+def require_running_server(container):
+    state = json.loads(command("docker", "inspect", container))[0]["State"]
+    if not state["Running"]:
+        raise RuntimeError("benchmark server exited during startup; raw diagnostics withheld")
 
 
 class Deployment:
@@ -43,8 +49,8 @@ class Deployment:
                                      "-p", "127.0.0.1::9000", MINIO, "server", "/data")
             # The image's temporary initialization server accepts Unix sockets
             # before restarting. TCP readiness waits for the final server.
-            ready(lambda: subprocess.run(["docker", "exec", self.pg, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
+            ready(lambda: command("docker", "exec", self.pg, "pg_isready", "-h",
+                                  "127.0.0.1", "-U", "postgres", timeout=2) is not None)
             self.endpoint = f"http://127.0.0.1:{port(self.s3, 9000)}"
             self.client = boto3.client("s3", endpoint_url=self.endpoint,
                                        aws_access_key_id="performance",
@@ -78,7 +84,9 @@ class Deployment:
         return command("docker", "exec", self.pg, "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
                        "-U", "postgres", "-d", database, "-c", query.strip())
 
-    def lane(self, name, replicas):
+    def lane(self, name, replicas, frontend="s3"):
+        if frontend not in ("s3", "hub"):
+            raise ValueError("unsupported benchmark frontend")
         lane = self.output / name
         lane.mkdir()
         (lane / "empty.toml").touch()
@@ -96,12 +104,16 @@ class Deployment:
                     "SHARDLINE_AUTH_PROVIDER": "local",
                     "SHARDLINE_TOKEN_SIGNING_KEY": "0123456789abcdef0123456789abcdef"}
         self.config = str(lane / "empty.toml")
+        if frontend == "hub":
+            # Disposable loopback fixture still exercises encrypted secrets.
+            self.env["SHARDLINE_HUB_WEBHOOK_SECRET_KEY"] = "0123456789abcdef0123456789abcdef"
         with (lane / "migration.log").open("w") as log:
-            subprocess.run([self.binary, "--config", self.config, "db", "migrate", "up",
-                            "--database-url", database], env=self.env, stdout=log,
-                           stderr=subprocess.STDOUT, check=True, timeout=120)
+            command(self.binary, "--config", self.config, "db", "migrate", "up",
+                    "--database-url", database, env=self.env, stdout=log,
+                    stderr=subprocess.STDOUT, timeout=120)
         self.token = command(self.binary, "--config", self.config, "admin", "token", "--issuer", "fixture",
-                             "--subject", "fixture", "--scope", "write", "--provider", "generic",
+                             "--subject", "fixture", "--scope", "write", "--provider",
+                             "github" if frontend == "hub" else "generic",
                              "--owner", "team", "--repo", "bench", "--key-env",
                              "SHARDLINE_TOKEN_SIGNING_KEY", env=self.env)
         self.servers = []
@@ -123,16 +135,15 @@ class Deployment:
                                        "-v", f"{self.ca_bundle}:/ca-certificates.crt:ro",
                                        "-v", f"{lane}:/fixture:z", *arguments,
                                        "debian:13-slim", "/shardline", "--config", "/fixture/empty.toml",
-                                       "serve", "--role", "api", "--frontend", "s3")
+                                       "serve", "--role", "all" if frontend == "hub" else "api",
+                                       "--frontend", frontend)
             self.servers.append(container)
             self.ports.append(listen)
         from benchmark_gc_contention import request
         import http.client
         for container, listen in zip(self.servers, self.ports):
             def healthy():
-                state = json.loads(command("docker", "inspect", container))[0]["State"]
-                if not state["Running"]:
-                    raise RuntimeError(command("docker", "logs", container, stderr=subprocess.STDOUT))
+                require_running_server(container)
                 connection = http.client.HTTPConnection("127.0.0.1", listen, timeout=2)
                 try:
                     request(connection, "GET", "/readyz")
@@ -144,8 +155,9 @@ class Deployment:
             "http://", "http://performance:owned_performance_password@"))
         self.trace = RequestTrace(subprocess.Popen(
             ["mc", "admin", "trace", "--json", "--verbose", "--call", "s3", "performance"],
-            env=mc_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True),
-            self.client, name, self.endpoint)
+            env=mc_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            start_new_session=os.name == "posix"),
+            self.client, name, self.endpoint, owns_process_group=os.name == "posix")
         return lane
 
     def inventory(self, name):
@@ -155,14 +167,18 @@ class Deployment:
     def gc(self, log):
         with log.open("w") as output:
             start = time.monotonic()
-            subprocess.run([self.binary, "--config", self.config, "gc", "--mark", "--sweep",
-                            "--retention-seconds", "0"], env=self.env, stdout=output,
-                           stderr=subprocess.STDOUT, check=True, timeout=180)
+            command(self.binary, "--config", self.config, "gc", "--mark", "--sweep",
+                    "--retention-seconds", "0", env=self.env, stdout=output,
+                    stderr=subprocess.STDOUT, timeout=180)
             return time.monotonic() - start
 
     def stop_lane(self, lane):
         if hasattr(self, "trace"):
             self.trace.close()
+            # Preserve sanitized observations even when a lane fails before it
+            # can publish results. These are diagnostics, not a qualified run.
+            (lane / "backend-request-trace.json").write_text(
+                json.dumps(self.trace.events, indent=2) + "\n")
             del self.trace
         for index, server in enumerate(self.servers):
             (lane / f"server-{index}.log").write_text(command("docker", "logs", server, stderr=subprocess.STDOUT))
@@ -170,6 +186,8 @@ class Deployment:
         self.servers = []
 
     def close(self):
-        if hasattr(self, "trace"):
-            self.trace.close()
-        self.stack.close()
+        try:
+            if hasattr(self, "trace"):
+                self.trace.close()
+        finally:
+            self.stack.close()

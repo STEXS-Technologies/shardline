@@ -20,6 +20,25 @@ fn checksum(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(Md5::digest(bytes))
 }
 
+fn sha256_checksum(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(bytes))
+}
+
+fn crc_checksum(algorithm: &str, bytes: &[u8]) -> String {
+    let crc64 = algorithm == "CRC64NVME";
+    let algorithm = match algorithm {
+        "CRC32" => crc_fast::CrcAlgorithm::Crc32IsoHdlc,
+        "CRC32C" => crc_fast::CrcAlgorithm::Crc32Iscsi,
+        "CRC64NVME" => crc_fast::CrcAlgorithm::Crc64Nvme,
+        _ => panic!("unsupported test checksum algorithm: {algorithm}"),
+    };
+    let mut digest = crc_fast::Digest::new(algorithm);
+    digest.update(bytes);
+    let digest = digest.finalize().to_be_bytes();
+    let checksum = if crc64 { &digest[..] } else { &digest[4..] };
+    base64::engine::general_purpose::STANDARD.encode(checksum)
+}
+
 fn upload_id(xml: &str) -> &str {
     xml.split_once("<UploadId>")
         .unwrap()
@@ -91,11 +110,78 @@ async fn assert_request_integrity(database_url: Option<&str>) {
         .put(&object)
         .bearer_auth(&token)
         .header("content-md5", checksum(b"original"))
+        .header("x-amz-checksum-sha256", sha256_checksum(b"original"))
         .body("original")
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amz-checksum-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        sha256_checksum(b"original")
+    );
+    let attributes = client
+        .get(format!("{object}?attributes"))
+        .bearer_auth(&token)
+        .header("x-amz-object-attributes", "Checksum")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(attributes.status(), 200);
+    let attributes = attributes.text().await.unwrap();
+    assert!(attributes.contains("<ChecksumSHA256>"), "{attributes}");
+    assert!(attributes.contains("<ChecksumType>FULL_OBJECT</ChecksumType>"));
+    let head = client
+        .head(&object)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200);
+    assert_eq!(
+        head.headers()["x-amz-checksum-sha256"],
+        sha256_checksum(b"original")
+    );
+    assert_eq!(head.headers()["x-amz-checksum-type"], "FULL_OBJECT");
+    let get = client
+        .get(&object)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(
+        get.headers()["x-amz-checksum-sha256"],
+        sha256_checksum(b"original")
+    );
+    assert_eq!(get.bytes().await.unwrap().as_ref(), b"original");
+    let response = client
+        .put(&object)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-sha256", sha256_checksum(b"not-original"))
+        .body("must-not-land")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(response.text().await.unwrap().contains("BadDigest"));
+    let bytes = client
+        .get(&object)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"original");
     for (md5, code) in [(wrong, "BadDigest"), ("malformed", "InvalidDigest")] {
         let response = client
             .put(&object)
@@ -125,6 +211,7 @@ async fn assert_request_integrity(database_url: Option<&str>) {
             .put(&object)
             .bearer_auth(&token)
             .header("content-md5", digest)
+            .header("x-amz-checksum-sha256", sha256_checksum(b"original"))
             .header("content-encoding", "aws-chunked")
             .header("x-amz-decoded-content-length", "8")
             .body(framed)
@@ -152,6 +239,150 @@ async fn assert_request_integrity(database_url: Option<&str>) {
     let response = client
         .post(format!("{multipart}?uploads"))
         .bearer_auth(&token)
+        .header("x-amz-checksum-algorithm", "SHA256")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let create_xml = response.text().await.unwrap();
+    assert!(create_xml.contains("<ChecksumAlgorithm>SHA256</ChecksumAlgorithm>"));
+    assert!(create_xml.contains("<ChecksumType>COMPOSITE</ChecksumType>"));
+    let sha_upload = upload_id(&create_xml).to_owned();
+    let sha_part = b"sha256 multipart payload";
+    let sha_part_checksum = sha256_checksum(sha_part);
+    let rejected_sha_part = client
+        .put(format!("{multipart}?uploadId={sha_upload}&partNumber=1"))
+        .bearer_auth(&token)
+        .header(
+            "x-amz-checksum-sha256",
+            sha256_checksum(b"wrong sha256 part"),
+        )
+        .body(sha_part.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected_sha_part.status(), 400);
+    assert!(
+        rejected_sha_part
+            .text()
+            .await
+            .unwrap()
+            .contains("BadDigest")
+    );
+    let sha_part_response = client
+        .put(format!("{multipart}?uploadId={sha_upload}&partNumber=1"))
+        .bearer_auth(&token)
+        .header("x-amz-checksum-sha256", &sha_part_checksum)
+        .body(sha_part.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sha_part_response.status(), 200);
+    let sha_etag = sha_part_response.headers()["etag"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let sha_completion = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{sha_etag}</ETag><ChecksumSHA256>{sha_part_checksum}</ChecksumSHA256></Part></CompleteMultipartUpload>"
+    );
+    let completed = client
+        .post(format!("{multipart}?uploadId={sha_upload}"))
+        .bearer_auth(&token)
+        .body(sha_completion)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), 200);
+    let completed_xml = completed.text().await.unwrap();
+    assert!(
+        completed_xml.contains("<ChecksumSHA256>"),
+        "{completed_xml}"
+    );
+    assert!(completed_xml.contains("<ChecksumType>COMPOSITE</ChecksumType>"));
+    let attributes = client
+        .get(format!("{multipart}?attributes"))
+        .bearer_auth(&token)
+        .header("x-amz-object-attributes", "Checksum,ObjectParts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(attributes.status(), 200);
+    let attributes = attributes.text().await.unwrap();
+    assert!(attributes.contains("<ChecksumSHA256>"), "{attributes}");
+    let head = client
+        .head(&multipart)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-mode", "ENABLED")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200);
+    assert!(head.headers().contains_key("x-amz-checksum-sha256"));
+    assert_eq!(head.headers()["x-amz-checksum-type"], "COMPOSITE");
+    for (algorithm, checksum_type) in [
+        ("CRC64NVME", "COMPOSITE"),
+        ("SHA1", "FULL_OBJECT"),
+        ("SHA256", "FULL_OBJECT"),
+    ] {
+        let rejected = client
+            .post(format!("{multipart}?uploads"))
+            .bearer_auth(&token)
+            .header("x-amz-checksum-algorithm", algorithm)
+            .header("x-amz-checksum-type", checksum_type)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), 501, "{algorithm} {checksum_type}");
+    }
+    for (algorithm, checksum_header) in [
+        ("CRC32", "x-amz-checksum-crc32"),
+        ("CRC32C", "x-amz-checksum-crc32c"),
+        ("CRC64NVME", "x-amz-checksum-crc64nvme"),
+    ] {
+        let payload = format!("{algorithm} FULL_OBJECT multipart payload");
+        let create = client
+            .post(format!("{multipart}?uploads"))
+            .bearer_auth(&token)
+            .header("x-amz-checksum-algorithm", algorithm)
+            .header("x-amz-checksum-type", "FULL_OBJECT")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(create.status(), 200, "{algorithm} FULL_OBJECT");
+        let id = upload_id(&create.text().await.unwrap()).to_owned();
+        let part = client
+            .put(format!("{multipart}?uploadId={id}&partNumber=1"))
+            .bearer_auth(&token)
+            .body(payload.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(part.status(), 200, "{algorithm} part upload");
+        let etag = part.headers()["etag"].to_str().unwrap().to_owned();
+        let expected = crc_checksum(algorithm, payload.as_bytes());
+        let completed = client
+            .post(format!("{multipart}?uploadId={id}"))
+            .bearer_auth(&token)
+            .header(checksum_header, &expected)
+            .body(completion(&etag))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(completed.status(), 200, "{algorithm} completion");
+        let object = client
+            .head(&multipart)
+            .bearer_auth(&token)
+            .header("x-amz-checksum-mode", "ENABLED")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(object.status(), 200, "{algorithm} HEAD");
+        assert_eq!(object.headers()[checksum_header], expected);
+        assert_eq!(object.headers()["x-amz-checksum-type"], "FULL_OBJECT");
+    }
+    let response = client
+        .post(format!("{multipart}?uploads"))
+        .bearer_auth(&token)
         .send()
         .await
         .unwrap();
@@ -163,11 +394,21 @@ async fn assert_request_integrity(database_url: Option<&str>) {
         .put(&part_url)
         .bearer_auth(&token)
         .header("content-md5", checksum(b"original-part"))
+        .header("x-amz-checksum-sha256", sha256_checksum(b"original-part"))
         .body("original-part")
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amz-checksum-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        sha256_checksum(b"original-part")
+    );
     let original_etag = response
         .headers()
         .get("etag")
@@ -175,12 +416,23 @@ async fn assert_request_integrity(database_url: Option<&str>) {
         .to_str()
         .unwrap()
         .to_owned();
+    let response = client
+        .put(&part_url)
+        .bearer_auth(&token)
+        .header("x-amz-checksum-sha256", sha256_checksum(b"original-part"))
+        .body("bad-part")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(response.text().await.unwrap().contains("BadDigest"));
     let framed =
         "d;chunk-signature=deadbeef\r\noriginal-part\r\n0;chunk-signature=deadbeef\r\n\r\n";
     let response = client
         .put(&part_url)
         .bearer_auth(&token)
         .header("content-md5", checksum(b"original-part"))
+        .header("x-amz-checksum-sha256", sha256_checksum(b"original-part"))
         .header("content-encoding", "aws-chunked")
         .header("x-amz-decoded-content-length", "13")
         .body(framed)
@@ -377,7 +629,7 @@ async fn s3_request_checksums_and_interrupted_part_overwrites_preserve_acknowled
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_request_checksums_preserve_acknowledged_state() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    let Some(url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
     assert_request_integrity(Some(&url)).await;

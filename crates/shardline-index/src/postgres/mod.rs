@@ -1,5 +1,9 @@
 mod index_store;
+mod lfs_locks;
+#[cfg(test)]
+mod membership_tests;
 mod oci_objects;
+mod oci_referrers;
 mod oci_tags;
 mod provider_mutation;
 mod record_store;
@@ -12,6 +16,9 @@ mod tree_store;
 mod types;
 mod upload_intent_ownership;
 mod upload_recovery_guard;
+mod upload_transitions;
+mod xet_xorb;
+pub(crate) use record_store::{admit_record_conversion, run_record_conversion};
 
 pub(crate) use index_store::{
     insert_reliability_event, load_postgres_latest_evidence_event,

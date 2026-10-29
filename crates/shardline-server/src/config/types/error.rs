@@ -110,6 +110,12 @@ pub enum ServerConfigError {
     /// The maximum request body size was zero.
     #[error("max request body size must be greater than zero")]
     ZeroMaxRequestBodyBytes,
+    /// The native Xorb wire-size limit could not be parsed.
+    #[error("invalid max Xorb body size")]
+    MaxXorbBodyBytes(ParseIntError),
+    /// The native Xorb wire-size limit was zero.
+    #[error("max Xorb body size must be greater than zero")]
+    ZeroMaxXorbBodyBytes,
     /// The maximum shard file section count could not be parsed.
     #[error("invalid max shard file section count")]
     MaxShardFiles(ParseIntError),

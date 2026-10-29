@@ -1,4 +1,4 @@
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::http::HeaderMap;
 use axum::{
     Json,
@@ -6,28 +6,24 @@ use axum::{
 };
 use tracing;
 
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
-
-use crate::{
-    commit::{self, CommitInstruction, ParsedCommit},
-    error::HubApiError,
-    models::*,
-};
-use shardline_index::hub::HubFileEntry;
+use crate::{commit::ParsedCommit, error::HubApiError, models::*};
+use shardline_index::hub::{HubFileEntry, HubRefUpdateOutcome, canonical_ref_name};
 use shardline_server_core::AuthorizedRepository;
 
 use super::{HubRepository, HubState, deliver_webhook_events, lfs_object_key};
 
-/// Commit NDJSON is control metadata; inline files larger than this should use
-/// the LFS flow. Keeping the request bounded prevents a giant JSON envelope
-/// from becoming a heap-sized upload.
-const MAX_COMMIT_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+mod publication;
+mod stream;
+
+/// Keep inline commits comfortably below the bounded NDJSON request limit.
+/// Larger Hub files use the existing LFS object flow.
+const MAX_INLINE_HUB_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 // ---- Preupload (requires Write) ----
 
 pub(crate) async fn preupload(
     State(state): State<HubState>,
-    _repo: HubRepository<true>,
+    repo: HubRepository<true>,
     Path((_repo_type, ns, repo_name, rev)): Path<(String, String, String, String)>,
     Json(request): Json<PreuploadRequest>,
 ) -> Result<Json<PreuploadResponse>, HubApiError> {
@@ -38,11 +34,11 @@ pub(crate) async fn preupload(
         )));
     }
     let name = format!("{ns}/{repo_name}");
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &rev)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
+    let commit_sha =
+        crate::git::smart_http::resolve_commit_id(&state, &name, &rev, repo.capability())?
+            .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(&state, &name, &rev, &commit_sha, repo.capability())
+        .await?;
 
     let existing_files = state
         .store
@@ -60,7 +56,11 @@ pub(crate) async fn preupload(
         .map(|f| PreuploadResult {
             exists: existing_paths.contains(f.path.as_str()),
             path: f.path,
-            upload_mode: "regular".to_owned(),
+            upload_mode: if f.lfs || f.size > MAX_INLINE_HUB_FILE_BYTES {
+                "lfs".to_owned()
+            } else {
+                "regular".to_owned()
+            },
             should_ignore: false,
         })
         .collect();
@@ -93,31 +93,76 @@ pub(crate) async fn commit(
             "commit requires Content-Type: application/x-ndjson or application/json".to_owned(),
         ));
     }
-    let body = to_bytes(body, MAX_COMMIT_REQUEST_BYTES)
-        .await
-        .map_err(|error| HubApiError::PathValidation(format!("commit body too large: {error}")))?;
-    let body = std::str::from_utf8(&body).map_err(|error| {
-        HubApiError::PathValidation(format!("commit body is not UTF-8: {error}"))
-    })?;
     let name = format!("{ns}/{repo_name}");
-    let parent_sha = state
-        .store
-        .resolve_revision(&name, &rev)
-        .map_err(|e| {
-            tracing::error!(error = %e, repo = %name, rev = %rev, "resolve_revision failed");
-            HubApiError::CasError(e.to_string())
-        })?
-        .ok_or(HubApiError::RevisionNotFound)?;
-    let parsed = match commit::parse_ndjson_commit(body) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, repo = %name, "parse_ndjson_commit failed");
-            return Err(e);
-        }
-    };
+    let parent_sha =
+        crate::git::smart_http::resolve_commit_id(&state, &name, &rev, repo.capability())?
+            .ok_or(HubApiError::RevisionNotFound)?;
     // The extractor minted a Write-scoped capability; its repository scope
     // namespaces the object-store writes so cross-tenant content stays isolated.
-    match apply_commit(&state, &name, &parent_sha, &parsed, repo.capability()).await {
+    // Retain the legacy explicit-parent commit URL as a conditional main
+    // update. Named revisions must publish to that branch, never to main.
+    let explicit_commit = rev == parent_sha
+        || (rev.len() == 40
+            && rev.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && rev
+                == crate::git::smart_http::public_commit_id(
+                    &state,
+                    &name,
+                    &parent_sha,
+                    repo.capability(),
+                )
+                .await?);
+    let target_ref = if explicit_commit || rev == "HEAD" {
+        "main"
+    } else {
+        canonical_ref_name(&rev)
+    };
+    if target_ref.starts_with("refs/")
+        || !crate::git::smart_http::ref_advertisement::is_valid_refname(&format!(
+            "refs/heads/{target_ref}"
+        ))
+    {
+        return Err(HubApiError::BadRequest(
+            "commits require a branch reference".to_owned(),
+        ));
+    }
+    crate::revision_access::authorize_write(&name, target_ref, repo.capability())?;
+    // Resolving a readable revision can find a tag. Require an actual branch
+    // before consuming uploads; retrying publication must not turn tag writes
+    // into missing-branch errors or accidentally create a branch from a tag.
+    if !explicit_commit
+        && state
+            .store
+            .resolve_revision(&name, &format!("refs/heads/{target_ref}"))
+            .map_err(|error| HubApiError::CasError(error.to_string()))?
+            .is_none()
+    {
+        return Err(HubApiError::BadRequest(
+            "commits require a branch reference".to_owned(),
+        ));
+    }
+    let (parsed, instructions) =
+        match stream::parse(body, state.clone(), repo.capability().clone()).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, repo = %name, "parse_ndjson_commit failed");
+                return Err(e);
+            }
+        };
+    match publication::publish(
+        &state,
+        &name,
+        publication::CommitTarget {
+            parent_sha: &parent_sha,
+            ref_name: target_ref,
+            retry_if_moved: parsed.parent_commit.is_none() && !explicit_commit,
+        },
+        &parsed,
+        &instructions,
+        repo.capability(),
+    )
+    .await
+    {
         Ok(response) => {
             shardline_metrics::record_hub_api_request("commit", "POST", 200);
             shardline_metrics::record_hub_api_commit("ndjson");
@@ -131,6 +176,7 @@ pub(crate) async fn commit(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn apply_commit(
     state: &HubState,
     repo_id: &str,
@@ -138,14 +184,45 @@ pub(crate) async fn apply_commit(
     parsed: &ParsedCommit,
     auth: &AuthorizedRepository,
 ) -> Result<Json<CommitResponse>, HubApiError> {
+    try_apply_commit_to_ref(
+        state,
+        repo_id,
+        parent_sha,
+        "main",
+        parsed,
+        parsed
+            .instructions
+            .iter()
+            .map(|instruction| stream::prepare(state, auth, instruction)),
+        auth,
+    )
+    .await?
+    .ok_or_else(branch_changed)
+}
+
+fn branch_changed() -> HubApiError {
+    HubApiError::Conflict("branch moved or was deleted".to_owned())
+}
+
+async fn try_apply_commit_to_ref(
+    state: &HubState,
+    repo_id: &str,
+    parent_sha: &str,
+    target_ref: &str,
+    parsed: &ParsedCommit,
+    instructions: impl Iterator<Item = Result<stream::PreparedInstruction, HubApiError>>,
+    auth: &AuthorizedRepository,
+) -> Result<Option<Json<CommitResponse>>, HubApiError> {
     // HUB-004: Validate that the NDJSON body's parentCommit (if present) matches
     // the URL path's parent_sha. A mismatch indicates a stale or conflicting request.
-    if let Some(ref body_parent) = parsed.parent_commit
-        && body_parent != parent_sha
-    {
-        return Err(HubApiError::Conflict(format!(
-            "parentCommit mismatch: body specified {body_parent} but URL resolved to {parent_sha}"
-        )));
+    if let Some(ref body_parent) = parsed.parent_commit {
+        let resolved_parent =
+            crate::git::smart_http::resolve_commit_id(state, repo_id, body_parent, auth)?;
+        if resolved_parent.as_deref() != Some(parent_sha) {
+            return Err(HubApiError::Conflict(format!(
+                "parentCommit mismatch: body specified {body_parent} but URL resolved to {parent_sha}"
+            )));
+        }
     }
 
     let existing_files: Vec<HubFileEntry> = state.store.get_files(parent_sha).map_err(|e| {
@@ -160,58 +237,17 @@ pub(crate) async fn apply_commit(
         .map(|file| (file.path.clone(), file))
         .collect();
 
-    for instruction in &parsed.instructions {
-        match instruction {
-            CommitInstruction::InlineFile { path, content } => {
-                let sha = {
-                    let mut h = blake3::Hasher::new();
-                    h.update(content);
-                    hex::encode(h.finalize().as_bytes())
-                };
-                let size = content.len() as u64;
-
-                // Store in ObjectStore, namespaced by repository so the same
-                // content in different repos maps to different storage objects.
-                let key = lfs_object_key(&sha, auth)?;
-                let body = ObjectBody::from_slice(content);
-                let integrity = ObjectIntegrity::new(
-                    shardline_protocol::ShardlineHash::from_bytes(
-                        *blake3::hash(content).as_bytes(),
-                    ),
-                    size,
-                );
-                state
-                    .object_store
-                    .put_if_absent(&key, body, &integrity)
-                    .map_err(|e| HubApiError::CasError(e.to_string()))?;
-
-                files.insert(
-                    path.clone(),
-                    HubFileEntry {
-                        path: path.clone(),
-                        size,
-                        sha: sha.clone(),
-                        is_lfs: false,
-                    },
-                );
+    for instruction in instructions {
+        match instruction? {
+            stream::PreparedInstruction::File(file) => {
+                files.insert(file.path.clone(), file);
             }
-            CommitInstruction::LfsPointer { path, oid, size } => {
-                commit::validate_lfs_oid(oid).map_err(|e| {
-                    tracing::error!(error = %e, oid, path, "invalid LFS OID");
-                    HubApiError::PathValidation(format!("invalid LFS OID: {e}"))
-                })?;
-                files.insert(
-                    path.clone(),
-                    HubFileEntry {
-                        path: path.clone(),
-                        size: *size,
-                        sha: oid.clone(),
-                        is_lfs: true,
-                    },
-                );
-            }
-            CommitInstruction::Delete { path } => {
-                files.remove(path);
+            stream::PreparedInstruction::Delete(path) => {
+                if path.ends_with('/') {
+                    files.retain(|candidate, _| !candidate.starts_with(&path));
+                } else {
+                    files.remove(&path);
+                }
             }
         }
     }
@@ -234,6 +270,7 @@ pub(crate) async fn apply_commit(
     let paths: std::collections::HashSet<&str> =
         files.iter().map(|file| file.path.as_str()).collect();
     for file in &files {
+        crate::git::smart_http::validate_projected_path(&file.path)?;
         for (separator, _) in file.path.match_indices('/') {
             let ancestor = file.path.get(..separator).ok_or_else(|| {
                 HubApiError::PathValidation("invalid file path boundary".to_owned())
@@ -266,42 +303,53 @@ pub(crate) async fn apply_commit(
     ))?;
     let commit_sha = blake3::hash(&identity).to_hex().to_string();
 
-    // HUB-008: Orphan cleanup trade-off.
-    //
-    // `store_files` writes content-addressed blobs, then `create_revision` records the
-    // new revision pointer. If `store_files` succeeds but `create_revision` fails, the
-    // stored files become orphaned (no revision references them). This is acceptable
-    // because:
-    //   1. Content-addressed files are idempotent — retries won't create duplicates.
-    //   2. Orphans are small relative to the body limit and can be reclaimed by a
-    //      background GC sweep if needed.
-    //   3. Swapping the order (revision first, then files) requires a placeholder
-    //      revision state and is more complex for marginal gain.
-    state.store.store_files(&commit_sha, &files).map_err(|e| {
-        tracing::error!(error = %e, commit_sha, "store_files failed");
-        HubApiError::CasError(e.to_string())
-    })?;
-    state
+    // HUB-008: Immutable payloads may remain unpublished after failed requests.
+    // Prepare Git evidence before storing the final file-entry rows, then
+    // publish the ref last. A rejected projection never writes those rows.
+    let created_at_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .as_secs();
+    let prepared = crate::git::smart_http::prepare_publication(
+        state,
+        shardline_index::hub::HubRevision {
+            repo_id: repo_id.to_owned(),
+            ref_name: target_ref.to_owned(),
+            sha: commit_sha.clone(),
+            parent_sha: Some(parent_sha.to_owned()),
+            message: Some(parsed.message.clone()),
+            created_at_unix_seconds,
+        },
+        files,
+        auth,
+    )
+    .await?;
+    // Every payload read, Git limit check and archive write has succeeded.
+    // Only the existing metadata/evidence transaction may now advance the ref.
+    match state
         .store
-        .create_revision(
-            repo_id,
-            Some(parent_sha),
-            &commit_sha,
-            "main",
-            &parsed.message,
-        )
-        .map_err(|e| {
-            tracing::error!(error = %e, commit_sha, repo_id, "create_revision failed");
-            HubApiError::CasError(e.to_string())
-        })?;
+        .publish_prepared_revision(&prepared.revision)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+    {
+        HubRefUpdateOutcome::Updated(_) => {}
+        HubRefUpdateOutcome::Conflict => {
+            return Ok(None);
+        }
+        HubRefUpdateOutcome::Unsupported => {
+            return Err(HubApiError::CasError(
+                "store does not support prepared atomic branch publication".to_owned(),
+            ));
+        }
+    }
 
     // Fire webhook deliveries in the background (non-blocking).
     deliver_webhook_events(state, repo_id, "push", &commit_sha).await;
 
-    Ok(Json(CommitResponse {
+    let public_sha = prepared.public_id;
+    Ok(Some(Json(CommitResponse {
         commit_id: commit_sha.clone(),
-        commit_oid: commit_sha.clone(),
-        commit_url: format!("/{repo_id}/commit/{commit_sha}"),
-        ref_name: Some("main".to_owned()),
-    }))
+        commit_oid: public_sha.clone(),
+        commit_url: format!("/{repo_id}/commit/{public_sha}"),
+        ref_name: Some(target_ref.to_owned()),
+    })))
 }

@@ -57,9 +57,9 @@ fuzz_target!(|data: (
             "release_after={ra:?} <= now={r_now} should expire",
             ra = r_release
         );
-    } else if !r_exists {
-        assert_eq!(r1, FuzzRetentionAction::DeleteMissing);
     } else {
+        // An absent object may arrive later; neither finite nor permanent
+        // protection ends merely because its bytes are currently missing.
         assert_eq!(r1, FuzzRetentionAction::Keep);
     }
 

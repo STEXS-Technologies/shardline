@@ -20,10 +20,7 @@ use crate::{
 };
 
 use super::{
-    io::{
-        self, ensure_file_matches_bytes, ensure_files_match, open_existing_object_file,
-        verify_file_integrity,
-    },
+    io::{self, ensure_file_matches_bytes, ensure_files_match, open_existing_object_file},
     metadata::{self, ensure_regular_file_metadata, modified_unix_nanos, object_file_metadata},
     util::verify_integrity,
     walk::{self, read_dir_if_exists},
@@ -119,11 +116,70 @@ impl LocalObjectStore {
         open_existing_object_file(&path)
     }
 
+    /// Opens an existing object without treating absence as an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the object path exists but cannot be safely opened.
+    pub fn open_object_file_if_present(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<Option<File>, LocalObjectStoreError> {
+        match self.open_object_file(key) {
+            Ok(file) => Ok(Some(file)),
+            Err(LocalObjectStoreError::Io(error)) if error.kind() == ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Confirms that `pinned` is still the object published at `key` and makes
+    /// its bytes and directory entry durable before acknowledging a duplicate.
+    ///
+    /// This is useful after comparing an incoming stream directly against an
+    /// already-open immutable object. If the name was removed or replaced
+    /// during that comparison, the caller must retry instead of acknowledging.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the object name changed, the filesystem cannot sync
+    /// it, or the local path no longer resolves to the anchored store.
+    #[cfg(unix)]
+    pub fn verify_open_object_is_still_durable(
+        &self,
+        key: &ObjectKey,
+        pinned: &File,
+    ) -> Result<(), LocalObjectStoreError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let path = self.key_path(key);
+        metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
+        let pinned_metadata = pinned.metadata()?;
+        verify_existing_object_durable(&self.root, &path, |anchored_path| {
+            let current = open_existing_object_file(anchored_path)?;
+            let current_metadata = current.metadata()?;
+            if (pinned_metadata.dev(), pinned_metadata.ino())
+                != (current_metadata.dev(), current_metadata.ino())
+            {
+                return Err(LocalObjectStoreError::Io(IoError::new(
+                    ErrorKind::NotFound,
+                    "local object changed while verifying duplicate upload",
+                )));
+            }
+            Ok::<File, LocalObjectStoreError>(current)
+        })?;
+        Ok(())
+    }
+
     /// Stores a temporary file if no identical object exists yet.
     ///
-    /// The temporary file is consumed and removed on every successful outcome. Callers
-    /// should create it on the same filesystem as the store root so installation can
-    /// use an atomic hard-link operation.
+    /// The temporary file is consumed and removed on every successful outcome. When
+    /// it is on the same filesystem as the store root, installation uses an atomic
+    /// hard link; cross-filesystem sources are copied to a target-side temporary file
+    /// before the same atomic publication step.
+    /// The caller must exclusively own the staging file: no other handle may
+    /// modify it during installation or after its inode is published.
     ///
     /// # Errors
     ///
@@ -135,17 +191,13 @@ impl LocalObjectStore {
         temporary: &Path,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, LocalObjectStoreError> {
-        let verified_source = verify_file_integrity(temporary, integrity)?;
+        // Pin the source now; hash it inside the anchored publication boundary.
+        // Hashing here as well would add a redundant full-file read.
+        let verified_source = open_existing_object_file(temporary)?;
         let path = self.key_path(key);
-        metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
-        io::link_temporary_file_if_absent(
-            &self.root,
-            &path,
-            temporary,
-            &verified_source,
-            integrity,
-            None,
-        )
+        // The installation helper validates the same parent immediately before
+        // publication; do not repeat that complete walk at this boundary.
+        io::link_temporary_file_if_absent(&self.root, &path, temporary, &verified_source, integrity)
     }
 
     /// Copies an existing object to a new key if the destination is absent.
@@ -267,6 +319,34 @@ impl LocalObjectStore {
     }
 }
 
+impl LocalObjectStore {
+    fn put_authenticated_bytes(
+        &self,
+        key: &ObjectKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, LocalObjectStoreError> {
+        let path = self.key_path(key);
+        metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
+        // This observation only selects the path. Reuse still opens the file
+        // through its pinned parent and compares every byte before syncing.
+        // Do not open and immediately discard another handle just to test
+        // whether the target exists.
+        if object_file_metadata(&path)?.is_some() {
+            verify_existing_object_durable(&self.root, &path, |anchored_path| {
+                let file = open_existing_object_file(anchored_path)?;
+                ensure_file_matches_bytes(file.try_clone()?, body)?;
+                Ok::<File, LocalObjectStoreError>(file)
+            })?;
+            return Ok(PutOutcome::AlreadyExists);
+        }
+
+        match put_bytes_if_absent(&self.root, &path, body).map_err(LocalObjectStoreError::Io)? {
+            PutBytesIfAbsentOutcome::Inserted => Ok(PutOutcome::Inserted),
+            PutBytesIfAbsentOutcome::AlreadyExists => Ok(PutOutcome::AlreadyExists),
+        }
+    }
+}
+
 impl ObjectStore for LocalObjectStore {
     type Error = LocalObjectStoreError;
 
@@ -277,27 +357,22 @@ impl ObjectStore for LocalObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, Self::Error> {
         verify_integrity(body.as_slice(), integrity)?;
-        let path = self.key_path(key);
-        metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
-        match open_existing_object_file(&path) {
-            Ok(_) => {
-                verify_existing_object_durable(&self.root, &path, |anchored_path| {
-                    let file = open_existing_object_file(anchored_path)?;
-                    ensure_file_matches_bytes(file.try_clone()?, body.as_slice())?;
-                    Ok::<File, LocalObjectStoreError>(file)
-                })?;
-                return Ok(PutOutcome::AlreadyExists);
-            }
-            Err(LocalObjectStoreError::Io(error)) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        self.put_authenticated_bytes(key, body.as_slice())
+    }
 
-        match put_bytes_if_absent(&self.root, &path, body.as_slice())
-            .map_err(LocalObjectStoreError::Io)?
-        {
-            PutBytesIfAbsentOutcome::Inserted => Ok(PutOutcome::Inserted),
-            PutBytesIfAbsentOutcome::AlreadyExists => Ok(PutOutcome::AlreadyExists),
+    fn put_verified_if_absent(
+        &self,
+        key: &ObjectKey,
+        body: crate::VerifiedObjectBody,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, Self::Error> {
+        if body.integrity().length() != integrity.length() {
+            return Err(LocalObjectStoreError::IntegrityLengthMismatch);
         }
+        if body.integrity().hash() != integrity.hash() {
+            return Err(LocalObjectStoreError::IntegrityHashMismatch);
+        }
+        self.put_authenticated_bytes(key, &body)
     }
 
     fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
@@ -399,9 +474,9 @@ impl AsyncObjectStore for LocalObjectStore {
         let this = self.clone();
         let key = key.clone();
         let integrity = *integrity;
-        let body_bytes = body.as_slice().to_vec();
+        let body_bytes = body.into_bytes();
         tokio::task::spawn_blocking(move || {
-            ObjectStore::put_if_absent(&this, &key, ObjectBody::from_vec(body_bytes), &integrity)
+            ObjectStore::put_if_absent(&this, &key, ObjectBody::from_bytes(body_bytes), &integrity)
         })
         .await
         .map_err(|join| {

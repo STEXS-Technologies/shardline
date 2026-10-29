@@ -148,6 +148,7 @@ pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lf
 pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
 mod gc_tests;
+mod native_chunk_read;
 mod transfer_limiter;
 mod upload_identity;
 pub mod upload_ingest;
@@ -159,9 +160,9 @@ pub use backup::{BackupManifestReport, write_backup_manifest};
 #[cfg(feature = "fuzzing")]
 pub use config::file::parse_toml_config_for_fuzzing;
 pub use config::{
-    AuthProviderKind, DeploymentMode, ObjectStorageAdapter, ServerConfig, ServerConfigError,
-    ShardMetadataLimits, env::load_index_postgres_url_from_toml, file::load_toml_config,
-    load_server_config_from_env_with_toml, validate_chunk_size,
+    AuthProviderKind, DeploymentMode, ObjectStorageAdapter, S3SigningIdentity, ServerConfig,
+    ServerConfigError, ShardMetadataLimits, env::load_index_postgres_url_from_toml,
+    file::load_toml_config, load_server_config_from_env_with_toml, validate_chunk_size,
 };
 pub use database_migration::{
     DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand, DatabaseMigrationError,

@@ -68,22 +68,30 @@ pub(crate) fn setup() -> HubTestContext {
     let store = LocalIndexStore::open(root.clone());
     let boxed = BoxedHubStore::from_store(store);
     let object_store = ServerObjectStore::local(root.join("lfs")).expect("local object store");
-    let state = HubState {
-        store: boxed,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
-
-    HubTestContext {
-        _temp_dir: temp_dir,
-        state,
-    }
+    HubTestContext::with_backend(temp_dir, boxed, object_store)
 }
 
 impl HubTestContext {
+    pub(crate) fn with_backend(
+        temp_dir: TempDir,
+        store: BoxedHubStore,
+        object_store: ServerObjectStore,
+    ) -> Self {
+        let state = HubState {
+            store,
+            object_store,
+            auth: None,
+            http_client: None,
+            webhook_secret_cipher: None,
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
+        };
+
+        Self {
+            _temp_dir: temp_dir,
+            state,
+        }
+    }
+
     pub(crate) const fn state(&self) -> &HubState {
         &self.state
     }

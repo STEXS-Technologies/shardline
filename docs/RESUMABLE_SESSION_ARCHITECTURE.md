@@ -24,6 +24,13 @@ The design covers incomplete, externally visible protocol operations:
 Completed CAS objects remain unchanged. Session objects are private,
 unreachable by normal readers, and have a bounded TTL.
 
+Postgres-coordinated LFS completion streams the authoritative range fragments
+from local or S3 storage without creating a full-file assembly copy. Later
+generations win overlapping ranges. The completed logical byte stream still
+passes full SHA-256 verification before publication; independent part hashes
+cannot replace that check. Local fragment reads use anchored file handles and
+bounded buffers, and durable session fragments remain available for retries.
+
 ## Durable model
 
 Every session has an opaque random ID and one immutable identity:
@@ -87,9 +94,41 @@ reaper first changes `active` to `expired` with a conditional update, then
 deletes unreachable temporary objects asynchronously. It must not delete an
 object still referenced by the current range/part map.
 
+## Shared ingestion and protocol boundaries
+
+Frontends translate their wire requests into shared storage operations. S3
+objects, Hub/LFS files, OCI blobs and Bazel CAS entries use the common file
+ingestor for streamed chunking, digest verification and bounded packing. Local
+and PostgreSQL backends use the same body-consumption loop; their publication
+locks, fencing checks and metadata transactions remain backend-specific.
+
+Native Xet uploads already contain client-built Xorbs and shards. Their
+format-specific preparation validates those structures instead of chunking the
+wire bytes as an ordinary file. It shares admission and immutable storage
+machinery with the other paths. An Xorb-decoder optimization therefore benefits
+Xet transfers; a common packing or storage improvement can benefit multiple
+frontends. Neither implies equal measured speedups across protocols.
+
+Resumable protocols still own their part ordering, range maps and retry state.
+Acknowledged resume data must remain durable until completion or safe expiry;
+removing disposable verification copies does not remove that requirement.
+Preparation writes immutable bytes, while fenced metadata publication controls
+visibility. Protocol handlers must not substitute their own publication path.
+
 ## Protocol-specific publication
 
 ### S3 multipart
+
+On Unix, PostgreSQL-coordinated uploads with local object storage receive each
+part into a private file under the existing resumable staging namespace. The
+parent directory stays pinned through publication; the verified file becomes
+the immutable part by hard link on the same filesystem. This avoids copying a
+part from a separate system-temporary filesystem. A cancelled publication worker
+retains its file and directory handles until it finishes. Unpublished receiving
+files left by a crash use the existing staging GC, while acknowledged parts
+remain protected by the durable session map. Other platforms retain their
+existing staging behavior. This is a placement change, not removal of durable
+resume data or a measured throughput improvement.
 
 `UploadPart` writes one immutable temporary object. The part map is keyed by
 `(session_id, part_number)` and stores its current generation, object key,

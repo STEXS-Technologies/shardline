@@ -1,3 +1,5 @@
+mod role_split_remote;
+mod role_split_signed_urls;
 mod support;
 
 use std::{
@@ -31,11 +33,7 @@ use support::ServerE2eInvariantError;
 /// topology through the authenticated admin API (the unauthenticated /readyz
 /// no longer carries runtime metadata).
 const TEST_ADMIN_TOKEN: &str = "role-split-admin-read-token";
-use tokio::{
-    net::TcpListener,
-    spawn,
-    time::{sleep, timeout},
-};
+use tokio::{net::TcpListener, spawn, time::timeout};
 use xet_client::cas_client::auth::AuthConfig;
 use xet_data::processing::{
     FileDownloadSession, FileUploadSession, Sha256Policy, XetFileInfo,
@@ -97,7 +95,7 @@ async fn transfer_role_serves_transfer_routes_only() {
 async fn split_roles_support_native_xet_through_path_routed_proxy() {
     match timeout(
         Duration::from_secs(60),
-        exercise_split_role_native_xet_flow(),
+        exercise_split_role_native_xet_flow(None),
     )
     .await
     {
@@ -146,7 +144,11 @@ async fn exercise_role(
 
     // /readyz reports health only; runtime topology comes from the
     // authenticated admin status endpoint.
-    let readyz = client.get(format!("{base_url}/readyz")).send().await?.error_for_status()?;
+    let readyz = client
+        .get(format!("{base_url}/readyz"))
+        .send()
+        .await?
+        .error_for_status()?;
     assert_eq!(readyz.status(), StatusCode::OK, "readyz should be healthy");
     let ready = client
         .get(format!("{base_url}/api/v1/status"))
@@ -178,29 +180,15 @@ async fn exercise_role(
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20))
+        .await
+        .map_err(Into::into)
 }
 
 async fn wait_for_ready(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    for _attempt in 0..100 {
-        if let Ok(response) = client.get(format!("{base_url}/readyz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become ready").into())
+    support::wait_for_endpoint(client, base_url, "readyz", 100, Duration::from_millis(20))
+        .await
+        .map_err(Into::into)
 }
 
 async fn start_frontend_role_runtime(
@@ -318,13 +306,14 @@ async fn exercise_oci_role_surface(role: ServerRole) -> Result<(), Box<dyn Error
 
 #[derive(Debug, Clone)]
 struct SplitProxyState {
-    access_token: String,
     api_base_url: String,
     client: Client,
     transfer_base_url: String,
 }
 
-async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
+async fn exercise_split_role_native_xet_flow(
+    services: Option<&shardline_test_support::DockerLocalStack>,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let client_root = tempfile::tempdir()?;
 
@@ -345,6 +334,7 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     )
     .with_server_role(ServerRole::Api)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
+    let api_config = role_split_remote::configure(api_config, services)?;
     let api_server = spawn(async move { serve_with_listener(api_config, api_listener).await });
 
     // Both roles initialize the same local SQLite metadata store. Complete
@@ -365,6 +355,7 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     )
     .with_server_role(ServerRole::Transfer)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
+    let transfer_config = role_split_remote::configure(transfer_config, services)?;
     let transfer_server =
         spawn(async move { serve_with_listener(transfer_config, transfer_listener).await });
 
@@ -383,12 +374,23 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
         .fallback(any(handle_split_proxy))
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(SplitProxyState {
-            access_token: write_token.clone(),
             api_base_url,
             client: client.clone(),
             transfer_base_url,
         });
     let proxy_server = spawn(async move { serve_http(proxy_listener, proxy_router).await });
+
+    // Routing must never turn an unauthenticated request into an authorized
+    // one. Native clients supply their own credentials; signed transfer URLs
+    // must work using only their advertised capability.
+    let unauthenticated = client
+        .get(format!(
+            "{proxy_base_url}/v1/reconstructions/{}",
+            "a".repeat(64)
+        ))
+        .send()
+        .await?;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
     let translator = authenticated_translator(&proxy_base_url, client_root.path(), &write_token)?;
     let first_bytes = seeded_bytes(384 * 1024, 0x19);
@@ -402,6 +404,9 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     assert!(first_metrics.total_bytes > 0);
     assert!(second_metrics.deduped_chunks > 0);
     assert!(second_metrics.new_bytes < second_metrics.total_bytes);
+
+    role_split_signed_urls::verify(&client, &proxy_base_url, &write_token, first_info.hash())
+        .await?;
 
     let download_session = FileDownloadSession::new(translator, None).await?;
     let first_output = client_root.path().join("split-first.out");
@@ -512,23 +517,17 @@ async fn handle_split_proxy(
         .unwrap_or_else(|| uri.path().to_owned());
     let upstream_base_url = select_upstream_base_url(&path_and_query, &state);
     let upstream_url = format!("{upstream_base_url}{path_and_query}");
-    let has_authorization = headers.contains_key("authorization");
     let request = state
         .client
         .request(method, upstream_url)
         .headers(headers)
         .body(body);
-    let request = if has_authorization {
-        request
-    } else {
-        request.bearer_auth(&state.access_token)
-    };
     let response = match request.send().await {
         Ok(built_response) => built_response,
-        Err(error) => {
+        Err(_error) => {
             return response_with_status(
                 StatusCode::BAD_GATEWAY,
-                format!("split proxy request failed: {error}"),
+                "split proxy request failed".to_owned(),
             );
         }
     };
@@ -536,10 +535,10 @@ async fn handle_split_proxy(
     let upstream_headers = response.headers().clone();
     let body_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
-        Err(error) => {
+        Err(_error) => {
             return response_with_status(
                 StatusCode::BAD_GATEWAY,
-                format!("split proxy body read failed: {error}"),
+                "split proxy body read failed".to_owned(),
             );
         }
     };

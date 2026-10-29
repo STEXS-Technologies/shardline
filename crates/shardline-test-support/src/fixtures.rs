@@ -9,7 +9,6 @@ use thiserror::Error;
 
 #[cfg(feature = "docker")]
 pub use crate::docker::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};
-#[cfg(feature = "docker")]
 pub use crate::s3_fault_proxy::{S3FaultProxy, S3ProxyFault};
 
 /// Error type for test-only invariant failures.

@@ -186,11 +186,20 @@ impl StreamContext {
 /// runtime for the process lifetime once any stream has been used. This mirrors
 /// hf-xet's shared `TaskRuntime` (the per-session variant arrives with the
 /// stream-group layer, M2b2).
+///
+/// This is an I/O bridge shared by all clients, not a host-sized CPU pool.
+/// Keep its workers bounded: spreading short wire/decode allocations across
+/// every host core leaves separate allocator arenas resident long after the
+/// byte reservations have been released. Network concurrency remains governed
+/// by the existing per-client permits.
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn global_blocking_runtime() -> Result<Arc<tokio::runtime::Runtime>, SdxError> {
     static RUNTIME: OnceLock<Result<Arc<tokio::runtime::Runtime>, String>> = OnceLock::new();
     let slot = RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(
+                std::thread::available_parallelism().map_or(1, |count| count.get().min(2)),
+            )
             .enable_all()
             .build()
             .map(Arc::new)

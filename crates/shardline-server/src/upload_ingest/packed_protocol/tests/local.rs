@@ -10,6 +10,7 @@ async fn ingest(
         NonZeroUsize::new(64 * 1024).unwrap(),
         false,
         NonZeroUsize::new(8).unwrap(),
+        &crate::admission::ExecutionPools::default_sizes().hashing,
     );
     if direct {
         upload = upload.with_packed_protocol_storage(
@@ -30,7 +31,7 @@ async fn ingest(
         .0
 }
 
-async fn assert_read(
+pub(super) async fn assert_read(
     store: &ServerObjectStore,
     record: &shardline_index::FileRecord,
     expected: &[u8],
@@ -52,6 +53,43 @@ async fn assert_read(
         offset = end;
     }
     assert_eq!(offset, expected.len());
+}
+
+#[tokio::test]
+async fn public_upload_packs_before_eof_and_cancellation_releases_batch_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ServerObjectStore::local(root.path().to_owned()).unwrap();
+    let pool = crate::admission::BoundedPool::new(NonZeroUsize::MIN);
+    let mut upload = FileUploadIngestor::new_with_parallelism(
+        NonZeroUsize::new(64 * 1024).unwrap(),
+        false,
+        NonZeroUsize::new(8).unwrap(),
+        &pool,
+    );
+    let frame = Bytes::from(vec![0x5a; 64 * 1024]);
+    for _ in 0..(34 * 1024 / 64) {
+        upload.ingest_body_chunk(&store, &frame).await.unwrap();
+    }
+    assert!(
+        !ObjectStore::list_prefix(&store, &ObjectPrefix::parse("xorbs/").unwrap())
+            .unwrap()
+            .is_empty(),
+        "a bounded container must persist before the whole upload reaches EOF"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), pool.acquire_buffer())
+            .await
+            .is_err(),
+        "the pending raw batch must retain admission"
+    );
+    crate::admission::blocking_work(&pool, || Ok(()))
+        .await
+        .unwrap();
+    drop(upload);
+    let _released = tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire_buffer())
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

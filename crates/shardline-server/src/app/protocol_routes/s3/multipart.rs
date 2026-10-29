@@ -23,7 +23,13 @@
 //! re-acquiring the per-root lock for metadata
 //! mutations.
 
+mod listing;
+pub(super) use listing::{s3_list_parts, s3_list_uploads};
+
+use super::checksum::{self, MultipartChecksumAlgorithm, PayloadChecksum};
+
 use std::{
+    collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
     time::Instant,
@@ -42,11 +48,12 @@ use shardline_index::{
     ResumableSessionProtocol, ResumableSessionState, S3ObjectEntry, S3PublishCondition,
 };
 use shardline_s3_adapter::{
-    CompleteMultipartUploadResult, InitiateMultipartUploadResult, MultipartPart, PartQuotaLimits,
-    S3Error, S3SessionError, acquire_session_part_lock_for_root, create_session,
+    CompleteMultipartUploadResult, CompleteParts, InitiateMultipartUploadResult, MultipartPart,
+    PartQuotaLimits, S3Error, S3SessionError, acquire_session_part_lock_for_root, create_session,
     delete_session_locked, lock_session_parts, lock_upload_sessions, new_upload_id,
-    parse_complete_multipart_parts, parse_content_md5, read_conditional_headers,
-    read_session_locked, session_dir, store_versioned_part_locked, stored_part_file_path,
+    parse_complete_multipart_parts, parse_content_md5, read_session_locked,
+    read_wire_conditional_headers as read_conditional_headers, session_dir,
+    store_versioned_part_with_checksum_locked, stored_part_file_path,
     validate_part_quota_for_session_locked, versioned_part_file_name,
 };
 use shardline_storage::ObjectKey;
@@ -72,8 +79,34 @@ fn io_to_s3(error: std::io::Error) -> S3Error {
     S3Error::from(ServerError::Io(error))
 }
 
+fn requested_part_checksum(
+    requested: &CompleteParts,
+    part_number: u32,
+    algorithm: MultipartChecksumAlgorithm,
+) -> Option<&str> {
+    requested.checksum(part_number, algorithm.s3_name())
+}
+
+fn requested_part_has_checksum(requested: &CompleteParts, part_number: u32) -> bool {
+    ["CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"]
+        .into_iter()
+        .any(|algorithm| requested.checksum(part_number, algorithm).is_some())
+}
+
+fn requested_part_has_other_checksum(
+    requested: &CompleteParts,
+    part_number: u32,
+    algorithm: MultipartChecksumAlgorithm,
+) -> bool {
+    ["CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"]
+        .into_iter()
+        .any(|candidate| {
+            candidate != algorithm.s3_name() && requested.checksum(part_number, candidate).is_some()
+        })
+}
+
 /// The `413 EntityTooLarge` envelope for an oversized part body.
-fn entity_too_large() -> S3Error {
+pub(super) fn entity_too_large() -> S3Error {
     S3Error {
         code: "EntityTooLarge",
         message: "Your proposed upload exceeds the maximum allowed part size".to_owned(),
@@ -113,6 +146,17 @@ fn store_error_to_s3(error: S3SessionError) -> S3Error {
 struct DurableS3SessionAttributes {
     bucket: String,
     user_metadata: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    part_checksums: BTreeMap<u32, DurableS3PartChecksum>,
+    #[serde(default)]
+    initiated_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableS3PartChecksum {
+    algorithm: String,
+    checksum: String,
+    generation: u64,
 }
 
 const fn durable_sessions_enabled(state: &AppState) -> bool {
@@ -130,13 +174,20 @@ pub(super) async fn s3_create_multipart_upload(
 ) -> Result<Response, S3Error> {
     // S3 user metadata is supplied at CreateMultipartUpload and applied to the
     // completed object.
-    let user_metadata = object::capture_user_metadata(headers)?;
+    let mut user_metadata = object::capture_user_metadata(headers)?;
+    super::object_headers::capture_headers(headers, &mut user_metadata)?;
+    if let Some(tags) = super::tagging::parse_header(headers)? {
+        super::tagging::replace_metadata(&mut user_metadata, &tags)?;
+    }
+    user_metadata.retain(|(name, _)| {
+        !checksum::is_internal_metadata(name) || super::object_headers::is_internal_metadata(name)
+    });
+    let checksum_algorithm = checksum::negotiate_multipart(headers, &mut user_metadata)?;
+    let checksum_config = checksum::multipart_checksum_config(&user_metadata);
     if durable_sessions_enabled(state) {
         let upload_id = new_upload_id();
-        let expires_at = state
-            .backend
-            .postgres_now()
-            .await?
+        let initiated_at = state.backend.postgres_now().await?;
+        let expires_at = initiated_at
             .checked_add(std::time::Duration::from_secs(
                 state.config.s3_upload_session_ttl_seconds().get(),
             ))
@@ -144,6 +195,8 @@ pub(super) async fn s3_create_multipart_upload(
         let attributes = serde_json::to_string(&DurableS3SessionAttributes {
             bucket: context.bucket.clone(),
             user_metadata,
+            part_checksums: BTreeMap::new(),
+            initiated_at: Some(initiated_at.as_secs()),
         })
         .map_err(|_error| S3Error::internal())?;
         let session = ResumableSession::new(
@@ -173,6 +226,8 @@ pub(super) async fn s3_create_multipart_upload(
             bucket: context.bucket.clone(),
             key: context.key.clone(),
             upload_id,
+            checksum_algorithm: checksum_algorithm.map(|algorithm| algorithm.s3_name().to_owned()),
+            checksum_type: checksum_config.map(|config| config.checksum_type.s3_name().to_owned()),
         }
         .to_xml();
         return Ok((
@@ -197,6 +252,8 @@ pub(super) async fn s3_create_multipart_upload(
         bucket: context.bucket.clone(),
         key: context.key.clone(),
         upload_id,
+        checksum_algorithm: checksum_algorithm.map(|algorithm| algorithm.s3_name().to_owned()),
+        checksum_type: checksum_config.map(|config| config.checksum_type.s3_name().to_owned()),
     }
     .to_xml();
     Ok((
@@ -311,9 +368,22 @@ pub(super) async fn s3_upload_part(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    let payload_checksum = checksum::parse(headers)?;
     if durable_sessions_enabled(state) {
-        return durable_s3_upload_part(state, context, part_number, upload_id, headers, body).await;
+        return durable_s3_upload_part(
+            state,
+            context,
+            part_number,
+            upload_id,
+            headers,
+            body,
+            payload_checksum,
+        )
+        .await;
     }
+    let response_checksum = payload_checksum
+        .as_ref()
+        .map(|checksum| (checksum.header(), checksum.expected().to_owned()));
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
     let session_quota = state.config.s3_upload_session_max_bytes();
@@ -332,6 +402,10 @@ pub(super) async fn s3_upload_part(
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
+    checksum::validate_part_checksum_header(
+        checksum::multipart_checksum_config(&session.user_metadata),
+        payload_checksum.as_ref(),
+    )?;
 
     // The part's current contribution to the session total (an overwrite
     // replaces the old size), used for the pre-write quota projection and the
@@ -418,6 +492,10 @@ pub(super) async fn s3_upload_part(
         ));
     }
 
+    if let Some(payload_checksum) = payload_checksum {
+        body = checksum::verify_body(body, payload_checksum);
+    }
+
     let expected_md5 = parse_content_md5(headers)?;
     let md5 = Arc::new(Mutex::new(Md5::new()));
     body = body.with_md5_tee_and_expected(md5.clone(), expected_md5);
@@ -496,13 +574,20 @@ pub(super) async fn s3_upload_part(
         }
         Err(error) => return Err(io_to_s3(error.error)),
     };
-    let publication = store_versioned_part_locked(
+    let part_checksum =
+        checksum::multipart_checksum_algorithm(&current.user_metadata).and_then(|algorithm| {
+            response_checksum
+                .as_ref()
+                .map(|(_, value)| (algorithm.s3_name(), value.as_str()))
+        });
+    let publication = store_versioned_part_with_checksum_locked(
         root,
         upload_id,
         part_number,
         new_part.clone(),
         &context.scope_namespace,
         &context.key,
+        part_checksum,
         ttl,
         session_quota,
         total_quota,
@@ -537,6 +622,12 @@ pub(super) async fn s3_upload_part(
         ETAG,
         HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
     );
+    if let Some((header, value)) = response_checksum {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(header),
+            HeaderValue::from_str(&value).map_err(|_error| S3Error::internal())?,
+        );
+    }
     Ok(response)
 }
 
@@ -547,7 +638,11 @@ async fn durable_s3_upload_part(
     upload_id: &str,
     headers: &HeaderMap,
     body: Body,
+    payload_checksum: Option<PayloadChecksum>,
 ) -> Result<Response, S3Error> {
+    let response_checksum = payload_checksum
+        .as_ref()
+        .map(|checksum| (checksum.header(), checksum.expected().to_owned()));
     let session = state
         .backend
         .resumable_session_by_id(upload_id)
@@ -559,7 +654,12 @@ async fn durable_s3_upload_part(
                 && session.target_key() == context.key
         })
         .ok_or_else(S3Error::no_such_upload)?;
-    let _session = session;
+    let session_attributes: DurableS3SessionAttributes =
+        serde_json::from_str(session.attributes_json()).map_err(|_error| S3Error::internal())?;
+    checksum::validate_part_checksum_header(
+        checksum::multipart_checksum_config(&session_attributes.user_metadata),
+        payload_checksum.as_ref(),
+    )?;
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
         .map_err(|_error| S3Error::internal())?;
     let max_bytes = NonZeroUsize::new(max_bytes).ok_or_else(S3Error::internal)?;
@@ -583,6 +683,10 @@ async fn durable_s3_upload_part(
         ));
     }
 
+    if let Some(payload_checksum) = payload_checksum {
+        reader = checksum::verify_body(reader, payload_checksum);
+    }
+
     let expected_md5 = parse_content_md5(headers)?;
     let md5 = Arc::new(Mutex::new(Md5::new()));
     reader = reader.with_md5_tee_and_expected(md5.clone(), expected_md5);
@@ -599,6 +703,23 @@ async fn durable_s3_upload_part(
         }
         shardline_server_core::ServerObjectStore::Local(_)
         | shardline_server_core::ServerObjectStore::Blackhole => {
+            #[cfg(unix)]
+            let (temporary, anchor) = match &store {
+                shardline_server_core::ServerObjectStore::Local(local) => {
+                    let prefix = format!("staging/resumable/s3/{upload_id}/{part_number}");
+                    let (temporary, anchor) =
+                        crate::object_store::local_resumable_staging_file(local, &prefix)
+                            .map_err(io_to_s3)?;
+                    (temporary, Some(anchor))
+                }
+                shardline_server_core::ServerObjectStore::Blackhole => {
+                    (tempfile::NamedTempFile::new().map_err(io_to_s3)?, None)
+                }
+                shardline_server_core::ServerObjectStore::S3(_) => {
+                    return Err(S3Error::internal());
+                }
+            };
+            #[cfg(not(unix))]
             let temporary = tempfile::NamedTempFile::new().map_err(io_to_s3)?;
             let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(io_to_s3)?);
             let mut hasher = blake3::Hasher::new();
@@ -626,6 +747,16 @@ async fn durable_s3_upload_part(
             let path = temporary.path().to_path_buf();
             let durable_key = staging_key.clone();
             tokio::task::spawn_blocking(move || {
+                // A detached writer must own the staging file and pinned
+                // directory until verified publication finishes.
+                let _temporary = temporary;
+                #[cfg(unix)]
+                if let Some(anchor) = &anchor {
+                    shardline_storage::ensure_parent_path_matches_anchor(
+                        anchor,
+                        "staging parent changed",
+                    )?;
+                }
                 store.put_content_addressed_file(&durable_key, &path, &integrity)
             })
             .await
@@ -637,15 +768,22 @@ async fn durable_s3_upload_part(
 
     let part_number = NonZeroU64::new(u64::from(part_number)).ok_or_else(S3Error::invalid_part)?;
     let etag = shardline_s3_adapter::etag_header(&object::md5_hasher_hex(&md5));
+    let part_checksum = checksum::multipart_checksum_algorithm(&session_attributes.user_metadata)
+        .and_then(|algorithm| {
+            response_checksum
+                .as_ref()
+                .map(|(_, value)| (algorithm.s3_name(), value.as_str()))
+        });
     match state
         .backend
-        .publish_resumable_part_bounded(
+        .publish_resumable_part_bounded_with_checksum(
             upload_id,
             part_number,
             staging_key.as_str(),
             size_bytes,
             Some(&etag),
             None,
+            part_checksum,
             state.config.s3_upload_session_max_bytes().get(),
             state.config.s3_upload_total_max_bytes().get(),
             state.config.s3_upload_max_active_part_files().get(),
@@ -671,6 +809,12 @@ async fn durable_s3_upload_part(
         ETAG,
         HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
     );
+    if let Some((header, value)) = response_checksum {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(header),
+            HeaderValue::from_str(&value).map_err(|_error| S3Error::internal())?,
+        );
+    }
     Ok(response)
 }
 
@@ -685,8 +829,9 @@ async fn durable_s3_upload_part(
 /// object (upload-then-swap, like `PutObject`): the new record is streamed
 /// first, then the listing-index row is upserted and any stale direct object
 /// dropped. Responds `200` with the `CompleteMultipartUploadResult` XML
-/// envelope (`ETag` = the BLAKE3 root content hash — identical to a single
-/// `PutObject` of the same bytes).
+/// envelope. The ETag is the hex MD5 of the assembled object bytes, matching
+/// the frontend's single-PUT validator and checksum-verifying S3 clients.
+#[allow(clippy::option_if_let_else)]
 pub(super) async fn s3_complete_multipart_upload(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
@@ -715,7 +860,7 @@ pub(super) async fn s3_complete_multipart_upload(
         return Err(S3Error::no_such_upload());
     }
     // User metadata was captured at CreateMultipartUpload; apply it now.
-    let user_metadata = session.user_metadata.clone();
+    let mut user_metadata = session.user_metadata.clone();
 
     // Parse the Complete request body (the client echoes the part
     // numbers/etags it uploaded; selected MD5 identities are checked below).
@@ -729,6 +874,51 @@ pub(super) async fn s3_complete_multipart_upload(
         .map_err(S3Error::from)?;
     let body_str = std::str::from_utf8(&bytes).map_err(|_error| S3Error::invalid_part())?;
     let requested = parse_complete_multipart_parts(body_str)?;
+    let checksum_config = checksum::multipart_checksum_config(&user_metadata);
+    let checksum_algorithm = checksum_config.map(|config| config.algorithm);
+    let full_object_expected = if let Some(config) = checksum_config {
+        checksum::full_object_completion_checksum(headers, config)?
+    } else {
+        checksum::reject_unverified_headers(headers)?;
+        None
+    };
+    let requested_checksums = if let Some(config) = checksum_config {
+        if session.parts.keys().any(|part_number| {
+            requested_part_has_other_checksum(&requested, *part_number, config.algorithm)
+        }) {
+            return Err(S3Error::invalid_part());
+        }
+        let has_part_checksums = session.parts.keys().any(|part_number| {
+            requested_part_checksum(&requested, *part_number, config.algorithm).is_some()
+        });
+        if config.checksum_type == checksum::MultipartChecksumType::Composite || has_part_checksums
+        {
+            session
+                .parts
+                .iter()
+                .map(|(part_number, part)| {
+                    Ok((
+                        *part_number,
+                        requested_part_checksum(&requested, *part_number, config.algorithm)
+                            .ok_or_else(S3Error::invalid_part)?
+                            .to_owned(),
+                        part.size_bytes,
+                    ))
+                })
+                .collect::<Result<Vec<_>, S3Error>>()?
+        } else {
+            Vec::new()
+        }
+    } else {
+        if session
+            .parts
+            .keys()
+            .any(|part_number| requested_part_has_checksum(&requested, *part_number))
+        {
+            return Err(S3Error::invalid_part());
+        }
+        Vec::new()
+    };
 
     // The client's part set must exactly match the uploaded parts.
     let uploaded_parts: std::collections::BTreeSet<u32> = session.parts.keys().copied().collect();
@@ -802,7 +992,54 @@ pub(super) async fn s3_complete_multipart_upload(
             }
         })
     });
-    let parts_reader = RequestBodyReader::from_stream(part_stream);
+    let mut parts_reader = RequestBodyReader::from_stream(part_stream);
+    if !requested_checksums.is_empty() {
+        parts_reader = checksum::verify_multipart_part_checksums(
+            parts_reader,
+            requested_checksums
+                .iter()
+                .map(|(_, _, size)| *size)
+                .collect(),
+            requested_checksums
+                .iter()
+                .map(|(_, checksum, _)| checksum.clone())
+                .collect(),
+            checksum_algorithm.ok_or_else(S3Error::internal)?,
+        )?;
+    }
+    let full_object_checksum = match checksum_config
+        .filter(|config| config.checksum_type == checksum::MultipartChecksumType::FullObject)
+    {
+        Some(config) => {
+            let (verified_reader, checksum_state) =
+                checksum::verify_full_object(parts_reader, config.algorithm, full_object_expected);
+            parts_reader = verified_reader;
+            Some(checksum_state)
+        }
+        None => None,
+    };
+    let mut checksum_manifest = if checksum_config
+        .is_some_and(|config| config.checksum_type == checksum::MultipartChecksumType::Composite)
+    {
+        Some(checksum::attach_multipart_manifest(
+            &mut user_metadata,
+            checksum_algorithm.ok_or_else(S3Error::internal)?,
+            checksum::MultipartChecksumType::Composite,
+            None,
+            requested_checksums
+                .iter()
+                .map(
+                    |(part_number, checksum_value, size_bytes)| checksum::MultipartPartChecksum {
+                        part_number: *part_number,
+                        size_bytes: *size_bytes,
+                        checksum_value: checksum_value.clone(),
+                    },
+                )
+                .collect(),
+        )?)
+    } else {
+        None
+    };
 
     // Reuse PutObject's lock, conditional recheck, compare-and-swap and
     // conditional-loser cleanup before consuming the multipart session.
@@ -814,9 +1051,23 @@ pub(super) async fn s3_complete_multipart_upload(
         parts_reader,
         user_metadata,
         hasher,
-        Some(headers),
+        object::ObjectUploadOptions {
+            multipart_part_count: u32::try_from(session.parts.len())
+                .map_err(|_error| S3Error::internal())?,
+            full_object_checksum: full_object_checksum.clone(),
+            precondition: Some(headers),
+        },
     )
     .await?;
+
+    if let Some(full_object_checksum) = &full_object_checksum {
+        checksum_manifest = Some(checksum::MultipartChecksumManifest {
+            algorithm: full_object_checksum.algorithm(),
+            checksum_type: checksum::MultipartChecksumType::FullObject,
+            checksum_value: full_object_checksum.value()?,
+            parts: Vec::new(),
+        });
+    }
 
     // The ingest is done; release the per-session lock (never await the
     // global lock while holding it) and consume the session under the global
@@ -831,12 +1082,23 @@ pub(super) async fn s3_complete_multipart_upload(
     // startup or on the next session creation.
     let _ignored = delete_session_locked(root, upload_id).await;
 
-    let xml = CompleteMultipartUploadResult {
+    let completion_result = CompleteMultipartUploadResult {
         bucket: context.bucket.clone(),
         key: context.key.clone(),
         etag,
-    }
-    .to_xml();
+        checksum_crc32: checksum_manifest
+            .as_ref()
+            .filter(|manifest| manifest.algorithm == MultipartChecksumAlgorithm::Crc32)
+            .map(|manifest| manifest.checksum_value.clone()),
+    };
+    let xml = match checksum_manifest.as_ref() {
+        Some(manifest) => completion_result.to_negotiated_checksum_xml(
+            manifest.algorithm.xml_field(),
+            &manifest.checksum_value,
+            manifest.checksum_type.s3_name(),
+        )?,
+        None => completion_result.to_xml(),
+    };
     Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
@@ -845,6 +1107,7 @@ pub(super) async fn s3_complete_multipart_upload(
         .into_response())
 }
 
+#[allow(clippy::option_if_let_else)]
 async fn durable_s3_complete_multipart_upload(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
@@ -888,6 +1151,14 @@ async fn durable_s3_complete_multipart_upload(
     let request_text =
         std::str::from_utf8(&request_bytes).map_err(|_error| S3Error::invalid_part())?;
     let requested = parse_complete_multipart_parts(request_text)?;
+    let checksum_config = checksum::multipart_checksum_config(&candidate_attributes.user_metadata);
+    let checksum_algorithm = checksum_config.map(|config| config.algorithm);
+    let full_object_expected = if let Some(config) = checksum_config {
+        checksum::full_object_completion_checksum(headers, config)?
+    } else {
+        checksum::reject_unverified_headers(headers)?;
+        None
+    };
 
     let (session, parts) = state
         .backend
@@ -895,7 +1166,7 @@ async fn durable_s3_complete_multipart_upload(
         .await?
         .ok_or_else(S3Error::no_such_upload)?;
     let completion = async {
-        let attributes = candidate_attributes;
+        let mut attributes = candidate_attributes;
 
         let uploaded_numbers = parts
             .iter()
@@ -916,6 +1187,53 @@ async fn durable_s3_complete_multipart_upload(
                 return Err(S3Error::invalid_part());
             }
         }
+        let requested_checksums = if let Some(config) = checksum_config {
+            if parts.iter().any(|part| {
+                u32::try_from(part.part_number().get())
+                    .ok()
+                    .is_some_and(|number| {
+                        requested_part_has_other_checksum(&requested, number, config.algorithm)
+                    })
+            }) {
+                return Err(S3Error::invalid_part());
+            }
+            let has_part_checksums = parts.iter().any(|part| {
+                u32::try_from(part.part_number().get())
+                    .ok()
+                    .is_some_and(|number| {
+                        requested_part_checksum(&requested, number, config.algorithm).is_some()
+                    })
+            });
+            if config.checksum_type == checksum::MultipartChecksumType::Composite
+                || has_part_checksums
+            {
+                parts
+                    .iter()
+                    .map(|part| {
+                        let part_number = u32::try_from(part.part_number().get())
+                            .map_err(|_error| S3Error::invalid_part())?;
+                        Ok((
+                            part_number,
+                            requested_part_checksum(&requested, part_number, config.algorithm)
+                                .ok_or_else(S3Error::invalid_part)?
+                                .to_owned(),
+                            part.size_bytes(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, S3Error>>()?
+            } else {
+                Vec::new()
+            }
+        } else {
+            if parts.iter().any(|part| {
+                u32::try_from(part.part_number().get())
+                    .ok()
+                    .is_some_and(|part_number| requested_part_has_checksum(&requested, part_number))
+            }) {
+                return Err(S3Error::invalid_part());
+            }
+            Vec::new()
+        };
         let Some(last_part) = parts.last() else {
             return Err(S3Error::invalid_part());
         };
@@ -928,7 +1246,7 @@ async fn durable_s3_complete_multipart_upload(
         }
 
         let hasher = Arc::new(Mutex::new(Md5::new()));
-        let (reader, _temporary) = if let Some(reader) =
+        let (mut reader, _temporary) = if let Some(reader) =
             s3_resumable_parts_reader(&state.backend.object_store(), &parts).await?
         {
             (reader.with_md5_tee(hasher.clone()), None)
@@ -956,6 +1274,56 @@ async fn durable_s3_complete_multipart_upload(
                     .with_md5_tee(hasher.clone()),
                 Some(temporary),
             )
+        };
+        if !requested_checksums.is_empty() {
+            reader = checksum::verify_multipart_part_checksums(
+                reader,
+                requested_checksums
+                    .iter()
+                    .map(|(_, _, size_bytes)| *size_bytes)
+                    .collect(),
+                requested_checksums
+                    .iter()
+                    .map(|(_, checksum_crc32, _)| checksum_crc32.clone())
+                    .collect(),
+                checksum_algorithm.ok_or_else(S3Error::internal)?,
+            )?;
+        }
+        let full_object_checksum = match checksum_config
+            .filter(|config| config.checksum_type == checksum::MultipartChecksumType::FullObject)
+        {
+            Some(config) => {
+                let (verified_reader, checksum_state) = checksum::verify_full_object(
+                    reader,
+                    config.algorithm,
+                    full_object_expected.clone(),
+                );
+                reader = verified_reader;
+                Some(checksum_state)
+            }
+            None => None,
+        };
+        let mut checksum_manifest = if checksum_config.is_some_and(|config| {
+            config.checksum_type == checksum::MultipartChecksumType::Composite
+        }) {
+            Some(checksum::attach_multipart_manifest(
+                &mut attributes.user_metadata,
+                checksum_algorithm.ok_or_else(S3Error::internal)?,
+                checksum::MultipartChecksumType::Composite,
+                None,
+                requested_checksums
+                    .iter()
+                    .map(|(part_number, checksum_value, size_bytes)| {
+                        checksum::MultipartPartChecksum {
+                            part_number: *part_number,
+                            size_bytes: *size_bytes,
+                            checksum_value: checksum_value.clone(),
+                        }
+                    })
+                    .collect(),
+            )?)
+        } else {
+            None
         };
 
         let object_lock = acquire_object_upload_lock_for_root(
@@ -988,6 +1356,22 @@ async fn durable_s3_complete_multipart_upload(
             .backend
             .prepare_s3_object_stream(&context.object_key, reader)
             .await?;
+        if let Some(full_object_checksum) = &full_object_checksum {
+            let value = full_object_checksum.value()?;
+            checksum_manifest = Some(checksum::MultipartChecksumManifest {
+                algorithm: full_object_checksum.algorithm(),
+                checksum_type: checksum::MultipartChecksumType::FullObject,
+                checksum_value: value.clone(),
+                parts: Vec::new(),
+            });
+            checksum::attach_multipart_manifest(
+                &mut attributes.user_metadata,
+                full_object_checksum.algorithm(),
+                checksum::MultipartChecksumType::FullObject,
+                Some(&value),
+                Vec::new(),
+            )?;
+        }
         metrics::record_upload(
             "s3",
             prepared.response.total_bytes,
@@ -995,6 +1379,7 @@ async fn durable_s3_complete_multipart_upload(
             true,
         );
         let etag = object::md5_hasher_hex(&hasher);
+        let part_count = u32::try_from(parts.len()).map_err(|_error| S3Error::internal())?;
         let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
             .map_err(|_error| S3Error::internal())?;
         let entry = S3ObjectEntry {
@@ -1009,12 +1394,13 @@ async fn durable_s3_complete_multipart_upload(
         };
         let published = state
             .backend
-            .publish_s3_object_locked(
+            .publish_s3_object_locked_with_multipart_count(
                 &mut resource_guard,
                 &prepared,
                 &entry,
                 &condition,
                 Some(&session.completion_fence()),
+                Some(part_count),
             )
             .await?;
         if !published {
@@ -1035,12 +1421,23 @@ async fn durable_s3_complete_multipart_upload(
             .backend
             .delete_direct_object_if_present(&context.object_key)
             .await?;
-        let xml = CompleteMultipartUploadResult {
+        let completion_result = CompleteMultipartUploadResult {
             bucket: context.bucket.clone(),
             key: context.key.clone(),
             etag,
-        }
-        .to_xml();
+            checksum_crc32: checksum_manifest
+                .as_ref()
+                .filter(|manifest| manifest.algorithm == MultipartChecksumAlgorithm::Crc32)
+                .map(|manifest| manifest.checksum_value.clone()),
+        };
+        let xml = match checksum_manifest.as_ref() {
+            Some(manifest) => completion_result.to_negotiated_checksum_xml(
+                manifest.algorithm.xml_field(),
+                &manifest.checksum_value,
+                manifest.checksum_type.s3_name(),
+            )?,
+            None => completion_result.to_xml(),
+        };
         Ok((
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],

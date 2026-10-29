@@ -570,6 +570,36 @@ fn history_scope_bindings_preserve_legacy_results_and_reject_substitution() {
         .unwrap()
         .unwrap();
     assert_eq!(identity.deployment, deployment);
+    assert_eq!(
+        store
+            .history_scope_binding_match_for_manifest_with_binding(
+                &identity,
+                scope,
+                &manifest,
+                Some(&binding),
+            )
+            .unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        store
+            .history_scope_binding_match_for_manifest_with_binding(
+                &identity,
+                other_scope,
+                &manifest,
+                Some(&binding),
+            )
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        store
+            .history_scope_binding_match_for_manifest_with_binding(
+                &identity, scope, &manifest, None,
+            )
+            .unwrap(),
+        None
+    );
     assert!(
         store
             .history_scope_binding_matches(&identity, scope)
@@ -615,13 +645,37 @@ fn history_scope_bindings_preserve_legacy_results_and_reject_substitution() {
             .unwrap(),
         manifest
     );
+    assert_eq!(
+        store
+            .inspect_summaries_with_scope(deployment, Some(scope), None, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .inspect_summaries_with_scope(deployment, Some(other_scope), None, 10)
+            .unwrap()
+            .is_empty()
+    );
     let binding_path = root
         .path()
         .join("chunks/_shardline_tasks/v1/scope-bindings")
         .join(id);
     let mut tampered: serde_json::Value = serde_json::from_slice(&binding).unwrap();
     tampered["scope"] = serde_json::to_value(other_scope).unwrap();
-    std::fs::write(&binding_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
+    assert!(
+        store
+            .history_scope_binding_match_for_manifest_with_binding(
+                &identity,
+                scope,
+                &manifest,
+                Some(&tampered_bytes),
+            )
+            .is_err()
+    );
+    std::fs::write(&binding_path, tampered_bytes).unwrap();
     assert!(
         store
             .history_scope_binding_matches(&identity, scope)
@@ -632,6 +686,13 @@ fn history_scope_bindings_preserve_legacy_results_and_reject_substitution() {
             .history_scope_binding_matches(&identity, other_scope)
             .is_err()
     );
+    let corrupt_scope = store
+        .inspect_summaries_with_scope(deployment, Some(scope), None, 10)
+        .unwrap();
+    assert!(corrupt_scope.iter().any(|entry| matches!(entry,
+        super::status::TaskEvidenceEntry::Unreadable { id: observed, state: TaskRunState::Corrupt, .. }
+        if observed == id
+    )));
     std::fs::write(&binding_path, &binding).unwrap();
     let mut forged = identity.clone();
     forged.operation.push_str("-forged");
@@ -1685,7 +1746,8 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "ALTER ROLE {first_role} SET search_path TO public;
          ALTER ROLE {second_role} SET search_path TO public;
-         GRANT SELECT ON public.shardline_schema_migrations TO {first_role}, {second_role};"
+         GRANT SELECT ON public.shardline_schema_migrations,
+             public.shardline_frontend_schema_v1 TO {first_role}, {second_role};"
     )))
     .execute(&pool)
     .await
@@ -1874,7 +1936,8 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
     second_pool.close().await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "DROP SCHEMA {first_role} CASCADE; DROP SCHEMA {second_role} CASCADE;
-         REVOKE SELECT ON public.shardline_schema_migrations FROM {first_role}, {second_role};
+         REVOKE SELECT ON public.shardline_schema_migrations,
+             public.shardline_frontend_schema_v1 FROM {first_role}, {second_role};
          DROP ROLE {first_role}; DROP ROLE {second_role};"
     )))
     .execute(&pool)

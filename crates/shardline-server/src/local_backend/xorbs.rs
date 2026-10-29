@@ -9,12 +9,11 @@ use shardline_storage::ObjectStore;
 use super::LocalBackend;
 use crate::{
     ServerError,
-    download_stream::{ServerByteStream, object_byte_stream, validated_xorb_byte_range_stream},
-    upload_ingest::{RequestBodyReader, StagedRequestBody, stage_body_for_object_store},
-    xet_adapter::{
-        XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes,
-        store_uploaded_xorb_file_path, xorb_object_key,
+    download_stream::{
+        ServerByteStream, VerifiedXorb, object_byte_stream, prepare_xorb_byte_range,
     },
+    upload_ingest::{RequestBodyReader, prepare_native_xorb, store_admitted_xorb},
+    xet_adapter::{XorbUploadResponse, resolve_dedupe_shard_object, xorb_object_key},
 };
 
 impl LocalBackend {
@@ -47,10 +46,8 @@ impl LocalBackend {
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
         let object_store = self.object_store();
-        let staged = stage_body_for_object_store(&mut body, &object_store).await?;
-        let (staged, body_length) =
-            crate::upload_identity::xorb_length(expected_hash, staged, &self.stream_work_pool)
-                .await?;
+        let (staged, body_length, permit) =
+            prepare_native_xorb(&mut body, expected_hash, &self.stream_work_pool).await?;
         let intent_id = crate::upload_identity::xorb(expected_hash, body_length);
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
@@ -65,20 +62,12 @@ impl LocalBackend {
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
+        let intent = coordinator
+            .content_addressed_upload_attempt(&intent)
+            .await?;
         coordinator
             .with_upload_intent(&intent, move || async move {
-                match staged {
-                    StagedRequestBody::Memory { bytes, .. } => {
-                        store_uploaded_xorb_bytes(&object_store, expected_hash, &bytes)
-                            .await
-                            .map_err(ServerError::from)
-                    }
-                    StagedRequestBody::File { file, .. } => {
-                        store_uploaded_xorb_file_path(&object_store, expected_hash, file.path())
-                            .await
-                            .map_err(ServerError::from)
-                    }
-                }
+                store_admitted_xorb(&object_store, staged, permit).await
             })
             .await
     }
@@ -95,27 +84,25 @@ impl LocalBackend {
         Ok((byte_stream, total_length))
     }
 
-    /// Streams a stored xorb byte range by hash.
+    /// Prepares a fully verified xorb for subsequent range authorization.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the hash is invalid, the xorb is missing, or the
-    /// requested byte range cannot be served.
-    pub(crate) async fn read_xorb_range_stream(
+    /// stored length or content fails verification.
+    pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
-        total_length: u64,
-        range: ByteRange,
-    ) -> Result<ServerByteStream, ServerError> {
+        total_length: Option<u64>,
+    ) -> Result<VerifiedXorb, ServerError> {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        validated_xorb_byte_range_stream(
+        prepare_xorb_byte_range(
             &object_store,
             &object_key,
             hash_hex,
             total_length,
-            range,
             self.stream_work_pool.clone(),
         )
         .await
@@ -135,6 +122,16 @@ impl LocalBackend {
         };
 
         Ok(metadata.length())
+    }
+
+    pub(crate) async fn repository_xorb_coverage(
+        &self,
+        hash: &str,
+        scope: &RepositoryScope,
+        requested: Option<ByteRange>,
+    ) -> Result<crate::record_store::XorbRangeCoverage, ServerError> {
+        crate::record_store::repository_xorb_coverage(&self.record_store, hash, scope, requested)
+            .await
     }
 
     pub(crate) async fn repository_references_xorb(

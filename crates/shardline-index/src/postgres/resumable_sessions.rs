@@ -7,8 +7,7 @@ use sqlx::{Connection, PgConnection, Postgres, Row, Transaction};
 
 use super::{
     PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, insert_reliability_event,
-    load_postgres_latest_evidence_event, load_postgres_latest_evidence_heads,
-    next_reliability_sequence, u64_to_i64,
+    load_postgres_latest_evidence_heads, next_reliability_sequence, u64_to_i64,
 };
 use crate::{
     CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumablePartRange,
@@ -17,6 +16,8 @@ use crate::{
 };
 
 const SESSION_ACCOUNTING_LOCK_ID: i64 = 0x5348_5244_5345_5353;
+
+mod listing_snapshot;
 
 /// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
 fn escape_like(value: &str) -> String {
@@ -684,10 +685,16 @@ impl PostgresIndexStore {
             return Ok(None);
         };
         let session = session_from_row(&row)?;
-        let parts = parts_on_transaction(&mut transaction, session_id).await?;
-        verify_resumable_state_digest_strict(&session, &parts, row.try_get("state_digest")?)?;
+        // Keep the row's shared lock until both metadata and lifecycle evidence
+        // are verified. A completion/abort must not advance the evidence head
+        // between reading the session and checking its corresponding event.
+        verify_resumable_session_page(
+            &mut transaction,
+            std::slice::from_ref(&session),
+            &[row.try_get("state_digest")?],
+        )
+        .await?;
         transaction.commit().await?;
-        self.verify_resumable_session_evidence(&session).await?;
         Ok(Some(session))
     }
 
@@ -810,8 +817,8 @@ impl PostgresIndexStore {
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
         verify_resumable_state_digest_strict(&session, &parts, row.try_get("state_digest")?)?;
+        Self::verify_resumable_session_evidence(&mut transaction, &session).await?;
         transaction.commit().await?;
-        self.verify_resumable_session_evidence(&session).await?;
         Ok(Some((session, parts)))
     }
 
@@ -848,8 +855,8 @@ impl PostgresIndexStore {
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
         verify_resumable_state_digest_strict(&session, &parts, row.try_get("state_digest")?)?;
+        Self::verify_resumable_session_evidence(&mut transaction, &session).await?;
         transaction.commit().await?;
-        self.verify_resumable_session_evidence(&session).await?;
         Ok(Some((session, parts)))
     }
 
@@ -957,8 +964,43 @@ impl PostgresIndexStore {
         aggregate_max_bytes: u64,
         max_active_parts: usize,
     ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
+        self.publish_resumable_part_bounded_with_checksum(
+            session_id,
+            part_number,
+            staging_key,
+            size_bytes,
+            etag,
+            range,
+            None,
+            session_max_bytes,
+            aggregate_max_bytes,
+            max_active_parts,
+        )
+        .await
+    }
+
+    /// Publishes a part and its optional negotiated checksum in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres rejects the transaction or a bound cannot
+    /// be represented.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_resumable_part_bounded_with_checksum(
+        &self,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        range: Option<ResumablePartRange>,
+        checksum: Option<(&str, &str)>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
         let mut connection = self.pool().acquire().await?;
-        Self::publish_resumable_part_bounded_on_connection(
+        Self::publish_resumable_part_bounded_on_connection_with_checksum(
             &mut connection,
             session_id,
             part_number,
@@ -966,6 +1008,7 @@ impl PostgresIndexStore {
             size_bytes,
             etag,
             range,
+            checksum,
             session_max_bytes,
             aggregate_max_bytes,
             max_active_parts,
@@ -991,6 +1034,42 @@ impl PostgresIndexStore {
         aggregate_max_bytes: u64,
         max_active_parts: usize,
     ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
+        Self::publish_resumable_part_bounded_on_connection_with_checksum(
+            connection,
+            session_id,
+            part_number,
+            staging_key,
+            size_bytes,
+            etag,
+            range,
+            None,
+            session_max_bytes,
+            aggregate_max_bytes,
+            max_active_parts,
+        )
+        .await
+    }
+
+    /// Publishes a part and its checksum using the caller's lock-owning connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection is lost, Postgres rejects the
+    /// transaction, or a bound cannot be represented.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_resumable_part_bounded_on_connection_with_checksum(
+        connection: &mut PgConnection,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        range: Option<ResumablePartRange>,
+        checksum: Option<(&str, &str)>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(SESSION_ACCOUNTING_LOCK_ID)
@@ -1010,7 +1089,7 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(PublishResumablePartOutcome::SessionUnavailable);
         };
-        let session = session_from_row(&row)?;
+        let mut session = session_from_row(&row)?;
         let generation = u64_to_i64(session.generation().get())?;
         let part_number_i64 = u64_to_i64(part_number.get())?;
         let mut parts = parts_on_transaction(&mut transaction, session_id).await?;
@@ -1066,6 +1145,35 @@ impl PostgresIndexStore {
         {
             transaction.rollback().await?;
             return Ok(PublishResumablePartOutcome::TooManyParts);
+        }
+        if let Some((algorithm, checksum_value)) = checksum {
+            let updated = sqlx::query(
+                "UPDATE shardline_resumable_sessions
+                 SET attributes_json = (
+                     attributes_json::jsonb || jsonb_build_object(
+                         'part_checksums',
+                         COALESCE(attributes_json::jsonb -> 'part_checksums', '{}'::jsonb)
+                         || jsonb_build_object(
+                             $2::text,
+                             jsonb_build_object(
+                                 'algorithm', $3::text,
+                                 'checksum', $4::text,
+                                 'generation', $5::bigint
+                             )
+                         )
+                     )
+                 )::text
+                 WHERE session_id = $1 AND generation = $5 AND state = 'active'
+                 RETURNING attributes_json",
+            )
+            .bind(session_id)
+            .bind(part_number.get().to_string())
+            .bind(algorithm)
+            .bind(checksum_value)
+            .bind(generation)
+            .fetch_one(&mut *transaction)
+            .await?;
+            session = session.with_attributes_json(updated.try_get("attributes_json")?)?;
         }
         sqlx::query(
             "INSERT INTO shardline_resumable_session_parts (
@@ -1500,7 +1608,7 @@ impl PostgresIndexStore {
             .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
         let state_str = state.map(ResumableSessionState::as_str);
         let escaped_prefix = prefix.map(escape_like);
-        let mut transaction = self.pool().begin().await?;
+        let mut transaction = listing_snapshot::begin(self.pool()).await?;
         let rows = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json,
                     state, generation, fence_epoch, expires_at, state_digest
@@ -1547,10 +1655,43 @@ impl PostgresIndexStore {
         prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
+        self.list_inflight_sessions_filtered(after_session_id, prefix, limit, None, None)
+            .await
+    }
+
+    /// Lists evidence-verified active sessions within one authorized namespace.
+    ///
+    /// # Errors
+    /// Returns database, evidence, or checked-conversion errors.
+    pub async fn list_scoped_inflight_resumable_sessions(
+        &self,
+        scope: &str,
+        protocol: ResumableSessionProtocol,
+        after_session_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
+        self.list_inflight_sessions_filtered(
+            after_session_id,
+            None,
+            limit,
+            Some(scope),
+            Some(protocol),
+        )
+        .await
+    }
+
+    async fn list_inflight_sessions_filtered(
+        &self,
+        after_session_id: Option<&str>,
+        prefix: Option<&str>,
+        limit: usize,
+        scope: Option<&str>,
+        protocol: Option<ResumableSessionProtocol>,
+    ) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
         let limit = i64::try_from(limit)
             .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
         let escaped_prefix = prefix.map(escape_like);
-        let mut transaction = self.pool().begin().await?;
+        let mut transaction = listing_snapshot::begin(self.pool()).await?;
         let rows = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json,
                     state, generation, fence_epoch, expires_at, state_digest
@@ -1558,12 +1699,16 @@ impl PostgresIndexStore {
              WHERE ($1::text IS NULL OR session_id > $1)
                AND state IN ('active', 'completing')
                AND ($2::text IS NULL OR session_id LIKE $2 || '%' ESCAPE '\\')
+               AND ($4::text IS NULL OR scope_namespace = $4)
+               AND ($5::text IS NULL OR protocol = $5)
              ORDER BY session_id
              LIMIT $3",
         )
         .bind(after_session_id)
         .bind(escaped_prefix.as_deref())
         .bind(limit)
+        .bind(scope)
+        .bind(protocol.map(ResumableSessionProtocol::as_str))
         .fetch_all(&mut *transaction)
         .await?;
         let sessions = rows
@@ -1580,16 +1725,16 @@ impl PostgresIndexStore {
     }
 
     async fn verify_resumable_session_evidence(
-        &self,
+        transaction: &mut Transaction<'_, Postgres>,
         session: &ResumableSession,
     ) -> Result<(), PostgresMetadataStoreError> {
-        let Some(event) = load_postgres_latest_evidence_event(
-            self.pool(),
+        let mut heads = load_postgres_latest_evidence_heads(
+            transaction.as_mut(),
             shardline_reliability::OperationKind::ResumableSession,
-            session.session_id(),
+            &[session.session_id().to_owned()],
         )
-        .await?
-        else {
+        .await?;
+        let Some(event) = heads.remove(session.session_id()) else {
             return Err(PostgresMetadataStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
@@ -1654,7 +1799,7 @@ mod tests {
     use super::*;
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-    async fn store() -> Option<PostgresIndexStore> {
+    pub(super) async fn store() -> Option<PostgresIndexStore> {
         let pool = super::super::connect_isolated_postgres().await?;
         sqlx::raw_sql(include_str!(
             "../../../../migrations/20260823000000_resumable_sessions.up.sql"
@@ -1723,7 +1868,7 @@ mod tests {
         }
     }
 
-    fn session(prefix: &str, expires_at: Duration) -> ResumableSession {
+    pub(super) fn session(prefix: &str, expires_at: Duration) -> ResumableSession {
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         ResumableSession::new(
             format!("{prefix}-{}-{suffix}", std::process::id()),

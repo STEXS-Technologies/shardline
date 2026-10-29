@@ -1,0 +1,522 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use super::*;
+use crate::test_support::postgres_fixture::PostgresFixture;
+use shardline_index::{S3ObjectEntry, S3ObjectIndexStore};
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn creation_policy_preserves_restricted_writer_and_rejects_policy_edits() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    let role = quote(&format!("creation_writer_{}", fixture.schema));
+    let schema = quote(&fixture.schema);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role}; GRANT USAGE ON SCHEMA {schema} TO {role};
+         GRANT SELECT,INSERT ON {schema}.shardline_hub_repos TO {role};
+         INSERT INTO {schema}.shardline_hub_creation_policies(namespace,configured,max_repositories)
+         VALUES ('alice',true,1)"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    install(pool).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    query("INSERT INTO shardline_hub_repos(repo_id,repo_type,private,default_branch,created_at_unix_seconds,updated_at_unix_seconds,creation_authorized) VALUES ('alice/one','model',true,'main',0,0,true)")
+        .execute(&mut *connection).await.unwrap();
+    for (statement, expected) in [
+        (
+            "UPDATE shardline_hub_creation_policies SET configured=false WHERE namespace='alice'",
+            "42501",
+        ),
+        (
+            "DELETE FROM shardline_hub_creation_denials WHERE namespace='alice'",
+            "42501",
+        ),
+        (
+            "INSERT INTO shardline_hub_repos(repo_id,repo_type,private,default_branch,created_at_unix_seconds,updated_at_unix_seconds,creation_authorized) VALUES ('alice/two','model',true,'main',0,0,true)",
+            "SL409",
+        ),
+        (
+            "INSERT INTO shardline_hub_repos(repo_id,repo_type,private,default_branch,created_at_unix_seconds,updated_at_unix_seconds) VALUES ('alice/legacy','model',true,'main',0,0)",
+            "SL403",
+        ),
+    ] {
+        let error = query(statement)
+            .execute(&mut *connection)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some(expected)
+        );
+    }
+    let events: i64 =
+        query_scalar("SELECT count(*) FROM shardline_hub_creation_events WHERE namespace='alice'")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+    assert_eq!(events, 1);
+    query("RESET ROLE").execute(&mut *connection).await.unwrap();
+    drop(connection);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn creation_policy_physical_tampering_fails_closed() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    install(pool).await.unwrap();
+    for mutation in [
+        "ALTER TABLE shardline_hub_repos DISABLE TRIGGER shardline_hub_creation_guard",
+        "ALTER TABLE shardline_hub_repos ALTER COLUMN creation_authorized SET DEFAULT true",
+        "ALTER TABLE shardline_hub_creation_policies DROP CONSTRAINT shardline_hub_creation_policies_window_seconds_check",
+        "ALTER TABLE shardline_hub_creation_denials DROP CONSTRAINT shardline_hub_creation_denials_namespace_fkey",
+        "DROP INDEX shardline_hub_creation_events_window",
+        "DROP INDEX shardline_hub_repos_creation_namespace",
+        "ALTER FUNCTION shardline_hub_creation_guard() RESET search_path",
+    ] {
+        let mut transaction = pool.begin().await.unwrap();
+        raw_sql(mutation).execute(&mut *transaction).await.unwrap();
+        assert!(matches!(
+            check_on_connection(&mut transaction).await,
+            Err(DatabaseMigrationError::FrontendSchemaIncompatible(_))
+        ));
+        transaction.rollback().await.unwrap();
+    }
+    check(pool).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn native_alias_trigger_preserves_update_only_role_and_fails_closed_if_disabled() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    let role = quote(&format!("alias_writer_{}", fixture.schema));
+    let schema = quote(&fixture.schema);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role}; GRANT USAGE ON SCHEMA {schema} TO {role};
+         GRANT SELECT,UPDATE ON {schema}.shardline_xet_file_identities TO {role};
+         INSERT INTO {schema}.shardline_xet_file_identities VALUES ('scope','sha','old',42)"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    install(pool).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    query("UPDATE shardline_xet_file_identities SET file_id='new' WHERE scope_key='scope'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let aliases: Vec<String> =
+        query_scalar("SELECT file_id FROM shardline_xet_file_aliases ORDER BY file_id")
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+    assert_eq!(aliases, vec!["new", "old"]);
+    assert!(
+        query(
+            "UPDATE shardline_xet_file_identities SET sha256='different' WHERE scope_key='scope'"
+        )
+        .execute(&mut *connection)
+        .await
+        .is_err()
+    );
+    assert!(
+        query("INSERT INTO shardline_xet_file_identities VALUES ('scope','other','ungranted',42)")
+            .execute(&mut *connection)
+            .await
+            .is_err()
+    );
+    query("RESET ROLE").execute(&mut *connection).await.unwrap();
+    drop(connection);
+    raw_sql("ALTER TABLE shardline_xet_file_identities DISABLE TRIGGER shardline_xet_file_aliases_preserve")
+        .execute(pool).await.unwrap();
+    assert!(check(pool).await.is_err());
+    assert!(install(pool).await.is_err());
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+async fn move_frontend_history_to_prerelease_ledger(pool: &PgPool) {
+    // Simulate an actually installed prerelease, including its triggers, before
+    // moving the ledger. Table-only clones are not an installed schema.
+    install(pool).await.unwrap();
+    for migration in FRONTEND_MIGRATIONS {
+        query(
+            "INSERT INTO shardline_schema_migrations(version,name,checksum,applied_at)
+             VALUES ($1,$2,$3,now())",
+        )
+        .bind(migration.version)
+        .bind(migration.name)
+        .bind(migration_checksum(&migration))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    raw_sql("DROP TABLE shardline_frontend_schema_v1")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn adoption_preserves_original_history_and_durable_frontend_rows() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    move_frontend_history_to_prerelease_ledger(pool).await;
+    raw_sql(
+        "INSERT INTO shardline_xet_file_identities VALUES ('scope','sha','file',42);
+        INSERT INTO shardline_lfs_locks VALUES ('scope','id','path','owner','name','time')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let versions: Vec<_> = FRONTEND_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    let before: Vec<(String,String,String)> = sqlx::query_as("SELECT version,checksum,applied_at::text FROM shardline_schema_migrations WHERE version = ANY($1) ORDER BY version")
+        .bind(&versions).fetch_all(pool).await.unwrap();
+    assert_eq!(before.len(), FRONTEND_MIGRATIONS.len());
+    let report =
+        super::super::run_database_migration(&super::super::DatabaseMigrationOptions::new(
+            fixture.config.index_postgres_url().unwrap().to_owned(),
+            super::super::DatabaseMigrationCommand::Up { steps: None },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(report.pending_count, 0);
+    let frontend_count = u64::try_from(FRONTEND_MIGRATIONS.len()).unwrap();
+    assert_eq!(report.applied_count, frontend_count);
+    assert_eq!(report.applied_total_count, 35 + frontend_count);
+    install(pool).await.unwrap();
+    check(pool).await.unwrap();
+    let after: Vec<(String,String,String)> = sqlx::query_as("SELECT version,checksum,applied_at::text FROM shardline_frontend_schema_v1 ORDER BY version")
+        .fetch_all(pool).await.unwrap();
+    assert_eq!(after, before);
+    let legacy: i64 =
+        query_scalar("SELECT count(*) FROM shardline_schema_migrations WHERE version = ANY($1)")
+            .bind(&versions)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(legacy, 0);
+    let identity: String = query_scalar("SELECT file_id FROM shardline_xet_file_identities")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let lock: String = query_scalar("SELECT id FROM shardline_lfs_locks")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(identity, "file");
+    assert_eq!(lock, "id");
+    super::super::verify_applied_migrations(pool).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn mismatched_prerelease_checksum_rolls_back_without_losing_history() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    move_frontend_history_to_prerelease_ledger(pool).await;
+    query(
+        "UPDATE shardline_schema_migrations SET checksum='corrupt' WHERE version='20261022000000'",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(install(pool).await.is_err());
+    let count: i64 = query_scalar("SELECT count(*) FROM shardline_schema_migrations WHERE version IN ('20261021000000','20261022000000','20261023000000')").fetch_one(pool).await.unwrap();
+    assert_eq!(count, 3);
+    let registry: bool = query_scalar("SELECT to_regclass(format('%I.shardline_frontend_schema_v1',current_schema())) IS NOT NULL").fetch_one(pool).await.unwrap();
+    assert!(!registry);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn corrupted_physical_contract_and_registry_fail_closed() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    install(pool).await.unwrap();
+    raw_sql("DROP INDEX shardline_xet_file_identities_file_id_idx")
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(check(pool).await.is_err());
+    assert!(install(pool).await.is_err());
+    raw_sql(FRONTEND_MIGRATIONS.first().unwrap().up_sql)
+        .execute(pool)
+        .await
+        .unwrap();
+    check(pool).await.unwrap();
+    query("UPDATE shardline_frontend_schema_v1 SET checksum='corrupt'")
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(check(pool).await.is_err());
+    assert!(install(pool).await.is_err());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn unknown_frontend_history_fails_check_status_and_install() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    install(pool).await.unwrap();
+    query("INSERT INTO shardline_frontend_schema_v1(version,name,checksum) VALUES ('99999999999999','future','future')")
+        .execute(pool).await.unwrap();
+
+    assert!(check(pool).await.is_err());
+    assert!(status_history(pool).await.is_err());
+    assert!(install(pool).await.is_err());
+    let preserved: i64 = query_scalar(
+        "SELECT count(*) FROM shardline_frontend_schema_v1 WHERE version='99999999999999'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(preserved, 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn unrelated_core_history_is_never_hidden_by_frontend_installation() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    query("INSERT INTO shardline_schema_migrations(version,name,checksum) VALUES ('99999999999999','unknown','unknown')")
+        .execute(pool).await.unwrap();
+    install(pool).await.unwrap();
+    assert!(
+        matches!(super::super::verify_applied_migrations(pool).await, Err(DatabaseMigrationError::UnknownAppliedMigration(version)) if version=="99999999999999")
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn existing_read_only_role_can_check_without_ddl_or_new_write_permissions() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    let role_name = format!("frontend_reader_{}", fixture.schema);
+    let role = quote(&role_name);
+    let schema = quote(&fixture.schema);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role}; GRANT USAGE ON SCHEMA {schema} TO {role};
+         GRANT SELECT ON {schema}.shardline_schema_migrations,{schema}.shardline_file_records TO {role}"
+    ))).execute(pool).await.unwrap();
+    install(pool).await.unwrap();
+    // The fixture pool has exactly one connection, so SET ROLE applies to
+    // every query below, including the ordinary startup compatibility check.
+    query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
+        .execute(pool)
+        .await
+        .unwrap();
+    super::super::check_database_schema_compatibility(pool)
+        .await
+        .unwrap();
+    for table in [
+        HISTORY,
+        "shardline_xet_file_identities",
+        "shardline_lfs_locks",
+        "shardline_record_membership",
+        "shardline_xet_xorbs",
+        "shardline_xet_chunks",
+    ] {
+        let permissions: (bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT
+            has_table_privilege(current_user,format('%I.%I',current_schema(),$1),'SELECT'),
+            has_table_privilege(current_user,format('%I.%I',current_schema(),$1),'INSERT'),
+            has_table_privilege(current_user,format('%I.%I',current_schema(),$1),'UPDATE'),
+            has_table_privilege(current_user,format('%I.%I',current_schema(),$1),'DELETE')",
+        )
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(permissions, (true, false, false, false));
+    }
+    let ddl: bool =
+        query_scalar("SELECT has_schema_privilege(current_user,current_schema(),'CREATE')")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert!(!ddl);
+    query("RESET ROLE").execute(pool).await.unwrap();
+    // The role owns no objects: remove only its fixture grants before dropping it.
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn membership_trigger_preserves_existing_update_only_runtime_role() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    let role_name = format!("membership_writer_{}", fixture.schema);
+    let role = quote(&role_name);
+    let schema = quote(&fixture.schema);
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role}; GRANT USAGE ON SCHEMA {schema} TO {role};
+         GRANT SELECT,UPDATE ON {schema}.shardline_file_records TO {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    install(pool).await.unwrap();
+    query("INSERT INTO shardline_file_records(record_key,record_kind,scope_key,file_id,content_hash,record)
+           VALUES ('legacy','latest','scope','file','content',$1)")
+        .bind(sqlx::types::Json(serde_json::json!({"chunks": [{"hash": "before"}]})))
+        .execute(pool).await.unwrap();
+    query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
+        .execute(pool)
+        .await
+        .unwrap();
+    query("UPDATE shardline_file_records SET record=$1 WHERE record_key='legacy'")
+        .bind(sqlx::types::Json(
+            serde_json::json!({"chunks": [{"hash": "after"}]}),
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    let hashes: Vec<String> = query_scalar(
+        "SELECT member_hash FROM shardline_record_membership WHERE record_key='legacy'",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(hashes, vec!["after"]);
+    let can_insert_source: bool =
+        query_scalar("SELECT has_table_privilege(current_user,'shardline_file_records','INSERT')")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert!(
+        !can_insert_source,
+        "migration must preserve the source role policy"
+    );
+    query("RESET ROLE").execute(pool).await.unwrap();
+    raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn row_security_on_grant_sources_blocks_privilege_widening_atomically() {
+    for table in ["shardline_file_records", "shardline_schema_migrations"] {
+        let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+        let pool = fixture.index().pool();
+        raw_sql("DROP TABLE shardline_frontend_schema_v1")
+            .execute(pool)
+            .await
+            .unwrap();
+        let schema = quote(&fixture.schema);
+        raw_sql(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE {schema}.{table} ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE {schema}.{table} FORCE ROW LEVEL SECURITY;
+             CREATE POLICY deny_frontend_rows ON {schema}.{table}
+                 USING (false) WITH CHECK (false)"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            install(pool).await,
+            Err(DatabaseMigrationError::FrontendSchemaIncompatible(message))
+                if message.contains(table) && message.contains("row-level security")
+        ));
+        let registry: bool = query_scalar(
+            "SELECT to_regclass(format('%I.shardline_frontend_schema_v1',current_schema())) IS NOT NULL",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(
+            !registry,
+            "failed migration must roll back its new registry"
+        );
+        fixture.finish().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires configured disposable PostgreSQL"]
+async fn legacy_object_update_invalidates_multipart_count_sidecar() {
+    let fixture = PostgresFixture::new().await.expect("DATABASE_URL required");
+    let pool = fixture.index().pool();
+    install(pool).await.unwrap();
+
+    let entry = S3ObjectEntry {
+        scope_namespace: "legacy-writer".to_owned(),
+        object_key: "same-bytes.bin".to_owned(),
+        file_id: "legacy-file-id".to_owned(),
+        size_bytes: 12,
+        content_hash: "ab".repeat(32),
+        etag: "ab".repeat(32),
+        user_metadata: Vec::new(),
+        updated_at_unix_seconds: 77,
+    };
+    fixture
+        .index()
+        .upsert_s3_object_with_multipart_count(&entry, 2)
+        .await
+        .unwrap();
+
+    // A released writer updates only the authoritative object row. Keep the
+    // value identical to cover a same-content upload with another part shape.
+    query(
+        "UPDATE shardline_s3_objects SET file_id=file_id
+         WHERE scope_namespace=$1 AND object_key=$2",
+    )
+    .bind(&entry.scope_namespace)
+    .bind(&entry.object_key)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let (stored, count) = fixture
+        .index()
+        .scan_s3_object_exact_with_multipart_count(&entry.scope_namespace, &entry.object_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, entry);
+    assert_eq!(count, None);
+    fixture.finish().await;
+}

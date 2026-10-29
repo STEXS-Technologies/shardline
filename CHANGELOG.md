@@ -6,6 +6,491 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- Authenticate selected chunks for small ranges in large S3-backed Xorbs,
+  avoiding complete-container transfer while retaining full-download verification
+  and legacy-format fallback.
+- Add optional shared repository-creation limits and creator denials, managed
+  through `admin repository-policy` in the existing metadata database.
+  Creation checks and publication are atomic across replicas; defaults preserve
+  existing behavior, and configured namespaces reject legacy creation writers.
+- Support scoped Xet delta-upload metadata with chunk-aligned edit windows,
+  authenticated gap commitments and verified recovery of older source metadata.
+- Support authenticated Xet file HEAD requests with metadata-only length lookup
+  and the same repository and Hub revision scope as reconstruction reads.
+- Keep native Xet tree and revision-list metadata routes available alongside the
+  Hub frontend through an explicit Accept media type; Hub client responses remain
+  unchanged.
+- Support native Hugging Face Xet uploads through Hub negotiation, scoped CAS
+  credentials, repository-scoped file identities and verified reconstruction.
+- Support S3 object tags through object and multipart uploads, browser forms,
+  copy directives and the Get/Put/DeleteObjectTagging APIs, storing tags inside
+  the existing evidence-bound object metadata and verifying request checksums.
+- Support the truthful empty `GetBucketVersioning` response for buckets where
+  Shardline has never enabled versioning, and `ListObjectVersions` as one current
+  `null` version per live object with stable owner IDs. `ListObjectsV2` also
+  returns owner IDs when requested; enabling version history remains unsupported.
+- Report the S3 bucket-owner-enforced ownership mode and its default full-control
+  ACL on bucket/object reads. Accept the compatible `bucket-owner-full-control`
+  upload ACL and reject ACL grants or updates with `AccessControlListNotSupported`.
+- Support durable Git LFS locks shared across replicas, including owner checks,
+  pagination and the Hub's LFS routes.
+- Support OCI 1.1 referrer discovery with artifact filtering and pagination,
+  retaining recovery checks and legacy inventory reconciliation.
+- Add optional S3 SigV4 identities, presigned requests, authenticated streaming
+  checksums, multipart listing and range-based UploadPartCopy.
+- Preserve S3 object `Content-Type`, `Cache-Control`, `Content-Disposition`,
+  `Content-Encoding`, `Expires` and website redirect metadata across PUT,
+  browser POST, multipart upload, copy, GET and HEAD without rewriting object
+  bytes.
+- Support negotiated multipart CRC32, CRC32C, SHA-1 and SHA-256 COMPOSITE checksums, verifying
+  part bytes before publication and exposing checksums and part sizes through
+  object attributes and active `ListParts` responses while preserving existing
+  CRC32 metadata reads and deriving missing checksums for in-progress uploads.
+- Support multipart CRC32, CRC32C and CRC64NVME FULL_OBJECT checksums. The
+  assembled object checksum is verified before publication; part-level checksums
+  are optional for FULL_OBJECT uploads, and CRC64NVME defaults to FULL_OBJECT.
+- Retain verified single-PUT S3 checksums and return them through
+  `GetObjectAttributes` and checksum-enabled `GetObject`/`HeadObject` responses.
+- Support S3 `GetObject` and `HeadObject` response overrides for cache
+  control, content disposition/encoding/language/type and expiry on full `200`
+  responses; reject unsupported override parameters rather than ignoring them.
+- Support signed path-style S3 browser `PostObject` uploads with policy-condition
+  checks, `${filename}` expansion, bounded streaming, user metadata,
+  Content-MD5 and CRC32/CRC32C/SHA-1/SHA-256 checksums, using atomic object
+  publication; honor successful-upload redirects with bucket, expanded key and
+  ETag query parameters.
+- Support atomic Git pushes, report-status-v2, side-band responses, shallow
+  history by depth, date or excluded refs, and blob/tree partial clones.
+- Support Git protocol v2 upload-pack discovery, reference listing and fetch,
+  including shallow and filtered requests with bounded combined blob/tree
+  filters and object-type selection, while retaining v0/v1 behavior.
+- Support negotiated Git receive-pack push-options with strict packet framing;
+  options are consumed but have no effect because Shardline exposes no receive hooks.
+
+### Improved
+
+- Close built-in HTTP connections after five minutes of stalled socket writes,
+  releasing transport-held buffers while allowing progressing transfers to continue.
+- Stop idle response producers after five minutes without nonempty body data,
+  including when a client stops reading; progressing transfers can run longer.
+- Release packing execution slots while uploads accumulate data or wait on
+  object storage, retaining bounded batch buffers through cancellation and fallback.
+- Keep authenticated range response buffers charged through transport slices
+  while releasing decoding execution slots during I/O and reader pauses.
+- Release native Xet verification execution capacity between incoming frames,
+  retaining bounded body memory and final publication admission so idle clients
+  do not occupy verification slots.
+- Carry immutable verified upload bodies through shared local/S3 storage,
+  avoiding a duplicate native Xet payload hash while retaining existing-object
+  conflict checks and durable publication.
+- Coalesce adjacent cached-Xorb registration terms into one authenticated range
+  read while checking each term length and the final file SHA-256.
+- Reuse bounded, verified SHA-256 prefix states for native Xet registration of
+  overlapping files, equivalent adjacent term layouts and cached ordered sparse
+  ranges, retaining source authentication, individual term-length checks and
+  final identity checks.
+- Overlap native Xet member authentication and file hashing when CPU admission
+  has spare capacity, retaining sequential verification under saturation.
+- Combine final CAS upload-state commits in SQLite and PostgreSQL after durable
+  object and domain-metadata publication, retaining every recovery evidence event.
+- Stage Unix durable-local S3 multipart parts on the object-store filesystem,
+  retaining verified hard-link publication and existing crash cleanup instead
+  of copying from a separate system-temporary filesystem.
+- Accumulate native Xorb serialized commitments while receiving frames,
+  avoiding a complete preparation scan at EOF while binding the final storage
+  commitment to immutable owned bytes.
+- Reuse source validation for consecutive ordered file terms during native
+  shard registration, avoiding repeated member decoding while preserving
+  full-file SHA-256, range checks and repeated/out-of-order content.
+- Stream remote shard-registration verification without scratch files,
+  authenticating complete containers and subsequent selected-range reads while
+  retaining complete-file SHA-256 and legacy container support.
+- Retain shared packing admission with encoded S3 payloads until transport
+  releases them, including after request cancellation. Carry the same ownership
+  through compressed individual-chunk fallback payloads while preserving raw
+  buffer reuse after storage releases its references.
+- Release buffered object-read memory when validation switches to scratch
+  storage, retaining exact bytes and automatic scratch cleanup.
+- Stream durable local LFS PATCH ranges through the shared ordered reader,
+  avoiding full-file assembly copies while retaining overlap ordering and
+  complete-file SHA-256 verification before publication.
+- Stream authenticated S3 browser-form payloads without full-file scratch or
+  memory buffering, retaining policy, checksum and trailing-form checks before
+  object publication.
+- Pack public local uploads incrementally in bounded admitted batches, removing
+  the full-upload scratch copy while preserving standalone chunk access,
+  verified fallback and existing response accounting.
+- Keep local Bazel action-cache request validation in shared admitted memory,
+  removing disposable staging files while retaining conditional publication
+  and complete-byte storage verification.
+- Keep OCI ranged-request validation in admitted memory, avoiding disposable
+  local staging files while preserving validation before durable session append.
+  Buffered OCI and native Xet requests share process-wide memory admission.
+- Buffer native Xet Xorb and shard requests in admitted memory without temporary
+  request files, retaining size limits, verification and durable publication.
+  Share two buffer slots per process through validation and storage so queued
+  requests and cancelled workers cannot create unbounded upload buffering.
+- Buffer small native Xet preparation reads within a fixed 64 KiB per worker,
+  retaining content verification and cancellation checks.
+- Verify duplicate local staged uploads against the existing object's digest,
+  avoiding a second read of the candidate while retaining length, content and
+  durability checks.
+- Persist native Xet payloads once as verified Xorb containers, removing redundant
+  decoded chunk writes. Existing data stays readable; new native chunk reads
+  require upgraded readers, so upgrade all replicas before accepting new writes.
+- Remove the unused raw-wire checksum from native Xorb request staging, retaining
+  member/root authentication, final storage verification and shard checksums.
+- Reuse one verified legacy chunk within a download stream, avoiding repeated
+  reads and decompression for consecutive complete chunks up to 64 KiB.
+- Avoid a duplicate complete validation pass when preparing owned or borrowed
+  footerless Xet uploads, retaining final container authentication and storage
+  verification.
+- Avoid repeated file-position queries during footerless Xet upload bounds
+  checks and normalization, retaining chunk limits, malformed-input rejection
+  and full validation.
+- Buffer native Xet member-source reads with a fixed 64 KiB allocation while
+  retaining per-member verification and durable immutable writes.
+- Reuse the original PostgreSQL request session for native Xorb deletion guards,
+  avoiding extra metadata checkouts while retaining pending-delete fencing and
+  lost-owner rejection.
+- Carry verified native Xet bytes and metadata from preparation into storage,
+  avoiding repeated normalization and content validation. Preserve footerless
+  and file-based compatibility, cancellation, final storage-digest verification
+  and existing formats.
+- Reuse related native Xet containers in bounded, repository-scoped dedup replies,
+  reducing retransmission and backend work for partially overlapping versions
+  while preserving member authorization and remote-delete coordination.
+- Avoid decoding unrequested Xorb members twice during native file
+  reconstruction, retaining complete source validation and rehashing returned
+  members.
+- Reuse one response-local Xorb source across adjacent native download terms,
+  avoiding repeated backend reads while fully validating every term and
+  retaining bounded scratch storage and cancellation.
+- Derive native file SHA-256 identities during the first full Xorb validation,
+  avoiding repeated decoding and member hashing without retaining decoded
+  containers or skipping source integrity checks.
+- Keep detached Hub revisions from exhausting the Git export history limit,
+  selecting reachable history after a bounded listing overflows while retaining
+  reference, history, object and byte limits.
+- Release inactive S3 write-coordination entries directly instead of scanning
+  every active key on each acquisition, preserving same-key exclusion and
+  cancellation cleanup.
+- Stop boolean Xorb access checks after the first verified repository record,
+  avoiding unnecessary candidate traversal for shared content.
+- Stop Xorb range access checks once published file terms prove every requested
+  byte, retaining gap, footer and repository-isolation checks.
+- Authorize native Xet membership before backend object discovery and use the
+  fully verified payload boundary to avoid scanning shared-container history
+  for footer access, retaining exact range and historical access checks.
+- Bound PostgreSQL's first-candidate authorization query, avoiding large result
+  transfers when one record proves access; retain full traversal when needed.
+- Plan PostgreSQL's first-candidate and streaming lookups for the requested
+  hash, avoiding slow missing-hash scans caused by generic prepared plans.
+- Reduce PostgreSQL authorization overhead for containers shared by many files
+  with bounded record-conversion batches, retaining access checks, corruption
+  reporting and cancellation accounting.
+- Stop unused PostgreSQL candidate results with bounded pages in one consistent
+  read snapshot, retaining early proofs, corruption errors and cancellation cleanup.
+- Avoid copying already-owned local object writes when handing their bodies to
+  blocking storage workers, retaining validation and durable publication.
+- Avoid scratch files when GC verifies S3 containers up to 2 MiB, using a fixed
+  memory allowance and retaining full content verification and disk spill for
+  larger containers.
+- Reuse native Xorb sources during shard validation and file hashing to avoid
+  repeated object-store reads and temporary copies for sequential file terms;
+  derive range offsets from verified members without a duplicate offset array.
+- Reuse fully verified packed-container reachability within lifecycle repair's
+  bounded working set, avoiding repeated source reads for shared latest and
+  version records while verifying sources again on later repair runs.
+- Reuse an existing native Xorb during protocol packing when its verified content
+  matches but its compression encoding differs, retaining the installed offsets
+  instead of writing redundant standalone chunks.
+- Remove the preliminary shard-existence probe from native Xet publication;
+  conditional writes retain verified duplicate detection and upload results.
+- Reject S3 ACL grants and ACL updates with `AccessControlListNotSupported`;
+  reject unsupported encryption, expected-owner and requester-payer options
+  instead of silently acknowledging them. Accept only the STANDARD object
+  storage class on object writes and signed browser forms.
+- Bound Git request buffering, projection, packing and slow-consumer responses
+  through shared admission.
+- Keep additive LFS-lock and Xet-identity migrations outside the released core
+  schema ledger, allowing 1.12.1 replicas to restart and read stored objects
+  during a rolling upgrade; deployments with incompatible row-level security
+  policies fail the migration safely.
+- Exercise protocol frontends with real clients and explicit prerequisite checks,
+  including pinned Hugging Face Hub 1.25.1 and 2.2.0 compatibility workflows.
+
+### Fixed
+
+- Recheck S3 file-upload digests while streaming, rejecting changed source
+  bytes before multipart completion or existing-object acknowledgment without
+  adding a file pass or backend request.
+
+- Reject native Xorb upload retries while their object has an unresolved remote
+  delete, including retries of previously completed uploads.
+- Stop cancelled native upload identity preparation between validation and
+  checksum reads, reclaiming staging files while retaining admission until
+  the blocking worker stops.
+
+- Reject Hub commits to tags before consuming upload bodies, preserving the
+  branch-only write error contract when concurrent publication retries apply.
+- Avoid redundant conditional S3 writes for recently stored native Xet chunks
+  using a larger bounded hint window, retaining remote content verification
+  and conditional creation when hints are stale.
+- Recover cold Hub Git identities beyond 10,000 ancestors in bounded windows,
+  preserving commit hashes, repository scope and cumulative file-work limits.
+- Retry concurrent unconditional Hub branch commits against the latest tree,
+  preserving unrelated files, explicit-parent conflicts and deleted branches.
+- Verify PostgreSQL Hub heads and their reliability evidence from one read
+  snapshot, avoiding false integrity failures during concurrent publication.
+- Restore plain HTTP native-Xet downloads for repository-wide credentials when
+  the verified file is stored under a branch, retaining repository and ref isolation.
+- Return a retryable error when PostgreSQL terminates an active publication
+  session, allowing native Xet clients to retry the verified upload.
+- Preserve retry guidance for transient failures in Xet shard-upload progress
+  streams while keeping malformed uploads terminal.
+- Reject native Xorb HEAD requests outside the caller's published repository
+  references before reading private backend metadata.
+- Recognize Hub-only native Xet storage during lifecycle repair, preserving
+  published container references without requiring a separate Xet frontend.
+- Preserve opaque bytes and quoted commas in conditional download and S3
+  mutation validators, including repeated fields, without weakening strong
+  ETag or authorization checks.
+- Stop Xorb normalization immediately on cancellation or reader failures instead
+  of retrying them as footerless input and continuing to modify upload staging.
+- Recognize native Xet storage during Hub-only garbage collection, preserving
+  live containers and verified member recovery without requiring a separate
+  `xet` frontend setting.
+- Return complete Hub/LFS downloads when an opaque non-ASCII `If-Range`
+  validator does not match, instead of incorrectly serving a partial response.
+- Use commit-specific Xet token refresh URLs so cached credentials for an older
+  branch head do not cause reconstruction failures after a new upload.
+- Supply the development Compose Hub webhook encryption key so a fresh stack
+  passes configuration validation without disabling production secret protection.
+- Stop development Compose initialization with an actionable error after 60
+  unsuccessful MinIO connection attempts instead of retrying forever.
+- Avoid a second temporary payload copy when normalizing privately owned native
+  Xet upload staging, including upload-intent identity preparation; preserve full
+  hash verification and caller-owned files.
+- Recheck native Xet member hashes before persistence so changed staged bytes
+  cannot be stored under an earlier validated chunk identity.
+- Prepare file-backed native Xet uploads on blocking workers so full validation
+  and hashing do not block async request handling; retain staging and admission
+  through active work and stop cancelled preparation between reads.
+- Include next-page links for ordinary paginated Hub tree listings, keeping
+  cursors bound to immutable revisions and preserving nested directory paths.
+- Reject oversized Xorb footer lengths without arithmetic overflow or parser
+  panics, preserving valid container reads and retries after rejected uploads.
+
+- Separate internal Hub file-reader transport from webhook transport so private
+  service DNS works without weakening webhook SSRF checks or forwarding scoped
+  read credentials through redirects or environment proxies.
+- Give internal Hub Xet downloads their own transfer deadline and a bounded
+  admission wait for analytical range bursts, preserving verification and active
+  work limits. Keep internal URLs out of transfer error responses.
+- Omit whole-object checksum headers on partial S3 GET responses so stock SDKs
+  can read verified ranges without comparing them against the full-file digest.
+- Read older v0 Xorb footers through full payload verification, deriving missing
+  decoded offsets without rewriting objects or relaxing decompression limits.
+- Reject truncated or oversized S3 backend range responses instead of returning
+  them as successful reads, enforcing the requested byte limit while receiving data.
+- Upgrade the internal Arrow/Parquet preview reader to remove the unmaintained
+  `paste` dependency and its dependency-policy exception.
+- Keep webhook credentials, path tokens and query secrets out of delivery logs.
+- Validate outbound Hub webhook DNS results at connection time, rejecting private
+  addresses and proxy-based resolution bypasses while keeping redirects disabled.
+- Accept bounded anonymous model-card validation so stock Hub 2.2 clients can
+  publish cards to their configured endpoint while preserving repository authorization.
+- Fail required deployment qualification when Docker services, binaries or clock
+  fixtures are missing; bound Docker probes and deployment subprocesses instead
+  of accepting skipped drills as successful execution.
+- Validate native Xorb member indexes in one PostgreSQL statement, retaining
+  one consistent snapshot and complete bounded membership checks.
+- Keep the Xet hash-writing helper's digest consistent with accepted bytes
+  after short writes, interrupted writes and errors.
+- Initialize the dedicated S3 multipart-completion client only when needed,
+  avoiding an unused HTTP pool and TLS-root loading during reads and GC.
+  Store clones share initialization; conditional publication remains unchanged.
+- Bound the SDK's shared download runtime to reduce per-core worker and allocator
+  memory overhead while preserving transfer admission and content verification.
+- Acquire PostgreSQL native-Xet descriptor locks in a consistent order so
+  overlapping staging and member-index repair batches avoid lock-order deadlocks.
+- Preserve retryable native-reader overload responses and `Retry-After` through
+  Hub LFS downloads instead of converting temporary saturation into HTTP 500.
+  Allow a bounded admission wait for short analytical range-read bursts without
+  increasing active verification capacity.
+- Batch Hub PostgreSQL file metadata writes while preserving ordered duplicate
+  paths, unchanged-row reuse and transaction rollback on invalid sizes.
+- Check the separate E2E dependency graph against the same security, license and
+  source policy as the main workspace during contributor CI.
+- Apply private/public visibility consistently to both Hub repository creation
+  routes and reject unsupported values or malformed privacy options instead of
+  silently creating public repositories.
+- Default omitted Hub repository types to `model`, matching stock
+  `HfApi.create_repo()` while preserving exact repository creation authorization.
+- Return 404 for JSON Xet reconstruction batches containing missing files and
+  400 for malformed requests, while preserving legacy GET partial results and
+  oversized-request limits.
+- Preserve the Hub tree root `/.` alias for ordinary, paginated and expanded
+  listings while continuing to reject nonexistent directories.
+- Reject native Xet terms whose declared length differs from their verified
+  members before appending or streaming their bytes; recheck selected member
+  hashes during decoding to reject local source changes after validation.
+- Honor expanded Hub tree requests with bounded, snapshot-pinned SDK pagination
+  and last-change metadata; avoid charging cached tree lookups as payload reads.
+- Paginate Hub commit history through immutable parent links instead of loading
+  every repository revision, preserving authorization on each page.
+- Keep snapshot-scoped Hub commit history and expanded path metadata from
+  exposing ancestor messages and timestamps; accept tag aliases without granting
+  access to a same-named branch.
+- Reject Hub commits exceeding Git path-depth limits before advancing their
+  branch, preserving the prior revision and history on rejection.
+- Prepare and persist verified Hub Git metadata before atomic branch
+  publication, keeping object-limit and identity-archive failures from advancing
+  the branch. Preserve prepared timestamps across retries and identity rebuilds.
+
+- Preserve safe backend error categories and operation context for Hub storage
+  failures without logging signed URLs or provider response bodies.
+- Include directories in recursive Hub tree listings and return `EntryNotFound`
+  for missing paths or file paths requested as trees, including paged reads.
+- Prevent cancelled LFS uploads from recreating an orphan staging file by
+  writing through the temporary file's existing handle.
+- Return verified Git blob and directory IDs in Hub tree listings, matching
+  paths-info, and preserve repository-relative paths in nested listings. Retain
+  derived Git trees so repeated metadata lookups avoid reading file payloads.
+- Accept inline Hub files exactly at the documented 10 MiB limit, accounting
+  for base64 padding while retaining strict rejection of oversized content.
+- Stream multi-file Hub commits with bounded per-file buffering so batches of
+  inline-sized files can exceed the former 16 MiB aggregate request limit;
+  malformed or interrupted requests cannot publish a partial revision.
+- Merge overlapping Xet reconstruction fetch ranges so stock clients can
+  download repetitive files without reusing an undersized cached block,
+  while preserving scoped byte-range authorization.
+- Enforce tag and immutable-token snapshot boundaries in Git fetches, rejecting
+  guessed parent commits and older-only blobs while preserving commit hashes
+  and stock Git shallow-clone compatibility.
+
+- Enforce explicit LFS batch revision scope before issuing basic or Xet actions,
+  preserving omitted-ref clients and authorized historical downloads.
+- Return Xet upload actions for missing LFS content, recognize verified native
+  publications during Git push and LFS download, and derive verified SHA-256
+  identities for older repository-scoped native shards without extended metadata.
+- Resolve conventional `.git` URLs consistently for Git discovery, fetch and
+  push, preserve literal repository names and authorization checks, and expose
+  standard model Git routes and typed model LFS negotiation.
+- Apply the same repository aliases to LFS discovery and Git HEAD, support
+  standard model HEAD URLs, and prevent branch-scoped credentials from reading
+  another branch's HEAD reference.
+- Accept PyArrow's lowercase S3 checksum-mode token on object reads while
+  continuing to reject unknown and repeated checksum modes.
+- Treat missing legacy Xet deduplication sources as cache misses and continue
+  searching for verified live sources, while preserving rejection of corrupt
+  content and shard uploads that reference missing Xorbs.
+- Recognize recoverable indexed native Xorb members during FSCK while retaining
+  failures for missing lookup metadata, missing sources and corrupt containers.
+- Qualify native member-index repair against process SIGKILL with PostgreSQL
+  and S3 storage, checking batch rollback, fresh-process retry and intact file reads.
+- Recover native chunk reads from fully verified indexed Xorbs when the
+  standalone chunk copy is missing, retaining existing standalone reads.
+- Observe queued cancellation after native shard verification before invoking
+  metadata publication, including byte-backed and file-backed registration.
+- Preserve model-card downloads and README metadata for authorized readers
+  after broader repository credentials publish the file.
+
+- Require repository-wide credentials for repository deletion and webhook
+  configuration; branch, tag and commit credentials cannot administer all refs.
+
+- Return correct Hub paths-info identities and history for authorized files
+  written through broader credentials, including native Git trees.
+
+- Preserve authorized historical LFS reads after pointer deletion and locate
+  native Git ancestry across credential storage scopes, binding traversal to
+  the credential's selected head before following verified parent hashes.
+
+- Allow authorized basic LFS downloads and batch actions for files published
+  by broader repository credentials, checking visible publication history before
+  following cross-scope storage locations.
+
+- Read authorized Hub inline files and their Git projections after publication
+  by broader credentials, preserving revision checks for full and ranged reads.
+
+- Preserve Git HEAD discovery for branch-scoped credentials and allow verified
+  reachable Git objects to be read after publication by broader credentials
+  in the same repository, without enabling arbitrary cross-branch object reads.
+
+- Resolve existing Hub inline and LFS objects across repository-wide and
+  revision-scoped credentials without relocating stored bytes.
+- Authorize native Xet downloads against the exact immutable Hub commit before
+  selecting the original storage record; bind fetch URLs to signed ranges and
+  prevent commit-scoped CAS credentials from acting as general Hub credentials.
+- Retain verified native Xet identity mappings when equivalent content is
+  registered with a new identity, preserving cached download metadata.
+- Allow branch-scoped Hub read credentials to fetch immutable ancestors of their
+  branch while keeping sibling branches, tags, and write scopes isolated.
+- Check Hub revision authorization before exposing resolve or revision metadata,
+  and enforce exact target permissions for commit and branch/tag mutations.
+- Filter Hub ref/history listings by credential scope and locate verified cached
+  commit identities across storage namespaces within the same repository.
+- Resolve small LFS and Xet files through their recorded storage path so native
+  download discovery and HTTP reads work below the former 1 MiB cutoff.
+- Verify native shard SHA-256 identities against authenticated file content
+  before publication, while accepting legacy shards without extended metadata.
+- Preserve storage I/O failures during native Xorb normalization as server
+  errors so valid uploads are not rejected as malformed client data.
+- Honor recursive Hub folder deletions and official SDK LFS copies that omit
+  file size, resolving copy metadata within the authorized repository.
+- Serialize PostgreSQL frontend schema installation with existing metadata
+  writers to prevent migration-trigger deadlocks during rolling upgrades.
+- Retain staged files and bounded admission until running native Xorb file
+  writes finish, including after cancellation of the upload caller.
+- Cancel native Xorb file writes that are still queued when their upload future
+  is cancelled, retaining reconciliation for writes that already started.
+- Reject damaged Xorb footers and trailing framing errors instead of silently
+  repairing them through the footerless-upload compatibility path.
+- Accept standard native Xorbs whose framing exceeds the 64 MiB content size,
+  using a separate bounded wire limit while preserving explicit operator limits.
+- Spill large native upload bodies to temporary files on S3-backed deployments,
+  avoiding whole-container heap copies during footerless normalization.
+- Verify native Xet member objects using their keyed content hashes during FSCK,
+  avoiding false corruption reports while retaining detection of damaged members.
+- Fail fast with a clear minimum-pool-size error when applying Postgres
+  migrations through a pool that cannot provide separate lock and work
+  connections.
+- Apply repository-scoped read authorization before returning Git protocol-v2
+  capability discovery.
+- Propagate LFS object-store lookup failures instead of reporting them as
+  missing objects during batch negotiation.
+- Return Hub LFS route errors with the LFS media type and `message` field,
+  including request-decoding and authorization failures.
+- Preserve Hub branch, revision and historical Git identities across SDK writes,
+  reference updates and native Git operations.
+- Publish Git reference batches and their recovery evidence atomically, rejecting
+  malformed commands, stale refs and incomplete ancestry before publication.
+- Read OCI visibility and resumable-upload evidence consistently during concurrent
+  transitions; prevent reclaimed OCI indexes from being recreated by stale backfill.
+- Keep PostgreSQL multipart listing rows, parts and evidence in one read-only
+  snapshot, preventing false integrity errors without blocking upload writers.
+- Preserve the released direct upload packer, verified chunk cache, batched S3
+  cleanup and bounded streaming comparisons when integrating protocol changes.
+
+### Security
+
+- Bind both Hub repository-creation routes to the token's exact repository or an
+  explicit grant for its owner namespace, rejecting unauthorized creation before
+  metadata lookup or publication. Thanks to Jannes Stubbemann (@stubbi, openxet)
+  for privately reporting the cross-namespace creation vulnerability.
+- Cap newly issued Xet download URLs at their authorizing credential's expiry,
+  retaining the 15-minute upper bound and rejecting already expired credentials.
+- Reject expired Xet download requests with missing or invalid credentials
+  before backend discovery; preserve official-client URL refresh. Reject signed
+  requests with missing or repeated Range fields before storage lookups.
+- Upgrade the S3 backend and XML parser to remove RUSTSEC-2026-0194 and
+  RUSTSEC-2026-0195 advisory exceptions, including client-supplied tagging XML.
+- Update TLS certificate verification and bundled trust roots to patched releases
+  for RUSTSEC-2026-0381, RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
+
 ## [1.12.1] - 2026-10-17
 
 This patch reduces storage, database, and local I/O overhead while preserving

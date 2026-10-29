@@ -3,9 +3,10 @@ use shardline_index::hub::HubRepoType;
 use shardline_protocol::SecretString;
 
 /// Repository type (model, dataset, space).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepoType {
+    #[default]
     Model,
     Dataset,
     Space,
@@ -61,8 +62,8 @@ impl From<RepoType> for HubRepoType {
 /// Repository creation request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoCreateRequest {
-    /// Repository type.
-    #[serde(rename = "type")]
+    /// Repository type; official clients omit this for model repositories.
+    #[serde(rename = "type", default)]
     pub repo_type: RepoType,
     /// Repository owner or namespace.
     pub name: String,
@@ -170,11 +171,15 @@ pub struct TreeEntry {
 
 /// LFS metadata for a tree entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TreeEntryLfs {
     /// SHA-256 OID.
     pub oid: String,
     /// File size in bytes.
     pub size: u64,
+    /// Size of the Git LFS pointer blob stored in the repository tree.
+    #[serde(default)]
+    pub pointer_size: u64,
 }
 
 /// Preupload request body.
@@ -203,6 +208,9 @@ pub struct PreuploadRequest {
 pub struct PreuploadFile {
     /// Relative path.
     pub path: String,
+    /// File size reported by the Hub client. Older clients may omit it.
+    #[serde(default)]
+    pub size: u64,
     /// Whether the file is an LFS pointer.
     #[serde(default)]
     pub lfs: bool,
@@ -275,7 +283,7 @@ pub struct CommitDeletedEntry {
 /// Commit response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitResponse {
-    /// New commit SHA.
+    /// Legacy internal revision ID; remains accepted alongside the Git ID.
     pub commit_id: String,
     /// Official Hugging Face commit object identifier field.
     #[serde(rename = "commitOid")]
@@ -293,6 +301,12 @@ pub struct CommitResponse {
 pub struct WhoamiResponse {
     /// User name.
     pub name: String,
+    /// Organization memberships known to this Hub deployment.
+    ///
+    /// Shardline currently has no organization-membership source, so handlers
+    /// return an empty list rather than omitting the field or inventing roles.
+    #[serde(default)]
+    pub orgs: Vec<serde_json::Value>,
     /// Whether the user is an admin.
     #[serde(default)]
     pub is_admin: bool,
@@ -335,11 +349,21 @@ pub struct WhoamiAccount {
     pub name: String,
 }
 
-/// Token exchange response.
+/// JSON body for the Hub token-exchange endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenExchangeResponse {
-    /// Access token.
+    /// Legacy signed bearer token for clients using Shardline's original response.
     pub token: String,
+    /// CAS bearer token used by native Hugging Face Xet clients.
+    #[serde(default)]
+    pub access_token: String,
+    /// Unix-seconds expiry for `access_token`.
+    #[serde(default)]
+    pub exp: u64,
+    /// CAS base URL used by native Hugging Face Xet clients.
+    #[serde(default)]
+    pub cas_url: String,
 }
 
 /// LFS batch request.
@@ -348,7 +372,7 @@ pub struct LfsBatchRequest {
     /// Transfer adapter operations.
     pub operation: LfsBatchOperation,
     /// Objects to operate on.
-    #[serde(rename = "ref")]
+    #[serde(rename = "ref", default)]
     pub ref_: LfsBatchRef,
     /// Objects.
     pub objects: Vec<LfsObjectRequest>,
@@ -373,7 +397,7 @@ pub enum LfsBatchOperation {
 }
 
 /// LFS batch ref info.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LfsBatchRef {
     /// Branch name.
     pub name: String,
@@ -653,6 +677,16 @@ pub struct LfsObjectError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_xet_token_response_still_deserializes() {
+        let response: TokenExchangeResponse =
+            serde_json::from_str(r#"{"token":"legacy-cas-token"}"#).unwrap();
+        assert_eq!(response.token, "legacy-cas-token");
+        assert_eq!(response.access_token, "");
+        assert_eq!(response.exp, 0);
+        assert_eq!(response.cas_url, "");
+    }
+
     // -----------------------------------------------------------------------
     // RepoType::from_api_str
     // -----------------------------------------------------------------------
@@ -912,6 +946,20 @@ mod tests {
         assert!(deserialized.private);
     }
 
+    #[test]
+    fn repo_create_without_type_defaults_to_model_but_rejects_invalid_types() {
+        let request: RepoCreateRequest =
+            serde_json::from_str(r#"{"name":"repo","organization":"org","visibility":"private"}"#)
+                .unwrap();
+        assert_eq!(request.repo_type, RepoType::Model);
+        for invalid in [
+            r#"{"name":"org/repo","type":null}"#,
+            r#"{"name":"org/repo","type":"unknown"}"#,
+        ] {
+            assert!(serde_json::from_str::<RepoCreateRequest>(invalid).is_err());
+        }
+    }
+
     // -----------------------------------------------------------------------
     // RepoResponse serialization
     // -----------------------------------------------------------------------
@@ -1000,6 +1048,9 @@ mod tests {
         assert!(!resp.is_admin);
         assert_eq!(resp.user_type, "user");
         assert_eq!(resp.auth.auth_type, "token");
+        assert!(resp.orgs.is_empty());
+        let encoded = serde_json::to_value(resp).unwrap();
+        assert_eq!(encoded["orgs"], serde_json::json!([]));
     }
 
     // -----------------------------------------------------------------------

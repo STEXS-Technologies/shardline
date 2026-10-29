@@ -220,6 +220,28 @@ pub trait UploadIntentStore: Send + Sync {
         Ok(transitioned)
     }
 
+    /// Persists consecutive boundaries whose domain work has already completed.
+    ///
+    /// Transactional adapters may commit the states and every correlated event
+    /// together. The compatibility implementation retains individual commits;
+    /// callers must tolerate recoverable partial progress on an error or `false`.
+    /// A successful return acknowledges all supplied boundaries durably.
+    async fn transition_intent_batch_with_events(
+        &self,
+        intent_id: &str,
+        transitions: &[(UploadIntentState, LifecycleEvent)],
+    ) -> Result<bool, Self::Error> {
+        for (state, event) in transitions {
+            if !self
+                .transition_intent_with_event(intent_id, *state, event)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Loads an intent by ID.
     ///
     /// # Errors

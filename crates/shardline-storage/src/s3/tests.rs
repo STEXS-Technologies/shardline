@@ -1,4 +1,5 @@
 use bytes::Bytes;
+mod range_bounds;
 use futures_util::StreamExt;
 use object_store::{
     GetOptions, ObjectStore as ExternalObjectStore, ObjectStoreExt, memory::InMemory,
@@ -7,9 +8,9 @@ use object_store::{
 use shardline_protocol::{ByteRange, SecretString, ShardlineHash};
 
 use super::{
-    S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, chunk_hash, is_temp_upload_key,
-    normalize_prefix, stream_payload_for_range, temp_key_for, temporary_upload_location,
-    validated_external_range, verify_file_length, verify_integrity,
+    S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, STREAM_COMPARE_CHUNK_BYTES, chunk_hash,
+    is_temp_upload_key, normalize_prefix, stream_payload_for_range, temp_key_for,
+    temporary_upload_location, validated_external_range, verify_file_length, verify_integrity,
 };
 use crate::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore as ObjectStoreTrait,
@@ -84,6 +85,176 @@ async fn single_attempt_delete_does_not_retry_dropped_reply_or_retryable_server_
             "an uncertain delete was retried"
         );
     }
+}
+
+#[test]
+fn duplicate_file_put_streams_one_get_without_head_or_ranged_gets() {
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    let body = vec![0x5a; STREAM_COMPARE_CHUNK_BYTES * 2 + 17];
+    let response_body = body.clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "S3 client sent no request");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0, "S3 request ended before headers completed");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        assert!(
+            request.starts_with(b"GET /assets/chunks/replay "),
+            "expected one full GET without HEAD or range requests, got: {}",
+            String::from_utf8_lossy(&request)
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"replay-etag\"\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        )
+        .unwrap();
+        stream.write_all(&response_body).unwrap();
+        drop(stream);
+
+        let extra_request_deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            match listener.accept() {
+                Ok(_) => {
+                    return Err(std::io::Error::other(
+                        "duplicate verification issued more than one S3 request",
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= extra_request_deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok::<(), std::io::Error>(())
+    });
+
+    let store = synchronous_runtime_fixture(format!("http://{address}"));
+    let key = ObjectKey::parse("chunks/replay").unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &body).unwrap();
+    let integrity = ObjectIntegrity::new(chunk_hash(&body), body.len() as u64);
+    assert!(matches!(
+        store.put_content_addressed_file(&key, file.path(), &integrity),
+        Ok(PutOutcome::AlreadyExists)
+    ));
+    server.join().unwrap().unwrap();
+}
+
+#[test]
+fn duplicate_file_put_rejects_same_length_different_bytes() {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let local_body = b"the expected immutable object".to_vec();
+    let remote_body = b"the conflicting immutable obj".to_vec();
+    assert_eq!(local_body.len(), remote_body.len());
+    let response_body = remote_body;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                return Err(std::io::Error::other("S3 request ended before headers"));
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        if !request.starts_with(b"GET /assets/chunks/conflict ") {
+            return Err(std::io::Error::other("unexpected S3 verification request"));
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"conflict-etag\"\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        )?;
+        stream.write_all(&response_body)?;
+        Ok::<(), std::io::Error>(())
+    });
+
+    let store = synchronous_runtime_fixture(format!("http://{address}"));
+    let key = ObjectKey::parse("chunks/conflict").unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &local_body).unwrap();
+    let integrity = ObjectIntegrity::new(chunk_hash(&local_body), local_body.len() as u64);
+    assert!(matches!(
+        store.put_content_addressed_file(&key, file.path(), &integrity),
+        Err(S3ObjectStoreError::ExistingObjectConflict)
+    ));
+    server.join().unwrap().unwrap();
+}
+
+#[test]
+fn duplicate_file_put_rejects_different_length_object() {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let local_body = b"expected bytes".to_vec();
+    let response_body = b"short".to_vec();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                return Err(std::io::Error::other("S3 request ended before headers"));
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        if !request.starts_with(b"GET /assets/chunks/length-conflict ") {
+            return Err(std::io::Error::other("unexpected S3 verification request"));
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"length-conflict-etag\"\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        )?;
+        stream.write_all(&response_body)?;
+        Ok::<(), std::io::Error>(())
+    });
+
+    let store = synchronous_runtime_fixture(format!("http://{address}"));
+    let key = ObjectKey::parse("chunks/length-conflict").unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &local_body).unwrap();
+    let integrity = ObjectIntegrity::new(chunk_hash(&local_body), local_body.len() as u64);
+    assert!(matches!(
+        store.put_content_addressed_file(&key, file.path(), &integrity),
+        Err(S3ObjectStoreError::ExistingObjectConflict)
+    ));
+    server.join().unwrap().unwrap();
 }
 
 #[test]
@@ -1268,11 +1439,9 @@ mod minio_tests {
     use shardline_protocol::{ByteRange, SecretString};
 
     fn ensure_minio() -> Option<DockerLocalStack> {
-        if !DockerLocalStack::docker_available() {
-            return None;
-        }
         // Start a fresh stack per test call so each nextest process owns its
-        // own OS-level infrastructure and has no shared test state.
+        // own OS-level infrastructure and has no shared test state. The shared
+        // builder fails required qualification before optional error handling.
         DockerLocalStack::builder()
             .with_minio()
             .start()
@@ -1640,12 +1809,20 @@ mod minio_tests {
         put_test_object(&store, "v1.tmp.123.456.1750000000000000000", b"user-b");
         put_test_object(&store, "data.tmp.1", b"user-c");
         put_test_object(&store, "notes.txt", b"user-d");
+        // Being inside the reserved subtree does not make a key generated.
+        let malformed_temp = "__tmp/shardline-stream-upload/not-generated";
+        put_test_object(&store, malformed_temp, b"keep-me");
 
         let (reaped, reaped_bytes) = store
             .sweep_stale_temp_keys(unix_now_seconds().saturating_add(2 * 3600))
             .unwrap();
         assert_eq!(reaped, 2, "only the two generated temps are stale");
         assert_eq!(reaped_bytes, 12, "5 + 7 bytes reclaimed");
+        assert!(
+            store
+                .contains(&ObjectKey::parse(malformed_temp).unwrap())
+                .unwrap()
+        );
 
         assert!(!store.contains(&overwrite_temp).unwrap());
         assert!(
@@ -2382,45 +2559,6 @@ fn s3_put_overwrite_connection_error() {
 // ── existing_object_outcome_from_file edge case ────────────────────
 
 #[test]
-fn existing_object_outcome_from_file_length_mismatch() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18987".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("test.bin");
-    std::fs::write(&path, b"hello world").unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello world"), 11);
-    // existing_length (5) differs from integrity.length (11) → ExistingObjectConflict
-    let result = super::existing_object_outcome_from_file(&store, &key, 5, &path, &integrity);
-    assert!(matches!(
-        result,
-        Err(S3ObjectStoreError::ExistingObjectConflict)
-    ));
-}
-
-#[test]
-fn existing_object_outcome_from_file_zero_length() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18986".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("empty.bin");
-    std::fs::write(&path, b"").unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
-    // existing_length (0) == integrity.length (0) and source file is empty → AlreadyExists
-    let result = super::existing_object_outcome_from_file(&store, &key, 0, &path, &integrity);
-    assert!(matches!(result, Ok(PutOutcome::AlreadyExists)));
-}
-
-#[test]
 fn existing_object_outcome_from_file_verify_file_length_fails() {
     let store = S3ObjectStore::new(
         S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
@@ -2434,7 +2572,7 @@ fn existing_object_outcome_from_file_verify_file_length_fails() {
     let key = ObjectKey::parse("test/key").unwrap();
     let integrity = ObjectIntegrity::new(super::chunk_hash(b"short"), 99);
     // verify_file_length fails
-    let result = super::existing_object_outcome_from_file(&store, &key, 99, &path, &integrity);
+    let result = super::existing_object_outcome_from_file(&store, &key, &path, &integrity);
     assert!(matches!(
         result,
         Err(S3ObjectStoreError::IntegrityLengthMismatch)

@@ -6,7 +6,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::ServerConfigError;
 
 mod blocking;
-pub(crate) use blocking::{blocking_work, blocking_work_with_permit, blocking_work_with_setup};
+mod bytes;
+pub(crate) use blocking::{blocking_work, blocking_work_with_buffer, blocking_work_with_permit};
+pub(crate) use blocking::{cancellable_work_with_permit, cancellable_work_with_setup};
+pub(crate) use bytes::retain_bytes;
 
 /// Largest capacity representable by batch permit counts and Tokio's semaphore.
 pub(crate) fn maximum_counted_capacity() -> usize {
@@ -138,6 +141,7 @@ impl WeightedAdmission {
 #[derive(Debug, Clone)]
 pub struct BoundedPool {
     inner: Arc<Semaphore>,
+    retained_buffers: Arc<Semaphore>,
     capacity: u32,
 }
 
@@ -174,6 +178,7 @@ impl BoundedPool {
         })?;
         Ok(Self {
             inner: Arc::new(Semaphore::new(max_concurrent.get())),
+            retained_buffers: Arc::new(Semaphore::new(max_concurrent.get())),
             capacity: cap,
         })
     }
@@ -188,6 +193,19 @@ impl BoundedPool {
     /// blocking job while queued. The running job must own the returned permit.
     pub(crate) async fn acquire(&self) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
         self.inner.clone().acquire_owned().await
+    }
+
+    /// Separately bounds retained, individually size-limited buffers. Hold this
+    /// charge with the actual bytes while releasing execution between jobs.
+    pub(crate) async fn acquire_buffer(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        self.retained_buffers.clone().acquire_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_buffer_permits(&self) -> usize {
+        self.retained_buffers.available_permits()
     }
 
     /// Returns the number of currently available permits.
@@ -262,12 +280,19 @@ impl ExecutionPools {
 pub mod timeouts {
     use std::time::Duration;
 
-    /// Upper bound for work performed while serving one HTTP request.
+    /// Upper bound for admission and handler work through response headers.
     ///
-    /// This does not replace lower-level client and database deadlines; it is
-    /// the final server-side guard that prevents an accepted request from
-    /// running indefinitely.
+    /// This complements lower-level client and database deadlines.
+    /// Response producers have a separate no-progress deadline after headers.
     pub const REQUEST_TOTAL: Duration = Duration::from_secs(300);
+
+    /// Maximum interval without nonempty response data. This is an idle limit,
+    /// not a limit on total transfer duration or a TCP acknowledgement timer.
+    pub(crate) const RESPONSE_IDLE: Duration = Duration::from_secs(300);
+
+    /// Maximum stall while a connection has an outstanding socket write.
+    /// Idle keep-alive connections and progressing writes do not expire here.
+    pub(crate) const WRITE_IDLE: Duration = Duration::from_secs(300);
 }
 
 /// Admission metrics counters tracked via atomics (used when prometheus metrics are unavailable).
@@ -308,6 +333,9 @@ pub mod weights {
     /// records per request (O(N) in record count), so they are admission-gated
     /// like the upload/reconstruction paths to bound concurrent scans.
     pub const XORB_READ: u64 = 1;
+    /// Weight for bounded, multi-container native deduplication metadata.
+    /// Uses the existing controller's capacity clamp on small deployments.
+    pub const XET_DEDUP: u64 = 4;
     /// Weight for a xorb upload (stores chunks + metadata).
     pub const XORB_UPLOAD: u64 = 4;
     /// Weight for a shard upload (parsing + metadata commit).

@@ -49,16 +49,33 @@ flowchart TD
   linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
-The bundled compose file starts the local profile by default:
+The bundled Compose file starts Shardline with PostgreSQL metadata and MinIO
+object storage for local development:
 
 ```text
 docker compose -f docker-compose.yml up --build
 ```
 
-That compose profile is Docker-native by default: it generates and persists its
-development signing key inside the named data volume.
-To mint an authenticated local token against that running container, execute the CLI
-inside the service:
+Once the services are ready, run the authenticated smoke check from another
+terminal (requires Python 3):
+
+```text
+python3 scripts/shardline/compose_smoke.py
+```
+
+It checks readiness, rejects missing credentials, and uploads and downloads a
+deterministic 1 MiB fixture byte-for-byte. Repeating it reuses the same object;
+the fixture remains in the development deployment. It does not restart services
+or delete data. Credentials stay out of its output, and downloads do not follow
+redirects. Use `--endpoint`, `--project`, and repeated `--compose-file` arguments
+when you override the bundled development configuration.
+The complete check has a 180-second deadline, including token minting and HTTP
+response bodies. Use `--timeout SECONDS` to change it; expiry stops the check's
+owned client processes without stopping the deployment.
+
+Compose supplies a development signing key through
+`SHARDLINE_TOKEN_SIGNING_KEY`. To mint a token using the running server's key,
+execute the CLI inside the service:
 
 ```bash
 TOKEN="$(docker compose -f docker-compose.yml exec -T shardline \
@@ -70,7 +87,7 @@ TOKEN="$(docker compose -f docker-compose.yml exec -T shardline \
   --owner team \
   --repo assets \
   --revision main \
-  --key-file /var/lib/shardline/secrets/token-signing-key)"
+  --key-env SHARDLINE_TOKEN_SIGNING_KEY)"
 
 curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:18080/v1/stats
 ```
@@ -100,9 +117,9 @@ If you want to mint tokens on the host for the Compose server, pass the same sig
 as an environment variable:
 
 ```bash
-SHARDLINE_TOKEN_SIGNING_KEY=dev-signing-key docker compose -f docker-compose.yml up --build
+SHARDLINE_TOKEN_SIGNING_KEY=dev-only-signing-key-32-bytes-long docker compose -f docker-compose.yml up --build
 
-TOKEN="$(SHARDLINE_TOKEN_SIGNING_KEY=dev-signing-key shardline admin token \
+TOKEN="$(SHARDLINE_TOKEN_SIGNING_KEY=dev-only-signing-key-32-bytes-long shardline admin token \
   --issuer local \
   --subject operator-1 \
   --scope write \
@@ -120,18 +137,19 @@ configuration through normal environment variables or files.
 Provider integration is independent of whether the process runs on the host or in a
 container.
 
-For local S3-compatible testing, start the MinIO profile and point Shardline at the
-bucket it creates:
+To run a host-native Shardline process against only the development MinIO
+service, start MinIO and its bucket initializer, then export the storage settings
+in the shell used to start Shardline:
 
-```text
-docker compose -f docker-compose.yml --profile s3 up minio minio-init
-SHARDLINE_OBJECT_STORAGE_ADAPTER=s3
-SHARDLINE_S3_BUCKET=shardline
-SHARDLINE_S3_REGION=us-east-1
-SHARDLINE_S3_ENDPOINT=http://127.0.0.1:19000
-SHARDLINE_S3_ACCESS_KEY_ID=shardline
-SHARDLINE_S3_SECRET_ACCESS_KEY=shardline-dev-password
-SHARDLINE_S3_ALLOW_HTTP=true
+```bash
+docker compose -f docker-compose.yml up -d minio minio-init
+export SHARDLINE_OBJECT_STORAGE_ADAPTER=s3
+export SHARDLINE_S3_BUCKET=shardline
+export SHARDLINE_S3_REGION=us-east-1
+export SHARDLINE_S3_ENDPOINT=http://127.0.0.1:19000
+export SHARDLINE_S3_ACCESS_KEY_ID=shardline
+export SHARDLINE_S3_SECRET_ACCESS_KEY=shardline-dev-password
+export SHARDLINE_S3_ALLOW_HTTP=true
 ```
 
 For a direct, providerless Xet-compatible backend, follow
@@ -148,7 +166,7 @@ flowchart TD
     Server[server: shardline]
     Server --> Object[object store: S3-compatible]
     Server --> Index[index store: Postgres-compatible SQL]
-    Server --> Transfer[transfer: presigned object-store URLs when supported]
+    Server --> Transfer[transfer: authorized downloads through Shardline]
   end
 
   style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
@@ -662,16 +680,20 @@ SHARDLINE_INDEX_POSTGRES_URL=postgres://user:password@db.example.com:5432/shardl
 
 Secrets must not be printed by `config check`.
 
-`SHARDLINE_MAX_REQUEST_BODY_BYTES` caps the maximum accepted HTTP request body size.
-Transfer routes for xorb and shard uploads enforce this limit before Xet normalization
-and validation. Upload bodies are not staged to local `incoming` files; immutable bytes
-are persisted through the configured object-storage adapter.
-S3 deployments therefore do not require local disk for upload-body persistence.
-Ranged xorb and shard downloads stream stored object bytes through the response path.
-Control-plane JSON and webhook routes still buffer bounded request bodies before
-parsing. The default is `67108864` bytes.
-Raise it to match expected asset sizes and keep the transfer role behind an upstream
-limit that is at least as strict.
+`SHARDLINE_MAX_REQUEST_BODY_BYTES` defaults to `67108864` bytes (64 MiB).
+Native Xorb uploads have a separate default wire limit of `134217728` bytes
+(128 MiB), because a valid 64 MiB container also carries framing bytes.
+Set `SHARDLINE_MAX_XORB_BODY_BYTES` (or `[server].max_xorb_body_bytes` in TOML)
+to override that limit. An explicitly configured general body limit also applies
+to Xorbs unless the Xorb limit is set separately, preserving existing operator
+restrictions. Other upload routes retain the general limit.
+
+Both limits are enforced before normalization and validation. Large transfer
+bodies and footerless normalization use bounded temporary files; allow scratch
+space even with S3 storage. Immutable objects are persisted through the configured
+storage adapter. Downloads stream stored bytes. Control-plane JSON and webhook
+routes buffer bounded bodies before parsing. Configure upstream proxies to allow
+the intended wire sizes; a 64 MiB proxy limit can reject valid native Xorbs.
 
 Shard metadata limits cap per-upload metadata fanout, not logical asset size.
 They prevent a shard body from forcing unbounded file sections, xorb sections,

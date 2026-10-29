@@ -214,6 +214,8 @@ pub struct TokenClaims {
     scope: TokenScope,
     repository: RepositoryScope,
     expires_at_unix_seconds: u64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    namespace_repository_creation: bool,
 }
 
 #[derive(Deserialize)]
@@ -224,6 +226,8 @@ struct TokenClaimsFields {
     scope: TokenScope,
     repository: RepositoryScopeFields,
     expires_at_unix_seconds: u64,
+    #[serde(default)]
+    namespace_repository_creation: bool,
 }
 
 impl TryFrom<TokenClaimsFields> for TokenClaims {
@@ -243,6 +247,10 @@ impl TryFrom<TokenClaimsFields> for TokenClaims {
             repository,
             fields.expires_at_unix_seconds,
         )
+        .map(|mut claims| {
+            claims.namespace_repository_creation = fields.namespace_repository_creation;
+            claims
+        })
     }
 }
 
@@ -304,7 +312,25 @@ impl TokenClaims {
             scope,
             repository,
             expires_at_unix_seconds,
+            namespace_repository_creation: false,
         })
+    }
+
+    /// Grants repository creation within this token's existing owner namespace.
+    ///
+    /// This signed grant does not authorize reading or modifying sibling
+    /// repositories. Creation still requires Write scope at the authorization
+    /// boundary. Issuers must establish namespace ownership before minting it.
+    #[must_use]
+    pub const fn with_namespace_repository_creation(mut self) -> Self {
+        self.namespace_repository_creation = true;
+        self
+    }
+
+    /// Whether creation is explicitly granted for this namespace.
+    #[must_use]
+    pub fn grants_namespace_repository_creation(&self, namespace: &str) -> bool {
+        self.namespace_repository_creation && self.repository.owner() == namespace
     }
 
     /// Returns the token issuer identity.
@@ -335,6 +361,34 @@ impl TokenClaims {
     #[must_use]
     pub const fn expires_at_unix_seconds(&self) -> u64 {
         self.expires_at_unix_seconds
+    }
+}
+
+#[cfg(test)]
+mod namespace_creation_tests {
+    use super::*;
+
+    #[test]
+    fn creation_grant_is_signed_and_absent_from_legacy_payloads() {
+        let claims = TokenClaims::new(
+            "issuer",
+            "subject",
+            TokenScope::Write,
+            RepositoryScope::new(RepositoryProvider::GitHub, "alice", "own", None).unwrap(),
+            u64::MAX,
+        )
+        .unwrap();
+        let legacy = serde_json::to_value(&claims).unwrap();
+        assert!(legacy.get("namespace_repository_creation").is_none());
+        let decoded: TokenClaims = serde_json::from_value(legacy).unwrap();
+        assert!(!decoded.grants_namespace_repository_creation("alice"));
+        let granted = claims.with_namespace_repository_creation();
+        let signer = TokenSigner::new(b"namespace-creation-test-key-32bytes").unwrap();
+        let token = signer.sign(&granted).unwrap();
+        let verified = signer.verify_now(&token).unwrap();
+        assert!(verified.grants_namespace_repository_creation("alice"));
+        assert!(!verified.grants_namespace_repository_creation("bob"));
+        assert_eq!(verified.repository().name(), "own");
     }
 }
 
@@ -547,6 +601,9 @@ pub fn split_token(token: &str) -> Result<(&str, &str), TokenCodecError> {
     if token.len() > MAX_TOKEN_STRING_BYTES {
         return Err(TokenCodecError::InvalidFormat);
     }
+    // Official Hub clients require this presentation prefix. It carries no
+    // authority: both segments still undergo normal signature/claim validation.
+    let token = token.strip_prefix("hf_").unwrap_or(token);
     let Some((payload_hex, signature_hex)) = token.split_once('.') else {
         return Err(TokenCodecError::InvalidFormat);
     };
@@ -558,6 +615,27 @@ pub fn split_token(token: &str) -> Result<(&str, &str), TokenCodecError> {
         return Err(TokenCodecError::InvalidFormat);
     }
     Ok((payload_hex, signature_hex))
+}
+
+/// Presents an existing signed Shardline credential to official Hub clients.
+///
+/// This preserves its signature, scope and expiry. Bare credentials remain the
+/// default; prefixed credentials require a server supporting this envelope.
+///
+/// # Errors
+/// Returns an error for malformed envelopes or an oversized prefixed token.
+pub fn format_hub_token(token: &str) -> Result<String, TokenCodecError> {
+    let (payload, signature) = split_token(token)?;
+    if !payload.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !signature.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(TokenCodecError::InvalidFormat);
+    }
+    let formatted = format!("hf_{payload}.{signature}");
+    if formatted.len() > MAX_TOKEN_STRING_BYTES {
+        return Err(TokenCodecError::InvalidFormat);
+    }
+    Ok(formatted)
 }
 
 /// Serializes validated token claims into the canonical signed payload.
@@ -656,6 +734,42 @@ mod tests {
         TOKEN_SIGNATURE_HEX_BYTES, TokenClaims, TokenClaimsError, TokenCodecError, TokenScope,
         TokenSigner, format_signed_token, split_token,
     };
+
+    #[test]
+    fn hub_envelope_preserves_signature_scope_and_expiry() {
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let repository = RepositoryScope::new(
+            RepositoryProvider::Generic,
+            "alice",
+            "private",
+            Some("main"),
+        )
+        .unwrap();
+        let claims =
+            TokenClaims::new("issuer", "alice", TokenScope::Read, repository, 100).unwrap();
+        let native = signer.sign(&claims).unwrap();
+        let hub = super::format_hub_token(&native).unwrap();
+        assert_eq!(hub, format!("hf_{native}"));
+        assert_eq!(super::format_hub_token(&hub).unwrap(), hub);
+        assert_eq!(signer.verify_at(&hub, 99).unwrap(), claims);
+        assert_eq!(signer.verify_at(&native, 99).unwrap(), claims);
+        assert!(signer.verify_at(&hub, 101).is_err());
+        assert!(
+            TokenSigner::new(b"different-signing-key-32-bytes!!!")
+                .unwrap()
+                .verify_at(&hub, 99)
+                .is_err()
+        );
+        assert!(signer.verify_at(&format!("hf_{hub}"), 99).is_err());
+        let mut tampered = hub;
+        let last = tampered.pop().unwrap();
+        tampered.push(if last == '0' { '1' } else { '0' });
+        assert!(signer.verify_at(&tampered, 99).is_err());
+        assert!(super::format_hub_token("hf_nothex.signature").is_err());
+        let maximum =
+            format_signed_token(&vec![1; (MAX_TOKEN_STRING_BYTES - 3) / 2], &[2]).unwrap();
+        assert!(super::format_hub_token(&maximum).is_err());
+    }
 
     #[test]
     fn deserialized_repository_and_claims_validate_components() {

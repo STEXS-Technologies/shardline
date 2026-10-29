@@ -26,7 +26,6 @@ The object adapter must provide:
 - range read without full-object buffering
 - full-object read for validation and repair tooling
 - object existence check
-- optional native presigned ranged GET URL
 - deletion for garbage collection
 - metadata retrieval for object length and checksum where supported
 
@@ -80,9 +79,9 @@ The object adapter must provide:
 > }
 > ```
 
-Presigned URLs and native async read streams still belong in production adapters, but
-inventory, metadata, bounded range reads, and idempotent delete are now part of the
-required lifecycle contract.
+Client presigned URLs target Shardline's protocol endpoints; storage adapters must
+not expose backend download URLs. Native async backend reads, inventory, metadata,
+bounded range reads, and idempotent delete belong in the lifecycle contract.
 Use the prefix visitor for garbage collection, index rebuild, and operational stats so
 an adapter can page or stream inventory without forcing callers to allocate the full
 object listing first.
@@ -99,8 +98,9 @@ The local server backend already uses that adapter for chunk writes, chunk reads
 existence checks, and local chunk inventory.
 HTTP transfer paths use the local adapter to derive validated object paths, then stream
 stored chunk bytes through bounded async file reads.
-Cloud adapters should expose native read streams or presigned ranged URLs so the server
-does not need to allocate full objects during transfer mediation.
+Cloud adapters should expose bounded native read streams to Shardline. Client download
+URLs always point to Shardline, which authorizes the request and serves verified bytes;
+backend download URLs and credentials are not exposed to clients.
 
 Rules:
 - Keys must never map directly to unchecked user-provided paths.
@@ -133,9 +133,9 @@ Rules:
 - Use conditional writes where supported.
 - Store xorbs under deterministic keys.
 - Accept direct in-memory payloads instead of staging local temporary files.
-- Use server-mediated ranged transfer when presigning is disabled or unavailable.
-- Prefer native async ranged reads or presigned ranged GET URLs when the adapter can
-  provide them.
+- Always serve client downloads through Shardline, including presigned requests.
+- Prefer native async backend reads where compatible with content verification.
+- Never redirect client downloads to backend object-store URLs.
 - Avoid putting secrets, tokens, or tenant identifiers in object keys when not required.
 - Treat object-store ETags as provider metadata, not as protocol hashes.
 
@@ -406,7 +406,7 @@ Every object adapter must pass:
 - return metadata for an existing object
 - list objects under a validated prefix
 - delete an existing object idempotently
-- presign range when supported
+- keep client download URLs and responses on Shardline without backend redirects
 
 Every index adapter must pass:
 

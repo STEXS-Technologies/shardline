@@ -136,9 +136,10 @@ def write_summary(output, results, direct):
               "- Stored payload bytes include live objects and reliability evidence, but exclude MinIO filesystem overhead, PostgreSQL bytes, replication and versions. PostgreSQL size is reported separately.",
               "- Container CPU includes all PostgreSQL workers. Container peak memory is the lifetime cgroup high-water mark, including page cache; client RSS is measured separately.",
               "- Database lock/connection peaks are sampled every 0.5 seconds and can miss shorter spikes. Query calls and execution time are cumulative server counters.",
+              "- PostgreSQL counters include nested trigger/function statements. Total calls are not client round trips; summing nested statement WAL can count the same work more than once. Use top_level_calls and top_level_statement_wal_bytes to separate top-level work. Neither counter measures total cluster WAL, disk writes, replica traffic or NVMe wear.",
               "- The runner requests zero retention on disposable data, but the CLI enforces at least one hour. Short-run storage includes quarantined objects and does not establish the footprint after retention expires. A completed collector must overlap each maintenance workload.",
               "- GC overlap refers to CLI process lifetime, including startup and ownership waits; it does not prove every request overlapped an active scan.",
-              "- These are fixed-size bursts, not a sustained-load test. With 32 objects per lane, p99 is the slowest sample; use larger samples for tail-latency claims.",
+              "- These are fixed-size bursts, not a sustained-load test. With fewer than 100 observations, nearest-rank p99 is the slowest sample; use larger samples for tail-latency claims.",
               "- Initial ingestion uses one logical namespace. Mixed lanes then add two identical copies to compare warm deduplication with/without GC; their final logical bytes are reported separately.",
               "- No forced cold cache, node termination, load balancer, Redis, cloud pricing, native LFS/Xet performance, or 100 TB–1 PB cardinality result is claimed.",
               "- Direct S3 uses boto3 and identical payload/client counts; it is a storage-service reference, not a complete Shardline protocol comparison.", ""]
@@ -150,6 +151,7 @@ def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("output", type=Path, help="new directory outside the checkout")
+    parser.add_argument("--binary-source-revision", help="source revision of the supplied executable, when known; recorded separately from the harness checkout")
     parser.add_argument("--replicas", type=int, nargs="+", default=[1, 2, 4, 8])
     parser.add_argument("--datasets", nargs="+", choices=["unique", "repeated", "compressible"],
                         default=["unique", "repeated", "compressible"])
@@ -181,7 +183,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     with args.binary.open("rb") as binary:
         binary_hash = hashlib.file_digest(binary, "sha256").hexdigest()
-    metadata = {"commit": command("git", "rev-parse", "HEAD"), "started": utc_now(),
+    metadata = {"harness_commit": command("git", "rev-parse", "HEAD"),
+                "binary_source_revision": args.binary_source_revision, "started": utc_now(),
                 "binary_sha256": binary_hash, "binary_version": command(str(args.binary), "--version"),
                 "host": platform.platform(), "logical_cpus": os.cpu_count(),
                 "load_average_at_start": os.getloadavg(),
@@ -204,8 +207,10 @@ def main():
                     "http://", "http://performance:owned_performance_password@"))
                 trace = RequestTrace(subprocess.Popen(
                     ["mc", "admin", "trace", "--json", "--verbose", "--call", "s3", "performance"],
-                    env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True),
-                    deployment.client, bucket, deployment.endpoint)
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                    start_new_session=os.name == "posix"),
+                    deployment.client, bucket, deployment.endpoint,
+                    owns_process_group=os.name == "posix")
                 try:
                     start = trace.barrier()
                     reference = run_direct(deployment.client, bucket, dataset, args.objects,

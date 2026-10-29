@@ -73,7 +73,13 @@ async fn upsert_tree_transaction(
              DO UPDATE SET
                 file_id = EXCLUDED.file_id,
                 size_bytes = EXCLUDED.size_bytes,
-                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds",
+                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds
+             WHERE (shardline_tree_entries.file_id,
+                    shardline_tree_entries.size_bytes,
+                    shardline_tree_entries.updated_at_unix_seconds)
+                   IS DISTINCT FROM
+                   (EXCLUDED.file_id, EXCLUDED.size_bytes,
+                    EXCLUDED.updated_at_unix_seconds)",
     )
     .bind(&entry.provider)
     .bind(&entry.owner)
@@ -111,7 +117,9 @@ async fn upsert_revision_transaction(
              VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (provider, owner, repo, revision)
              DO UPDATE SET
-                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds",
+                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds
+             WHERE shardline_revisions.updated_at_unix_seconds
+                   IS DISTINCT FROM EXCLUDED.updated_at_unix_seconds",
     )
     .bind(&rev.provider)
     .bind(&rev.owner)
@@ -800,11 +808,39 @@ mod tests {
                 .expect("upsert")
                 .created
         );
+        let first_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_tree_entries
+             WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4 AND path = $5",
+        )
+        .bind(&e.provider)
+        .bind(&e.owner)
+        .bind(&e.repo)
+        .bind(&e.revision)
+        .bind(&e.path)
+        .fetch_one(store.pool())
+        .await
+        .expect("read initial tuple version");
         assert!(
             !TreeStore::upsert_tree_entry(&store, &e)
                 .await
                 .expect("upsert")
                 .created
+        );
+        let replay_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_tree_entries
+             WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4 AND path = $5",
+        )
+        .bind(&e.provider)
+        .bind(&e.owner)
+        .bind(&e.repo)
+        .bind(&e.revision)
+        .bind(&e.path)
+        .fetch_one(store.pool())
+        .await
+        .expect("read replay tuple version");
+        assert_eq!(
+            first_xmin, replay_xmin,
+            "identical replay must not create a new row version"
         );
 
         let loaded = TreeStore::tree_entry(&store, &key, "data/model.pt")
@@ -813,6 +849,32 @@ mod tests {
             .expect("present");
         assert_eq!(loaded.file_id, e.file_id);
         assert_eq!(loaded.size_bytes, 123);
+        let changed = TreeEntry {
+            file_id: "cd".repeat(32),
+            ..e.clone()
+        };
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &changed)
+                .await
+                .expect("changed metadata upsert")
+                .created
+        );
+        let changed_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_tree_entries
+             WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4 AND path = $5",
+        )
+        .bind(&e.provider)
+        .bind(&e.owner)
+        .bind(&e.repo)
+        .bind(&e.revision)
+        .bind(&e.path)
+        .fetch_one(store.pool())
+        .await
+        .expect("read changed tuple version");
+        assert_ne!(
+            first_xmin, changed_xmin,
+            "changed content identity must create a new row version"
+        );
 
         let scanned = TreeStore::scan_tree(&store, &key, "data", None, 100)
             .await
@@ -864,10 +926,60 @@ mod tests {
                 .await
                 .expect("upsert")
         );
+        let first_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_revisions
+             WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4",
+        )
+        .bind(&rev.provider)
+        .bind(&rev.owner)
+        .bind(&rev.repo)
+        .bind(&rev.revision)
+        .fetch_one(store.pool())
+        .await
+        .expect("read initial revision tuple version");
         assert!(
             !TreeStore::upsert_revision(&store, &rev)
                 .await
                 .expect("upsert")
+        );
+        let replay_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_revisions
+             WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4",
+        )
+        .bind(&rev.provider)
+        .bind(&rev.owner)
+        .bind(&rev.repo)
+        .bind(&rev.revision)
+        .fetch_one(store.pool())
+        .await
+        .expect("read replay revision tuple version");
+        assert_eq!(
+            first_xmin, replay_xmin,
+            "identical replay must not create a new row version"
+        );
+        let refreshed = RevisionRecord {
+            updated_at_unix_seconds: 2,
+            ..rev.clone()
+        };
+        assert!(
+            !TreeStore::upsert_revision(&store, &refreshed)
+                .await
+                .expect("changed revision timestamp")
+        );
+        let refreshed_xmin: String = sqlx::query_scalar(
+            "SELECT xmin::text FROM shardline_revisions
+             WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4",
+        )
+        .bind(&rev.provider)
+        .bind(&rev.owner)
+        .bind(&rev.repo)
+        .bind(&rev.revision)
+        .fetch_one(store.pool())
+        .await
+        .expect("read refreshed revision tuple version");
+        assert_ne!(
+            first_xmin, refreshed_xmin,
+            "changed revision timestamp must create a new row version"
         );
 
         let loaded = TreeStore::revision(&store, &repo_key(), "feature")

@@ -35,14 +35,24 @@
 //! assert_eq!(io_error.kind(), std::io::ErrorKind::InvalidData);
 //! ```
 
+mod client_process;
 #[cfg(feature = "docker")]
 mod docker;
 mod fixtures;
-#[cfg(feature = "docker")]
+mod native_clients;
+mod postgres_fixture;
 mod s3_fault_proxy;
 
 #[cfg(feature = "docker")]
-pub use fixtures::{
-    DockerLocalStack, DockerLocalStackBuilder, S3FaultProxy, S3ProxyFault, S3RawConfig,
-};
-pub use fixtures::{InvariantError, TempStorage};
+pub use docker::HttpsDocumentFixture;
+#[cfg(feature = "docker")]
+pub use docker::HttpsProxyFixture;
+#[cfg(feature = "docker")]
+pub use docker::HttpsWebhookFixture;
+
+pub use client_process::{native_client_output, native_client_output_with_input};
+#[cfg(feature = "docker")]
+pub use fixtures::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};
+pub use fixtures::{InvariantError, S3FaultProxy, S3ProxyFault, TempStorage};
+pub use native_clients::{native_clients_required, require_native_client};
+pub use postgres_fixture::postgres_fixture_url;

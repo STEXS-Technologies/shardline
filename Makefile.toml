@@ -73,10 +73,13 @@ args = ["nextest", "run", "--workspace", "--lib", "${@}"]
 [tasks.test-integration]
 description = "Run integration tests (requires Docker: Postgres, MinIO, Redis)"
 workspace = false
+dependencies = ["build-reliability-runtime-fixture"]
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "cargo"
-args = ["nextest", "run", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
+# Nextest unions multiple -E expressions. Select all integration binaries once,
+# including Xet format contracts, without rerunning library tests in this gate.
+args = ["nextest", "run", "--locked", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "-E", "kind(test)", "${@}"]
 
 [tasks.test-reliability-contracts]
 description = "Verify historical evidence, native profiles and durable task recovery without external services"
@@ -103,7 +106,7 @@ command = "bash"
 args = ["scripts/test-postgres.sh"]
 
 [tasks.test-postgres-process-cuts]
-description = "Verify owned PostgreSQL process cuts against the pinned released 1.11.3 executable"
+description = "Verify owned PostgreSQL process cuts against the pinned released compatibility baseline"
 workspace = false
 command = "bash"
 args = ["scripts/shardline/run_postgres_process_cut_gate.sh", "${@}"]
@@ -114,13 +117,19 @@ workspace = false
 command = "bash"
 args = ["scripts/shardline/run_distributed_integrity_gate.sh", "${@}"]
 
+[tasks.test-disk-pressure]
+description = "Verify stock Xet and S3 recovery after real bounded disk exhaustion (Linux/Docker)"
+workspace = false
+command = "python3"
+args = ["scripts/shardline/verify_disk_pressure.py", "${@}"]
+
 [tasks.test-e2e]
 description = "Run e2e integration tests from the e2e/ folder"
 workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "cargo"
-args = ["nextest", "run", "--locked", "--all-features", "--no-tests=pass", "${@}"]
+args = ["nextest", "run", "--locked", "--all-features", "${@}"]
 cwd = "e2e"
 
 [tasks.test-docker]
@@ -129,7 +138,7 @@ workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "bash"
-args = ["-c", "docker version >/dev/null && cargo nextest run -p shardline-server --features docker --no-tests=pass && (cd e2e && cargo nextest run --all-features --no-tests=pass)"]
+args = ["-c", "docker version >/dev/null && cargo nextest run --locked -p shardline-server --features docker && (cd e2e && cargo nextest run --locked --all-features)"]
 
 [tasks.test-kubernetes]
 description = "Run the disposable kind deployment smoke test"
@@ -327,6 +336,14 @@ install_crate = "cargo-deny"
 command = "cargo"
 args = ["deny", "check"]
 
+[tasks.deny-e2e]
+description = "Check the separate E2E dependency graph against the repository security policy"
+workspace = false
+command = "cargo"
+# Both supported cargo-deny CLI layouts discover the repository policy above
+# the E2E manifest; --config moved between command levels in newer releases.
+args = ["deny", "--manifest-path", "e2e/Cargo.toml", "check"]
+
 [tasks.check-dependency-exceptions]
 description = "Fail CI when a dependency-security exception lacks ownership or has expired"
 workspace = false
@@ -365,7 +382,7 @@ args = ["scripts/check_coverage_ratchet.sh"]
 [tasks.ci]
 description = "Run the core contributor CI checks"
 workspace = false
-dependencies = ["format-check", "clippy", "check-dependency-exceptions", "deny", "test", "test-reliability-contracts", "test-maintenance-contracts", "verify-release-binary", "check-migration-sync"]
+dependencies = ["format-check", "clippy", "check-dependency-exceptions", "deny", "deny-e2e", "test", "test-reliability-contracts", "test-maintenance-contracts", "verify-release-binary", "check-migration-sync"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"
@@ -432,5 +449,5 @@ install_crate_args = ["--locked", "--force"]
 command = "bash"
 args = [
   "-c",
-  "cargo build -p shardline && docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d && bash scripts/shardline/wait_for_chaos_stack.sh && target/debug/shardline db migrate up --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline && cargo nextest run -p shardline-server --test deployment_chaos --no-fail-fast && cargo nextest run -p shardline-server --test fault_drills -E 'test(drill3)' && cargo nextest run -p shardline-server --test fault_drills_extreme -E 'test(drill_extreme_4)'",
+  "cargo build -p shardline && docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d && bash scripts/shardline/wait_for_chaos_stack.sh && target/debug/shardline db migrate up --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline && cargo nextest run -p shardline-server --features docker --test deployment_chaos --no-fail-fast && cargo nextest run -p shardline-server --features docker --test fault_drills -E 'test(drill3)' && cargo nextest run -p shardline-server --features docker --test fault_drills_extreme -E 'test(drill_extreme_4)'",
 ]

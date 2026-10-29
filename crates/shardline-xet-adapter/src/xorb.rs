@@ -18,8 +18,18 @@ use thiserror::Error;
 
 use crate::error::XetAdapterError;
 
+mod authenticated_footer;
+mod legacy_footer;
+mod range;
+pub(crate) mod streaming;
+pub use authenticated_footer::{
+    AuthenticatedXorbFooter, decode_authenticated_xorb_chunk, validate_serialized_xorb_footer,
+};
+pub use range::try_for_each_serialized_xorb_chunk_range;
+
 /// Maximum total unpacked (decompressed) bytes accepted for a single serialized
-/// xorb, checked BEFORE any decompression happens.
+/// xorb. Seek-based validation checks the footer before decompression; forward
+/// streaming validation checks the cumulative declared length before each member.
 ///
 /// A chunk header's `uncompressed_length` is capped at `MAX_CHUNK_SIZE`
 /// (16 MiB), but nothing previously bounded the *sum* across all chunks of a
@@ -27,8 +37,8 @@ use crate::error::XetAdapterError;
 /// i.e. ~16 GiB of decompressed output (a decompression bomb that exhausts
 /// memory or amplifies storage). A legitimately serialized xorb holds at most
 /// one `XORB_BLOCK_SIZE` (16 MiB) of unpacked data, so 4 GiB is ~256x headroom
-/// for any legitimate multi-block upload while rejecting multi-GiB bombs before
-/// allocation or decompression work.
+/// for legitimate multi-block uploads. Both paths reject a member that would
+/// exceed the aggregate cap before allocating its decoded output.
 pub const MAX_XORB_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Validated metadata for one chunk inside a serialized xorb.
@@ -270,14 +280,33 @@ pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
     max_decoded_bytes: usize,
     decoded_buffer: Vec<u8>,
 ) -> Result<(ValidatedXorb, Option<Vec<u8>>), XorbParseError> {
+    validate_serialized_xorb_with_data_and_visitor(
+        reader,
+        expected_hash,
+        max_decoded_bytes,
+        decoded_buffer,
+        &mut |_, _| Ok(()),
+    )
+}
+
+/// The visitor may update request-local digest state only. Its observations
+/// become trusted only after this entire function returns successfully.
+pub(crate) fn validate_serialized_xorb_with_data_and_visitor<R: Read + Seek>(
+    reader: &mut R,
+    expected_hash: ShardlineHash,
+    max_decoded_bytes: usize,
+    decoded_buffer: Vec<u8>,
+    visitor: &mut dyn FnMut(u64, &[u8]) -> std::io::Result<()>,
+) -> Result<(ValidatedXorb, Option<Vec<u8>>), XorbParseError> {
     reader
         .seek(SeekFrom::Start(0))
         .map_err(XorbParseError::from)?;
     let expected_merkle_hash = shardline_hash_to_merkle_hash(expected_hash)?;
-    let parsed = XorbObject::deserialize(reader).map_err(|error| map_core_error(&error))?;
+    let mut parsed = XorbObject::deserialize(reader).map_err(|error| map_core_error(&error))?;
     if parsed.info.xorb_hash != expected_merkle_hash {
         return Err(XorbParseError::HashMismatch);
     }
+    legacy_footer::populate_decoded_offsets(reader, &mut parsed)?;
     // Bound the total declared unpacked bytes BEFORE any decompression: the
     // footer has been parsed but no chunk payload has been decompressed yet, so
     // a multi-chunk decompression bomb is rejected here rather than during
@@ -288,12 +317,13 @@ pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
     reader
         .seek(SeekFrom::Start(0))
         .map_err(XorbParseError::from)?;
-    let validated = XorbObject::validate_xorb_object_with_info_and_data(
+    let validated = XorbObject::validate_xorb_object_with_info_data_and_visitor(
         reader,
         parsed,
         &expected_merkle_hash,
         max_decoded_bytes,
         decoded_buffer,
+        visitor,
     )
     .map_err(|error| map_core_error(&error))?;
     let Some(validated) = validated else {
@@ -302,6 +332,20 @@ pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
     let decoded = validated.decoded;
     let validated = validated.xorb;
     let total_length = reader.seek(SeekFrom::End(0))?;
+    Ok((
+        metadata_from_verified_xorb(expected_hash, total_length, &validated)?,
+        decoded,
+    ))
+}
+
+/// Convert independently authenticated members/root and canonical metadata.
+/// This does not authenticate an untrusted client footer. Call only after full
+/// validation or generation from decoded members whose native root was checked.
+pub(crate) fn metadata_from_verified_xorb(
+    expected_hash: ShardlineHash,
+    total_length: u64,
+    validated: &XorbObject,
+) -> Result<ValidatedXorb, XorbParseError> {
     let packed_content_length = validated
         .get_contents_length()
         .map_err(|error| map_core_error(&error))?;
@@ -318,7 +362,7 @@ pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
     let mut unpacked_start = 0_u64;
 
     for index in 0..num_chunks {
-        let (packed_end, unpacked_end, hash) = validated_chunk_footer_at(&validated, index)?;
+        let (packed_end, unpacked_end, hash) = validated_chunk_footer_at(validated, index)?;
         if packed_end <= packed_start || unpacked_end <= unpacked_start {
             return Err(XorbInvalidFormatError::NonMonotonicChunkBoundaries.into());
         }
@@ -337,15 +381,12 @@ pub fn validate_serialized_xorb_with_data<R: Read + Seek>(
         return Err(XorbInvalidFormatError::PackedContentLengthMismatch.into());
     }
 
-    Ok((
-        ValidatedXorb::new(
-            expected_hash,
-            total_length,
-            packed_content_length,
-            unpacked_start,
-            chunks,
-        ),
-        decoded,
+    Ok(ValidatedXorb::new(
+        expected_hash,
+        total_length,
+        packed_content_length,
+        unpacked_start,
+        chunks,
     ))
 }
 
@@ -388,7 +429,14 @@ where
     R: Read + Seek,
     F: FnMut(DecodedXorbChunk) -> Result<(), VisitorError>,
 {
-    try_for_each_serialized_xorb_chunk_inner(reader, validated, visitor, true)
+    try_for_each_serialized_xorb_chunk_inner(
+        reader,
+        validated.chunks(),
+        0,
+        validated.packed_content_length(),
+        visitor,
+        true,
+    )
 }
 
 /// Decodes a serialized xorb after the exact immutable bytes have already been
@@ -412,12 +460,21 @@ where
     R: Read + Seek,
     F: FnMut(DecodedXorbChunk) -> Result<(), VisitorError>,
 {
-    try_for_each_serialized_xorb_chunk_inner(reader, validated, visitor, false)
+    try_for_each_serialized_xorb_chunk_inner(
+        reader,
+        validated.chunks(),
+        0,
+        validated.packed_content_length(),
+        visitor,
+        false,
+    )
 }
 
 fn try_for_each_serialized_xorb_chunk_inner<R, F, VisitorError>(
     reader: &mut R,
-    validated: &ValidatedXorb,
+    descriptors: &[ValidatedXorbChunk],
+    packed_start: u64,
+    expected_packed_end: u64,
     mut visitor: F,
     verify_chunk_hash: bool,
 ) -> Result<(), XorbVisitError<VisitorError>>
@@ -426,11 +483,11 @@ where
     F: FnMut(DecodedXorbChunk) -> Result<(), VisitorError>,
 {
     reader
-        .seek(SeekFrom::Start(0))
+        .seek(SeekFrom::Start(packed_start))
         .map_err(XorbParseError::from)?;
-    let mut packed_end = 0_u64;
+    let mut packed_end = packed_start;
 
-    for descriptor in validated.chunks() {
+    for descriptor in descriptors {
         let (data, packed_len, unpacked_len) =
             deserialize_chunk(reader).map_err(|error| map_core_error(&error))?;
         let packed_len = u64::try_from(packed_len).map_err(XorbParseError::from)?;
@@ -459,7 +516,7 @@ where
         packed_end = next_packed_end;
     }
 
-    if packed_end != validated.packed_content_length() {
+    if packed_end != expected_packed_end {
         return Err(
             XorbParseError::from(XorbInvalidFormatError::DecodedChunkLengthMismatch).into(),
         );
@@ -581,37 +638,33 @@ fn declared_unpacked_length(parsed: &XorbObject) -> u64 {
         .saturating_mul(MAX_CHUNK_SIZE.load(Ordering::Relaxed))
 }
 
-/// Scans the chunk headers of a serialized xorb byte stream and returns the
+/// Scans the chunk headers of a footerless xorb byte stream and returns the
 /// total declared uncompressed length, without decompressing any chunk payload.
 ///
-/// Stops at the footer ident (`XETBLOB`) or at end-of-input, mirroring the
-/// chunk loop in `reconstruct_xorb_with_footer`. Used to reject a decompression
-/// bomb BEFORE the reconstruct pass allocates its output.
-pub(crate) fn declared_unpacked_length_of_serialized(bytes: &[u8]) -> Result<u64, XetAdapterError> {
+/// Requires complete chunk framing through end-of-input. An invalid footer or
+/// trailing bytes are not a footerless compatibility case. Rejects malformed
+/// framing before reconstruction allocates its output.
+pub(crate) fn declared_footerless_unpacked_length(bytes: &[u8]) -> Result<u64, XetAdapterError> {
     let mut cursor = Cursor::new(bytes);
     let mut total: u64 = 0;
     loop {
         if cursor.position() as usize >= bytes.len() {
             break;
         }
-        let header = match deserialize_chunk_header(&mut cursor) {
-            Ok(header) => header,
-            Err(CoreError::ChunkHeaderParse) => break,
-            Err(error) => return Err(XetAdapterError::from(map_core_error(&error))),
-        };
+        let header = deserialize_chunk_header(&mut cursor)
+            .map_err(|_error| XetAdapterError::InvalidSerializedXorb)?;
         total = total
             .checked_add(u64::from(header.get_uncompressed_length()))
             .ok_or(XetAdapterError::Overflow)?;
         let compressed_len = u64::from(header.get_compressed_length());
-        let Some(next_position) = cursor.position().checked_add(compressed_len) else {
-            return Ok(total);
-        };
+        let next_position = cursor
+            .position()
+            .checked_add(compressed_len)
+            .ok_or(XetAdapterError::Overflow)?;
         if next_position > bytes.len() as u64 {
-            // Truncated payload: let the reconstruct pass surface the precise
-            // error. The bytes seen so far were already accounted for.
-            break;
+            return Err(XetAdapterError::InvalidSerializedXorb);
         }
-        cursor.seek(SeekFrom::Current(compressed_len as i64))?;
+        cursor.seek(SeekFrom::Start(next_position))?;
     }
     Ok(total)
 }

@@ -18,6 +18,7 @@ docs that match your use case.
 - [Maintenance: same commands, clearer results](MAINTENANCE_INTEGRATION_UX.md)
 - [Architecture](ARCHITECTURE.md)
 - [Compatibility Status](COMPATIBILITY_STATUS.md)
+- [Protocol Gap Register](PROTOCOL_GAP_REGISTER.md)
 - [Stability Graduation Policy](STABILITY_GRADUATION.md)
 - [CLI](CLI.md)
 - [Read-Only Administration API](ADMIN_READ_API.md)

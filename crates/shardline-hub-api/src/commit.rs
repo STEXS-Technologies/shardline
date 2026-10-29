@@ -26,7 +26,7 @@ pub const MAX_COMMIT_MSG_LEN: usize = 4096;
 /// - Contain null bytes
 /// - Contain control characters (ASCII 0x00–0x1F, 0x7F)
 /// - Exceed the maximum allowed length
-fn validate_commit_path(path: &str) -> Result<(), HubApiError> {
+pub(crate) fn validate_commit_path(path: &str) -> Result<(), HubApiError> {
     if path.is_empty() {
         return Err(HubApiError::PathValidation(
             "commit path must not be empty".to_owned(),
@@ -87,7 +87,7 @@ pub enum CommitInstruction {
         /// File size.
         size: u64,
     },
-    /// File deletion.
+    /// File deletion, or recursive directory deletion for a path ending in `/`.
     Delete {
         /// Relative path.
         path: String,
@@ -141,12 +141,40 @@ pub struct ParsedCommit {
 ///
 /// Returns [`HubApiError`] on malformed input.
 pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
+    parse_ndjson_commit_with_lfs_size(body, |_| Ok(None))
+}
+
+/// Official copy instructions omit LFS size; only an authorized storage lookup
+/// may supply it. The public storage-independent parser retains its contract.
+pub(crate) fn parse_ndjson_commit_with_lfs_size(
+    body: &str,
+    resolve_size: impl FnMut(&str) -> Result<Option<u64>, HubApiError>,
+) -> Result<ParsedCommit, HubApiError> {
+    let mut instructions = Vec::new();
+    let mut parsed =
+        parse_ndjson_commit_stream(body.lines().map(Ok), resolve_size, |instruction| {
+            instructions.push(instruction);
+            Ok(())
+        })?;
+    parsed.instructions = instructions;
+    Ok(parsed)
+}
+
+/// Parse bounded lines without retaining decoded files across instructions.
+/// The caller controls line/transport bounds and consumes each instruction
+/// before the next line is read. Public in-memory parsing keeps its old shape.
+pub(crate) fn parse_ndjson_commit_stream<S: AsRef<str>>(
+    lines: impl IntoIterator<Item = Result<S, HubApiError>>,
+    mut resolve_size: impl FnMut(&str) -> Result<Option<u64>, HubApiError>,
+    mut emit: impl FnMut(CommitInstruction) -> Result<(), HubApiError>,
+) -> Result<ParsedCommit, HubApiError> {
     let mut message = String::new();
     let mut parent_commit = None;
-    let mut instructions = Vec::new();
+    let mut instruction_count = 0;
 
-    for (line_idx, line) in body.lines().enumerate() {
-        let trimmed = line.trim();
+    for (line_idx, line) in lines.into_iter().enumerate() {
+        let line = line?;
+        let trimmed = line.as_ref().trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -162,7 +190,7 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
             parsed.get("value"),
         ) {
             let normalized_key = match key {
-                "deletedFile" | "deletedFolder" => "deletedEntry",
+                "deletedFile" => "deletedEntry",
                 other => other,
             };
             parsed = HashMap::from([(normalized_key.to_owned(), value.clone())]);
@@ -185,11 +213,12 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
             continue;
         }
 
-        if instructions.len() >= MAX_COMMIT_INSTRUCTIONS {
+        if instruction_count >= MAX_COMMIT_INSTRUCTIONS {
             return Err(HubApiError::PathValidation(format!(
                 "commit contains too many instructions (max {MAX_COMMIT_INSTRUCTIONS})"
             )));
         }
+        instruction_count = instruction_count.saturating_add(1);
 
         if let Some(file) = parsed.get("file") {
             let path = file.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -202,11 +231,11 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
                 .ok_or_else(|| {
                     HubApiError::PathValidation(format!("line {line_idx}: missing file content"))
                 })?;
-            // Bound the decoded size before allocating the decode buffer:
-            // each group of 4 base64 characters decodes to at most 3 bytes,
-            // so `encoded_len / 4 * 3` is a strict upper bound on the decoded
-            // length. Reject early when it would exceed the inline file cap.
-            if content_b64.len().saturating_div(4).saturating_mul(3) > MAX_INLINE_FILE_BYTES {
+            // Bound the encoded input before allocating the decode buffer.
+            // A padded final quartet can represent one or two bytes; counting
+            // every quartet as three rejects valid files at the exact limit.
+            // The decoded-length check below enforces the byte-exact ceiling.
+            if content_b64.len() > MAX_INLINE_FILE_BYTES.div_ceil(3).saturating_mul(4) {
                 return Err(HubApiError::PathValidation(format!(
                     "line {line_idx}: inline file exceeds maximum of {MAX_INLINE_FILE_BYTES} bytes; use LFS for large files"
                 )));
@@ -220,10 +249,10 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
                     content.len()
                 )));
             }
-            instructions.push(CommitInstruction::InlineFile {
+            emit(CommitInstruction::InlineFile {
                 path: path.to_owned(),
                 content,
-            });
+            })?;
             continue;
         }
 
@@ -241,21 +270,27 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
                 .ok_or_else(|| {
                     HubApiError::PathValidation(format!("line {line_idx}: missing lfsFile oid"))
                 })?;
-            let size = lfs_file
-                .get("size")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| {
-                    HubApiError::PathValidation(format!("line {line_idx}: missing lfsFile size"))
-                })?;
-            instructions.push(CommitInstruction::LfsPointer {
+            let size = if let Some(value) = lfs_file.get("size") {
+                value.as_u64()
+            } else {
+                validate_lfs_oid(oid)?;
+                resolve_size(oid)?
+            }
+            .ok_or_else(|| {
+                HubApiError::PathValidation(format!("line {line_idx}: missing lfsFile size"))
+            })?;
+            emit(CommitInstruction::LfsPointer {
                 path: path.to_owned(),
                 oid: oid.to_owned(),
                 size,
-            });
+            })?;
             continue;
         }
 
-        if let Some(deleted) = parsed.get("deletedEntry") {
+        if let Some(deleted) = parsed
+            .get("deletedEntry")
+            .or_else(|| parsed.get("deletedFolder"))
+        {
             let path = deleted
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -265,9 +300,15 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
                     ))
                 })?;
             validate_commit_path(path)?;
-            instructions.push(CommitInstruction::Delete {
-                path: path.to_owned(),
-            });
+            // Keep the public parsed instruction representation compatible.
+            // A trailing separator identifies a directory, matching the Hub
+            // client's folder-path convention, including explicit is_folder.
+            let path = if parsed.contains_key("deletedFolder") && !path.ends_with('/') {
+                format!("{path}/")
+            } else {
+                path.to_owned()
+            };
+            emit(CommitInstruction::Delete { path })?;
             continue;
         }
 
@@ -291,7 +332,7 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
     Ok(ParsedCommit {
         message,
         parent_commit,
-        instructions,
+        instructions: Vec::new(),
     })
 }
 
@@ -550,6 +591,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_ndjson_accepts_exact_inline_limit_and_rejects_one_byte_more() {
+        for extra in [0, 1, 2, 3] {
+            let bytes = vec![b'x'; MAX_INLINE_FILE_BYTES + extra];
+            let body = format!(
+                "{{\"header\":{{\"message\":\"inline boundary\"}}}}\n{{\"file\":{{\"path\":\"boundary.bin\",\"content\":\"{}\"}}}}",
+                STANDARD.encode(&bytes)
+            );
+            let result = parse_ndjson_commit(&body);
+            if extra == 0 {
+                let parsed = result.expect("the exact documented inline limit must be accepted");
+                assert!(
+                    matches!(&parsed.instructions[0], CommitInstruction::InlineFile { content, .. } if content == &bytes)
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "content beyond the inline limit must be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn parse_ndjson_too_many_instructions() {
         let content_b64 = STANDARD.encode(b"x");
         // Build a body with MAX_COMMIT_INSTRUCTIONS + 1 file instructions
@@ -684,5 +748,56 @@ mod tests {
     #[test]
     fn validate_lfs_oid_invalid_empty() {
         assert!(validate_lfs_oid("").is_err());
+    }
+
+    #[test]
+    fn official_folder_delete_retains_directory_semantics() {
+        for path in ["nested", "nested/"] {
+            let body = format!(
+                "{{\"key\":\"header\",\"value\":{{\"summary\":\"delete folder\"}}}}\n{{\"key\":\"deletedFolder\",\"value\":{{\"path\":\"{path}\"}}}}"
+            );
+            let parsed = parse_ndjson_commit(&body).unwrap();
+            assert!(
+                matches!(parsed.instructions.as_slice(), [CommitInstruction::Delete { path }] if path == "nested/")
+            );
+        }
+    }
+
+    #[test]
+    fn missing_lfs_copy_size_requires_authorized_resolution() {
+        let oid = "a".repeat(64);
+        let body = format!(
+            "{{\"header\":{{\"message\":\"copy\"}}}}\n{{\"lfsFile\":{{\"path\":\"copy.bin\",\"oid\":\"{oid}\"}}}}"
+        );
+        assert!(parse_ndjson_commit(&body).is_err());
+        let mut lookups = 0;
+        let parsed = parse_ndjson_commit_with_lfs_size(&body, |requested| {
+            assert_eq!(requested, oid);
+            lookups += 1;
+            Ok(Some(123))
+        })
+        .unwrap();
+        assert_eq!(lookups, 1);
+        assert!(matches!(
+            parsed.instructions.as_slice(),
+            [CommitInstruction::LfsPointer { size: 123, .. }]
+        ));
+    }
+
+    #[test]
+    fn invalid_explicit_lfs_size_does_not_use_copy_resolution() {
+        let oid = "a".repeat(64);
+        for size in ["null", "-1", "\"123\""] {
+            let body = format!(
+                "{{\"header\":{{\"message\":\"copy\"}}}}\n{{\"lfsFile\":{{\"path\":\"copy.bin\",\"oid\":\"{oid}\",\"size\":{size}}}}}"
+            );
+            let mut looked_up = false;
+            let result = parse_ndjson_commit_with_lfs_size(&body, |_| {
+                looked_up = true;
+                Ok(Some(123))
+            });
+            assert!(result.is_err());
+            assert!(!looked_up);
+        }
     }
 }

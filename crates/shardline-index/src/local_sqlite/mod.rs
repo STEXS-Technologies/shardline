@@ -1,13 +1,19 @@
 mod async_index_store;
 mod constants;
 mod error;
+mod frontend_schema;
 mod helpers;
 mod index_store;
+mod lfs_locks;
+#[cfg(test)]
+mod membership_tests;
 mod migration;
 mod oci_objects;
+mod oci_referrers;
 mod oci_tags;
 mod record_store;
 mod records;
+mod s3_listing_anchors;
 mod s3_objects;
 mod store;
 mod task_artifacts;
@@ -15,6 +21,8 @@ mod task_artifacts;
 mod tests;
 mod tree_store;
 mod upload_recovery_guard;
+mod upload_transitions;
+mod xet_xorb;
 
 pub(crate) use crate::record_kind::RecordKind;
 pub(crate) use constants::{

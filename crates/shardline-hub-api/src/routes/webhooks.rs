@@ -16,6 +16,34 @@ use shardline_protocol::SecretString;
 
 use super::{HubRepository, HubState};
 
+/// Resolves webhook names to public addresses, validating the same addresses
+/// returned to the connector rather than relying on earlier DNS lookups.
+#[derive(Debug)]
+pub struct PublicWebhookDnsResolver;
+
+impl reqwest::dns::Resolve for PublicWebhookDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((name.as_str(), 0))
+                .await?
+                .collect::<Vec<_>>();
+            let addresses = public_webhook_dns_addresses(addresses)?;
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn public_webhook_dns_addresses(
+    addresses: Vec<std::net::SocketAddr>,
+) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    if addresses.is_empty() || addresses.iter().any(|address| is_private_ip(&address.ip())) {
+        return Err(std::io::Error::other(
+            "webhook DNS must resolve only to public addresses",
+        ));
+    }
+    Ok(addresses)
+}
+
 /// Delivers webhook events to registered URLs.
 ///
 /// This fires in the background after a commit. Failures are logged but do not
@@ -157,19 +185,24 @@ fn resolve_webhook_secret(
 
 /// Sanitizes a URL for safe inclusion in log messages.
 ///
-/// Replaces control characters (newlines, tabs, etc.) and truncates to a
-/// reasonable length to prevent log injection via user-supplied URLs.
+/// Logs only the origin: credentials, paths, query strings and fragments can
+/// all contain webhook secrets. Invalid URLs are never echoed into logs.
 pub(crate) fn sanitize_log_url(url: &str) -> String {
     const MAX_LOG_URL_LEN: usize = 200;
-    let sanitized: String = url
-        .chars()
-        .map(|c| if c.is_control() { '?' } else { c })
-        .take(MAX_LOG_URL_LEN)
-        .collect();
-    if url.len() > MAX_LOG_URL_LEN {
-        format!("{sanitized}...")
+    let Ok(parsed) = url::Url::parse(url) else {
+        return "<invalid webhook URL>".to_owned();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return "<invalid webhook URL>".to_owned();
+    }
+    let origin = parsed.origin().ascii_serialization();
+    if origin.len() > MAX_LOG_URL_LEN {
+        format!(
+            "{}...",
+            origin.chars().take(MAX_LOG_URL_LEN).collect::<String>()
+        )
     } else {
-        sanitized
+        origin
     }
 }
 
@@ -186,11 +219,9 @@ async fn deliver_one_webhook(
     // "localtest.me" (→127.0.0.1) or "metadata.google.internal" (→169.254.169.254)
     // would pass the string-based check but resolve to private IPs.
     //
-    // The shared reqwest client (no `dns` feature) cannot carry per-host
-    // resolution pins via `ClientBuilder::resolve`, so we narrow the
-    // time-of-check-time-of-use window by recording the validated (public)
-    // addresses here and re-resolving immediately before the send below,
-    // rejecting on any mismatch. See `deliver_one_webhook`'s pre-send check.
+    // The default server client also installs PublicWebhookDnsResolver, which
+    // checks the actual addresses returned to the connector. Keep preflight
+    // checks for applications supplying their own HubState HTTP client.
     let parsed_url = url::Url::parse(url).map_err(|e| format!("webhook URL parse failed: {e}"))?;
     let host = parsed_url.host_str().ok_or("webhook URL has no host")?;
     let port = parsed_url.port_or_known_default().unwrap_or(80);
@@ -219,9 +250,8 @@ async fn deliver_one_webhook(
     // validation above and the actual connection. If the hostname now resolves
     // to a private address, or to an address that was not in the validated set,
     // reject the delivery rather than connect to a rebound (e.g. cloud metadata)
-    // endpoint. This is a best-effort mitigation given the shared client cannot
-    // pin addresses at connect time; the window is not fully closed without the
-    // reqwest `dns` feature.
+    // endpoint. Custom clients must install PublicWebhookDnsResolver as well;
+    // preflight lookups alone cannot constrain the connector's later lookup.
     for addr in tokio::net::lookup_host(&*host_port).await? {
         let ip = addr.ip();
         if is_private_ip(&ip) || !validated.contains(&ip) {
@@ -231,7 +261,11 @@ async fn deliver_one_webhook(
             );
         }
     }
-    let response = request.body(body.to_vec()).send().await?;
+    let response = request
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?;
     if !response.status().is_success() {
         return Err(format!("webhook returned {}", response.status()).into());
     }
@@ -310,7 +344,11 @@ pub(crate) fn validate_webhook_url(url: &str) -> Result<(), HubApiError> {
 pub(crate) const fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
+            let [first, second, ..] = v4.octets();
             v4.is_loopback() // 127.0.0.0/8
+                || first == 0 // this-network addresses, 0.0.0.0/8
+                || first >= 224 // multicast and reserved, 224.0.0.0/3
+                || (first == 198 && matches!(second, 18 | 19)) // benchmark networks
                 || v4.is_private() // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 || v4.is_link_local() // 169.254.0.0/16
                 || v4.is_unspecified() // 0.0.0.0
@@ -319,7 +357,10 @@ pub(crate) const fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || is_cgnat(*v4) // 100.64.0.0/10 (RFC 6598 shared address space)
         }
         std::net::IpAddr::V6(v6) => {
+            let [first, second, ..] = v6.segments();
             v6.is_loopback() // ::1
+                || v6.is_multicast() // ff00::/8
+                || (first == 0x2001 && second == 0x0db8) // documentation
                 || v6.is_unspecified() // ::
                 || v6.is_unicast_link_local() // fe80::/10
                 || v6.is_unique_local() // fc00::/7 (RFC 4193)
@@ -358,6 +399,8 @@ pub(crate) async fn webhook_create(
     Json(request): Json<WebhookCreateRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_create", "POST", 201);
+    let name = format!("{ns}/{repo}");
+    crate::revision_access::authorize_repository_wide(&name, _repo.capability())?;
     // The extractor has already required Write scope and bound the token to
     // this repository before the handler runs.
     if request.events.len() > MAX_WEBHOOK_EVENTS {
@@ -366,7 +409,6 @@ pub(crate) async fn webhook_create(
         )));
     }
     validate_webhook_url(&request.url)?;
-    let name = format!("{ns}/{repo}");
     let _ = state
         .store
         .get_repo(&name)
@@ -427,6 +469,7 @@ pub(crate) async fn webhook_list(
 ) -> Result<Json<WebhookListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_list", "GET", 200);
     let name = format!("{ns}/{repo}");
+    crate::revision_access::authorize_repository_wide(&name, _repo.capability())?;
     let webhooks = state
         .store
         .list_webhooks(&name)
@@ -445,6 +488,7 @@ pub(crate) async fn webhook_delete(
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_delete", "DELETE", 204);
     let name = format!("{ns}/{repo}");
+    crate::revision_access::authorize_repository_wide(&name, _repo.capability())?;
     state
         .store
         .delete_webhook(&name, &webhook_id)
@@ -456,9 +500,35 @@ pub(crate) async fn webhook_delete(
 
 #[cfg(test)]
 mod tests {
+    mod tls;
     use super::*;
     use crate::routes::test_repo;
     use std::net::IpAddr;
+
+    #[test]
+    fn webhook_dns_rejects_the_entire_mixed_or_empty_answer() {
+        let public = "8.8.8.8:0".parse().unwrap();
+        for private in [
+            "127.0.0.1:0",
+            "169.254.169.254:0",
+            "10.0.0.1:0",
+            "[::ffff:127.0.0.1]:0",
+            "0.1.2.3:0",
+            "224.0.0.1:0",
+            "240.0.0.1:0",
+            "198.18.0.1:0",
+            "[ff02::1]:0",
+            "[2001:db8::1]:0",
+        ] {
+            assert!(public_webhook_dns_addresses(vec![public, private.parse().unwrap()]).is_err());
+        }
+        assert!(public_webhook_dns_addresses(Vec::new()).is_err());
+        let addresses = vec![public, "[2001:4860:4860::8888]:0".parse().unwrap()];
+        assert_eq!(
+            public_webhook_dns_addresses(addresses.clone()).unwrap(),
+            addresses
+        );
+    }
 
     #[test]
     fn validate_webhook_url_accepts_valid_http() {
@@ -568,26 +638,26 @@ mod tests {
 
     #[test]
     fn is_private_ip_false_for_ipv6_public() {
-        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        let ip: IpAddr = "2001:4860:4860::8888".parse().unwrap();
         assert!(!is_private_ip(&ip));
     }
 
     #[test]
     fn sanitize_log_url_normal() {
         let url = "https://example.com/webhook";
-        assert_eq!(sanitize_log_url(url), url);
+        assert_eq!(sanitize_log_url(url), "https://example.com");
     }
 
     #[test]
     fn sanitize_log_url_replaces_control_chars() {
         let url = "https://example.com/new\nline";
-        assert_eq!(sanitize_log_url(url), "https://example.com/new?line");
+        assert_eq!(sanitize_log_url(url), "https://example.com");
     }
 
     #[test]
     fn sanitize_log_url_truncates_long() {
-        let base = "https://example.com/";
-        let long = format!("{}{}", base, "a".repeat(300));
+        let labels = vec!["a".repeat(60); 4].join(".");
+        let long = format!("https://{labels}/private");
         let result = sanitize_log_url(&long);
         assert!(result.len() <= 204); // 200 chars + "..."
         assert!(result.ends_with("..."));
@@ -596,7 +666,7 @@ mod tests {
     #[test]
     fn sanitize_log_url_replaces_tab() {
         let url = "https://example.com/\tpath";
-        assert_eq!(sanitize_log_url(url), "https://example.com/?path");
+        assert_eq!(sanitize_log_url(url), "https://example.com");
     }
 
     #[test]
@@ -604,6 +674,20 @@ mod tests {
         let url = "http://a.b";
         assert_eq!(sanitize_log_url(url), url);
         assert!(!url.ends_with("..."));
+    }
+
+    #[test]
+    fn webhook_logs_redact_credentials_and_path_tokens() {
+        let url = "https://user:password@example.com:8443/services/private-token?key=query-secret#fragment-secret";
+        assert_eq!(sanitize_log_url(url), "https://example.com:8443");
+        assert_eq!(
+            sanitize_log_url("invalid private-token"),
+            "<invalid webhook URL>"
+        );
+        assert_eq!(
+            sanitize_log_url("data:text/plain,private-token"),
+            "<invalid webhook URL>"
+        );
     }
 
     #[test]
@@ -1062,9 +1146,8 @@ mod tests {
 
     #[test]
     fn validate_webhook_url_ipv6_public_ok() {
-        let ip: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        let ip: std::net::IpAddr = "2001:4860:4860::8888".parse().unwrap();
         assert!(!is_private_ip(&ip));
-        let result = validate_webhook_url("http://[2001:db8::1]/hook");
-        let _ = result;
+        assert!(validate_webhook_url("http://[2001:4860:4860::8888]/hook").is_ok());
     }
 }

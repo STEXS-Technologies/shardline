@@ -63,6 +63,23 @@ impl ServerAuth {
         headers: &HeaderMap,
         required_scope: TokenScope,
     ) -> Result<VerifiedAuthContext, ServerError> {
+        self.authorize_in_domain(headers, required_scope, false)
+    }
+
+    pub(crate) fn authorize_xet(
+        &self,
+        headers: &HeaderMap,
+        required_scope: TokenScope,
+    ) -> Result<VerifiedAuthContext, ServerError> {
+        self.authorize_in_domain(headers, required_scope, true)
+    }
+
+    fn authorize_in_domain(
+        &self,
+        headers: &HeaderMap,
+        required_scope: TokenScope,
+        xet: bool,
+    ) -> Result<VerifiedAuthContext, ServerError> {
         if headers.get_all(AUTHORIZATION).iter().nth(1).is_some() {
             return Err(ServerError::InvalidAuthorizationHeader);
         }
@@ -74,6 +91,11 @@ impl ServerAuth {
             .map_err(|_error| ServerError::InvalidAuthorizationHeader)?;
         let token = parse_bearer_token(header)?;
         let ctx = self.provider.verify_verified(token)?;
+        if ctx.claims().issuer() == shardline_protocol::HUB_XET_READ_TOKEN_ISSUER
+            && (!xet || ctx.scope() != TokenScope::Read)
+        {
+            return Err(ServerError::InsufficientScope);
+        }
         if !scope_allows(ctx.scope(), required_scope) {
             return Err(ServerError::InsufficientScope);
         }
@@ -195,6 +217,38 @@ mod tests {
 
     use super::{MAX_TOKEN_STRING_BYTES, ServerAuth, authorize_static_bearer_token};
     use crate::ServerError;
+
+    #[test]
+    fn commit_read_tokens_are_accepted_only_for_read_scoped_cas_requests() {
+        let key = b"test-signing-key-32-bytes-long!!";
+        let auth = ServerAuth::new(key).unwrap();
+        let signer = TokenSigner::new(key).unwrap();
+        let repository =
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", Some("commit"))
+                .unwrap();
+        for scope in [TokenScope::Read, TokenScope::Write] {
+            let claims = TokenClaims::new(
+                shardline_protocol::HUB_XET_READ_TOKEN_ISSUER,
+                "reader",
+                scope,
+                repository.clone(),
+                u64::MAX,
+            )
+            .unwrap();
+            let token = signer.sign(&claims).unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+            assert!(matches!(
+                auth.authorize(&headers, TokenScope::Read),
+                Err(ServerError::InsufficientScope)
+            ));
+            assert_eq!(
+                auth.authorize_xet(&headers, TokenScope::Read).is_ok(),
+                scope == TokenScope::Read
+            );
+            assert!(auth.authorize_xet(&headers, TokenScope::Write).is_err());
+        }
+    }
 
     #[test]
     fn server_auth_rejects_missing_header() {

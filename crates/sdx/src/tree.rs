@@ -924,6 +924,15 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/github/team/assets/tree/main"))
             .and(query_param("cursor", "z"))
+            .and(|request: &wiremock::Request| {
+                request
+                    .headers
+                    .get("accept")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| {
+                        value.starts_with(shardline_xet_adapter::XET_METADATA_ACCEPT)
+                    })
+            })
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "entries": [
                     {"path": "b.txt", "isDir": false, "fileId": "b", "size": 1, "updatedAt": 1},
@@ -935,6 +944,15 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/api/github/team/assets/tree/main"))
+            .and(|request: &wiremock::Request| {
+                request
+                    .headers
+                    .get("accept")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| {
+                        value.starts_with(shardline_xet_adapter::XET_METADATA_ACCEPT)
+                    })
+            })
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "entries": [
                     {"path": "a.txt", "isDir": false, "fileId": "a", "size": 1, "updatedAt": 1},

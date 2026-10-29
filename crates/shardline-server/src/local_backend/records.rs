@@ -1,8 +1,6 @@
 use std::io::ErrorKind;
 
-use shardline_index::{
-    FileRecord, LocalIndexStoreError, LocalRecordStore, RecordTraversal, RepositoryRecordScope,
-};
+use shardline_index::{FileRecord, LocalIndexStoreError, LocalRecordStore, RecordTraversal};
 use shardline_protocol::RepositoryScope;
 
 use crate::{
@@ -66,23 +64,17 @@ pub(super) async fn repository_references_xorb(
     hash_hex: &str,
     repository_scope: &RepositoryScope,
 ) -> Result<bool, ServerError> {
-    let repository = RepositoryRecordScope::from_repository_scope(repository_scope);
     let mut found = false;
-    record_store
-        .visit_repository_latest_records(&repository, |entry| {
-            inspect_repository_record_for_xorb(&mut found, &entry.bytes, hash_hex, repository_scope)
-        })
-        .await?;
-    if found {
-        return Ok(true);
-    }
-    record_store
-        .visit_repository_version_records(&repository, |entry| {
-            inspect_repository_record_for_xorb(&mut found, &entry.bytes, hash_hex, repository_scope)
-        })
-        .await?;
-
-    Ok(found)
+    crate::record_store::any_repository_hash_record(
+        record_store,
+        repository_scope,
+        hash_hex,
+        |bytes| {
+            inspect_repository_record_for_xorb(&mut found, bytes, hash_hex, repository_scope)?;
+            Ok(found)
+        },
+    )
+    .await
 }
 
 fn inspect_repository_record_for_xorb(

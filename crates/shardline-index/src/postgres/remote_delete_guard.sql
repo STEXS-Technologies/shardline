@@ -70,6 +70,46 @@ BEGIN
 END;
 $guard$;
 
+-- Read replies may advertise several objects. Shared slots protect the entire
+-- set without accumulating per-key locks or reversing publication lock order.
+CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_remote_delete_read_batch_v1(
+    index_schema TEXT, object_keys TEXT[]
+) RETURNS TEXT[]
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO pg_catalog, @SCHEMA@, pg_temp
+SET shardline.remote_delete_schema TO @SCHEMA_LITERAL@
+AS $read_batch$
+DECLARE pending BOOLEAN;
+BEGIN
+    IF index_schema IS DISTINCT FROM current_setting('shardline.remote_delete_schema') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'remote delete guard schema mismatch';
+    END IF;
+    IF NOT has_schema_privilege(session_user, index_schema, 'USAGE')
+       OR NOT has_table_privilege(session_user,
+           format('%I.shardline_retention_holds', index_schema), 'SELECT') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501',
+            MESSAGE = 'retention metadata access is required for the remote delete guard';
+    END IF;
+    PERFORM shardline_remote_delete_snapshot_v1(index_schema);
+    PERFORM pg_advisory_xact_lock_shared(1397507140, slot)
+    FROM (SELECT DISTINCT
+        (hashtextextended('shardline:remote-delete:' || physical, 0) & 255)::INTEGER AS slot
+        FROM unnest(object_keys) physical) lock_slots
+    ORDER BY slot;
+    SELECT EXISTS(SELECT 1 FROM shardline_resource_fences
+                  WHERE domain='maintenance-remote-delete' AND resource=object_keys[1]) INTO pending;
+    IF pending THEN
+        RAISE EXCEPTION USING ERRCODE = 'SLD01',
+            MESSAGE = 'object has an unresolved remote delete; retry after reconciliation';
+    END IF;
+    -- The requested source is mandatory; related sources are optional. Retain
+    -- the locks while omitting unresolved siblings from the advertised set.
+    RETURN ARRAY(SELECT physical FROM unnest(object_keys) physical
+        WHERE NOT EXISTS(SELECT 1 FROM shardline_resource_fences
+            WHERE domain='maintenance-remote-delete' AND resource=physical));
+END;
+$read_batch$;
+GRANT EXECUTE ON FUNCTION @SCHEMA@.shardline_remote_delete_read_batch_v1(TEXT, TEXT[]) TO PUBLIC;
+
 CREATE OR REPLACE FUNCTION @SCHEMA@.shardline_remote_delete_begin_v1(
     index_schema TEXT, object_key TEXT
 ) RETURNS BIGINT

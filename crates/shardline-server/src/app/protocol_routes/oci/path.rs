@@ -20,6 +20,10 @@ pub(crate) enum OciPath {
     TagsList {
         repository: String,
     },
+    Referrers {
+        repository: String,
+        digest_hex: String,
+    },
 }
 
 impl OciPath {
@@ -31,7 +35,8 @@ impl OciPath {
             | OciPath::BlobUploads { repository }
             | OciPath::BlobUploadSession { repository, .. }
             | OciPath::Manifest { repository, .. }
-            | OciPath::TagsList { repository } => repository,
+            | OciPath::TagsList { repository }
+            | OciPath::Referrers { repository, .. } => repository,
         }
     }
 }
@@ -59,6 +64,13 @@ pub(crate) fn parse_oci_path(path: &str) -> Result<OciPath, ServerError> {
         return Err(ServerError::NotFound);
     };
     match operation {
+        "referrers" => {
+            validate_repository(repository)?;
+            Ok(OciPath::Referrers {
+                repository: repository.to_owned(),
+                digest_hex: parse_sha256_digest(value)?,
+            })
+        }
         "blobs" => {
             validate_repository(repository)?;
             Ok(OciPath::Blob {

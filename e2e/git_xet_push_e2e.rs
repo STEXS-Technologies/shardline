@@ -1,13 +1,16 @@
+mod deployment_probe_requirements;
+mod native_client_policy;
+mod native_git_xet_hub;
 mod support;
 
 use std::{
     error::Error,
     fs::{create_dir_all, read, write as write_file},
-    io::{Cursor, Error as IoError, Write},
+    io::{Cursor, Error as IoError},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     str::from_utf8,
     sync::{Arc, Mutex},
     time::Duration,
@@ -39,7 +42,7 @@ use shardline_server::{
     validate_serialized_xorb,
 };
 use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, task::spawn_blocking, time::sleep};
+use tokio::{net::TcpListener, spawn, task::spawn_blocking};
 
 type TestError = Box<dyn Error + Send + Sync>;
 
@@ -304,9 +307,15 @@ async fn exercise_git_xet_push_flow() -> Result<(), TestError> {
         .error_for_status()?
         .json::<ServerStatsResponse>()
         .await?;
-    if stats.chunks == 0 {
+    if stats.objects == 0 || stats.object_bytes == 0 {
         return Err(ServerE2eInvariantError::new(
-            "shardline stats reported zero stored chunks after git-xet push",
+            "shardline stats reported no retained objects after git-xet push",
+        )
+        .into());
+    }
+    if stats.chunks != 0 || stats.chunk_bytes != 0 {
+        return Err(ServerE2eInvariantError::new(
+            "native git-xet push unexpectedly retained standalone chunk copies",
         )
         .into());
     }
@@ -557,21 +566,33 @@ async fn exercise_git_xet_clone_flow() -> Result<(), TestError> {
         )
         .into());
     }
-    let new_chunk_objects = stats_after_second_push
-        .chunks
-        .checked_sub(stats_after_first_push.chunks)
+    let new_object_bytes = stats_after_second_push
+        .object_bytes
+        .checked_sub(stats_after_first_push.object_bytes)
         .ok_or_else(|| {
-            ServerE2eInvariantError::new("chunk object count unexpectedly shrank after second push")
+            ServerE2eInvariantError::new(
+                "retained object bytes unexpectedly shrank after second push",
+            )
         })?;
-    if new_chunk_objects == 0 {
+    if new_object_bytes == 0 {
         return Err(ServerE2eInvariantError::new(
-            "second git-xet push reported no new chunk objects for changed content",
+            "second git-xet push retained no new object bytes for changed content",
         )
         .into());
     }
-    if new_chunk_objects >= stats_after_first_push.chunks {
+    if new_object_bytes >= stats_after_first_push.object_bytes {
         return Err(ServerE2eInvariantError::new(
             "second git-xet push did not reuse enough existing chunks for the small update",
+        )
+        .into());
+    }
+    if stats_after_first_push.chunks != 0
+        || stats_after_second_push.chunks != 0
+        || stats_after_first_push.chunk_bytes != 0
+        || stats_after_second_push.chunk_bytes != 0
+    {
+        return Err(ServerE2eInvariantError::new(
+            "native git-xet versions unexpectedly retained standalone chunk copies",
         )
         .into());
     }
@@ -898,23 +919,33 @@ async fn exercise_git_xet_multi_repo_flow() -> Result<(), TestError> {
         )
         .into());
     }
-    let new_chunk_objects = stats_after_repo_b
-        .chunks
-        .checked_sub(stats_after_repo_a.chunks)
+    let new_object_bytes = stats_after_repo_b
+        .object_bytes
+        .checked_sub(stats_after_repo_a.object_bytes)
         .ok_or_else(|| {
             ServerE2eInvariantError::new(
-                "chunk object count unexpectedly shrank after second repository push",
+                "retained object bytes unexpectedly shrank after second repository push",
             )
         })?;
-    if new_chunk_objects == 0 {
+    if new_object_bytes == 0 {
         return Err(ServerE2eInvariantError::new(
-            "second repository push reported no new chunk objects for changed content",
+            "second repository push retained no new object bytes for changed content",
         )
         .into());
     }
-    if new_chunk_objects >= stats_after_repo_a.chunks {
+    if new_object_bytes >= stats_after_repo_a.object_bytes {
         return Err(ServerE2eInvariantError::new(
             "second repository push did not reuse enough chunks across repositories",
+        )
+        .into());
+    }
+    if stats_after_repo_a.chunks != 0
+        || stats_after_repo_b.chunks != 0
+        || stats_after_repo_a.chunk_bytes != 0
+        || stats_after_repo_b.chunk_bytes != 0
+    {
+        return Err(ServerE2eInvariantError::new(
+            "native cross-repository uploads unexpectedly retained standalone chunk copies",
         )
         .into());
     }
@@ -1531,16 +1562,8 @@ async fn read_server_stats_for_repository(
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), TestError> {
-    for _attempt in 0..50 {
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(ServerE2eInvariantError::new("server did not become healthy").into())
+    support::wait_for_endpoint(client, base_url, "healthz", 50, Duration::from_millis(20)).await?;
+    Ok(())
 }
 
 fn run_git_http_backend(
@@ -1566,22 +1589,18 @@ fn run_git_http_backend(
                 .unwrap_or(""),
         )
         .env("CONTENT_LENGTH", body.len().to_string())
-        .env("REMOTE_ADDR", "127.0.0.1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env("REMOTE_ADDR", "127.0.0.1");
 
     for (name, value) in headers {
         let variable = http_header_env_name(name);
         command.env(variable, value.to_str().unwrap_or(""));
     }
 
-    let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(body)?;
-    }
-
-    let output = child.wait_with_output()?;
+    let output = shardline_test_support::native_client_output_with_input(
+        &mut command,
+        Duration::from_secs(600),
+        body,
+    )?;
     if !output.status.success() {
         return Err(command_error("git http-backend", &output).into());
     }
@@ -1942,7 +1961,10 @@ fn format_cas_observations(
 }
 
 fn run_command(command: &mut Command) -> Result<Output, TestError> {
-    Ok(command.output()?)
+    Ok(shardline_test_support::native_client_output(
+        command,
+        Duration::from_secs(600),
+    )?)
 }
 
 fn run_command_checked(command: &mut Command, description: &str) -> Result<(), TestError> {
@@ -1956,16 +1978,17 @@ fn run_command_checked(command: &mut Command, description: &str) -> Result<(), T
 
 fn command_error(description: &str, output: &Output) -> IoError {
     ServerE2eInvariantError::new(format!(
-        "{description} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "{description} failed with status {}",
+        output.status
     ))
     .into()
 }
 
 fn command_available(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let available = shardline_test_support::native_client_output(
+        Command::new(program).arg("--version"),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|output| output.status.success());
+    native_client_policy::require_available(program, available)
 }

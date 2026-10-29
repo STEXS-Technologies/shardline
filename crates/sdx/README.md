@@ -28,6 +28,11 @@ Token issuance follows redirects only within the configured API origin
 (scheme, host and port). Token and error response bodies are limited to 1 MiB;
 oversized token responses fail with a parse error instead of entering the cache.
 
+Downloads share a runtime with at most two workers within the process. Request concurrency
+remains controlled by the client's download permits. The configured byte budget
+limits queued decoded data; total process memory also includes HTTP buffers,
+allocator overhead and any chunks retained by your application.
+
 ## The `xet://` URL scheme
 
 ```text

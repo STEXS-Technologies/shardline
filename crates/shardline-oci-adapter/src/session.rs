@@ -15,8 +15,6 @@ use shardline_reliability::{
 };
 use shardline_storage::ObjectIntegrity;
 use tokio::fs;
-#[cfg(not(unix))]
-use tokio::io::AsyncWriteExt;
 use tokio::task::spawn_blocking;
 
 use crate::{
@@ -153,6 +151,19 @@ pub async fn append_upload_bytes(
     bytes: &[u8],
 ) -> Result<u64, OciAdapterError> {
     validate_upload_session_id(session_id)?;
+    append_upload_bytes_owned(root, session_id, bytes::Bytes::copy_from_slice(bytes)).await
+}
+
+/// Append shared bytes while retaining their owner through blocking persistence.
+///
+/// # Errors
+/// Returns invalid-session, I/O or worker errors without weakening anchored writes.
+pub async fn append_upload_bytes_owned(
+    root: &Path,
+    session_id: &str,
+    bytes: bytes::Bytes,
+) -> Result<u64, OciAdapterError> {
+    validate_upload_session_id(session_id)?;
     let path = upload_body_path(root, session_id);
     append_upload_bytes_impl(root, path, bytes).await
 }
@@ -161,10 +172,9 @@ pub async fn append_upload_bytes(
 async fn append_upload_bytes_impl(
     root: &Path,
     path: PathBuf,
-    bytes: &[u8],
+    bytes: bytes::Bytes,
 ) -> Result<u64, OciAdapterError> {
     let root = root.to_path_buf();
-    let bytes = bytes.to_vec();
     spawn_blocking(move || append_file_anchored(&root, &path, &bytes))
         .await
         .map_err(OciAdapterError::BlockingTask)?
@@ -175,17 +185,20 @@ async fn append_upload_bytes_impl(
 async fn append_upload_bytes_impl(
     root: &Path,
     path: PathBuf,
-    bytes: &[u8],
+    bytes: bytes::Bytes,
 ) -> Result<u64, OciAdapterError> {
     let _ = root;
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .await
-        .map_err(map_not_found)?;
-    file.write_all(bytes).await?;
-    let metadata = file.metadata().await?;
-    Ok(metadata.len())
+    spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .map_err(map_not_found)?;
+        file.write_all(&bytes)?;
+        Ok(file.metadata()?.len())
+    })
+    .await
+    .map_err(OciAdapterError::BlockingTask)?
 }
 
 /// # Errors

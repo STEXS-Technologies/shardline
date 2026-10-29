@@ -144,6 +144,39 @@ pub fn file_hash(chunks: &[(MerkleHash, u64)]) -> MerkleHash {
     file_hash_with_salt(chunks, &[0; 32])
 }
 
+/// Computes the unsalted Xet file identity with bounded aggregation buffers.
+///
+/// This is equivalent to [`file_hash`] without materializing every file member.
+/// Memory grows with tree height, rather than the number of repeated chunks.
+/// As for the slice API, the total decoded size must fit in `u64`.
+pub fn file_hash_from_iter<'a>(chunks: impl Iterator<Item = (MerkleHash, u64)> + 'a) -> MerkleHash {
+    let mut level: Box<dyn Iterator<Item = (MerkleHash, u64)> + 'a> = Box::new(chunks);
+    loop {
+        let Some(first) = level.next() else {
+            return MerkleHash::default();
+        };
+        let Some(second) = level.next() else {
+            let digest = blake3::keyed_hash(&[0; 32], &<[u8; 32]>::from(first.0));
+            return MerkleHash::from(*digest.as_bytes());
+        };
+        let mut source = std::iter::once(first)
+            .chain(std::iter::once(second))
+            .chain(level);
+        level = Box::new(std::iter::from_fn(move || {
+            let mut group = Vec::with_capacity(MAX_GROUP_SIZE);
+            for entry in source.by_ref().take(MAX_GROUP_SIZE) {
+                let is_cut =
+                    group.len() >= 2 && entry.0 % AGGREGATED_HASHES_MEAN_TREE_BRANCHING_FACTOR == 0;
+                group.push(entry);
+                if is_cut {
+                    break;
+                }
+            }
+            (!group.is_empty()).then(|| merged_hash_of_sequence(&group))
+        }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +402,32 @@ mod tests {
     #[test]
     fn aggregated_node_hash_empty() {
         assert_eq!(aggregated_node_hash(&[]), MerkleHash::default());
+    }
+
+    #[test]
+    fn iterator_file_hash_matches_native_slice_and_upstream_across_tree_shapes() {
+        use super::super::compute_data_hash;
+        for count in (0..160).chain([255, 256, 257, 1023, 4096, 8193]) {
+            let chunks: Vec<_> = (0..count)
+                .map(|index: u64| (compute_data_hash(&index.to_le_bytes()), index % 127))
+                .collect();
+            let streamed = file_hash_from_iter(chunks.iter().copied());
+            assert_eq!(streamed, file_hash(&chunks), "member count {count}");
+            let wire: Vec<_> = chunks
+                .iter()
+                .map(|(hash, length)| {
+                    (
+                        xet_core_structures::merklehash::MerkleHash::from(<[u8; 32]>::from(*hash)),
+                        *length,
+                    )
+                })
+                .collect();
+            let upstream = xet_core_structures::merklehash::file_hash(&wire);
+            assert_eq!(
+                <[u8; 32]>::from(streamed),
+                <[u8; 32]>::from(upstream),
+                "upstream member count {count}"
+            );
+        }
     }
 }

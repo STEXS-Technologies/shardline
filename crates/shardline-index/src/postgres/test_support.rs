@@ -30,17 +30,14 @@ fn fixture_stage<T, E>(result: Result<T, E>, stage: &str) -> T {
 /// concurrently without weakening production verification or using a process
 /// lock.
 pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => {
-            match std::env::var("SHARDLINE_INDEX_POSTGRES_URL") {
-                Ok(value) => value,
-                Err(std::env::VarError::NotPresent) => return None,
-                Err(error) => fixture_stage(Err(error), "fallback connection configuration"),
-            }
-        }
-        Err(error) => fixture_stage(Err(error), "connection configuration"),
+    let variable = if std::env::var_os("DATABASE_URL").is_none()
+        && std::env::var_os("SHARDLINE_INDEX_POSTGRES_URL").is_some()
+    {
+        "SHARDLINE_INDEX_POSTGRES_URL"
+    } else {
+        "DATABASE_URL"
     };
+    let database_url = shardline_test_support::postgres_fixture_url(variable)?;
     let thread = std::thread::current();
     let test_name = thread.name().unwrap_or("unnamed-test");
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -105,6 +102,9 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
         .await,
         "table catalog",
     );
+    let has_creation_policy = table_names
+        .iter()
+        .any(|name| name == "shardline_hub_creation_policies");
     for table_name in table_names {
         let table_name = quoted_identifier(&table_name);
         fixture_stage(
@@ -116,6 +116,24 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
             "isolated table copy",
         );
     }
+    // LIKE INCLUDING ALL omits foreign keys. Preserve descriptor ownership in
+    // isolated fixtures so deletion and rollback tests exercise real constraints.
+    let has_xet_descriptors = fixture_stage(
+        query_scalar::<_, bool>("SELECT to_regclass('public.shardline_xet_chunks') IS NOT NULL")
+            .fetch_one(&admin_pool)
+            .await,
+        "descriptor table catalog",
+    );
+    if has_xet_descriptors {
+        fixture_stage(
+            query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.shardline_xet_chunks ADD FOREIGN KEY(xorb_hash) REFERENCES {schema}.shardline_xet_xorbs(xorb_hash) ON DELETE CASCADE"
+            )))
+            .execute(&admin_pool)
+            .await,
+            "isolated descriptor foreign key",
+        );
+    }
     let trigger_definitions = fixture_stage(
         query_scalar::<_, String>(
             "SELECT pg_get_triggerdef(trigger.oid)
@@ -125,6 +143,7 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
            ON namespace_entry.oid = table_entry.relnamespace
          WHERE namespace_entry.nspname = 'public'
            AND table_entry.relname LIKE 'shardline_%'
+           AND trigger.tgname NOT LIKE 'shardline_hub_creation_%'
            AND NOT trigger.tgisinternal",
         )
         .fetch_all(&admin_pool)
@@ -160,6 +179,32 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
             .await,
         "isolated connection pool/search path",
     );
+    if has_creation_policy {
+        fixture_stage(
+            query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.shardline_hub_creation_denials ADD FOREIGN KEY(namespace) REFERENCES {schema}.shardline_hub_creation_policies(namespace) ON DELETE CASCADE"
+            )))
+            .execute(&pool)
+            .await,
+            "isolated creation policy foreign key",
+        );
+        let migration =
+            include_str!("../../../../migrations/20261024000000_hub_creation_policy.up.sql");
+        let (_, functions) = fixture_stage(
+            migration
+                .split_once("CREATE FUNCTION shardline_hub_creation_policy_lock()")
+                .ok_or(()),
+            "creation policy function definitions",
+        );
+        let definitions =
+            format!("CREATE FUNCTION shardline_hub_creation_policy_lock(){functions}");
+        fixture_stage(
+            sqlx::raw_sql(sqlx::AssertSqlSafe(definitions))
+                .execute(&pool)
+                .await,
+            "isolated creation policy functions and triggers",
+        );
+    }
     fixture_stage(
         super::PostgresIndexStore::new(pool.clone())
             .initialize_remote_delete_guard()
@@ -167,4 +212,61 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
         "isolated remote delete guard",
     );
     Some(pool)
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    #[ignore = "invoked by the prerequisite subprocess regression"]
+    async fn isolated_postgres_prerequisite_child() {
+        assert!(super::connect_isolated_postgres().await.is_none());
+    }
+
+    #[test]
+    fn isolated_postgres_respects_required_and_optional_prerequisites()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let child = concat!(module_path!(), "::isolated_postgres_prerequisite_child")
+            .split_once("::")
+            .ok_or("missing test crate prefix")?
+            .1;
+        for (required, empty_variable, succeeds) in [
+            (false, None, true),
+            (true, None, false),
+            (false, Some("DATABASE_URL"), false),
+            (false, Some("SHARDLINE_INDEX_POSTGRES_URL"), false),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command
+                .args(["--exact", child, "--ignored", "--nocapture"])
+                .env_remove("DATABASE_URL")
+                .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
+                .env_remove("SHARDLINE_REQUIRE_POSTGRES_TESTS");
+            if required {
+                command.env("SHARDLINE_REQUIRE_POSTGRES_TESTS", "1");
+            }
+            if let Some(variable) = empty_variable {
+                command.env(variable, "  ");
+            }
+            let output = shardline_test_support::native_client_output(
+                &mut command,
+                std::time::Duration::from_secs(30),
+            )?;
+            if output.status.success() != succeeds {
+                return Err("unexpected PostgreSQL prerequisite child status".into());
+            }
+            let diagnostic = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !diagnostic.contains(if succeeds {
+                "SKIPPED: optional PostgreSQL fixture"
+            } else {
+                "is missing or invalid"
+            }) {
+                return Err("unexpected PostgreSQL prerequisite diagnostic".into());
+            }
+        }
+        Ok(())
+    }
 }

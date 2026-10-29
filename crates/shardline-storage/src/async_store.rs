@@ -45,6 +45,33 @@ pub trait AsyncObjectStore: Send + Sync {
     /// be served, or storage fails.
     async fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error>;
 
+    /// Reads a suffix and returns its bytes with the full object length.
+    /// S3 adapters can obtain both in one ranged GET. Other adapters use
+    /// metadata followed by a range read. Missing objects return `None`.
+    ///
+    /// # Errors
+    /// Returns the adapter error when the provider cannot serve the range.
+    async fn read_suffix(
+        &self,
+        key: &ObjectKey,
+        length: u64,
+    ) -> Result<Option<(Vec<u8>, u64)>, Self::Error> {
+        let Some(metadata) = self.metadata(key).await? else {
+            return Ok(None);
+        };
+        let total = metadata.length();
+        let range = total
+            .checked_sub(1)
+            .filter(|_| length != 0)
+            .and_then(|end| ByteRange::new(total.saturating_sub(length), end).ok());
+        let bytes = if let Some(range) = range {
+            self.read_range(key, range).await?
+        } else {
+            Vec::new()
+        };
+        Ok(Some((bytes, total)))
+    }
+
     /// Returns whether an object exists.
     ///
     /// # Errors
@@ -436,6 +463,40 @@ mod tests {
         let range = ByteRange::new(0, 4).unwrap();
         let data = rt().block_on(bridge.read_range(&key, range)).unwrap();
         assert_eq!(data, b"hello");
+    }
+
+    #[test]
+    fn suffix_fallback_handles_zero_oversized_missing_and_empty_objects() {
+        let bridge = SyncObjectStoreBridge::new(TestStore::default());
+        let key = ObjectKey::parse("test/suffix").unwrap();
+        assert!(
+            rt().block_on(bridge.read_suffix(&key, 3))
+                .unwrap()
+                .is_none()
+        );
+        rt().block_on(bridge.put_if_absent(
+            &key,
+            ObjectBody::from_slice(b"abcdef"),
+            &ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 6),
+        ))
+        .unwrap();
+        for (length, expected) in [(0, b"".as_slice()), (3, b"def"), (99, b"abcdef")] {
+            assert_eq!(
+                rt().block_on(bridge.read_suffix(&key, length)).unwrap(),
+                Some((expected.to_vec(), 6))
+            );
+        }
+        let empty = ObjectKey::parse("test/empty-suffix").unwrap();
+        rt().block_on(bridge.put_if_absent(
+            &empty,
+            ObjectBody::from_slice(b""),
+            &ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 0),
+        ))
+        .unwrap();
+        assert_eq!(
+            rt().block_on(bridge.read_suffix(&empty, 3)).unwrap(),
+            Some((Vec::new(), 0))
+        );
     }
 
     #[test]

@@ -5,6 +5,12 @@ use crate::{ServerError, object_store::ServerObjectStore};
 
 use super::{ServerFrontend, xet};
 
+fn uses_native_xet_storage(frontends: &[ServerFrontend]) -> bool {
+    frontends
+        .iter()
+        .any(|frontend| matches!(frontend, ServerFrontend::Xet | ServerFrontend::Hub))
+}
+
 pub(crate) fn optional_chunk_container_keys(
     frontends: &[ServerFrontend],
     chunk_hash: &str,
@@ -12,7 +18,7 @@ pub(crate) fn optional_chunk_container_keys(
     let mut object_keys = Vec::new();
     for frontend in frontends {
         match frontend {
-            ServerFrontend::Xet => {
+            ServerFrontend::Xet | ServerFrontend::Hub => {
                 xet::push_optional_chunk_container_key(&mut object_keys, chunk_hash)?
             }
             // S3 protocol keys are skipped by `scan_orphan_objects`'s
@@ -21,8 +27,7 @@ pub(crate) fn optional_chunk_container_keys(
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::S3
-            | ServerFrontend::Hub => {}
+            | ServerFrontend::S3 => {}
         }
     }
 
@@ -33,7 +38,7 @@ pub(crate) fn referenced_term_object_key(
     frontends: &[ServerFrontend],
     term_hash: &str,
 ) -> Result<ObjectKey, ServerError> {
-    if frontends.contains(&ServerFrontend::Xet) {
+    if uses_native_xet_storage(frontends) {
         return xet::referenced_term_object_key(term_hash);
     }
 
@@ -51,7 +56,7 @@ where
 {
     for frontend in frontends {
         match frontend {
-            ServerFrontend::Xet => {
+            ServerFrontend::Xet | ServerFrontend::Hub => {
                 if xet::owns_protocol_object(object_key)? {
                     return xet::visit_protocol_object_member_chunks(
                         object_store,
@@ -64,8 +69,7 @@ where
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::S3
-            | ServerFrontend::Hub => {}
+            | ServerFrontend::S3 => {}
         }
     }
 
@@ -78,7 +82,7 @@ pub(crate) fn append_referenced_term_bytes(
     term: &FileChunkRecord,
     output: &mut Vec<u8>,
 ) -> Result<(), ServerError> {
-    if frontends.contains(&ServerFrontend::Xet) {
+    if uses_native_xet_storage(frontends) {
         return xet::append_referenced_term_bytes(object_store, term, output);
     }
 
@@ -90,6 +94,47 @@ mod tests {
     use super::*;
     use crate::ServerObjectStore;
     use crate::xet_adapter::xorb_object_key;
+
+    #[test]
+    fn hub_native_storage_works_without_a_separate_xet_frontend() {
+        let hash = "ab".repeat(32);
+        let expected = xorb_object_key(&hash).unwrap();
+        for frontends in [
+            vec![ServerFrontend::Hub],
+            vec![ServerFrontend::Hub, ServerFrontend::Xet],
+            vec![ServerFrontend::Xet, ServerFrontend::Hub],
+        ] {
+            assert_eq!(
+                optional_chunk_container_keys(&frontends, &hash).unwrap(),
+                vec![expected.clone()]
+            );
+            assert_eq!(
+                referenced_term_object_key(&frontends, &hash).unwrap(),
+                expected
+            );
+            assert!(referenced_term_object_key(&frontends, "invalid").is_err());
+            let term = FileChunkRecord {
+                hash: hash.clone(),
+                offset: 0,
+                length: 1024,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 1024,
+            };
+            let mut output = Vec::new();
+            assert!(matches!(
+                append_referenced_term_bytes(
+                    &frontends,
+                    &ServerObjectStore::blackhole(),
+                    &term,
+                    &mut output,
+                ),
+                Err(ServerError::MissingReferencedXorb)
+            ));
+            assert!(output.is_empty());
+        }
+    }
 
     // -----------------------------------------------------------------------
     // optional_chunk_container_keys
@@ -120,7 +165,6 @@ mod tests {
             ServerFrontend::Lfs,
             ServerFrontend::BazelHttp,
             ServerFrontend::Oci,
-            ServerFrontend::Hub,
         ];
         let result = optional_chunk_container_keys(&frontends, &hash);
         assert!(result.is_ok());
@@ -201,7 +245,6 @@ mod tests {
             ServerFrontend::Lfs,
             ServerFrontend::Oci,
             ServerFrontend::BazelHttp,
-            ServerFrontend::Hub,
         ];
         let mut visited = false;
         let result = visit_protocol_object_member_chunks(&frontends, &store, &key, |_hash| {

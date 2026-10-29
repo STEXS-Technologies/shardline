@@ -87,23 +87,31 @@ pub(super) async fn file_stream_with_decode_budget(
 
     let mut groups = groups.into_iter();
     let (first, first_range) = groups.next().ok_or(ServerError::Overflow)?;
-    // Preserve eager integrity validation for the first (and single) container.
-    // Later containers are validated before their bytes are yielded, without
-    // retaining earlier temporary files or buffering the complete logical file.
-    let first = single_container_file_stream(
+    // Validate the first payload before exposing the stream. Explicit ranges
+    // can authenticate selected members; full downloads verify each container.
+    // Later groups retain neither earlier scratch files nor a whole logical file.
+    let first = container_stream(
         object_store.clone(),
         first,
         first_range,
         pool.clone(),
         decoded_byte_budget,
+        range.is_some(),
     )
     .await?;
     let remaining = stream::iter(groups).then(move |(next_record, next_range)| {
         let store = object_store.clone();
         let pool = pool.clone();
         async move {
-            single_container_file_stream(store, next_record, next_range, pool, decoded_byte_budget)
-                .await
+            container_stream(
+                store,
+                next_record,
+                next_range,
+                pool,
+                decoded_byte_budget,
+                range.is_some(),
+            )
+            .await
         }
     });
     Ok(Box::pin(
@@ -111,6 +119,25 @@ pub(super) async fn file_stream_with_decode_budget(
             .chain(remaining)
             .try_flatten(),
     ))
+}
+
+async fn container_stream(
+    store: ServerObjectStore,
+    record: FileRecord,
+    range: Option<ByteRange>,
+    pool: BoundedPool,
+    decoded_byte_budget: usize,
+    explicit_range: bool,
+) -> Result<ServerByteStream, ServerError> {
+    if explicit_range
+        && let Some(range) = range
+        && let Some(stream) =
+            super::authenticated_range::file_stream(store.clone(), &record, range, pool.clone())
+                .await?
+    {
+        return Ok(stream);
+    }
+    single_container_file_stream(store, record, range, pool, decoded_byte_budget).await
 }
 
 #[cfg(test)]

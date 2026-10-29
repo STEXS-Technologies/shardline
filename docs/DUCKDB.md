@@ -55,6 +55,22 @@ authorized by the token. Use exact object paths when a revision-pinned file
 identity is required; mutable globs are appropriate only for external ad-hoc
 analysis.
 
+## Reading Hub files
+
+DuckDB can also read Parquet through the Hub's ordinary HTTP download routes.
+Configure an HTTP bearer secret scoped to Shardline's public endpoint, then
+pass a Hub resolve URL to `read_parquet`. Use an immutable commit in the URL
+when the query must read a fixed version. Both regular and native-Xet files
+support authenticated HTTP ranges; downloads stay through Shardline.
+
+The real-client suite passes with DuckDB 2.0.0, PyArrow 26.0.0,
+`huggingface_hub` 2.3.0 and `hf_xet` 1.7.0 on SQLite/filesystem and
+PostgreSQL/MinIO, with combined and separate API/transfer roles. It checks
+Parquet filtering and aggregates, actual partial responses, HEAD metadata,
+conditional requests and anonymous-access rejection. These shared-host
+correctness checks do not establish production latency or multi-host scaling.
+They supplement the pinned CI matrix rather than replacing it.
+
 ## Server-side query boundary
 
 The typed request contract is available as
@@ -94,10 +110,11 @@ the supported opt-out when analytics should remain outside the Hub process.
 
 ## Design and benchmark gate
 
-The selected production boundary for this release is external DuckDB over the
-S3 frontend. This is the only path enabled by default and is covered by the
-real-client E2E lane, including a Docker-backed Postgres + MinIO deployment
-shape. A server-side worker is not enabled until it beats the
+Full SQL runs in external DuckDB over the S3 frontend. This path is covered by
+the real-client E2E lane, including a Docker-backed Postgres + MinIO deployment
+shape. The bounded native dataset query API described above is also enabled by
+default; it does not execute arbitrary SQL or embed DuckDB. A future server-side
+DuckDB worker must first beat the
 external path and a native range-backed reader on the same fixture. Record cold
 and warm latency, peak RSS, source/reconstructed bytes, range count, backend
 operations, spill bytes, and concurrent upload/download impact for: exact-file

@@ -2,8 +2,8 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -15,12 +15,21 @@ use std::{
 pub enum S3ProxyFault {
     /// Forward a successful PUT, then close the client connection before its response.
     DropAcceptedPut,
+    /// Forward a successful DELETE, then close the client connection before its response.
+    DropAcceptedDelete,
     /// Forward a successful PUT, then pause before returning its original response.
     DelaySuccessfulPutResponse(Duration),
     /// Return one retryable `503 Service Unavailable` without contacting the provider.
     ServiceUnavailableOnce,
     /// Forward successful GET headers, pause, then forward the original body.
     DelaySuccessfulGetBody(Duration),
+    /// Pause a successful GET body only when its request path has this suffix.
+    DelaySuccessfulGetBodyForPath {
+        /// Exact trailing object path, excluding the query string.
+        suffix: String,
+        /// Time to hold the provider's response body.
+        delay: Duration,
+    },
     /// Replace one successful GET body with same-length stale provider bytes.
     ReplaceSuccessfulGetBody(Arc<[u8]>),
 }
@@ -30,8 +39,23 @@ pub struct S3FaultProxy {
     endpoint: String,
     armed: Arc<AtomicBool>,
     injected: Arc<AtomicBool>,
+    requests: Arc<RequestCounts>,
+    get_responses: Arc<GetResponses>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct RequestCounts {
+    get: AtomicUsize,
+    xorb_get: AtomicUsize,
+    head: AtomicUsize,
+}
+
+#[derive(Default)]
+struct GetResponses {
+    bytes: AtomicUsize,
+    lengths: Mutex<Vec<(bool, usize)>>,
 }
 
 impl S3FaultProxy {
@@ -72,6 +96,10 @@ impl S3FaultProxy {
         let endpoint = format!("http://{}", listener.local_addr()?);
         let armed = Arc::new(AtomicBool::new(initially_armed));
         let injected = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(RequestCounts::default());
+        let worker_requests = Arc::clone(&requests);
+        let get_responses = Arc::new(GetResponses::default());
+        let worker_get_response_bytes = Arc::clone(&get_responses);
         let worker_armed = Arc::clone(&armed);
         let worker_injected = Arc::clone(&injected);
         let (stop, stopped) = mpsc::channel();
@@ -88,6 +116,8 @@ impl S3FaultProxy {
                             fault.clone(),
                             &worker_armed,
                             &worker_injected,
+                            &worker_requests,
+                            &worker_get_response_bytes,
                         )
                         .ok();
                     }
@@ -102,6 +132,8 @@ impl S3FaultProxy {
             endpoint,
             armed,
             injected,
+            requests,
+            get_responses,
             stop: Some(stop),
             thread: Some(thread),
         })
@@ -123,6 +155,56 @@ impl S3FaultProxy {
     pub fn fault_was_injected(&self) -> bool {
         self.injected.load(Ordering::Acquire)
     }
+
+    /// Number of actual HTTP GET attempts received, including injected failures.
+    #[must_use]
+    pub fn get_requests(&self) -> usize {
+        self.requests.get.load(Ordering::Acquire)
+    }
+
+    /// Actual GET attempts for Xorb object paths, excluding startup metadata.
+    #[must_use]
+    pub fn xorb_get_requests(&self) -> usize {
+        self.requests.xorb_get.load(Ordering::Acquire)
+    }
+
+    /// Number of actual HTTP HEAD attempts received, including missing objects.
+    #[must_use]
+    pub fn head_requests(&self) -> usize {
+        self.requests.head.load(Ordering::Acquire)
+    }
+
+    /// Successful upstream GET response-body bytes, before any injected mutation.
+    /// Excludes headers and failed requests; this is fixture traffic, not billing.
+    #[must_use]
+    pub fn get_response_bytes(&self) -> usize {
+        self.get_responses.bytes.load(Ordering::Acquire)
+    }
+
+    /// Successful upstream GET body lengths, in provider response order.
+    #[must_use]
+    pub fn get_response_lengths(&self) -> Vec<usize> {
+        self.get_responses
+            .lengths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(_, length)| *length)
+            .collect()
+    }
+
+    /// Successful Xorb GET body lengths, excluding unrelated metadata responses.
+    /// Classification retains no request URLs, query strings or credentials.
+    #[must_use]
+    pub fn xorb_get_response_lengths(&self) -> Vec<usize> {
+        self.get_responses
+            .lengths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter_map(|(xorb, length)| xorb.then_some(*length))
+            .collect()
+    }
 }
 
 impl Drop for S3FaultProxy {
@@ -142,11 +224,34 @@ fn proxy_one_s3_request(
     fault: S3ProxyFault,
     armed: &AtomicBool,
     injected: &AtomicBool,
+    requests: &RequestCounts,
+    get_response_bytes: &GetResponses,
 ) -> std::io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(10)))?;
     let request = read_http_request(&mut client)?;
     let is_put = request.starts_with(b"PUT ");
     let is_get = request.starts_with(b"GET ");
+    let is_xorb_get = is_get
+        && request
+            .split(|byte| *byte == b' ')
+            .nth(1)
+            .and_then(|path| path.split(|byte| *byte == b'?').next())
+            .is_some_and(|path| {
+                path.ends_with(b".xorb")
+                    && path
+                        .windows(b"/xorbs/".len())
+                        .any(|part| part == b"/xorbs/")
+            });
+    if is_get {
+        requests.get.fetch_add(1, Ordering::AcqRel);
+    }
+    if is_xorb_get {
+        requests.xorb_get.fetch_add(1, Ordering::AcqRel);
+    }
+    if request.starts_with(b"HEAD ") {
+        requests.head.fetch_add(1, Ordering::AcqRel);
+    }
+    let is_delete = request.starts_with(b"DELETE ");
     if is_put
         && matches!(fault, S3ProxyFault::ServiceUnavailableOnce)
         && mark_injected(armed, injected)
@@ -167,10 +272,31 @@ fn proxy_one_s3_request(
         || response.starts_with(b"HTTP/1.1 201 ")
         || response.starts_with(b"HTTP/1.1 206 ")
         || response.starts_with(b"HTTP/1.1 204 ");
+    if is_get && accepted {
+        let header_end = response_header_end(&response)?;
+        let length = response
+            .len()
+            .checked_sub(header_end)
+            .ok_or_else(invalid_response_offset)?;
+        get_response_bytes.bytes.fetch_add(length, Ordering::AcqRel);
+        get_response_bytes
+            .lengths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((is_xorb_get, length));
+    }
 
     if is_put
         && accepted
         && matches!(fault, S3ProxyFault::DropAcceptedPut)
+        && mark_injected(armed, injected)
+    {
+        client.shutdown(Shutdown::Both)?;
+        return Ok(());
+    }
+    if is_delete
+        && accepted
+        && matches!(fault, S3ProxyFault::DropAcceptedDelete)
         && mark_injected(armed, injected)
     {
         client.shutdown(Shutdown::Both)?;
@@ -184,9 +310,27 @@ fn proxy_one_s3_request(
         thread::sleep(delay);
         return client.write_all(&response);
     }
+    let get_delay = match &fault {
+        S3ProxyFault::DelaySuccessfulGetBody(delay) => Some(*delay),
+        S3ProxyFault::DelaySuccessfulGetBodyForPath { suffix, delay }
+            if request
+                .split(|byte| *byte == b' ')
+                .nth(1)
+                .and_then(|path| path.split(|byte| *byte == b'?').next())
+                .is_some_and(|path| path.ends_with(suffix.as_bytes())) =>
+        {
+            Some(*delay)
+        }
+        S3ProxyFault::DropAcceptedPut
+        | S3ProxyFault::DropAcceptedDelete
+        | S3ProxyFault::DelaySuccessfulPutResponse(_)
+        | S3ProxyFault::ServiceUnavailableOnce
+        | S3ProxyFault::DelaySuccessfulGetBodyForPath { .. }
+        | S3ProxyFault::ReplaceSuccessfulGetBody(_) => None,
+    };
     if is_get
         && accepted
-        && let S3ProxyFault::DelaySuccessfulGetBody(delay) = fault
+        && let Some(delay) = get_delay
         && mark_injected(armed, injected)
     {
         let header_end = response_header_end(&response)?;

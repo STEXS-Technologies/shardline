@@ -26,6 +26,7 @@ use super::error::CliParseError;
 
 pub(crate) enum ParsedCommand {
     Existing(CliCommand),
+    RepositoryPolicy(super::definition::AdminRepositoryPolicyArgs),
     History(super::definition::HistoryArgs),
     #[cfg(target_os = "linux")]
     Maintenance {
@@ -58,6 +59,10 @@ impl CliCommand {
             ParsedCommand::History(_) => Err(CliParseError::validation(
                 ErrorKind::InvalidSubcommand,
                 "history inspection must be dispatched through shardline::run",
+            )),
+            ParsedCommand::RepositoryPolicy(_) => Err(CliParseError::validation(
+                ErrorKind::InvalidSubcommand,
+                "repository policy commands must be dispatched through shardline::run",
             )),
             #[cfg(target_os = "linux")]
             ParsedCommand::Maintenance { .. } | ParsedCommand::MaintenanceWorker { .. } => {
@@ -106,6 +111,13 @@ where
     // Embedded callers can recover from a failed parse without inheriting
     // its dotenv variables or selected configuration path.
     let command = match definition {
+        CliDefinition {
+            command:
+                CliDefinitionCommand::Admin(super::definition::AdminCommandArgs {
+                    command: AdminSubcommand::RepositoryPolicy(policy_args),
+                }),
+            ..
+        } if managed => ParsedCommand::RepositoryPolicy(policy_args),
         CliDefinition {
             command: CliDefinitionCommand::History(history_args),
             ..
@@ -290,6 +302,10 @@ impl TryFrom<CliDefinition> for CliCommand {
                 },
             },
             CliDefinitionCommand::Admin(args) => match args.command {
+                AdminSubcommand::RepositoryPolicy(_) => Err(CliParseError::validation(
+                    ErrorKind::InvalidSubcommand,
+                    "repository policy commands must be dispatched through shardline::run",
+                )),
                 AdminSubcommand::Token(args) => Ok(Self::AdminToken {
                     auth_provider: args.auth_provider.into(),
                     issuer: args.issuer,

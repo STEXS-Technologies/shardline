@@ -53,9 +53,9 @@ pub type QueryMap = Vec<(String, String)>;
 
 /// A recognized S3 sub-resource (the `?subresource` query dispatch set).
 ///
-/// The `Acl`…`Encryption` variants and [`S3SubResource::Other`] are
-/// out-of-scope operations that the handler lane maps to
-/// `501 NotImplemented` (per `docs/S3_FRONTEND.md`).
+/// The handler lane maps unsupported operations to `501 NotImplemented`.
+/// [`S3SubResource::Other`] retains the released catch-all classification;
+/// handlers can refine it without adding a variant to this public enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum S3SubResource {
     /// `?uploads` — `CreateMultipartUpload`.
@@ -70,7 +70,7 @@ pub enum S3SubResource {
     DeleteObjects,
     /// `?location` — `GetBucketLocation` stub.
     Location,
-    /// `?acl` — out of scope (`NotImplemented`).
+    /// `?acl` — read-only ACLs; updates are rejected because ACLs are disabled.
     Acl,
     /// `?policy` — out of scope (`NotImplemented`).
     Policy,
@@ -82,15 +82,15 @@ pub enum S3SubResource {
     Cors,
     /// `?notification` — out of scope (`NotImplemented`).
     Notification,
-    /// `?tagging` — out of scope (`NotImplemented`).
+    /// `?tagging` — `GetObjectTagging`, `PutObjectTagging`, or `DeleteObjectTagging`.
     Tagging,
     /// `?encryption` — out of scope (`NotImplemented`).
     Encryption,
-    /// Any other recognized-but-unsupported sub-resource (for example
+    /// Any other recognized sub-resource (for example
     /// `restore`, `select`, `torrent`, `legal-hold`, `retention`, `attributes`,
     /// `replication`, `website`, `versionId`, `versions`, `logging`,
     /// `requestPayment`, `accelerate`, `object-lock`, `list-type=1`, or a
-    /// malformed `partNumber`) — `NotImplemented` at the handler level.
+    /// malformed `partNumber`). Handlers reject unimplemented refinements.
     Other,
 }
 
@@ -133,7 +133,7 @@ enum QueryParameter {
     /// A recognized-but-unsupported sub-resource (for example `restore`,
     /// `select`, `torrent`, `legal-hold`, `retention`, `attributes`,
     /// `replication`, `website`, `versionId`, `versions`, `logging`,
-    /// `requestPayment`, `accelerate`, or `object-lock`) — maps to
+    /// `requestPayment`, `accelerate`, `object-lock`, or `ownershipControls`) — maps to
     /// [`S3SubResource::Other`].
     Other,
 }
@@ -158,7 +158,9 @@ impl QueryParameter {
             "encryption" => Some(Self::Encryption),
             "restore" | "select" | "torrent" | "legal-hold" | "retention" | "attributes"
             | "replication" | "website" | "versionId" | "versions" | "logging"
-            | "requestPayment" | "accelerate" | "object-lock" => Some(Self::Other),
+            | "requestPayment" | "accelerate" | "object-lock" | "ownershipControls" => {
+                Some(Self::Other)
+            }
             _ => None,
         }
     }

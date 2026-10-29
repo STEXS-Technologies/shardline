@@ -56,6 +56,7 @@
 
 mod compat;
 mod error;
+mod native_members;
 mod report;
 mod runner;
 #[cfg(test)]

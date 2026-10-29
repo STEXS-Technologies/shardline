@@ -56,7 +56,9 @@ pub struct UploadFileResponse {
     pub inserted_chunks: u64,
     /// Number of chunks already present.
     pub reused_chunks: u64,
-    /// Number of new bytes written to chunk storage.
+    /// Uncompressed chunk bytes reported as newly inserted. This is a logical
+    /// upload/deduplication measure, not the encoded bytes written to object
+    /// storage or the complete physical storage delta.
     pub stored_bytes: u64,
     /// Ordered chunk upload results.
     pub chunks: Vec<UploadChunkResult>,

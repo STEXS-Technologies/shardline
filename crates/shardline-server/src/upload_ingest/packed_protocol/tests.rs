@@ -157,6 +157,7 @@ impl Provider {
             NonZeroUsize::new(64 * 1024).unwrap(),
             false,
             NonZeroUsize::new(8).unwrap(),
+            &crate::admission::ExecutionPools::default_sizes().hashing,
         );
         if direct {
             ingestor = ingestor.with_packed_protocol_storage(
@@ -175,8 +176,155 @@ impl Provider {
 
 mod admission;
 mod digest;
+mod encoding_ranges;
 mod local;
 mod lost_ack;
+
+#[tokio::test]
+async fn equivalent_native_encoding_reuses_retained_container() {
+    let provider = Provider::new(0).await;
+    let plain = assert_equivalent_encoding_reuse(&provider.objects).await;
+    let state = provider.state.lock().unwrap();
+    assert_eq!(state.objects.len(), 1);
+    assert_eq!(state.objects.values().next().unwrap(), &plain);
+}
+
+#[tokio::test]
+async fn local_equivalent_native_encoding_reuses_retained_container() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ServerObjectStore::local(root.path().to_owned()).unwrap();
+    assert_equivalent_encoding_reuse(&store).await;
+    encoding_ranges::assert_ranges(&store).await;
+}
+
+#[tokio::test]
+async fn corrupt_retained_encoding_is_not_reused() {
+    let provider = Provider::new(0).await;
+    assert_equivalent_encoding_reuse(&provider.objects).await;
+    {
+        let mut state = provider.state.lock().unwrap();
+        let value = state.objects.values_mut().next().unwrap();
+        let mut corrupt = value.to_vec();
+        corrupt[16] ^= 1;
+        *value = Bytes::from(corrupt);
+    }
+    let bytes = vec![b'a'; 128 * 1024];
+    let mut upload = PackedProtocolUpload::new(
+        provider.objects.clone(),
+        crate::admission::ExecutionPools::default_sizes().hashing,
+    );
+    upload.push(&bytes, 0).await.unwrap();
+    let result = upload.finish().await.unwrap();
+    assert_eq!(result.inserted, 1);
+    assert_eq!(result.reused, 0);
+    let mut reader =
+        DurableUploadChunks::with_cache(provider.objects.clone(), 1, ReadCache::default());
+    assert_eq!(
+        reader.next(&result.records).await.unwrap().unwrap().0,
+        bytes
+    );
+    assert_eq!(provider.state.lock().unwrap().objects.len(), 2);
+}
+
+#[cfg(feature = "docker")]
+#[tokio::test]
+#[ignore = "requires disposable Docker MinIO"]
+async fn minio_equivalent_native_encoding_reuses_retained_container() {
+    let stack = tokio::task::spawn_blocking(|| {
+        shardline_test_support::DockerLocalStack::builder()
+            .with_minio_tmpfs()
+            .start()
+            .unwrap()
+            .expect("encoding qualification requires Docker MinIO")
+    })
+    .await
+    .unwrap();
+    let raw = stack.s3_raw_config(Some("packed-encoding-reuse")).unwrap();
+    let config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_allow_http(raw.allow_http)
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            None,
+        );
+    let store = ServerObjectStore::s3(config).unwrap();
+    assert_equivalent_encoding_reuse(&store).await;
+    encoding_ranges::assert_ranges(&store).await;
+}
+
+async fn assert_equivalent_encoding_reuse(store: &ServerObjectStore) -> Bytes {
+    let (_, plain, hash) = crate::test_fixtures::alternate_xorb_encodings().unwrap();
+    let bytes = vec![b'a'; 128 * 1024];
+    let packed =
+        crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&[(bytes.clone(), 0)]).unwrap();
+    assert_eq!(packed.xorb_hash_hex, hash);
+    assert_ne!(packed.serialized.as_slice(), plain.as_ref());
+    let key = crate::xet_adapter::xorb_object_key(&hash).unwrap();
+    let integrity = ObjectIntegrity::new(
+        crate::local_backend::chunk_hash(&plain),
+        u64::try_from(plain.len()).unwrap(),
+    );
+    shardline_storage::AsyncObjectStore::put_if_absent(
+        store,
+        &key,
+        ObjectBody::from_bytes(plain.clone()),
+        &integrity,
+    )
+    .await
+    .unwrap();
+    let mut upload = PackedProtocolUpload::new(
+        store.clone(),
+        crate::admission::ExecutionPools::default_sizes().hashing,
+    );
+    upload.push(&bytes, 0).await.unwrap();
+    let result = upload.finish().await.unwrap();
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].hash, hash);
+    assert_eq!(result.inserted, 0);
+    assert_eq!(result.reused, 1);
+    let individual_hash = xet_hash_hex_string(crate::local_backend::chunk_hash(&bytes));
+    let individual_key = crate::chunk_store::chunk_object_key(&individual_hash).unwrap();
+    assert!(
+        !shardline_storage::AsyncObjectStore::contains(store, &individual_key)
+            .await
+            .unwrap()
+    );
+    assert_ne!(
+        result.records[0].packed_end,
+        u64::from(
+            packed.chunk_entries[0]
+                .packed_offset
+                .checked_add(packed.chunk_entries[0].packed_length)
+                .unwrap()
+        )
+    );
+    let record = shardline_index::FileRecord {
+        file_id: "equivalent-native-encoding".to_owned(),
+        content_hash: hash,
+        total_bytes: u64::try_from(bytes.len()).unwrap(),
+        chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+        repository_scope: None,
+        chunks: result.records,
+    };
+    local::assert_read(store, &record, &bytes).await;
+    let store = store.clone();
+    let retained = tokio::task::spawn_blocking(move || {
+        let (mut source, _) = store
+            .materialize_bounded_object_if_present(&key, 0)
+            .unwrap()
+            .unwrap();
+        let mut retained = Vec::new();
+        std::io::Read::read_to_end(&mut source, &mut retained).unwrap();
+        retained
+    })
+    .await
+    .unwrap();
+    assert_eq!(retained.as_slice(), plain.as_ref());
+    plain
+}
 
 impl Drop for Provider {
     fn drop(&mut self) {

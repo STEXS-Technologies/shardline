@@ -7,6 +7,93 @@
 //! authoritative record. `DeleteObject` drops the listing row first, then the
 //! record + direct object (crash-safe ordering).
 
+mod attributes;
+use super::{checksum, object_headers};
+
+pub(super) struct ObjectUploadOptions<'headers> {
+    pub(super) multipart_part_count: u32,
+    pub(super) full_object_checksum: Option<checksum::FullObjectChecksum>,
+    pub(super) precondition: Option<&'headers HeaderMap>,
+}
+mod conditions;
+mod copy_part;
+
+#[cfg(test)]
+pub(crate) mod copy_part_test_hooks {
+    use std::{
+        collections::HashMap,
+        sync::{LazyLock, Mutex},
+    };
+
+    use shardline_storage::ObjectKey;
+    use tokio::sync::oneshot;
+
+    type Pause = (
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+        oneshot::Sender<bool>,
+    );
+
+    static AFTER_SNAPSHOT: LazyLock<Mutex<HashMap<String, Pause>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn arm(
+        object_key: &ObjectKey,
+    ) -> Option<(
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        oneshot::Receiver<bool>,
+    )> {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let (published_tx, published_rx) = oneshot::channel();
+        let mut pause = AFTER_SNAPSHOT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = object_key.as_str().to_owned();
+        if pause.contains_key(&key) {
+            return None;
+        }
+        pause.insert(key, (reached_tx, resume_rx, published_tx));
+        Some((reached_rx, resume_tx, published_rx))
+    }
+
+    pub(crate) struct CompletionGuard(Option<oneshot::Sender<bool>>);
+
+    impl CompletionGuard {
+        pub(super) fn mark_published(mut self) {
+            if let Some(published) = self.0.take() {
+                let _published_sent = published.send(true);
+            }
+        }
+    }
+
+    impl Drop for CompletionGuard {
+        fn drop(&mut self) {
+            if let Some(published) = self.0.take() {
+                let _cancelled_sent = published.send(false);
+            }
+        }
+    }
+
+    pub(super) async fn pause_after_snapshot(object_key: &ObjectKey) -> Option<CompletionGuard> {
+        let pause = {
+            let mut armed = AFTER_SNAPSHOT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            armed.remove(object_key.as_str())
+        };
+        if let Some((reached, resume, published)) = pause {
+            let completion = CompletionGuard(Some(published));
+            let _ = reached.send(());
+            let _ = resume.await;
+            Some(completion)
+        } else {
+            None
+        }
+    }
+}
+
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -29,8 +116,8 @@ use md5::{Digest, Md5};
 use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_s3_adapter::{
     CopyObjectResult, S3Error, S3SubResource, classify, etag_header, format_iso8601,
-    parse_content_md5, parse_copy_source, parse_s3_range, read_conditional_headers,
-    require_s3_bucket_binding,
+    parse_content_md5, parse_copy_source, parse_s3_range,
+    read_wire_conditional_headers as read_conditional_headers, require_s3_bucket_binding,
 };
 use shardline_server_core::AuthorizedRepository;
 
@@ -40,7 +127,7 @@ use crate::{
     metrics,
     overflow::checked_add,
     protocol_support::scope_namespace,
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
 use super::{
@@ -56,6 +143,53 @@ const COPY_SOURCE: axum::http::header::HeaderName =
 /// The `x-amz-metadata-directive` request header (CopyObject semantics).
 const METADATA_DIRECTIVE: axum::http::header::HeaderName =
     axum::http::header::HeaderName::from_static("x-amz-metadata-directive");
+const TAGGING_DIRECTIVE: axum::http::header::HeaderName =
+    axum::http::header::HeaderName::from_static("x-amz-tagging-directive");
+
+fn parse_response_overrides(
+    query: &[(String, String)],
+) -> Result<Vec<(HeaderName, HeaderValue)>, S3Error> {
+    let mut overrides = Vec::new();
+    for (name, value) in query {
+        let header_name = match name.as_str() {
+            "response-cache-control" => HeaderName::from_static("cache-control"),
+            "response-content-disposition" => HeaderName::from_static("content-disposition"),
+            "response-content-encoding" => HeaderName::from_static("content-encoding"),
+            "response-content-language" => HeaderName::from_static("content-language"),
+            "response-content-type" => HeaderName::from_static("content-type"),
+            "response-expires" => HeaderName::from_static("expires"),
+            _ if name.starts_with("response-") => return Err(S3Error::not_implemented()),
+            _ => continue,
+        };
+        if overrides
+            .iter()
+            .any(|(existing, _): &(HeaderName, HeaderValue)| *existing == header_name)
+        {
+            return Err(S3Error::invalid_argument(
+                "Repeated S3 response override parameter",
+            ));
+        }
+        let value = HeaderValue::from_str(value)
+            .map_err(|_error| S3Error::invalid_argument("Invalid S3 response override value"))?;
+        overrides.push((header_name, value));
+    }
+    Ok(overrides)
+}
+
+fn reject_response_overrides(query: &[(String, String)]) -> Result<(), S3Error> {
+    if query.iter().any(|(name, _)| name.starts_with("response-")) {
+        return Err(S3Error::not_implemented());
+    }
+    Ok(())
+}
+
+fn apply_response_overrides(response: &mut Response, overrides: Vec<(HeaderName, HeaderValue)>) {
+    if response.status() == StatusCode::OK {
+        for (name, value) in overrides {
+            response.headers_mut().insert(name, value);
+        }
+    }
+}
 
 /// S3 user-metadata request header prefix.
 const META_PREFIX: &str = "x-amz-meta-";
@@ -71,6 +205,9 @@ pub(super) fn capture_user_metadata(headers: &HeaderMap) -> Result<Vec<(String, 
         let Some(suffix) = name.as_str().strip_prefix(META_PREFIX) else {
             continue;
         };
+        if checksum::is_internal_metadata(&suffix.to_ascii_lowercase()) {
+            return Err(S3Error::invalid_argument("Reserved S3 user metadata name"));
+        }
         let mut values = Vec::new();
         for value in headers.get_all(name) {
             let text = std::str::from_utf8(value.as_bytes())
@@ -196,6 +333,9 @@ fn metadata_directive(headers: &HeaderMap) -> Result<MetadataDirective, S3Error>
 fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) {
     let mut combined: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for (name, value) in metadata {
+        if checksum::is_internal_metadata(name) {
+            continue;
+        }
         combined
             .entry(name.to_ascii_lowercase())
             .or_default()
@@ -256,6 +396,43 @@ pub(super) fn md5_hasher_hex(hasher: &Arc<Mutex<Md5>>) -> String {
     format!("{digest:x}")
 }
 
+fn checksum_mode_enabled(headers: &HeaderMap) -> Result<bool, S3Error> {
+    let mut values = headers.get_all("x-amz-checksum-mode").iter();
+    match values.next() {
+        Some(value) if values.next().is_none() => {
+            // Arrow's stock S3 client sends the lowercase token. Accept its
+            // spelling without accepting unknown or repeated mode values.
+            if value
+                .to_str()
+                .is_ok_and(|value| value.eq_ignore_ascii_case("ENABLED"))
+            {
+                Ok(true)
+            } else {
+                Err(S3Error::invalid_argument("Invalid checksum mode"))
+            }
+        }
+        Some(_) => Err(S3Error::invalid_argument("Repeated checksum mode")),
+        None => Ok(false),
+    }
+}
+
+fn insert_checksum_headers(
+    response: &mut Response,
+    checksum: Option<(&'static str, &str, &'static str)>,
+) -> Result<(), S3Error> {
+    if let Some((header, value, checksum_type)) = checksum {
+        response.headers_mut().insert(
+            HeaderName::from_static(header),
+            HeaderValue::from_str(value).map_err(|_error| S3Error::internal())?,
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("x-amz-checksum-type"),
+            HeaderValue::from_static(checksum_type),
+        );
+    }
+    Ok(())
+}
+
 /// `PUT /{bucket}/{*key}` — stream the body through the CDC ingestor.
 ///
 /// Overwrite semantics are **atomic upload-then-swap**: the new body is
@@ -275,6 +452,7 @@ pub(crate) async fn s3_put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_write_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?partNumber=N&uploadId=U` dispatches to UploadPart; other sub-resources
@@ -282,6 +460,13 @@ pub(crate) async fn s3_put_object(
     // rejected as 501.
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
+    reject_response_overrides(&query)?;
+    if resources.as_slice() == [S3SubResource::Acl] {
+        return Err(S3Error::acl_not_supported());
+    }
+    if resources.as_slice() == [S3SubResource::Tagging] {
+        return put_object_tagging(&state, &context, headers, body).await;
+    }
     let part_number = resources.iter().find_map(|resource| {
         if let S3SubResource::PartNumber(number) = resource {
             Some(*number)
@@ -297,8 +482,20 @@ pub(crate) async fn s3_put_object(
         }
     });
     if let (Some(part_number), Some(upload_id)) = (part_number, upload_id) {
-        if resources.len() != 2 || headers.contains_key(COPY_SOURCE) {
+        if resources.len() != 2 {
             return Err(S3Error::not_implemented());
+        }
+        if headers.contains_key(COPY_SOURCE) {
+            checksum::reject_unverified_headers(&headers)?;
+            return copy_part::upload_part_copy(
+                &state,
+                auth.capability(),
+                &context,
+                part_number,
+                upload_id,
+                &headers,
+            )
+            .await;
         }
         return multipart::s3_upload_part(&state, &context, part_number, upload_id, &headers, body)
             .await;
@@ -318,9 +515,15 @@ pub(crate) async fn s3_put_object(
         let copy_source = copy_source
             .to_str()
             .map_err(|_error| S3Error::invalid_argument("Invalid copy source header"))?;
+        checksum::reject_unverified_headers(&headers)?;
         return s3_copy_object(&state, auth.capability(), &context, copy_source, &headers).await;
     }
 
+    checksum::reject_unpersisted_negotiation(&headers)?;
+    let payload_checksum = checksum::parse(&headers)?;
+    let response_checksum = payload_checksum
+        .as_ref()
+        .map(|checksum| (checksum.header(), checksum.expected().to_owned()));
     let expected_md5 = parse_content_md5(&headers)?;
     // Bodies larger than SHARDLINE_S3_MAX_PART_BYTES must use multipart.
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
@@ -342,7 +545,7 @@ pub(crate) async fn s3_put_object(
     // encoding; decode the framing so the CDC ingestor stores the actual
     // payload (and size). The decoded size is enforced against the part
     // ceiling by the decoder.
-    let body = if aws_chunked::is_aws_chunked(&headers) {
+    let mut body = if aws_chunked::is_aws_chunked(&headers) {
         let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
         let decoded = aws_chunked::declared_decoded_content_length(&headers)?;
         if decoded > max_bytes_u64 {
@@ -360,6 +563,9 @@ pub(crate) async fn s3_put_object(
     } else {
         body
     };
+    if let Some(payload_checksum) = payload_checksum {
+        body = checksum::verify_body(body, payload_checksum);
+    }
 
     // Conditional requests (If-Match / If-None-Match) are evaluated against
     // the CURRENT object BEFORE the body is read — a fast-path rejection. The
@@ -372,7 +578,14 @@ pub(crate) async fn s3_put_object(
     // Capture S3 user metadata (x-amz-meta-*) and compute the ETag (hex MD5 of
     // the object bytes) while the body streams — standard S3 semantics that
     // checksum-verifying clients (s3cmd, the AWS SDKs) depend on.
-    let user_metadata = capture_user_metadata(&headers)?;
+    let mut user_metadata = capture_user_metadata(&headers)?;
+    object_headers::capture_headers(&headers, &mut user_metadata)?;
+    if let Some(tags) = super::tagging::parse_header(&headers)? {
+        super::tagging::replace_metadata(&mut user_metadata, &tags)?;
+    }
+    if let Some((header, value)) = &response_checksum {
+        checksum::attach_object_checksum(&mut user_metadata, header, value)?;
+    }
     let hasher = Arc::new(Mutex::new(Md5::new()));
     let body = body.with_md5_tee_and_expected(hasher.clone(), expected_md5);
 
@@ -385,7 +598,11 @@ pub(crate) async fn s3_put_object(
         body,
         user_metadata,
         hasher,
-        Some(&headers),
+        ObjectUploadOptions {
+            multipart_part_count: 0,
+            full_object_checksum: None,
+            precondition: Some(&headers),
+        },
     )
     .await?;
 
@@ -394,6 +611,12 @@ pub(crate) async fn s3_put_object(
         ETAG,
         HeaderValue::from_str(&etag_header(&etag)).map_err(|_error| S3Error::internal())?,
     );
+    if let Some((header, value)) = response_checksum {
+        response.headers_mut().insert(
+            HeaderName::from_static(header),
+            HeaderValue::from_str(&value).map_err(|_error| S3Error::internal())?,
+        );
+    }
     Ok(response)
 }
 
@@ -465,10 +688,57 @@ async fn s3_copy_object(
     // — resolved from the SAME snapshot as the source bytes, so the copied
     // metadata always belongs to the copied content (F-79); REPLACE overrides
     // it with the x-amz-meta-* headers of this request.
-    let user_metadata = match directive {
-        MetadataDirective::Replace => capture_user_metadata(headers)?,
-        MetadataDirective::Copy => snapshot.user_metadata,
+    let source_tagging = super::tagging::from_metadata(&snapshot.user_metadata)?;
+    let mut user_metadata = match directive {
+        MetadataDirective::Replace => {
+            let mut metadata = capture_user_metadata(headers)?;
+            object_headers::capture_headers(headers, &mut metadata)?;
+            metadata
+        }
+        MetadataDirective::Copy => snapshot
+            .user_metadata
+            .into_iter()
+            .filter(|(name, _value)| {
+                !checksum::is_internal_metadata(name) || object_headers::is_internal_metadata(name)
+            })
+            .collect(),
     };
+    let supplied_tagging = super::tagging::parse_header(headers)?;
+    let mut tagging_directives = headers.get_all(&TAGGING_DIRECTIVE).iter();
+    let tagging_directive = tagging_directives
+        .next()
+        .map(|value| {
+            if tagging_directives.next().is_some() {
+                return Err(S3Error::invalid_argument(
+                    "Repeated x-amz-tagging-directive header",
+                ));
+            }
+            let value = value.to_str().map_err(|_error| {
+                S3Error::invalid_argument("Invalid x-amz-tagging-directive header")
+            })?;
+            if value.eq_ignore_ascii_case("COPY") {
+                Ok(false)
+            } else if value.eq_ignore_ascii_case("REPLACE") {
+                Ok(true)
+            } else {
+                Err(S3Error::invalid_argument(
+                    "Invalid x-amz-tagging-directive header",
+                ))
+            }
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if supplied_tagging.is_some() && !tagging_directive {
+        return Err(S3Error::invalid_argument(
+            "x-amz-tagging requires x-amz-tagging-directive: REPLACE",
+        ));
+    }
+    let copied_or_replaced_tagging = if tagging_directive {
+        supplied_tagging.unwrap_or_default()
+    } else {
+        source_tagging
+    };
+    super::tagging::replace_metadata(&mut user_metadata, &copied_or_replaced_tagging)?;
 
     // Stream the source through the same pinned read path as GetObject (no
     // unbounded full-object `read_object` buffer), bounded mid-stream by the
@@ -495,7 +765,11 @@ async fn s3_copy_object(
         body,
         user_metadata,
         hasher,
-        Some(headers),
+        ObjectUploadOptions {
+            multipart_part_count: 0,
+            full_object_checksum: None,
+            precondition: Some(headers),
+        },
     )
     .await?;
 
@@ -551,18 +825,13 @@ fn check_copy_source_preconditions(
     for condition in conditions {
         // Snapshot resolution already proved source existence. A legacy
         // source without an ETag cannot satisfy concrete tag predicates.
-        let satisfied = match &condition {
-            shardline_s3_adapter::ConditionalHeader::IfMatch(
-                shardline_s3_adapter::EntityTagSet::Any,
-            ) => true,
-            shardline_s3_adapter::ConditionalHeader::IfNoneMatch(
-                shardline_s3_adapter::EntityTagSet::Any,
-            ) => false,
-            shardline_s3_adapter::ConditionalHeader::IfMatch(_)
-            | shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_) => snapshot
+        let satisfied = if condition.is_wildcard() {
+            condition.is_match()
+        } else {
+            snapshot
                 .etag
                 .as_deref()
-                .is_some_and(|etag| condition.satisfied(Some(etag))),
+                .is_some_and(|etag| condition.satisfied(Some(etag)))
         };
         if !satisfied {
             return Err(S3Error::precondition_failed());
@@ -592,17 +861,13 @@ fn check_copy_source_preconditions(
         let date = value
             .to_str()
             .ok()
-            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .and_then(conditions::timestamp)
             .ok_or_else(|| S3Error::invalid_argument("Invalid copy-source date header"))?;
         // S3 tag validators take precedence over their corresponding dates.
         if source_headers.contains_key(tag_header) {
             continue;
         }
-        let since = date
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-            .ok_or_else(|| S3Error::invalid_argument("Invalid copy-source date header"))?;
+        let since = date;
         let Some(modified) = snapshot.updated_at_unix_seconds else {
             return Err(S3Error::precondition_failed());
         };
@@ -643,11 +908,7 @@ pub(super) fn check_precondition(
     let Some(condition) = failing_condition(stored_etag, headers)? else {
         return Ok(());
     };
-    if matches!(
-        condition,
-        shardline_s3_adapter::ConditionalHeader::IfMatch(_)
-    ) && stored_etag.is_none()
-    {
+    if condition.is_match() && stored_etag.is_none() {
         return Err(S3Error::no_such_key(key));
     }
     Err(S3Error::precondition_failed())
@@ -656,7 +917,7 @@ pub(super) fn check_precondition(
 fn failing_condition(
     stored_etag: Option<&str>,
     headers: &HeaderMap,
-) -> Result<Option<shardline_s3_adapter::ConditionalHeader>, S3Error> {
+) -> Result<Option<shardline_s3_adapter::WireConditionalHeader>, S3Error> {
     let conditions = read_conditional_headers(headers)
         .map_err(|_error| S3Error::invalid_argument("Invalid conditional entity-tag header"))?;
     Ok(conditions
@@ -667,11 +928,14 @@ fn failing_condition(
 /// GET/HEAD use 304 for failed If-None-Match, with no XML or content body.
 fn check_read_precondition(
     stored_etag: Option<&str>,
+    modified_at: Option<i64>,
     headers: &HeaderMap,
     key: &str,
 ) -> Result<Option<Response>, S3Error> {
-    match failing_condition(stored_etag, headers)? {
-        Some(shardline_s3_adapter::ConditionalHeader::IfNoneMatch(_)) => {
+    let failed_tag = failing_condition(stored_etag, headers)?;
+    conditions::require_unmodified(modified_at, headers)?;
+    match failed_tag {
+        Some(condition) if !condition.is_match() => {
             let mut response = StatusCode::NOT_MODIFIED.into_response();
             if let Some(etag) =
                 stored_etag.and_then(|etag| HeaderValue::from_str(&etag_header(etag)).ok())
@@ -684,7 +948,7 @@ fn check_read_precondition(
             check_precondition(stored_etag, headers, key)?;
             Ok(None)
         }
-        None => Ok(None),
+        None => conditions::modified_response(stored_etag, modified_at, headers),
     }
 }
 
@@ -760,10 +1024,15 @@ pub(super) async fn s3_upload_object_body(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
     body: RequestBodyReader,
-    user_metadata: Vec<(String, String)>,
+    mut user_metadata: Vec<(String, String)>,
     hasher: Arc<Mutex<Md5>>,
-    precondition: Option<&HeaderMap>,
+    options: ObjectUploadOptions<'_>,
 ) -> Result<(crate::model::UploadFileResponse, String), S3Error> {
+    let ObjectUploadOptions {
+        multipart_part_count,
+        full_object_checksum,
+        precondition,
+    } = options;
     // Serialize concurrent overwrites of the same key; the swap below (index
     // upsert + stale-direct drop) is atomic with respect to other overwrites.
     let object_lock =
@@ -855,6 +1124,17 @@ pub(super) async fn s3_upload_object_body(
     // MD5 of the object bytes — the standard S3 ETag.
     let etag = md5_hasher_hex(&hasher);
 
+    if let Some(full_object_checksum) = full_object_checksum {
+        let checksum_value = full_object_checksum.value()?;
+        checksum::attach_multipart_manifest(
+            &mut user_metadata,
+            full_object_checksum.algorithm(),
+            checksum::MultipartChecksumType::FullObject,
+            Some(&checksum_value),
+            Vec::new(),
+        )?;
+    }
+
     // Swap: point the index at the new record version, then drop any stale
     // direct object that would shadow the record (the old record version is
     // left for GC — record stores are versioned).
@@ -878,24 +1158,29 @@ pub(super) async fn s3_upload_object_body(
         };
         state
             .backend
-            .publish_s3_object_locked(
+            .publish_s3_object_locked_with_multipart_count(
                 resource_guard.as_mut().ok_or_else(S3Error::internal)?,
                 prepared,
                 &replacement,
                 &condition,
                 None,
+                Some(multipart_part_count),
             )
             .await?
     } else if conditional_headers.is_some() {
         state
             .backend
-            .compare_and_swap_s3_object(
+            .compare_and_swap_s3_object_with_multipart_count(
                 expected_entry.as_ref().and_then(Option::as_ref),
                 &replacement,
+                multipart_part_count,
             )
             .await?
     } else {
-        state.backend.upsert_s3_object(&replacement).await?;
+        state
+            .backend
+            .upsert_s3_object_with_multipart_count(&replacement, multipart_part_count)
+            .await?;
         true
     };
     if !swapped {
@@ -942,9 +1227,46 @@ pub(crate) async fn s3_get_object(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_read_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
+    let resources = classify(&query);
+    let response_overrides = parse_response_overrides(&query)?;
+    if !resources.is_empty() && !response_overrides.is_empty() {
+        return Err(S3Error::not_implemented());
+    }
+    if resources.as_slice() == [S3SubResource::Acl] {
+        s3_object_entry(&state, &context)
+            .await?
+            .ok_or_else(|| S3Error::no_such_key(&context.key))?;
+        return Ok((
+            StatusCode::OK,
+            [(CONTENT_TYPE, s3_xml_content_type())],
+            super::acl::access_control_policy_xml(&context.scope_namespace),
+        )
+            .into_response());
+    }
+    if resources.as_slice() == [S3SubResource::Tagging] {
+        let entry = s3_object_entry(&state, &context)
+            .await?
+            .ok_or_else(|| S3Error::no_such_key(&context.key))?;
+        let tags = super::tagging::from_metadata(&entry.user_metadata)?;
+        return Ok((
+            StatusCode::OK,
+            [(CONTENT_TYPE, s3_xml_content_type())],
+            super::tagging::to_xml(&tags),
+        )
+            .into_response());
+    }
+    if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
+        return multipart::s3_list_parts(&state, &context, upload_id, &query).await;
+    }
+    // Preserve the released public sub-resource enum. Attributes are refined
+    // privately only when they are the sole recognized operation selector.
+    if resources == [S3SubResource::Other] && query.iter().any(|(name, _)| name == "attributes") {
+        return attributes::get(&state, &context, &headers).await;
+    }
     if has_sub_resource(&query) {
         return Err(S3Error::not_implemented());
     }
@@ -959,10 +1281,12 @@ pub(crate) async fn s3_get_object(
     // bytes (F-70). Only when no row exists is the latest record snapshot used
     // as a fallback (there is then no row metadata to pair).
     let entry = s3_object_entry(&state, &context).await?;
+    let checksum_mode = checksum_mode_enabled(&headers)?;
     // Conditional requests (If-Match / If-None-Match) evaluate against the
     // stored S3 ETag (listing-index row) before any bytes are served.
     if let Some(response) = check_read_precondition(
         entry.as_ref().map(|entry| entry.etag.as_str()),
+        entry.as_ref().map(|entry| entry.updated_at_unix_seconds),
         &headers,
         &context.key,
     )? {
@@ -1049,10 +1373,13 @@ pub(crate) async fn s3_get_object(
             total_length,
         )
     };
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
-    );
+    object_headers::apply_response_headers(
+        &mut response,
+        entry
+            .as_ref()
+            .map_or(&[][..], |entry| entry.user_metadata.as_slice()),
+    )?;
+    apply_response_overrides(&mut response, response_overrides);
     // Real clients (mc, the AWS SDKs) parse `Last-Modified` on GetObject
     // responses; derive it from the entry captured above so it is never torn
     // against the ETag/metadata (fallback: Unix epoch when no row exists).
@@ -1061,6 +1388,42 @@ pub(crate) async fn s3_get_object(
         HeaderValue::from_str(&last_modified_from_entry(entry.as_ref()))
             .map_err(|_error| S3Error::internal())?,
     );
+    // Stored checksums describe the complete object, not a 206 response body.
+    // Advertising one on a range makes stock SDKs reject otherwise verified
+    // bytes. Full GETs (including an ignored If-Range) retain object checksums.
+    if checksum_mode && range.is_none() {
+        let metadata = entry
+            .as_ref()
+            .map_or(&[][..], |entry| entry.user_metadata.as_slice());
+        let manifest = checksum::read_multipart_manifest_for_object(metadata, total_length)?;
+        let object_checksum = checksum::read_object_checksum(metadata)?;
+        if manifest.is_some() && object_checksum.is_some() {
+            return Err(S3Error::internal());
+        }
+        let value = manifest
+            .map(|manifest| {
+                (
+                    manifest.algorithm.header(),
+                    manifest.checksum_value,
+                    manifest.checksum_type.s3_name(),
+                )
+            })
+            .or_else(|| {
+                object_checksum.map(|checksum| {
+                    (
+                        checksum.algorithm.header(),
+                        checksum.checksum_value,
+                        checksum.checksum_type.s3_name(),
+                    )
+                })
+            });
+        insert_checksum_headers(
+            &mut response,
+            value
+                .as_ref()
+                .map(|(header, value, checksum_type)| (*header, value.as_str(), *checksum_type)),
+        )?;
+    }
     // S3 serves the ETag (hex MD5) and user metadata on GetObject too.
     if let Some(entry) = entry {
         response.headers_mut().insert(
@@ -1089,9 +1452,11 @@ pub(crate) async fn s3_head_object(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_read_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
+    let response_overrides = parse_response_overrides(&query)?;
     if has_sub_resource(&query) {
         return Err(S3Error::not_implemented());
     }
@@ -1102,57 +1467,83 @@ pub(crate) async fn s3_head_object(
     // swapped the row is simply not visible — the headers and the size are
     // never a mix of two overwrite states. Only when no row exists is the
     // authoritative record metadata used (with no row metadata to pair).
-    let entry = s3_object_entry(&state, &context).await?;
-    // Conditional requests evaluate against the stored S3 ETag before the
-    // headers are served.
+    let snapshot = match state
+        .backend
+        .s3_object_read_snapshot(&context.scope_namespace, &context.key, &context.object_key)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
+        Err(error) => return Err(error.into()),
+    };
+    let checksum_mode = checksum_mode_enabled(&headers)?;
+    // Conditional requests evaluate against the ETag from the same snapshot
+    // as metadata and checksum attributes.
     if let Some(response) = check_read_precondition(
-        entry.as_ref().map(|entry| entry.etag.as_str()),
+        snapshot.etag.as_deref(),
+        snapshot.updated_at_unix_seconds,
         &headers,
         &context.key,
     )? {
         return Ok(response);
     }
 
-    let size = match &entry {
-        Some(row) => row.size_bytes,
-        None => {
-            let (size, _content_hash) =
-                match state.backend.s3_object_metadata(&context.object_key).await {
-                    Ok(metadata) => metadata,
-                    Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
-                    Err(error) => return Err(S3Error::from(error)),
-                };
-            size
-        }
-    };
-    let last_modified = last_modified_from_entry(entry.as_ref());
+    let size = snapshot.total_bytes;
+    let last_modified = format_http_date(snapshot.updated_at_unix_seconds.unwrap_or(0));
 
     let mut response = StatusCode::OK.into_response();
     response
         .headers_mut()
         .insert(CONTENT_LENGTH, HeaderValue::from(size));
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
-    );
+    object_headers::apply_response_headers(&mut response, &snapshot.user_metadata)?;
     // Clients (pyarrow, the AWS SDKs) use `Accept-Ranges` on HeadObject to
     // decide the object supports ranged (seekable) access; without it pyarrow
     // opens a non-seekable stream and parquet reads fail.
     response
         .headers_mut()
         .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    if let Some(entry) = entry {
-        let etag = etag_header(&entry.etag);
+    if let Some(etag_value) = snapshot.etag.as_deref() {
+        let etag = etag_header(etag_value);
         response.headers_mut().insert(
             ETAG,
             HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
         );
-        insert_user_metadata(&mut response, &entry.user_metadata);
+        insert_user_metadata(&mut response, &snapshot.user_metadata);
+    }
+    if checksum_mode {
+        let checksum_value = match snapshot.multipart_part_count {
+            Some(count) if count > 0 => checksum::read_multipart_manifest(
+                &snapshot.user_metadata,
+                count,
+                snapshot.total_bytes,
+            )?
+            .map(|manifest| {
+                (
+                    manifest.algorithm.header(),
+                    manifest.checksum_value,
+                    manifest.checksum_type.s3_name(),
+                )
+            }),
+            _ => checksum::read_object_checksum(&snapshot.user_metadata)?.map(|checksum| {
+                (
+                    checksum.algorithm.header(),
+                    checksum.checksum_value,
+                    checksum.checksum_type.s3_name(),
+                )
+            }),
+        };
+        insert_checksum_headers(
+            &mut response,
+            checksum_value
+                .as_ref()
+                .map(|(header, value, checksum_type)| (*header, value.as_str(), *checksum_type)),
+        )?;
     }
     response.headers_mut().insert(
         LAST_MODIFIED,
         HeaderValue::from_str(&last_modified).map_err(|_error| S3Error::internal())?,
     );
+    apply_response_overrides(&mut response, response_overrides);
     Ok(response)
 }
 
@@ -1171,12 +1562,18 @@ pub(crate) async fn s3_delete_object(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_write_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?uploadId` dispatches to AbortMultipartUpload; other sub-resources are
     // out of scope.
     let query = parse_s3_query(&uri)?;
+    reject_response_overrides(&query)?;
     let resources = classify(&query);
+    if resources.as_slice() == [S3SubResource::Tagging] {
+        replace_object_tagging(&state, &context, &[]).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     if let [S3SubResource::UploadId(upload_id)] = resources.as_slice() {
         return multipart::s3_abort_multipart_upload(&state, &context, upload_id).await;
     }
@@ -1222,6 +1619,76 @@ pub(crate) async fn s3_delete_object(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+async fn put_object_tagging(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext<'_>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let max_bytes = state.config.max_request_body_bytes();
+    checksum::reject_unpersisted_negotiation(&headers)?;
+    let expected_md5 = parse_content_md5(&headers)?;
+    let payload_checksum = checksum::parse(&headers)?;
+    checksum::validate_sdk_checksum_algorithm(&headers, payload_checksum.as_ref())?;
+    if expected_md5.is_none() && payload_checksum.is_none() {
+        return Err(S3Error::invalid_argument(
+            "PutObjectTagging requires Content-MD5 or a supported S3 checksum",
+        ));
+    }
+    let mut reader = RequestBodyReader::from_body(body, max_bytes).map_err(S3Error::from)?;
+    if let Some(expected_md5) = expected_md5 {
+        reader = reader.with_expected_md5(expected_md5);
+    }
+    if let Some(payload_checksum) = payload_checksum {
+        reader = checksum::verify_body(reader, payload_checksum);
+    }
+    let bytes = read_body_to_bytes(&mut reader)
+        .await
+        .map_err(S3Error::from)?;
+    let tags = super::tagging::parse(&bytes)?;
+    replace_object_tagging(state, context, &tags).await?;
+    Ok((
+        StatusCode::OK,
+        [(CONTENT_TYPE, s3_xml_content_type())],
+        String::new(),
+    )
+        .into_response())
+}
+
+async fn replace_object_tagging(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext<'_>,
+    tags: &[(String, String)],
+) -> Result<(), S3Error> {
+    let _resource_guard = state
+        .backend
+        .acquire_resource_write_lock(
+            state.config.root_dir(),
+            &ResourceLockKey::s3_object(&context.scope_namespace, &context.key),
+        )
+        .await?;
+    let expected = s3_object_entry(state, context)
+        .await?
+        .ok_or_else(|| S3Error::no_such_key(&context.key))?;
+    let mut replacement = expected.clone();
+    super::tagging::replace_metadata(&mut replacement.user_metadata, tags)?;
+    if replacement.user_metadata == expected.user_metadata {
+        return Ok(());
+    }
+    let changed = state
+        .backend
+        .compare_and_swap_s3_object_metadata(&expected, &replacement)
+        .await?;
+    if !changed {
+        return Err(S3Error {
+            code: "OperationAborted",
+            message: "The object changed while tagging was being updated".to_owned(),
+            status: StatusCode::CONFLICT,
+        });
+    }
+    Ok(())
+}
+
 /// `POST /{bucket}/{*key}` dispatches multipart creation or completion.
 /// Unsupported or conflicting operation selectors return `501 NotImplemented`.
 #[tracing::instrument(skip(auth, state, headers, body), fields(bucket, key))]
@@ -1233,11 +1700,13 @@ pub(crate) async fn s3_post_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    object_headers::reject_unsupported_write_headers(&headers)?;
     let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?uploads` → CreateMultipartUpload, `?uploadId` → CompleteMultipartUpload;
     // anything else (PostObject) is out of scope.
     let query = parse_s3_query(&uri)?;
+    reject_response_overrides(&query)?;
     let resources = classify(&query);
     if let [S3SubResource::Uploads] = resources.as_slice() {
         return multipart::s3_create_multipart_upload(&state, &context, &headers).await;
@@ -1265,6 +1734,66 @@ fn last_modified_from_entry(entry: Option<&S3ObjectEntry>) -> String {
 mod conditional_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn checksum_mode_accepts_arrow_spelling_and_rejects_ambiguous_modes() {
+        assert!(!checksum_mode_enabled(&HeaderMap::new()).unwrap());
+        for mode in ["ENABLED", "enabled", "Enabled"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-amz-checksum-mode", mode.parse().unwrap());
+            assert!(checksum_mode_enabled(&headers).unwrap());
+        }
+        for mode in ["", "DISABLED", "enabled,enabled", " enabled"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-amz-checksum-mode", mode.parse().unwrap());
+            assert!(checksum_mode_enabled(&headers).is_err());
+        }
+        let mut repeated = HeaderMap::new();
+        repeated.append("x-amz-checksum-mode", HeaderValue::from_static("enabled"));
+        repeated.append("x-amz-checksum-mode", HeaderValue::from_static("ENABLED"));
+        assert!(checksum_mode_enabled(&repeated).is_err());
+    }
+
+    #[test]
+    fn response_overrides_accept_standard_headers_and_reject_invalid_parameters() {
+        let query = vec![
+            ("response-content-type".to_owned(), "text/plain".to_owned()),
+            ("response-cache-control".to_owned(), "no-cache".to_owned()),
+        ];
+        let overrides = parse_response_overrides(&query).unwrap();
+        assert_eq!(overrides.len(), 2);
+        let mut response = Response::new(Body::empty());
+        apply_response_overrides(&mut response, overrides);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
+        assert_eq!(response.headers()["cache-control"], "no-cache");
+
+        let repeated = vec![
+            ("response-content-type".to_owned(), "text/plain".to_owned()),
+            (
+                "response-content-type".to_owned(),
+                "application/json".to_owned(),
+            ),
+        ];
+        assert!(parse_response_overrides(&repeated).is_err());
+        let invalid = vec![("response-content-type".to_owned(), "bad\nvalue".to_owned())];
+        assert!(parse_response_overrides(&invalid).is_err());
+        let unsupported = vec![("response-custom-header".to_owned(), "value".to_owned())];
+        assert!(parse_response_overrides(&unsupported).is_err());
+    }
+
+    #[test]
+    fn response_overrides_apply_only_to_full_success_responses() {
+        let overrides = vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("text/plain"),
+        )];
+        let mut partial = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .body(Body::empty())
+            .unwrap();
+        apply_response_overrides(&mut partial, overrides);
+        assert!(!partial.headers().contains_key(CONTENT_TYPE));
+    }
     #[test]
     fn metadata_legacy_pairs_and_unprintable_values_are_served_without_loss() {
         let mut response = axum::response::Response::new(Body::empty());
@@ -1303,6 +1832,7 @@ mod conditional_tests {
             record_content_hash: None,
             user_metadata: Vec::new(),
             etag: None,
+            multipart_part_count: None,
             updated_at_unix_seconds: None,
         };
         let mut headers = HeaderMap::new();

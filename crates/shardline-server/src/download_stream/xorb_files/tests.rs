@@ -1,4 +1,6 @@
 use futures_util::TryStreamExt;
+#[cfg(feature = "docker")]
+mod minio_ranges;
 mod read_cost;
 use shardline_index::{FileChunkRecord, FileRecord, StorageRepresentation};
 use shardline_protocol::ByteRange;

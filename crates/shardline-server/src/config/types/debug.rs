@@ -15,6 +15,7 @@ impl fmt::Debug for ServerConfig {
             .field("object_storage_adapter", &self.object_storage_adapter)
             .field("s3_object_store_config", &self.s3_object_store_config)
             .field("max_request_body_bytes", &self.max_request_body_bytes)
+            .field("max_xorb_body_bytes", &self.max_xorb_body_bytes)
             .field("shard_metadata_limits", &self.shard_metadata_limits)
             .field("chunk_size", &self.chunk_size)
             .field(

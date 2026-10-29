@@ -62,10 +62,13 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
     }
     record_compression_saved(chunk_length, compressed_length);
     let integrity = ObjectIntegrity::new(compressed_hash, compressed_length);
+    let ChunkBuffer(raw_owner) = chunk;
     Ok(ChunkStorageRequest {
         key: object_key,
         integrity,
-        compressed: Bytes::from(compressed),
+        // Compression creates a new allocation. Carry the raw owner's
+        // admission into every encoded clone retained by storage/transport.
+        compressed: super::buffer_admission::into_bytes(compressed, raw_owner.clone()),
         hash_hex,
         chunk_length,
         compressed_length,
@@ -93,8 +96,8 @@ pub(super) async fn put_if_absent_with_verified_cache(
     cache: Option<&super::durable_chunks::SharedReadCache>,
 ) -> Result<(StoredChunkOutcome, Option<BytesMut>), ServerError> {
     let request = chunk_object_key_and_integrity(&chunk)?;
-    let ChunkBuffer::Pooled(bytes) = chunk;
-    let (outcome, _compressed_bytes) =
+    let ChunkBuffer(bytes) = chunk;
+    let (outcome, compressed_bytes) =
         put_if_absent_pooled_bytes(object_store, &request, request.compressed.clone()).await?;
     record_dedup_on_already_exists(outcome, request.chunk_length);
     if outcome == PutOutcome::AlreadyExists
@@ -106,13 +109,24 @@ pub(super) async fn put_if_absent_with_verified_cache(
             .unwrap_or_else(|error| error.into_inner())
             .remember_verified_existing(&request.hash_hex, &bytes, request.compressed_length)?;
     }
+    let ChunkStorageRequest {
+        hash_hex,
+        chunk_length,
+        compressed_length,
+        compressed,
+        ..
+    } = request;
+    // Release our encoded owners before attempting raw buffer reuse. Any
+    // outstanding storage clone continues to retain its raw admission owner.
+    drop(compressed_bytes);
+    drop(compressed);
     // Return the original (uncompressed) bytes for reuse as a pending buffer
     let reusable_buffer = bytes.try_into_mut().ok();
     Ok((
         StoredChunkOutcome {
-            hash_hex: request.hash_hex,
-            chunk_length: request.chunk_length,
-            compressed_length: request.compressed_length,
+            hash_hex,
+            chunk_length,
+            compressed_length,
             inserted: matches!(outcome, PutOutcome::Inserted),
         },
         reusable_buffer,
@@ -172,13 +186,35 @@ mod tests {
     use shardline_index::xet_hash_hex_string;
     use shardline_storage::ObjectStore;
 
+    #[test]
+    fn compressed_transport_retains_raw_payload_admission() {
+        let pool = crate::admission::BoundedPool::new(std::num::NonZeroUsize::MIN);
+        let permit = pool.try_acquire().unwrap();
+        let payload = super::super::buffer_admission::into_bytes(vec![0x5a; 4096], permit);
+        let chunk = ChunkBuffer(payload);
+        let request = chunk_object_key_and_integrity(&chunk).unwrap();
+        let transport = request.compressed.clone();
+        drop(request);
+        drop(chunk);
+        assert!(
+            pool.try_acquire().is_none(),
+            "compressed transport must retain admission after request cancellation"
+        );
+        assert_eq!(
+            lz4_flex::decompress_size_prepended(&transport).unwrap(),
+            vec![0x5a; 4096]
+        );
+        drop(transport);
+        assert!(pool.try_acquire().is_some());
+    }
+
     // ------------------------------------------------------------------
     // chunk_object_key_and_integrity
     // ------------------------------------------------------------------
 
     #[test]
     fn pooled_chunk_produces_valid_content_addressed_key() {
-        let chunk = ChunkBuffer::Pooled(Bytes::from_static(b"hello world"));
+        let chunk = ChunkBuffer(Bytes::from_static(b"hello world"));
         let result = chunk_object_key_and_integrity(&chunk);
         assert!(result.is_ok());
         let request = result.unwrap();
@@ -190,7 +226,7 @@ mod tests {
     #[test]
     fn integrity_hash_matches_blake3_of_raw_bytes() {
         let data = b"test data for blake3 verification";
-        let chunk = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let chunk = ChunkBuffer(Bytes::from_static(data));
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
         let expected_hash = chunk_hash(data); // CHANGED: hash raw bytes, not compressed
         let expected_hex = xet_hash_hex_string(expected_hash);
@@ -204,8 +240,8 @@ mod tests {
     fn hash_is_of_raw_bytes_not_compressed() {
         // Two different raw chunks must produce different hashes
         // even if they compress to the same output (unlikely but proves the model)
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"hello world"));
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"hello worle"));
+        let chunk1 = ChunkBuffer(Bytes::from_static(b"hello world"));
+        let chunk2 = ChunkBuffer(Bytes::from_static(b"hello worle"));
         let req1 = chunk_object_key_and_integrity(&chunk1).unwrap();
         let req2 = chunk_object_key_and_integrity(&chunk2).unwrap();
         assert_ne!(req1.hash_hex, req2.hash_hex);
@@ -219,15 +255,15 @@ mod tests {
     #[test]
     fn chunk_length_matches_buffer_length() {
         let data = b"short";
-        let chunk = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let chunk = ChunkBuffer(Bytes::from_static(data));
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
         assert_eq!(request.chunk_length, 5);
     }
 
     #[test]
     fn different_chunks_produce_different_hashes() {
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"alpha"));
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"beta"));
+        let chunk1 = ChunkBuffer(Bytes::from_static(b"alpha"));
+        let chunk2 = ChunkBuffer(Bytes::from_static(b"beta"));
         let req1 = chunk_object_key_and_integrity(&chunk1).unwrap();
         let req2 = chunk_object_key_and_integrity(&chunk2).unwrap();
         assert_ne!(req1.hash_hex, req2.hash_hex);
@@ -235,8 +271,8 @@ mod tests {
 
     #[test]
     fn same_content_produces_same_hash() {
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"identical"));
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"identical"));
+        let chunk1 = ChunkBuffer(Bytes::from_static(b"identical"));
+        let chunk2 = ChunkBuffer(Bytes::from_static(b"identical"));
         let req1 = chunk_object_key_and_integrity(&chunk1).unwrap();
         let req2 = chunk_object_key_and_integrity(&chunk2).unwrap();
         assert_eq!(req1.hash_hex, req2.hash_hex);
@@ -250,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn blackhole_store_inserted_returns_true() {
         let store = ServerObjectStore::blackhole();
-        let chunk = ChunkBuffer::Pooled(Bytes::from_static(b"test data"));
+        let chunk = ChunkBuffer(Bytes::from_static(b"test data"));
         let (outcome, _reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -261,11 +297,11 @@ mod tests {
     #[tokio::test]
     async fn blackhole_store_same_hash_inserted_returns_true() {
         let store = ServerObjectStore::blackhole();
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"same data"));
+        let chunk1 = ChunkBuffer(Bytes::from_static(b"same data"));
         let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
             .await
             .unwrap();
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"same data"));
+        let chunk2 = ChunkBuffer(Bytes::from_static(b"same data"));
         let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
             .await
             .unwrap();
@@ -283,7 +319,7 @@ mod tests {
     async fn local_store_first_insert_returns_inserted() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
-        let chunk = ChunkBuffer::Pooled(Bytes::from_static(b"local test"));
+        let chunk = ChunkBuffer(Bytes::from_static(b"local test"));
         let (outcome, _reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -295,13 +331,13 @@ mod tests {
     async fn local_store_same_hash_returns_not_inserted() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"dedup test"));
+        let chunk1 = ChunkBuffer(Bytes::from_static(b"dedup test"));
         let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
             .await
             .unwrap();
         assert!(outcome1.inserted);
 
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"dedup test"));
+        let chunk2 = ChunkBuffer(Bytes::from_static(b"dedup test"));
         let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
             .await
             .unwrap();
@@ -314,7 +350,7 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let data = b"verify stored content matches";
-        let chunk = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let chunk = ChunkBuffer(Bytes::from_static(data));
         let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -334,8 +370,8 @@ mod tests {
     async fn local_store_different_chunks_store_separately() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"chunk one"));
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"chunk two"));
+        let chunk1 = ChunkBuffer(Bytes::from_static(b"chunk one"));
+        let chunk2 = ChunkBuffer(Bytes::from_static(b"chunk two"));
         let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
             .await
             .unwrap();
@@ -355,7 +391,7 @@ mod tests {
     async fn pooled_local_store_returns_inserted_first_time() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
-        let chunk = ChunkBuffer::Pooled(Bytes::from_static(b"pooled test"));
+        let chunk = ChunkBuffer(Bytes::from_static(b"pooled test"));
         let (outcome, _reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -366,13 +402,13 @@ mod tests {
     async fn pooled_local_store_returns_not_inserted_second_time() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"pooled dedup"));
+        let chunk1 = ChunkBuffer(Bytes::from_static(b"pooled dedup"));
         let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
             .await
             .unwrap();
         assert!(outcome1.inserted);
 
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"pooled dedup"));
+        let chunk2 = ChunkBuffer(Bytes::from_static(b"pooled dedup"));
         let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
             .await
             .unwrap();
@@ -390,7 +426,7 @@ mod tests {
         let data = b"dedup-metric-test-content!";
 
         // First insert — should be stored as new
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let chunk1 = ChunkBuffer(Bytes::from_static(data));
         let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
             .await
             .unwrap();
@@ -401,7 +437,7 @@ mod tests {
             .storage
             .dedup_saves_bytes_total
             .get();
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let chunk2 = ChunkBuffer(Bytes::from_static(data));
         let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
             .await
             .unwrap();
@@ -423,7 +459,7 @@ mod tests {
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         // Use Bytes::from(Vec) so the buffer is Arc-backed and convertible
         // back to BytesMut via try_into_mut().
-        let chunk = ChunkBuffer::Pooled(Bytes::from(vec![0u8; 8]));
+        let chunk = ChunkBuffer(Bytes::from(vec![0u8; 8]));
         let (_outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -441,7 +477,7 @@ mod tests {
     async fn empty_chunk_buffer_round_trip() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
-        let chunk = ChunkBuffer::Pooled(Bytes::new());
+        let chunk = ChunkBuffer(Bytes::new());
         let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -452,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn empty_chunk_blackhole_round_trip() {
         let store = ServerObjectStore::blackhole();
-        let chunk = ChunkBuffer::Pooled(Bytes::new());
+        let chunk = ChunkBuffer(Bytes::new());
         let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -466,7 +502,7 @@ mod tests {
 
     #[test]
     fn zero_length_chunk_produces_valid_key() {
-        let chunk = ChunkBuffer::Pooled(Bytes::new());
+        let chunk = ChunkBuffer(Bytes::new());
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
         assert_eq!(request.chunk_length, 0);
         assert!(!request.hash_hex.is_empty());
@@ -475,7 +511,7 @@ mod tests {
     #[tokio::test]
     async fn blackhole_store_pooled_chunk_buffer_returns_inserted_with_reusable() {
         let store = ServerObjectStore::blackhole();
-        let chunk = ChunkBuffer::Pooled(Bytes::from(vec![0u8; 16]));
+        let chunk = ChunkBuffer(Bytes::from(vec![0u8; 16]));
         let (outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -492,7 +528,7 @@ mod tests {
     async fn local_store_pooled_chunk_buffer_inserts_and_returns_reusable() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
-        let chunk = ChunkBuffer::Pooled(Bytes::from(vec![0xABu8; 32]));
+        let chunk = ChunkBuffer(Bytes::from(vec![0xABu8; 32]));
         let (outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -515,7 +551,7 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let data = vec![0x42u8; 65536]; // 64KB chunk
-        let chunk = ChunkBuffer::Pooled(Bytes::from(data));
+        let chunk = ChunkBuffer(Bytes::from(data));
         let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -530,12 +566,12 @@ mod tests {
     #[tokio::test]
     async fn blackhole_put_if_absent_pooled_same_content_inserted() {
         let store = ServerObjectStore::blackhole();
-        let chunk = ChunkBuffer::Pooled(Bytes::from_static(b"dedup pool blackhole"));
+        let chunk = ChunkBuffer(Bytes::from_static(b"dedup pool blackhole"));
         let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
         assert!(outcome1.inserted);
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"dedup pool blackhole"));
+        let chunk2 = ChunkBuffer(Bytes::from_static(b"dedup pool blackhole"));
         let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
             .await
             .unwrap();
@@ -593,7 +629,7 @@ mod tests {
 
         // Store compressible content
         let data = vec![0x42u8; 8192];
-        let chunk = ChunkBuffer::Pooled(Bytes::from(data.clone()));
+        let chunk = ChunkBuffer(Bytes::from(data.clone()));
         let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -625,13 +661,13 @@ mod tests {
         let store = ServerObjectStore::local(tmp.path()).unwrap();
 
         let data = b"compressible dedup test data";
-        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let chunk1 = ChunkBuffer(Bytes::from_static(data));
         let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
             .await
             .unwrap();
         assert!(outcome1.inserted);
 
-        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let chunk2 = ChunkBuffer(Bytes::from_static(data));
         let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
             .await
             .unwrap();
@@ -647,7 +683,7 @@ mod tests {
         let store = ServerObjectStore::local(tmp.path()).unwrap();
 
         let data = vec![0x42u8; 1024];
-        let chunk = ChunkBuffer::Pooled(Bytes::from(data));
+        let chunk = ChunkBuffer(Bytes::from(data));
         let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
             .await
             .unwrap();
@@ -708,7 +744,7 @@ mod tests {
 
     #[test]
     fn compressed_length_leq_chunk_length_for_compressible() {
-        let chunk = ChunkBuffer::Pooled(Bytes::from(vec![0u8; 4096]));
+        let chunk = ChunkBuffer(Bytes::from(vec![0u8; 4096]));
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
         assert!(
             request.compressed_length <= request.chunk_length,
@@ -721,7 +757,7 @@ mod tests {
     #[test]
     fn compressed_length_may_exceed_for_incompressible() {
         let data: Vec<u8> = (0..128).map(|i| (i * 37 + 13) as u8).collect();
-        let chunk = ChunkBuffer::Pooled(Bytes::from(data));
+        let chunk = ChunkBuffer(Bytes::from(data));
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
         // Small data with LZ4 prepend_size overhead may be larger than raw
         assert!(request.compressed_length > 0);

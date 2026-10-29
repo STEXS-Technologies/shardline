@@ -9,6 +9,339 @@
 
 mod read_only;
 
+#[tokio::test]
+async fn native_reference_cursor_allows_absent_optional_index_but_rejects_malformed_table() {
+    use crate::RecordTraversal;
+    let root = tempfile::tempdir().unwrap();
+    let store = LocalRecordStore::new(root.path().to_path_buf()).unwrap();
+    let connection = store.open_connection().unwrap();
+    connection
+        .execute_batch("DROP TABLE shardline_xet_chunks")
+        .unwrap();
+    assert!(
+        store
+            .native_chunk_reference_page(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    connection
+        .execute_batch("CREATE TABLE shardline_xet_chunks(unrelated TEXT)")
+        .unwrap();
+    assert!(store.native_chunk_reference_page(None).await.is_err());
+}
+
+#[tokio::test]
+async fn xet_identity_replay_preserves_row_and_conflict_rollback() {
+    let root = tempfile::tempdir().unwrap();
+    let index = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
+    let store = LocalRecordStore::new(root.path().to_path_buf()).unwrap();
+    let mut identity = crate::XetFileIdentity {
+        repository_scope: sample_repository_scope().unwrap(),
+        sha256: "a".repeat(64),
+        file_id: "b".repeat(64),
+        total_bytes: 42,
+    };
+    let connection = index.open_connection().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE identity_updates(value INTEGER);
+         CREATE TRIGGER identity_update_probe AFTER UPDATE ON shardline_xet_file_identities
+         BEGIN INSERT INTO identity_updates VALUES(1); END;",
+        )
+        .unwrap();
+    for _ in 0..2 {
+        store
+            .commit_native_shard_metadata_with_identities(&[], &[], std::slice::from_ref(&identity))
+            .await
+            .unwrap();
+    }
+    let updates = || {
+        connection
+            .query_row("SELECT count(*) FROM identity_updates", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(updates(), 0);
+    identity.file_id = "c".repeat(64);
+    store
+        .commit_native_shard_metadata_with_identities(&[], &[], std::slice::from_ref(&identity))
+        .await
+        .unwrap();
+    assert_eq!(updates(), 1);
+    assert_eq!(
+        store
+            .xet_file_identity(&identity.repository_scope, &identity.sha256)
+            .unwrap(),
+        Some(identity.clone())
+    );
+    let hub = crate::hub::BoxedHubStore::from_store(index.clone());
+    assert_eq!(
+        hub.lookup_xet_file_identity(&identity.repository_scope, &identity.sha256)
+            .unwrap(),
+        Some(identity.clone())
+    );
+    let other_scope = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub,
+        "unrelated",
+        "repository",
+        Some("main"),
+    )
+    .unwrap();
+    assert_eq!(
+        hub.lookup_xet_file_identity(&other_scope, &identity.sha256)
+            .unwrap(),
+        None
+    );
+    let mut new_identity = identity.clone();
+    new_identity.sha256 = "d".repeat(64);
+    new_identity.file_id = "f".repeat(64);
+    let mut conflict = identity.clone();
+    conflict.total_bytes = 43;
+    assert!(matches!(
+        store
+            .commit_native_shard_metadata_with_identities(
+                &[],
+                &[],
+                &[new_identity.clone(), conflict]
+            )
+            .await,
+        Err(LocalIndexStoreError::XetFileIdentityConflict)
+    ));
+    assert_eq!(
+        store
+            .xet_file_identity(&new_identity.repository_scope, &new_identity.sha256)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .xet_file_identity(&identity.repository_scope, &identity.sha256)
+            .unwrap(),
+        Some(identity.clone())
+    );
+    assert_eq!(updates(), 1);
+
+    // A mixed-version writer may only know the canonical identity table. The
+    // additive trigger must preserve its old and new bindings without requiring
+    // that writer to call the candidate's alias-publication implementation.
+    let scope_key = crate::XetFileIdentity::repository_key_for_scope(&identity.repository_scope);
+    connection
+        .execute(
+            "UPDATE shardline_xet_file_identities SET file_id=?1 WHERE scope_key=?2 AND sha256=?3",
+            rusqlite::params!["e".repeat(64), scope_key, identity.sha256],
+        )
+        .unwrap();
+    let aliases: Vec<String> = connection
+        .prepare(
+            "SELECT file_id FROM shardline_xet_file_aliases WHERE scope_key=?1 ORDER BY file_id",
+        )
+        .unwrap()
+        .query_map([&scope_key], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        aliases,
+        vec!["b".repeat(64), "c".repeat(64), "e".repeat(64)]
+    );
+    assert!(connection.execute(
+        "UPDATE shardline_xet_file_identities SET total_bytes=43 WHERE scope_key=?1 AND sha256=?2",
+        rusqlite::params![scope_key, identity.sha256],
+    ).is_err(), "conflicting legacy writes must fail atomically");
+    let reopened = LocalRecordStore::new(root.path().to_path_buf()).unwrap();
+    identity.file_id = "e".repeat(64);
+    assert_eq!(
+        reopened
+            .xet_file_identity(&identity.repository_scope, &identity.sha256)
+            .unwrap(),
+        Some(identity)
+    );
+}
+
+#[test]
+fn persistent_connection_preserves_recreated_root() {
+    for remove_old in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("active");
+        let retired = directory.path().join("retired");
+        let store = LocalIndexStore::new_with_persistent_connection(root.clone()).unwrap();
+        store.open_connection().unwrap().execute_batch(
+            "CREATE TABLE replacement_probe(value TEXT); INSERT INTO replacement_probe VALUES('old')",
+        ).unwrap();
+        if remove_old {
+            std::fs::remove_dir_all(&root).unwrap();
+        } else {
+            std::fs::rename(&root, &retired).unwrap();
+        }
+        let replacement = LocalIndexStore::new(root.clone()).unwrap();
+        let connection = replacement.open_connection().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE replacement_probe(value TEXT); INSERT INTO replacement_probe VALUES('new')",
+        ).unwrap();
+        drop(store);
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM replacement_probe", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "new"
+        );
+        drop(connection);
+        let ordinary = Connection::open(root.join("metadata.sqlite3")).unwrap();
+        assert_eq!(
+            ordinary
+                .query_row("SELECT value FROM replacement_probe", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "new"
+        );
+        if !remove_old {
+            let old = Connection::open(retired.join("metadata.sqlite3")).unwrap();
+            assert_eq!(
+                old.query_row("SELECT value FROM replacement_probe", [], |row| row
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "old"
+            );
+        }
+    }
+}
+
+#[test]
+fn persistent_connection_recovers_after_process_kill() {
+    const CHILD_ROOT: &str = "SHARDLINE_SQLITE_PERSISTENT_CRASH_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = std::path::PathBuf::from(root);
+        let store = LocalIndexStore::new_with_persistent_connection(root.clone()).unwrap();
+        let mut connection = store.open_connection().unwrap();
+        connection
+            .execute_batch("CREATE TABLE crash_probe(value BLOB)")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO crash_probe VALUES(?1)",
+                [b"committed bytes".as_slice()],
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute(
+                "INSERT INTO crash_probe VALUES(?1)",
+                [b"uncommitted bytes".as_slice()],
+            )
+            .unwrap();
+        std::fs::write(root.join("ready"), b"ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        panic!("parent did not kill the crash fixture");
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "local_sqlite::tests::persistent_connection_recovers_after_process_kill",
+        ])
+        .env(CHILD_ROOT, root.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !root.path().join("ready").exists() && std::time::Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let ready = root.path().join("ready").exists();
+    let _kill = child.kill();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        ready,
+        "crash child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success());
+    let recovered = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
+    let connection = recovered.open_connection().unwrap();
+    let values = connection
+        .prepare("SELECT value FROM crash_probe")
+        .unwrap()
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(values, [b"committed bytes".to_vec()]);
+    assert_eq!(
+        connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+}
+
+#[test]
+fn persistent_connection_shares_lifetime_without_pinning_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new_with_persistent_connection(root.path().to_path_buf()).unwrap();
+    let clone = store.clone();
+    let wal = root.path().join("metadata.sqlite3-wal");
+    {
+        let connection = store.open_connection().unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "wal_autocheckpoint", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1000
+        );
+        connection.execute_batch("CREATE TABLE lifetime_probe(value TEXT); INSERT INTO lifetime_probe VALUES('committed')").unwrap();
+    }
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    drop(store);
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    {
+        let connection = clone.open_connection().unwrap();
+        let result = connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            result,
+            (0, 0, 0),
+            "idle connection must not pin a reader snapshot"
+        );
+        connection
+            .execute("INSERT INTO lifetime_probe VALUES('after-checkpoint')", [])
+            .unwrap();
+    }
+    drop(clone);
+    assert!(
+        !wal.exists(),
+        "last close must retain SQLite's normal clean-shutdown checkpoint"
+    );
+    let ordinary = Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+    let values = ordinary
+        .prepare("SELECT value FROM lifetime_probe ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(values, ["committed", "after-checkpoint"]);
+}
+
 use std::{error::Error, fs, path::Path, slice::from_ref};
 
 use rusqlite::{Connection, config::DbConfig, params};
@@ -902,6 +1235,10 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
 /// migration).
 #[test]
 fn bundled_sqlite_migrations_match_on_disk_files() {
+    let registered: Vec<_> = LOCAL_SQLITE_MIGRATIONS
+        .iter()
+        .chain(super::migration::FRONTEND_MIGRATIONS.iter())
+        .collect();
     let migrations_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let entries = fs::read_dir(&migrations_dir).expect("migrations directory must exist");
     let mut on_disk = Vec::new();
@@ -916,14 +1253,14 @@ fn bundled_sqlite_migrations_match_on_disk_files() {
     on_disk.sort();
 
     assert_eq!(
-        LOCAL_SQLITE_MIGRATIONS.len(),
+        registered.len(),
         on_disk.len(),
         "registration count must match the on-disk .up.sql count \
          (registered={}, on_disk={})",
-        LOCAL_SQLITE_MIGRATIONS.len(),
+        registered.len(),
         on_disk.len(),
     );
-    for migration in LOCAL_SQLITE_MIGRATIONS {
+    for migration in &registered {
         assert!(
             on_disk
                 .iter()
@@ -933,7 +1270,7 @@ fn bundled_sqlite_migrations_match_on_disk_files() {
             migration.version,
         );
     }
-    let mut registered_versions: Vec<&str> = LOCAL_SQLITE_MIGRATIONS
+    let mut registered_versions: Vec<&str> = registered
         .iter()
         .map(|migration| migration.version)
         .collect();
@@ -959,14 +1296,15 @@ fn bundled_sqlite_migrations_have_unique_versions() {
     assert!(!LOCAL_SQLITE_MIGRATIONS.is_empty());
     let mut versions: Vec<&str> = LOCAL_SQLITE_MIGRATIONS
         .iter()
+        .chain(super::migration::FRONTEND_MIGRATIONS.iter())
         .map(|migration| migration.version)
         .collect();
     versions.sort_unstable();
     versions.dedup();
     assert_eq!(
         versions.len(),
-        LOCAL_SQLITE_MIGRATIONS.len(),
-        "LOCAL_SQLITE_MIGRATIONS contains a duplicate version"
+        LOCAL_SQLITE_MIGRATIONS.len() + super::migration::FRONTEND_MIGRATIONS.len(),
+        "core and frontend installation histories must not reuse versions"
     );
 }
 
@@ -2112,4 +2450,40 @@ fn sqlite_oci_and_hub_writers_wait_for_brief_contention() {
     });
     assert!(HubStore::get_repo(&store, "model").unwrap().is_none());
     store.verify_reliability_events().unwrap();
+}
+
+#[test]
+fn identical_dedupe_mapping_replay_skips_row_update_but_changed_mapping_still_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(directory.path().to_owned()).unwrap();
+    let chunk_hash = ShardlineHash::from_bytes([0x5a; 32]);
+    let original = DedupeShardMapping::new(
+        chunk_hash,
+        ObjectKey::parse("shards/original.shard").unwrap(),
+    );
+    let replacement = DedupeShardMapping::new(
+        chunk_hash,
+        ObjectKey::parse("shards/replacement.shard").unwrap(),
+    );
+    store.upsert_dedupe_shard_mapping(&original).unwrap();
+
+    let connection = open_sqlite_connection(directory.path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_dedupe_mapping_update
+             BEFORE UPDATE ON shardline_dedupe_shards
+             BEGIN
+                 SELECT RAISE(FAIL, 'unexpected dedupe mapping update');
+             END;",
+        )
+        .unwrap();
+
+    // Replaying the same content-addressed mapping is a no-op. A real change
+    // still reaches SQLite's UPDATE path and remains subject to its guards.
+    store.upsert_dedupe_shard_mapping(&original).unwrap();
+    assert!(store.upsert_dedupe_shard_mapping(&replacement).is_err());
+    assert_eq!(
+        DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).unwrap(),
+        Some(original)
+    );
 }

@@ -2,14 +2,11 @@
 //! references always identify the exact commit objects sent in upload-pack.
 use std::collections::{BTreeMap, HashMap};
 
-use crate::{
-    error::HubApiError,
-    routes::{HubState, lfs_object_key},
-};
+use crate::{error::HubApiError, routes::HubState};
 use sha1::{Digest, Sha1};
 use shardline_index::hub::{HubFileEntry, HubRevision};
-use shardline_protocol::{ByteRange, ShardlineHash};
-use shardline_server_core::AuthorizedRepository;
+use shardline_protocol::ShardlineHash;
+use shardline_server_core::{AuthorizedRepository, BoundedObjectReadError};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
 use super::super::pack::{GitObject, ObjectType, generate_pack};
@@ -17,30 +14,213 @@ use super::super::pack::{GitObject, ObjectType, generate_pack};
 use super::pack_parse::parse_pack_data;
 use super::{pack_parse::parse_pack_data_with_budget, upload_pack::build_lfs_pointer_blob};
 
+mod history_selection;
+
 /// Bound cumulative metadata work even when most Git objects deduplicate.
 const MAX_PROJECTED_FILE_ENTRIES: usize = 1_000_000;
 
 pub(super) struct GitProjection {
     pub(super) identities: HashMap<String, String>,
     pub(super) objects: Vec<GitObject>,
+    // Identity recovery carries this charge across bounded ancestry windows.
+    pub(super) file_entries: usize,
+    // Async exports retain the existing identity admission slot through pack
+    // generation. A cancelled waiter cannot admit replacement blocking work.
+    pub(super) admission: Option<tokio::sync::SemaphorePermit<'static>>,
 }
 
 fn failure(error: impl std::fmt::Display) -> HubApiError {
     HubApiError::CasError(error.to_string())
 }
 
-fn archive_key(
+pub(super) fn archive_key(
     repo_id: &str,
     revision: &str,
     auth: &AuthorizedRepository,
 ) -> Result<ObjectKey, HubApiError> {
+    archive_key_for_scope(repo_id, revision, auth.namespace())
+}
+
+fn archive_key_for_scope(
+    repo_id: &str,
+    revision: &str,
+    scope: Option<&shardline_protocol::RepositoryScope>,
+) -> Result<ObjectKey, HubApiError> {
     ObjectKey::parse(&format!(
         "protocols/hub/git/{}/{}/{}",
-        shardline_server_core::protocol_support::scope_namespace(auth.namespace()),
+        shardline_server_core::protocol_support::scope_namespace(scope),
         blake3::hash(repo_id.as_bytes()).to_hex(),
         revision
     ))
     .map_err(failure)
+}
+
+/// Constructed only while projecting a selected repository commit or walking
+/// hash-verified references from it. This is not an arbitrary object lookup.
+pub(crate) struct GitArchiveMember<'member> {
+    repo: &'member str,
+    oid: &'member str,
+}
+
+/// A file selected from an authorized immutable revision, or from the trusted
+/// file entries of a selected Git projection revision. Fields stay private.
+pub(crate) struct PublishedFileMember<'member> {
+    repo: &'member str,
+    oid: &'member str,
+}
+
+impl PublishedFileMember<'_> {
+    pub(crate) const fn repo(&self) -> &str {
+        self.repo
+    }
+    pub(crate) const fn oid(&self) -> &str {
+        self.oid
+    }
+}
+
+/// One bounded publication snapshot shared by every object in an LFS batch.
+pub(crate) struct ScopedPublishedFiles {
+    repo: String,
+    oids: std::collections::HashSet<String>,
+}
+
+impl ScopedPublishedFiles {
+    pub(crate) fn key(
+        &self,
+        state: &HubState,
+        oid: &str,
+        auth: &AuthorizedRepository,
+    ) -> Result<Option<ObjectKey>, HubApiError> {
+        if !self.oids.contains(oid) {
+            return Ok(None);
+        }
+        crate::object_locations::file_member_key(
+            state,
+            auth,
+            &PublishedFileMember {
+                repo: &self.repo,
+                oid,
+            },
+        )
+        .map(Some)
+    }
+}
+
+pub(crate) async fn scoped_published_files(
+    state: &HubState,
+    auth: &AuthorizedRepository,
+) -> Result<Option<ScopedPublishedFiles>, HubApiError> {
+    let Some(scope) = auth.repository() else {
+        return Ok(None);
+    };
+    if scope.revision().is_none() {
+        return Ok(None);
+    }
+    let repo = format!("{}/{}", scope.owner(), scope.name());
+    let Some(commits) = crate::revision_access::visible_commits(state, &repo, auth).await? else {
+        return Ok(None);
+    };
+    let mut oids = std::collections::HashSet::new();
+    let mut remaining = MAX_PROJECTED_FILE_ENTRIES;
+    for commit in commits {
+        let files = state
+            .store
+            .get_files_bounded(&commit, remaining.min(100_000))
+            .map_err(failure)?;
+        remaining = remaining
+            .checked_sub(files.len())
+            .ok_or_else(|| failure("LFS publication snapshot exceeds file entry limit"))?;
+        oids.extend(files.into_iter().map(|file| file.sha));
+    }
+    Ok(Some(ScopedPublishedFiles { repo, oids }))
+}
+
+pub(crate) async fn file_key_at_revision(
+    state: &HubState,
+    repo: &str,
+    requested: &str,
+    commit: &str,
+    path: &str,
+    auth: &AuthorizedRepository,
+) -> Result<ObjectKey, HubApiError> {
+    crate::revision_access::authorize_read(state, repo, requested, commit, auth).await?;
+    state
+        .store
+        .get_revision(repo, commit)
+        .map_err(failure)?
+        .ok_or(HubApiError::RevisionNotFound)?;
+    let files = state
+        .store
+        .get_files_bounded(commit, 100_000)
+        .map_err(failure)?;
+    let file = files
+        .iter()
+        .find(|file| file.path == path)
+        .ok_or(HubApiError::NotFound)?;
+    crate::object_locations::file_member_key(
+        state,
+        auth,
+        &PublishedFileMember {
+            repo,
+            oid: &file.sha,
+        },
+    )
+}
+
+/// The caller has selected this file entry from a trusted revision in its
+/// authorized projection/history. Never use this for a hash-only wire request.
+pub(super) fn projected_file_key(
+    state: &HubState,
+    repo: &str,
+    file: &HubFileEntry,
+    auth: &AuthorizedRepository,
+) -> Result<ObjectKey, HubApiError> {
+    crate::object_locations::file_member_key(
+        state,
+        auth,
+        &PublishedFileMember {
+            repo,
+            oid: &file.sha,
+        },
+    )
+}
+
+impl GitArchiveMember<'_> {
+    pub(crate) const fn repo(&self) -> &str {
+        self.repo
+    }
+    pub(crate) const fn oid(&self) -> &str {
+        self.oid
+    }
+}
+
+pub(super) fn read_member_archive_key(
+    state: &HubState,
+    repo: &str,
+    oid: &str,
+    auth: &AuthorizedRepository,
+) -> Result<ObjectKey, HubApiError> {
+    let member = GitArchiveMember { repo, oid };
+    crate::object_locations::locate_git_member(state, auth, &member, |scope| {
+        archive_key_for_scope(repo, oid, scope)
+    })
+}
+
+pub(super) fn read_identity_archive_key(
+    state: &HubState,
+    repo_id: &str,
+    lookup: &str,
+    auth: &AuthorizedRepository,
+) -> Result<ObjectKey, HubApiError> {
+    if let Some(scope) = auth.repository()
+        && repo_id != format!("{}/{}", scope.owner(), scope.name())
+    {
+        return Err(HubApiError::Forbidden);
+    }
+    let revision = format!("identities-v1/{lookup}");
+    crate::object_locations::locate_identity(state, auth, &revision, |scope| {
+        archive_key_for_scope(repo_id, &revision, scope)
+    })
 }
 
 fn read_object(state: &HubState, key: &ObjectKey) -> Result<Option<Vec<u8>>, HubApiError> {
@@ -51,26 +231,25 @@ fn read_object(state: &HubState, key: &ObjectKey) -> Result<Option<Vec<u8>>, Hub
     )
 }
 
-fn read_object_bounded(
+pub(super) fn read_object_bounded(
     state: &HubState,
     key: &ObjectKey,
     maximum_length: usize,
 ) -> Result<Option<Vec<u8>>, HubApiError> {
-    let Some(meta) = state.object_store.metadata(key).map_err(failure)? else {
-        return Ok(None);
-    };
-    if meta.length() > maximum_length as u64 {
-        return Err(failure("Git object exceeds pack memory limit"));
-    }
-    if meta.length() == 0 {
-        return Ok(Some(Vec::new()));
-    }
-    let range = ByteRange::new(0, meta.length().saturating_sub(1)).map_err(failure)?;
+    // A bounded GET carries the source length with its bytes. Keep Git pack
+    // parsing and identity checks at the callers, without a separate S3 HEAD.
     state
         .object_store
-        .read_range(key, range)
-        .map(Some)
-        .map_err(failure)
+        .read_object_if_present(key, u64::try_from(maximum_length).map_err(failure)?)
+        .map(|object| object.map(|(bytes, _length)| bytes))
+        .map_err(|error| match error {
+            BoundedObjectReadError::ObjectTooLarge => {
+                failure("Git object exceeds pack memory limit")
+            }
+            BoundedObjectReadError::Store(error) => {
+                crate::routes::object_io::storage_failure("Git archive bytes read", &error)
+            }
+        })
 }
 
 /// Retain exact Git objects before publishing a Git-origin revision. Rebuilding
@@ -82,6 +261,52 @@ pub(super) fn archive_objects(
     objects: &[GitObject],
     auth: &AuthorizedRepository,
 ) -> Result<(), HubApiError> {
+    archive_objects_with_limit(
+        state,
+        repo_id,
+        revision,
+        objects,
+        auth,
+        super::limits::MAX_GIT_PROJECTED_BYTES,
+        false,
+    )
+}
+
+/// Retain only authenticated tree/commit metadata, never another payload copy.
+/// A 100,000-entry tree with 1024-byte paths remains below this metadata bound.
+pub(super) fn archive_metadata_objects(
+    state: &HubState,
+    repo_id: &str,
+    revision: &str,
+    objects: &[GitObject],
+    auth: &AuthorizedRepository,
+) -> Result<(), HubApiError> {
+    if objects
+        .iter()
+        .any(|object| object.object_type == ObjectType::Blob)
+    {
+        return Err(failure("payload object in metadata archive"));
+    }
+    archive_objects_with_limit(
+        state,
+        repo_id,
+        revision,
+        objects,
+        auth,
+        128 * 1024 * 1024,
+        true,
+    )
+}
+
+fn archive_objects_with_limit(
+    state: &HubState,
+    repo_id: &str,
+    revision: &str,
+    objects: &[GitObject],
+    auth: &AuthorizedRepository,
+    byte_limit: usize,
+    trees_only: bool,
+) -> Result<(), HubApiError> {
     if !objects
         .iter()
         .any(|obj| obj.object_type == ObjectType::Commit && hex::encode(obj.sha1()) == revision)
@@ -92,10 +317,13 @@ pub(super) fn archive_objects(
         .iter()
         .try_fold(0usize, |total, object| total.checked_add(object.data.len()))
         .ok_or_else(|| failure("Git archive size overflow"))?;
-    if total > super::limits::MAX_GIT_PROJECTED_BYTES || objects.len() > 100_000 {
+    if total > byte_limit || objects.len() > 100_000 {
         return Err(failure("Git archive exceeds object limits"));
     }
     for object in objects {
+        if trees_only && object.object_type != ObjectType::Tree {
+            continue;
+        }
         let sha = hex::encode(object.sha1());
         let key = archive_key(repo_id, &sha, auth)?;
         if let Some(existing) = read_object(state, &key)? {
@@ -108,6 +336,12 @@ pub(super) fn archive_objects(
             if !same {
                 return Err(failure("conflicting immutable Git object archive"));
             }
+            crate::object_locations::remember(
+                state,
+                auth,
+                shardline_index::hub::HubObjectKind::GitArchive,
+                &sha,
+            )?;
             continue;
         }
         let data = generate_pack(std::slice::from_ref(object)).map_err(failure)?;
@@ -118,7 +352,15 @@ pub(super) fn archive_objects(
         state
             .object_store
             .put_if_absent(&key, ObjectBody::from_slice(&data), &integrity)
-            .map_err(failure)?;
+            .map_err(|error| {
+                crate::routes::object_io::storage_failure("Git object archive write", &error)
+            })?;
+        crate::object_locations::remember(
+            state,
+            auth,
+            shardline_index::hub::HubObjectKind::GitArchive,
+            &sha,
+        )?;
     }
     Ok(())
 }
@@ -130,9 +372,33 @@ pub(super) async fn project_history_async(
     repo_id: String,
     auth: AuthorizedRepository,
 ) -> Result<GitProjection, HubApiError> {
-    tokio::task::spawn_blocking(move || project_history(&state, &repo_id, &auth))
-        .await
-        .map_err(failure)?
+    project_history_with_admission(state, repo_id, auth, &super::identity::IDENTITY_ADMISSION).await
+}
+
+async fn project_history_with_admission(
+    state: HubState,
+    repo_id: String,
+    auth: AuthorizedRepository,
+    admission: &'static tokio::sync::Semaphore,
+) -> Result<GitProjection, HubApiError> {
+    let permit = admission.acquire().await.map_err(failure)?;
+    project_history_admitted(state, repo_id, auth, permit).await
+}
+
+pub(super) async fn project_history_admitted(
+    state: HubState,
+    repo_id: String,
+    auth: AuthorizedRepository,
+    permit: tokio::sync::SemaphorePermit<'static>,
+) -> Result<GitProjection, HubApiError> {
+    tokio::task::spawn_blocking(move || {
+        let mut projection = project_history(&state, &repo_id, &auth)?;
+        super::identity::retain_projection_identities(&state, &repo_id, &projection, &auth)?;
+        projection.admission = Some(permit);
+        Ok(projection)
+    })
+    .await
+    .map_err(failure)?
 }
 
 /// One shared quota across revisions. Charge unique objects when constructed,
@@ -141,6 +407,7 @@ struct ProjectionBudget {
     remaining_bytes: usize,
     remaining_objects: usize,
     seen: std::collections::HashSet<[u8; 20]>,
+    identity_only: bool,
 }
 
 impl ProjectionBudget {
@@ -167,15 +434,20 @@ impl ProjectionBudget {
         let bytes = self
             .remaining_bytes
             .checked_sub(object.data.len())
-            .ok_or_else(|| failure("Git projection exceeds byte limit"))?;
-        let count = self
-            .remaining_objects
-            .checked_sub(1)
-            .ok_or_else(|| failure("Git projection exceeds object count limit"))?;
-        self.remaining_bytes = bytes;
+            .ok_or_else(|| {
+                HubApiError::BadRequest("Git projection exceeds byte limit".to_owned())
+            })?;
+        let count = self.remaining_objects.checked_sub(1).ok_or_else(|| {
+            HubApiError::BadRequest("Git projection exceeds object count limit".to_owned())
+        })?;
+        if !self.identity_only {
+            self.remaining_bytes = bytes;
+        }
         self.remaining_objects = count;
         self.seen.insert(sha);
-        objects.push(object);
+        if !self.identity_only || object.object_type != ObjectType::Blob {
+            objects.push(object);
+        }
         Ok(sha)
     }
 }
@@ -194,23 +466,115 @@ fn project_history_with_file_budget(
     auth: &AuthorizedRepository,
     maximum_file_entries: usize,
 ) -> Result<GitProjection, HubApiError> {
-    let revisions = state
-        .store
-        .list_revisions_bounded(repo_id, 10_000)
-        .map_err(failure)?;
+    project_history_with_roots(state, repo_id, auth, maximum_file_entries, None)
+}
+
+/// Explicit roots support immutable REST revisions, including commits retained
+/// after their last branch is deleted. Git discovery continues to use live refs.
+pub(super) fn project_history_with_roots(
+    state: &HubState,
+    repo_id: &str,
+    auth: &AuthorizedRepository,
+    maximum_file_entries: usize,
+    requested_roots: Option<&[String]>,
+) -> Result<GitProjection, HubApiError> {
+    let mut remaining_file_work = maximum_file_entries;
+    let mut export_roots = Vec::new();
+    let revisions = if let Some(roots) = requested_roots {
+        // Identity lookup must not impose the Git export history limit on
+        // repositories with many unrelated or already-committed revisions.
+        let mut pending = roots.to_vec();
+        let mut seen = std::collections::HashSet::new();
+        let mut selected = Vec::new();
+        while let Some(sha) = pending.pop() {
+            if !seen.insert(sha.clone()) {
+                continue;
+            }
+            if seen.len() > 10_000 {
+                return Err(failure(
+                    "uncached Git identity ancestry exceeds 10000 revisions",
+                ));
+            }
+            if !roots.contains(&sha)
+                && super::identity::cached_public_commit_id(state, repo_id, &sha, auth)?.is_some()
+            {
+                continue;
+            }
+            let git_origin = sha.len() == 40 && sha != "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+            if !roots.contains(&sha)
+                && !git_origin
+                && sha.len() != 16
+                && seen.len() > super::identity::COLD_IDENTITY_WINDOW
+            {
+                remaining_file_work = super::identity::recover_cold_ancestor(
+                    state,
+                    repo_id,
+                    &sha,
+                    auth,
+                    remaining_file_work,
+                )?;
+                continue;
+            }
+            let revision = state
+                .store
+                .get_revision(repo_id, &sha)
+                .map_err(failure)?
+                .ok_or_else(|| failure("missing repository revision metadata"))?;
+            if let Some(parent) = &revision.parent_sha
+                && (!git_origin || roots.contains(&sha))
+            {
+                pending.push(parent.clone());
+            }
+            selected.push(revision);
+        }
+        selected
+    } else {
+        let (selected, roots) = history_selection::live_revisions(state, repo_id, auth)?;
+        export_roots = roots;
+        selected
+    };
     if revisions.len() > 10_000 {
         return Err(failure("Git history exceeds 10000 revisions"));
     }
     let mut reachable = std::collections::HashSet::new();
     let by_sha: HashMap<_, _> = revisions.iter().map(|r| (r.sha.as_str(), r)).collect();
-    let refs = state
-        .store
-        .list_refs_bounded(repo_id, 10_000)
-        .map_err(failure)?;
-    let mut stack: Vec<_> = refs.iter().map(|r| r.sha.as_str()).collect();
+    let roots = match requested_roots {
+        Some(roots) => {
+            if roots.len() > 10_000 || roots.iter().any(|root| !by_sha.contains_key(root.as_str()))
+            {
+                return Err(failure(
+                    "unknown repository commit or too many projection roots",
+                ));
+            }
+            roots.to_vec()
+        }
+        None => export_roots,
+    };
+    let mut stack: Vec<_> = roots.iter().map(String::as_str).collect();
+    let mut known_identities = HashMap::new();
     while let Some(sha) = stack.pop() {
         // Legacy short IDs have no trustworthy tree and form a recovery boundary.
         if sha.len() == 16 {
+            continue;
+        }
+        if requested_roots.is_some()
+            && !roots.iter().any(|root| root == sha)
+            && sha.len() == 40
+            && sha != "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3"
+        {
+            known_identities.insert(sha.to_owned(), sha.to_owned());
+            continue;
+        }
+        // REST identity construction needs ancestor identities, not their
+        // complete exported payloads. Reuse a durable parent commitment so
+        // ordinary writes do not repeatedly read all previous inline content.
+        // Git export must still materialize the complete reachable graph.
+        if requested_roots.is_some()
+            && !roots.iter().any(|root| root == sha)
+            && let Some(public) =
+                super::identity::cached_public_commit_id(state, repo_id, sha, auth)?
+        {
+            known_identities.insert(sha.to_owned(), public);
             continue;
         }
         if !reachable.insert(sha.to_owned()) {
@@ -257,18 +621,25 @@ fn project_history_with_file_budget(
         }
     }
     let mut projection = GitProjection {
-        identities: HashMap::new(),
+        admission: None,
+        identities: known_identities,
         objects: Vec::new(),
+        file_entries: 0,
     };
     let mut budget = ProjectionBudget {
         remaining_bytes: super::limits::MAX_GIT_PROJECTED_BYTES,
         remaining_objects: 100_000,
         seen: std::collections::HashSet::new(),
+        identity_only: requested_roots.is_some(),
     };
     let mut blob_cache = HashMap::new();
     let mut tree_cache = HashMap::new();
-    let mut remaining_files = maximum_file_entries;
+    let mut remaining_files = remaining_file_work;
     for sha in ordered {
+        if budget.identity_only {
+            budget.remaining_objects = 100_000;
+            budget.seen.clear();
+        }
         let revision = revisions
             .remove(&sha)
             .ok_or_else(|| failure("missing ordered revision"))?;
@@ -276,47 +647,75 @@ fn project_history_with_file_budget(
             .parent_sha
             .as_ref()
             .filter(|p| projection.identities.contains_key(*p));
-        let objects =
-            if let Some(bytes) = read_object(state, &archive_key(repo_id, &revision.sha, auth)?)? {
-                let objects =
-                    load_archived_graph(state, repo_id, &revision.sha, bytes, auth, &mut budget)?;
-                projection
+        let objects = if let Some(bytes) = read_object(
+            state,
+            &read_member_archive_key(state, repo_id, &revision.sha, auth)?,
+        )? {
+            let objects =
+                load_archived_graph(state, repo_id, &revision.sha, bytes, auth, &mut budget)?;
+            projection
+                .identities
+                .insert(revision.sha.clone(), revision.sha.clone());
+            objects
+        } else {
+            if revision.sha.len() == 40
+                && revision.sha != "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3"
+            {
+                return Err(failure(
+                    "original Git objects unavailable; restore the Git object archive",
+                ));
+            }
+            let parent_sha = parent.and_then(|p| projection.identities.get(p));
+            let files = state
+                .store
+                .get_files_bounded(&revision.sha, remaining_files.min(100_000))
+                .map_err(failure)?;
+            remaining_files = remaining_files
+                .checked_sub(files.len())
+                .ok_or_else(|| failure("Git projection exceeds cumulative file entry limit"))?;
+            let (objects, commit_sha) = project_revision(
+                state,
+                &revision,
+                &files,
+                parent_sha,
+                auth,
+                &mut blob_cache,
+                &mut tree_cache,
+                &mut budget,
+            )?;
+            projection
+                .identities
+                .insert(revision.sha.clone(), hex::encode(commit_sha));
+            objects
+        };
+        if requested_roots.is_some() {
+            if revision.sha.len() != 40
+                || revision.sha == "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3"
+            {
+                let public = projection
                     .identities
-                    .insert(revision.sha.clone(), revision.sha.clone());
-                objects
-            } else {
-                if revision.sha.len() == 40
-                    && revision.sha != "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3"
+                    .get(&revision.sha)
+                    .ok_or_else(|| failure("missing projected metadata identity"))?;
+                archive_metadata_objects(state, repo_id, public, &objects, auth)?;
+            }
+            for object in &objects {
+                if object.object_type == ObjectType::Commit
+                    && (revision.sha.len() != 40
+                        || revision.sha == "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3")
                 {
-                    return Err(failure(
-                        "original Git objects unavailable; restore the Git object archive",
-                    ));
+                    super::identity::retain_identity(state, repo_id, &revision.sha, object, auth)?;
                 }
-                let parent_sha = parent.and_then(|p| projection.identities.get(p));
-                let files = state
-                    .store
-                    .get_files_bounded(&revision.sha, remaining_files.min(100_000))
-                    .map_err(failure)?;
-                remaining_files = remaining_files
-                    .checked_sub(files.len())
-                    .ok_or_else(|| failure("Git projection exceeds cumulative file entry limit"))?;
-                let (objects, commit_sha) = project_revision(
-                    state,
-                    &revision,
-                    &files,
-                    parent_sha,
-                    auth,
-                    &mut blob_cache,
-                    &mut tree_cache,
-                    &mut budget,
-                )?;
-                projection
-                    .identities
-                    .insert(revision.sha.clone(), hex::encode(commit_sha));
-                objects
-            };
-        projection.objects.extend(objects);
+            }
+            if roots.contains(&sha) {
+                projection.objects.extend(objects);
+            }
+        } else {
+            projection.objects.extend(objects);
+        }
     }
+    projection.file_entries = maximum_file_entries
+        .checked_sub(remaining_files)
+        .ok_or_else(|| failure("invalid Git projection file budget"))?;
     Ok(projection)
 }
 
@@ -349,7 +748,7 @@ fn load_archived_graph(
         }
         let bytes = match bytes {
             Some(bytes) => bytes,
-            None => read_object(state, &archive_key(repo_id, &sha, auth)?)?
+            None => read_object(state, &read_member_archive_key(state, repo_id, &sha, auth)?)?
                 .ok_or_else(|| failure("missing archived Git object"))?,
         };
         let mut parsed =
@@ -383,7 +782,7 @@ fn load_archived_graph(
     Ok(objects)
 }
 
-fn object_children(object: &GitObject) -> Result<Vec<String>, HubApiError> {
+pub(super) fn object_children(object: &GitObject) -> Result<Vec<String>, HubApiError> {
     let mut children = Vec::new();
     match object.object_type {
         ObjectType::Commit => {
@@ -454,12 +853,7 @@ fn project_revision(
     let mut blobs = BTreeMap::new();
     let mut objects = Vec::new();
     for file in files {
-        if file.path.len() > 1024 {
-            return Err(failure("Git tree path exceeds maximum length"));
-        }
-        if file.path.split('/').count() > 128 {
-            return Err(failure("Git tree nesting exceeds maximum depth"));
-        }
+        validate_projected_path(&file.path)?;
         let cache_key = (file.sha.clone(), file.size, file.is_lfs);
         if let Some(sha) = cache.get(&cache_key) {
             blobs.insert(file.path.clone(), *sha);
@@ -476,7 +870,7 @@ fn project_revision(
         let blob = if file.is_lfs {
             build_lfs_pointer_blob(&file.sha, file.size)
         } else {
-            let key = lfs_object_key(&file.sha, auth)?;
+            let key = projected_file_key(state, &revision.repo_id, file, auth)?;
             let bytes = read_object_bounded(state, &key, expected_size)?
                 .ok_or_else(|| failure(format!("missing inline content: {}", file.path)))?;
             if bytes.len() as u64 != file.size {
@@ -524,7 +918,9 @@ fn project_revision(
         return Err(failure("Git commit exceeds byte limit"));
     }
     if budget.remaining_objects == 0 {
-        return Err(failure("Git commit exceeds object count limit"));
+        return Err(HubApiError::BadRequest(
+            "Git commit exceeds object count limit".to_owned(),
+        ));
     }
     let mut data = BoundedCommit {
         text: String::new(),
@@ -539,6 +935,49 @@ fn project_revision(
         candidate,
     )?;
     Ok((objects, commit_sha))
+}
+
+/// Project exactly one unpublished revision with the same unique-object and
+/// per-object limits as identity recovery. No metadata ref is read or advanced.
+pub(super) fn project_prepared_revision(
+    state: &HubState,
+    revision: &HubRevision,
+    files: &[HubFileEntry],
+    parent: &String,
+    auth: &AuthorizedRepository,
+) -> Result<(Vec<GitObject>, [u8; 20]), HubApiError> {
+    let mut budget = ProjectionBudget {
+        remaining_bytes: super::limits::MAX_GIT_PROJECTED_BYTES,
+        remaining_objects: 100_000,
+        seen: std::collections::HashSet::new(),
+        identity_only: true,
+    };
+    project_revision(
+        state,
+        revision,
+        files,
+        Some(parent),
+        auth,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &mut budget,
+    )
+}
+
+/// The same bounds apply before REST publication and while projecting legacy
+/// revisions. Rejecting a new path must never first advance an authoritative ref.
+pub(crate) fn validate_projected_path(path: &str) -> Result<(), HubApiError> {
+    if path.len() > 1024 {
+        return Err(HubApiError::PathValidation(
+            "Git tree path exceeds maximum length".to_owned(),
+        ));
+    }
+    if path.split('/').count() > 128 {
+        return Err(HubApiError::PathValidation(
+            "Git tree nesting exceeds maximum depth".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 // Count and hash the same borrowed fields before allocating a commit body.
@@ -600,6 +1039,21 @@ impl std::fmt::Write for BoundedCommit {
         self.text.push_str(text);
         Ok(())
     }
+}
+
+/// Build the same canonical trees for REST path metadata as for Git export.
+pub(super) fn metadata_tree(
+    files: &BTreeMap<String, [u8; 20]>,
+) -> Result<([u8; 20], Vec<GitObject>), HubApiError> {
+    let mut objects = Vec::new();
+    let mut budget = ProjectionBudget {
+        remaining_bytes: super::limits::MAX_GIT_PROJECTED_BYTES,
+        remaining_objects: 100_000,
+        seen: std::collections::HashSet::new(),
+        identity_only: false,
+    };
+    let root = build_tree(files, &mut objects, &mut budget)?;
+    Ok((root, objects))
 }
 
 fn build_tree(
@@ -698,10 +1152,14 @@ fn build_tree_slice(
         return Ok(tree_sha);
     }
     if length > budget.remaining_bytes {
-        return Err(failure("Git tree exceeds byte limit"));
+        return Err(HubApiError::BadRequest(
+            "Git tree exceeds byte limit".to_owned(),
+        ));
     }
     if budget.remaining_objects == 0 {
-        return Err(failure("Git tree exceeds object count limit"));
+        return Err(HubApiError::BadRequest(
+            "Git tree exceeds object count limit".to_owned(),
+        ));
     }
     let mut bytes = Vec::with_capacity(length);
     for (name, dir, sha) in entries {
@@ -726,6 +1184,7 @@ mod tests {
             remaining_bytes: bytes,
             remaining_objects: objects,
             seen: std::collections::HashSet::new(),
+            identity_only: false,
         }
     }
 
@@ -806,6 +1265,80 @@ mod tests {
         assert!(
             archive_objects(&state, "alice/repo", &sha, &original, &auth).is_err(),
             "conflicting stored bytes must fail before revision publication"
+        );
+    }
+
+    #[test]
+    fn explicit_projection_retains_identity_after_branch_deletion() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        let auth = AuthorizedRepository::anonymous_full_access();
+        state
+            .store
+            .create_repo(
+                shardline_index::hub::HubRepoType::Model,
+                "alice/repo",
+                false,
+            )
+            .unwrap();
+        let parent = state
+            .store
+            .resolve_revision("alice/repo", "main")
+            .unwrap()
+            .unwrap();
+        let sha = "b".repeat(64);
+        state.store.store_files(&sha, &[]).unwrap();
+        state
+            .store
+            .create_revision("alice/repo", Some(&parent), &sha, "feature", "feature")
+            .unwrap();
+        let before = project_history(&state, "alice/repo", &auth).unwrap();
+        let expected = before.identities.get(&sha).unwrap().clone();
+        state
+            .store
+            .delete_ref("alice/repo", "feature", &sha)
+            .unwrap();
+        assert!(
+            !project_history(&state, "alice/repo", &auth)
+                .unwrap()
+                .identities
+                .contains_key(&sha)
+        );
+        let retained = project_history_with_roots(
+            &state,
+            "alice/repo",
+            &auth,
+            MAX_PROJECTED_FILE_ENTRIES,
+            Some(std::slice::from_ref(&sha)),
+        )
+        .unwrap();
+        assert_eq!(retained.identities.get(&sha), Some(&expected));
+        assert!(
+            retained
+                .objects
+                .iter()
+                .any(|object| object.object_type == ObjectType::Commit
+                    && hex::encode(object.sha1()) == expected)
+        );
+    }
+
+    #[test]
+    fn explicit_projection_rejects_commit_from_another_repository() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        let auth = AuthorizedRepository::anonymous_full_access();
+        let foreign = raw_revision(&state, &auth);
+        state
+            .store
+            .create_repo(shardline_index::hub::HubRepoType::Model, "bob/repo", false)
+            .unwrap();
+        assert!(
+            project_history_with_roots(
+                &state,
+                "bob/repo",
+                &auth,
+                MAX_PROJECTED_FILE_ENTRIES,
+                Some(&[foreign]),
+            )
+            .is_err()
         );
     }
 
@@ -1167,6 +1700,79 @@ mod tests {
                 .unwrap(),
             bytes
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_projection_keeps_admission_until_blocking_work_finishes() {
+        static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let (temp, state) = super::super::tests::make_hub_state();
+        state
+            .store
+            .create_repo(
+                shardline_index::hub::HubRepoType::Model,
+                "alice/repo",
+                false,
+            )
+            .unwrap();
+        let database = temp.path().join("metadata.sqlite3");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(database).unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+            connection.execute_batch("COMMIT;").unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let worker_state = state.clone();
+        let operation = tokio::spawn(async move {
+            project_history_with_admission(
+                worker_state,
+                "alice/repo".to_owned(),
+                AuthorizedRepository::anonymous_full_access(),
+                &ADMISSION,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while ADMISSION.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        operation.abort();
+        assert!(matches!(operation.await, Err(error) if error.is_cancelled()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), ADMISSION.acquire(),)
+                .await
+                .is_err(),
+            "cancelled HTTP waiter must not admit overlapping blocking work"
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let projection = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            project_history_with_admission(
+                state,
+                "alice/repo".to_owned(),
+                AuthorizedRepository::anonymous_full_access(),
+                &ADMISSION,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ADMISSION.available_permits(),
+            0,
+            "retained objects still own their slot"
+        );
+        drop(projection);
+        assert_eq!(ADMISSION.available_permits(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

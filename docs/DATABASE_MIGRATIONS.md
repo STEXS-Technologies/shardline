@@ -109,6 +109,11 @@ stale schema produces an explicit error instructing the operator to run
 existing database; run `shardline db migrate local-up --root <root>` to apply its
 pending migrations.
 
+For an SDK deployment with a read-only root, run `local-up` with the new CLI
+while the metadata is writable, before restarting the SDK application. Then
+restore the read-only root and its existing writable metadata/chunk mounts.
+Runtime SDK construction checks compatibility; it does not apply schema changes.
+
 Each migration step runs inside its own transaction.
 A failed step does not mark itself applied.
 Mutating migration commands also hold one Postgres advisory lock for the full command,

@@ -7,11 +7,26 @@ use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use std::num::NonZeroUsize;
 
 #[tokio::test]
-async fn released_server_preserves_new_file_evidence_and_recovers_legacy_files() {
-    let Ok(binary) = std::env::var("SHARDLINE_N_MINUS_ONE_BINARY") else {
-        eprintln!("SKIPPED: SQLite rollback fixture requires SHARDLINE_N_MINUS_ONE_BINARY");
+async fn historical_server_preserves_new_file_evidence_and_recovers_legacy_files() {
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_LEGACY_RECOVERY_BINARY")
+    else {
         return;
     };
+    verify_file_recovery(binary, true).await;
+}
+
+#[tokio::test]
+async fn released_server_recovers_verified_file_checkpoints_without_inventing_completion() {
+    let Some(binary) =
+        crate::test_support::released_startup::binary("SHARDLINE_N_MINUS_ONE_BINARY")
+    else {
+        return;
+    };
+    verify_file_recovery(binary, false).await;
+}
+
+async fn verify_file_recovery(binary: String, historical: bool) {
     let root = tempfile::tempdir().unwrap();
     let backend = LocalBackend::new(
         root.path().to_path_buf(),
@@ -110,29 +125,49 @@ async fn released_server_preserves_new_file_evidence_and_recovers_legacy_files()
             "released recovery skipped {}: {logs}",
             intent.intent_id()
         );
-        assert_eq!(
-            backend
-                .index_store
-                .intent_by_id(intent.intent_id())
-                .await
-                .unwrap()
-                .unwrap()
-                .state(),
-            *checkpoint,
-            "released recovery changed {}",
-            intent.intent_id()
-        );
-        assert_eq!(
-            serde_json::to_value(
-                backend
-                    .index_store
-                    .reliability_events(intent.intent_id())
-                    .await
-                    .unwrap()
+        let recovered = backend
+            .index_store
+            .intent_by_id(intent.intent_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .state();
+        if historical
+            || !matches!(
+                checkpoint,
+                UploadIntentState::Stored | UploadIntentState::MetadataCommitted
             )
-            .unwrap(),
-            *before
+        {
+            assert_eq!(recovered, *checkpoint);
+        } else {
+            // Readiness can precede bounded background file verification.
+            // Killing the released process can also stop between its two
+            // durable recovery transitions. The chain/prefix checks below
+            // still authenticate this intermediate checkpoint, and current
+            // recovery must finish it after the released process stops.
+            assert!(
+                recovered == *checkpoint
+                    || recovered == UploadIntentState::Visible
+                    || (*checkpoint == UploadIntentState::Stored
+                        && recovered == UploadIntentState::MetadataCommitted),
+                "released recovery changed checkpoint {checkpoint:?} to {recovered:?}"
+            );
+        }
+        let events = backend
+            .index_store
+            .reliability_events(intent.intent_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_lifecycle_chain_ends_at(&events, recovered).unwrap();
+        let actual = serde_json::to_value(events).unwrap();
+        let original = before.as_array().unwrap();
+        assert_eq!(
+            actual.as_array().unwrap().get(..original.len()).unwrap(),
+            original.as_slice()
         );
+        if recovered == *checkpoint {
+            assert_eq!(actual, *before);
+        }
     }
     assert_eq!(
         backend
@@ -142,7 +177,11 @@ async fn released_server_preserves_new_file_evidence_and_recovers_legacy_files()
             .unwrap()
             .unwrap()
             .state(),
-        UploadIntentState::Visible
+        if historical {
+            UploadIntentState::Visible
+        } else {
+            UploadIntentState::Created
+        }
     );
     assert_eq!(
         backend
@@ -151,7 +190,7 @@ async fn released_server_preserves_new_file_evidence_and_recovers_legacy_files()
             .await
             .unwrap()
             .len(),
-        5
+        if historical { 5 } else { 1 }
     );
     backend.reconcile_stuck_upload_intents().await.unwrap();
     for (intent, checkpoint, _) in checkpoints {
