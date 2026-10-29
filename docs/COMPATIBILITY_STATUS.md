@@ -8,10 +8,12 @@ Promotion between maturity tiers follows the checked-in evidence requirements in
 
 ## Current Source-Tree Contract
 
-The current Shardline source tree should be treated as a content-addressed backend for
-the validated workflows covered by this repository.
-Release notes identify which source-tree capabilities are included in each published
-version.
+Shardline 1.13.0 is a content-addressed backend for the validated workflows
+covered by this repository. This document describes the 1.13.0 source contract;
+it does not claim compatibility with every upstream service API or client version.
+See the [release notes](../CHANGELOG.md) and the
+[1.12.1 upgrade procedure](ROLLING_UPGRADE.md#protocol-frontend-upgrade-from-1121-to-1130)
+for the included changes and mixed-version limits.
 
 Native Xet uploads now retain the verified Xorb container without an additional
 decoded chunk copy. Existing Xorbs and standalone chunks remain readable; the

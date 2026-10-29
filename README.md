@@ -2,8 +2,9 @@
 
 ## A content-addressed storage server for large, changing files
 
-Shardline stores each piece of data once and represents new versions as small
-metadata changes. That makes it a practical backend for model checkpoints,
+Shardline reuses verified content across uploads and records file versions in
+durable metadata. Actual storage reuse depends on the protocol and container
+layout. That makes it a practical backend for model checkpoints,
 datasets, container layers, game assets, build outputs, and CI caches that are
 large, frequently revised, and expensive to copy repeatedly.
 
@@ -43,8 +44,22 @@ entire request path so file size does not become server memory usage.
 | Native CLI | Administration, maintenance, migration, and benchmarks |
 
 The frontends share authorization, deduplication, storage limits, lifecycle
-metadata, and observability. A client can use the protocol that fits its
-workflow without creating a separate copy of the data.
+metadata, and observability. Clients can use the protocol that fits their
+workflow; different protocol encodings can still require separate stored objects.
+
+## Upgrading to 1.13.0
+
+Existing uploaded data remains readable without reuploading. Apply the owner-run
+metadata migrations and follow the [upgrade procedure](docs/ROLLING_UPGRADE.md)
+before enabling new writes. Pause native Xet uploads until every native chunk
+reader is upgraded: new uploads omit redundant standalone chunk copies that
+older readers may require. New Hub Git identities and S3 tags also have routing
+and rollback limits described in that guide. Readiness alone does not prove that
+old replicas have been retired.
+
+See the [changelog](CHANGELOG.md) for the 1.13.0 changes and
+[compatibility status](docs/COMPATIBILITY_STATUS.md) for tested client workflows
+and remaining limitations.
 
 ## Start locally
 
