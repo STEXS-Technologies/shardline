@@ -75,10 +75,22 @@ jobs:
           test -n "$faketime_library"
           echo "SHARDLINE_FAKETIME_LIBRARY=$faketime_library" >> "$GITHUB_ENV"
 
-      - name: Run deployment fault campaign
+      - name: Install pinned Hub clients for deployment drills
         run: |
-          set -o pipefail
+          client_env="$RUNNER_TEMP/deployment-hub-clients"
+          python3 -m venv "$client_env"
+          "$client_env/bin/pip" install huggingface_hub==2.2.0 hf_xet==1.7.0
+          echo "$client_env/bin" >> "$GITHUB_PATH"
+
+      - name: Run deployment fault campaign
+        env:
+          SHARDLINE_REQUIRE_NATIVE_CLIENTS: "1"
+          SHARDLINE_CHAOS_DEPLOYMENT: "1"
+        run: |
+          set -euo pipefail
           mkdir -p reliability-deployment-results
+          export SHARDLINE_N_MINUS_ONE_BINARY
+          SHARDLINE_N_MINUS_ONE_BINARY=$(bash scripts/shardline/fetch_compatibility_baseline.sh reliability-deployment-results/predecessor)
           cargo make chaos-deployment 2>&1 \
             | tee reliability-deployment-results/deployment-chaos.log
 
@@ -179,9 +191,9 @@ jobs:
         env:
           SHARDLINE_ADJACENT_TAG: ${{ steps.adjacent.outputs.tag }}
         run: |
-          cargo build -p shardline
+          cargo build --locked -p shardline
           git worktree add --detach "$RUNNER_TEMP/shardline-n-minus-one" "$SHARDLINE_ADJACENT_TAG"
-          cargo build \
+          cargo build --locked \
             --manifest-path "$RUNNER_TEMP/shardline-n-minus-one/Cargo.toml" \
             --target-dir "$RUNNER_TEMP/shardline-n-minus-one-target" \
             -p shardline
@@ -191,14 +203,22 @@ jobs:
           docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d
           bash scripts/shardline/wait_for_chaos_stack.sh
 
+      - name: Install pinned Hub clients for mixed-version drills
+        run: |
+          client_env="$RUNNER_TEMP/upgrade-hub-clients"
+          python3 -m venv "$client_env"
+          "$client_env/bin/pip" install huggingface_hub==2.2.0 hf_xet==1.7.0
+          echo "$client_env/bin" >> "$GITHUB_PATH"
+
       - name: Exercise real mixed-version rollout and rollback
         env:
           SHARDLINE_REQUIRE_NATIVE_CLIENTS: "1"
           SHARDLINE_N_MINUS_ONE_BINARY: ${{ runner.temp }}/shardline-n-minus-one-target/debug/shardline
         run: |
-          set -o pipefail
+          set -euo pipefail
           mkdir -p reliability-upgrade-results
-          cargo nextest run -p shardline-server --test deployment_chaos \
+          cargo nextest run --locked -p shardline-server --all-features --test deployment_chaos \
+            --run-ignored all --test-threads 1 --no-fail-fast \
             -E 'test(drill_deploy_f_real_mixed_version_rollout_and_rollback) | test(local_protocol_upgrade::)' \
             --no-capture 2>&1 \
             | tee reliability-upgrade-results/mixed-version-upgrade.log
