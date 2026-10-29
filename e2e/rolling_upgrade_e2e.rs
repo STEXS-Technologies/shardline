@@ -39,6 +39,7 @@ const SIGNING_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
 /// topology through the authenticated admin API.
 const TEST_ADMIN_TOKEN: &str = "rolling-upgrade-admin-read-token";
 const FRONTENDS: [ServerFrontend; 1] = [ServerFrontend::Xet];
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A running role-split server runtime.
 struct RoleRuntime {
@@ -278,6 +279,7 @@ async fn ready_response(
     // authenticated admin status endpoint.
     let readyz = client
         .get(format!("{base_url}/readyz"))
+        .timeout(PROBE_TIMEOUT)
         .send()
         .await?
         .error_for_status()?;
@@ -288,6 +290,7 @@ async fn ready_response(
     );
     let response = client
         .get(format!("{base_url}/api/v1/status"))
+        .timeout(PROBE_TIMEOUT)
         .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
         .send()
         .await?
@@ -306,6 +309,7 @@ async fn role_surface_statuses(
             Method::PUT,
             format!("{base_url}/v1/reconstructions/asset.bin"),
         )
+        .timeout(PROBE_TIMEOUT)
         .send()
         .await?
         .status();
@@ -314,6 +318,7 @@ async fn role_surface_statuses(
             Method::POST,
             format!("{base_url}/v1/chunks/default-merkledb/deadbeef"),
         )
+        .timeout(PROBE_TIMEOUT)
         .send()
         .await?
         .status();
