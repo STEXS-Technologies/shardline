@@ -37,6 +37,19 @@ cargo check -p shardline
 3. Run contributor quality gates locally.
 4. Open a PR with a clear summary, risk notes, and test evidence.
 
+### Build iteration
+
+Use `cargo check -p shardline` for quick feedback and
+`cargo build --locked -p shardline --bin shardline` to build the server and CLI
+without compiling unrelated workspace tools. Scope test runs to the crate or
+module being changed before running the contributor gates.
+
+`cargo make build` and `cargo make build-prod` build the full workspace and
+reuse Cargo's existing artifacts. Use `cargo make build-clean` or
+`cargo make build-prod-clean` when an explicitly clean build is needed.
+`cargo clean` removes the shared build cache, so keep it out of routine edit,
+build and test cycles.
+
 ### PostgreSQL qualification
 
 Use a disposable database and export its connection string as `DATABASE_URL`.

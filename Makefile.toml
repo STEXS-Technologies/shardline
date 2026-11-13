@@ -3,7 +3,6 @@ description = "Build all shardline workspace crates"
 workspace = false
 command = "cargo"
 args = ["build", "--workspace", "--all-features", "${@}"]
-dependencies = ["clean"]
 
 [tasks.format-rust]
 description = "Format Rust code using rustfmt"
@@ -30,6 +29,17 @@ workspace = false
 command = "cargo"
 args = ["fmt", "--check", "--all"]
 
+# Ordinary builds preserve Cargo's artifact cache. Clean builds are explicit.
+[tasks.build-clean]
+description = "Clean artifacts, then build all workspace crates"
+workspace = false
+dependencies = ["clean", "build"]
+
+[tasks.build-prod-clean]
+description = "Clean artifacts, then build optimized workspace binaries"
+workspace = false
+dependencies = ["clean", "build-prod"]
+
 [tasks.clean]
 description = "Remove build artifacts"
 workspace = false
@@ -54,7 +64,6 @@ description = "Build optimized release binaries"
 workspace = false
 command = "cargo"
 args = ["build", "--workspace", "--release", "--all-features", "${@}"]
-dependencies = ["clean"]
 
 [tasks.check]
 description = "Quick compilation check without building"
