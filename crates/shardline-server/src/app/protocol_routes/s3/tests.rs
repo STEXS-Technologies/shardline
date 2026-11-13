@@ -32,8 +32,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use md5::{Digest, Md5};
-use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
+use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenScope};
 use tempfile::TempDir;
 use tower::ServiceExt;
 mod range_checksums;
@@ -45,6 +44,10 @@ use crate::{
     transfer_limiter::TransferLimiter,
 };
 
+use super::test_support::{
+    BUCKET, NAME, OWNER, TEST_SIGNING_KEY, body_bytes, build_state, build_test_state,
+    build_test_state_with_options, mint_token, put_request, sigv4_auth,
+};
 use super::{
     bucket::{
         s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_list_buckets,
@@ -55,21 +58,7 @@ use super::{
 };
 use crc_fast::{CrcAlgorithm, Digest as CrcDigest};
 
-/// Test signing key matching the one used in e2e tests.
-const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
-const OWNER: &str = "acme";
-const NAME: &str = "models";
-const BUCKET: &str = "acme.models";
 const KEY: &str = "data/model.pt";
-
-/// Builds an auth-enabled [`AppState`] whose token scope is `acme.models`.
-async fn build_test_state() -> (Arc<AppState>, TempDir) {
-    build_test_state_with_options(
-        NonZeroU64::new(1).unwrap(),
-        NonZeroU64::new(1 << 40).unwrap(),
-    )
-    .await
-}
 
 /// Builds the same S3 router over Postgres metadata so multipart uses the
 /// durable object-store session path. Returns `None` outside the Postgres CI job.
@@ -183,56 +172,6 @@ async fn configured_postgres_backend_failure_does_not_skip_test() {
     build_postgres_state("invalid-postgres-url", temporary.path(), objects).await;
 }
 
-/// Like [`build_test_state`] but with an explicit S3 minimum part size and
-/// session byte quota (used by the quota/min-size hardening tests).
-async fn build_test_state_with_options(
-    min_part_bytes: NonZeroU64,
-    session_max_bytes: NonZeroU64,
-) -> (Arc<AppState>, TempDir) {
-    let tmp = TempDir::new().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(65536).unwrap();
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        tmp.path().to_path_buf(),
-        chunk_size,
-    )
-    .with_server_frontends([ServerFrontend::S3])
-    .expect("server frontends")
-    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key")
-    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
-    .expect("s3 max part bytes")
-    .with_s3_min_part_bytes(min_part_bytes)
-    .expect("s3 min part bytes")
-    .with_s3_upload_session_max_bytes(session_max_bytes)
-    .expect("s3 session max bytes");
-
-    let backend = crate::ServerBackend::from_config(&config)
-        .await
-        .expect("backend from config");
-
-    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
-
-    let state = Arc::new(AppState {
-        config,
-        role: ServerRole::All,
-        backend,
-        auth: Some(auth),
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
-        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(
-            std::num::NonZeroUsize::new(256).unwrap(),
-        ),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    });
-
-    (state, tmp)
-}
-
 /// Like [`build_test_state_with_options`] but with an explicit global
 /// active-part-file cap (used by the F-19 part-file-cap hardening test).
 async fn build_test_state_with_s3_part_file_cap(
@@ -257,28 +196,7 @@ async fn build_test_state_with_s3_part_file_cap(
     .with_s3_upload_max_active_part_files(max_active_part_files)
     .expect("s3 max active part files");
 
-    let backend = crate::ServerBackend::from_config(&config)
-        .await
-        .expect("backend from config");
-
-    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
-
-    let state = Arc::new(AppState {
-        config,
-        role: ServerRole::All,
-        backend,
-        auth: Some(auth),
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
-        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(
-            std::num::NonZeroUsize::new(256).unwrap(),
-        ),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    });
-
+    let state = build_state(config).await;
     (state, tmp)
 }
 
@@ -310,46 +228,8 @@ async fn build_test_state_with_part_sizes(
     .with_s3_upload_session_max_bytes(session_max_bytes)
     .expect("s3 session max bytes");
 
-    let backend = crate::ServerBackend::from_config(&config)
-        .await
-        .expect("backend from config");
-
-    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
-
-    let state = Arc::new(AppState {
-        config,
-        role: ServerRole::All,
-        backend,
-        auth: Some(auth),
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
-        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(
-            std::num::NonZeroUsize::new(256).unwrap(),
-        ),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    });
-
+    let state = build_state(config).await;
     (state, tmp)
-}
-
-/// Mints a token scoped to `owner.name` with the test signing key.
-fn mint_token(scope: TokenScope, owner: &str, name: &str) -> String {
-    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-    let repo = RepositoryScope::new(RepositoryProvider::Generic, owner, name, None).unwrap();
-    let claims = TokenClaims::new("shardline", "test", scope, repo, u64::MAX).unwrap();
-    provider.mint_token(&claims).unwrap()
-}
-
-/// Builds a SigV4-style `Authorization` header whose access key **is** the
-/// bearer token.
-fn sigv4_auth(token: &str) -> String {
-    format!(
-        "AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request, \
-         SignedHeaders=host;x-amz-date, Signature=deadbeef"
-    )
 }
 
 /// Builds the S3 router with the test state attached.
@@ -377,28 +257,6 @@ fn s3_router(state: Arc<AppState>) -> Router {
             crate::app::gc_write_barrier_middleware,
         ))
         .with_state(state)
-}
-
-/// Collects a response body into bytes.
-async fn body_bytes(response: axum::http::Response<Body>) -> Vec<u8> {
-    axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap()
-        .to_vec()
-}
-
-/// A default write-token request builder for the `acme.models` bucket.
-fn put_request(uri: String, body: Vec<u8>) -> axum::http::Request<Body> {
-    Request::builder()
-        .method("PUT")
-        .uri(uri)
-        .header(
-            header::AUTHORIZATION,
-            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
-        )
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(Body::from(body))
-        .unwrap()
 }
 
 // =========================================================================

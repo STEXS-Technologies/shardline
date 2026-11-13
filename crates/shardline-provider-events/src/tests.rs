@@ -78,12 +78,17 @@ async fn repository_deleted_creates_holds_for_matching_repository_versions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_deleted_removes_stale_latest_without_version_record() {
-    let result = exercise_repository_deleted_removes_stale_latest_without_version_record().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook repository deletion stale latest cleanup failed: {error:?}"
-    );
+    // Preserve both the core and former server fixture layouts.
+    for chunk_size in [4, 128] {
+        let result =
+            exercise_repository_deleted_removes_stale_latest_without_version_record(chunk_size)
+                .await;
+        let error = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            result.is_ok(),
+            "provider webhook repository deletion stale latest cleanup failed: {error:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -98,26 +103,32 @@ async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn access_changed_records_provider_repository_state_without_mutating_file_metadata() {
-    let result =
-        exercise_access_changed_records_provider_repository_state_without_mutating_file_metadata()
-            .await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook access-changed state update contract failed: {error:?}"
-    );
+    // Preserve both the core and former server fixture layouts.
+    for chunk_size in [4, 128] {
+        let result =
+            exercise_access_changed_records_provider_repository_state_without_mutating_file_metadata(chunk_size)
+                .await;
+        let error = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            result.is_ok(),
+            "provider webhook access-changed state update contract failed: {error:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revision_pushed_records_provider_repository_state_without_mutating_file_metadata() {
-    let result =
-        exercise_revision_pushed_records_provider_repository_state_without_mutating_file_metadata()
-            .await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook revision-pushed state update contract failed: {error:?}"
-    );
+    // Preserve both the core and former server fixture layouts.
+    for chunk_size in [4, 128] {
+        let result =
+            exercise_revision_pushed_records_provider_repository_state_without_mutating_file_metadata(chunk_size)
+                .await;
+        let error = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            result.is_ok(),
+            "provider webhook revision-pushed state update contract failed: {error:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -132,12 +143,17 @@ async fn access_change_and_revision_push_state_survives_reordering() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_webhook_delivery_is_ignored_after_first_application() {
-    let result = exercise_duplicate_webhook_delivery_is_ignored_after_first_application().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "duplicate webhook delivery no-op flow failed: {error:?}"
-    );
+    // Preserve both the core and former server fixture layouts.
+    for chunk_size in [4, 128] {
+        let result =
+            exercise_duplicate_webhook_delivery_is_ignored_after_first_application(chunk_size)
+                .await;
+        let error = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            result.is_ok(),
+            "duplicate webhook delivery no-op flow failed: {error:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -163,22 +179,30 @@ async fn failed_webhook_application_can_retry_same_delivery() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_rename_migrates_records_to_new_scope() {
-    let result = exercise_repository_rename_migrates_records_to_new_scope().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook repository rename migration failed: {error:?}"
-    );
+    // Preserve both the core and former server fixture layouts.
+    for chunk_size in [4, 128] {
+        let result = exercise_repository_rename_migrates_records_to_new_scope(chunk_size).await;
+        let error = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            result.is_ok(),
+            "provider webhook repository rename migration failed: {error:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_rename_removes_old_scope_latest_without_version_record() {
-    let result = exercise_repository_rename_removes_old_scope_latest_without_version_record().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook repository rename stale latest cleanup failed: {error:?}"
-    );
+    // Preserve both the core and former server fixture layouts.
+    for chunk_size in [4, 128] {
+        let result =
+            exercise_repository_rename_removes_old_scope_latest_without_version_record(chunk_size)
+                .await;
+        let error = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            result.is_ok(),
+            "provider webhook repository rename stale latest cleanup failed: {error:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -193,12 +217,15 @@ async fn repository_rename_rejects_conflicting_target_metadata() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn previously_recorded_webhook_delivery_is_a_no_op() {
-    let result = exercise_previously_recorded_webhook_delivery_is_a_no_op().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "pre-recorded webhook delivery no-op flow failed: {error:?}"
-    );
+    // Preserve both the core and former server fixture layouts.
+    for chunk_size in [4, 128] {
+        let result = exercise_previously_recorded_webhook_delivery_is_a_no_op(chunk_size).await;
+        let error = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            result.is_ok(),
+            "pre-recorded webhook delivery no-op flow failed: {error:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -360,8 +387,9 @@ async fn exercise_repository_deleted_creates_holds_for_matching_repository_versi
     Ok(())
 }
 
-async fn exercise_repository_deleted_removes_stale_latest_without_version_record()
--> Result<(), Box<dyn Error>> {
+async fn exercise_repository_deleted_removes_stale_latest_without_version_record(
+    chunk_size: u64,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -371,7 +399,7 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
         file_id: "stale.bin".to_owned(),
         content_hash: "e".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope.clone()),
         chunks: vec![FileChunkRecord {
@@ -388,7 +416,7 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
@@ -516,8 +544,9 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
     Ok(())
 }
 
-async fn exercise_access_changed_records_provider_repository_state_without_mutating_file_metadata()
--> Result<(), Box<dyn Error>> {
+async fn exercise_access_changed_records_provider_repository_state_without_mutating_file_metadata(
+    chunk_size: u64,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -527,7 +556,7 @@ async fn exercise_access_changed_records_provider_repository_state_without_mutat
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
@@ -591,8 +620,9 @@ async fn exercise_access_changed_records_provider_repository_state_without_mutat
     Ok(())
 }
 
-async fn exercise_revision_pushed_records_provider_repository_state_without_mutating_file_metadata()
--> Result<(), Box<dyn Error>> {
+async fn exercise_revision_pushed_records_provider_repository_state_without_mutating_file_metadata(
+    chunk_size: u64,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -602,7 +632,7 @@ async fn exercise_revision_pushed_records_provider_repository_state_without_muta
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
@@ -739,8 +769,9 @@ async fn exercise_access_change_and_revision_push_state_survives_reordering()
     Ok(())
 }
 
-async fn exercise_duplicate_webhook_delivery_is_ignored_after_first_application()
--> Result<(), Box<dyn Error>> {
+async fn exercise_duplicate_webhook_delivery_is_ignored_after_first_application(
+    chunk_size: u64,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -750,7 +781,7 @@ async fn exercise_duplicate_webhook_delivery_is_ignored_after_first_application(
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
@@ -932,7 +963,9 @@ async fn exercise_failed_webhook_application_can_retry_same_delivery() -> Result
     Ok(())
 }
 
-async fn exercise_repository_rename_migrates_records_to_new_scope() -> Result<(), Box<dyn Error>> {
+async fn exercise_repository_rename_migrates_records_to_new_scope(
+    chunk_size: u64,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -949,7 +982,7 @@ async fn exercise_repository_rename_migrates_records_to_new_scope() -> Result<()
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(main_scope.clone()),
         chunks: vec![FileChunkRecord {
@@ -966,7 +999,7 @@ async fn exercise_repository_rename_migrates_records_to_new_scope() -> Result<()
         file_id: "asset.bin".to_owned(),
         content_hash: "c".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(release_scope.clone()),
         chunks: vec![FileChunkRecord {
@@ -1039,7 +1072,9 @@ async fn exercise_repository_rename_migrates_records_to_new_scope() -> Result<()
     Ok(())
 }
 
-async fn exercise_previously_recorded_webhook_delivery_is_a_no_op() -> Result<(), Box<dyn Error>> {
+async fn exercise_previously_recorded_webhook_delivery_is_a_no_op(
+    chunk_size: u64,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -1049,7 +1084,7 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op() -> Result<()
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
@@ -1162,8 +1197,9 @@ async fn exercise_webhook_failure_with_failed_cleanup_logs_warning() -> Result<(
     Ok(())
 }
 
-async fn exercise_repository_rename_removes_old_scope_latest_without_version_record()
--> Result<(), Box<dyn Error>> {
+async fn exercise_repository_rename_removes_old_scope_latest_without_version_record(
+    chunk_size: u64,
+) -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -1174,7 +1210,7 @@ async fn exercise_repository_rename_removes_old_scope_latest_without_version_rec
         file_id: "stale.bin".to_owned(),
         content_hash: "e".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(main_scope.clone()),
         chunks: vec![FileChunkRecord {
@@ -1191,7 +1227,7 @@ async fn exercise_repository_rename_removes_old_scope_latest_without_version_rec
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(main_scope),
         chunks: vec![FileChunkRecord {

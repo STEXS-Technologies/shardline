@@ -2,10 +2,8 @@
 //! F-70).
 //!
 //! Each test drives the in-process S3 router and asserts a measured
-//! exploit-vs-control delta. Helpers (auth + state build) are duplicated here
-//! rather than re-exported from `tests.rs` because the `tests` module and its
-//! helpers are private to `super`, so a sibling `#[cfg(test)]` module cannot
-//! reach them.
+//! exploit-vs-control delta. Auth and state helpers are shared with the S3
+//! contract tests; this suite keeps its own router and fault helpers.
 
 #![allow(
     clippy::unwrap_used,
@@ -22,7 +20,7 @@
 
 use std::{
     collections::HashMap,
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroUsize,
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -38,13 +36,12 @@ use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use crate::{
-    ServerConfig, ServerFrontend, ServerRole,
-    app::{AppState, ProtocolMetrics},
-    reconstruction_cache::ReconstructionCacheService,
-    transfer_limiter::TransferLimiter,
-};
+use crate::{ServerConfig, ServerFrontend, ServerRole, app::AppState};
 
+use super::test_support::{
+    BUCKET, NAME, OWNER, TEST_SIGNING_KEY, body_bytes, build_test_state, mint_token, put_request,
+    sigv4_auth,
+};
 use super::{
     S3_OBJECT_UPLOAD_LOCKS, acquire_object_upload_lock_for_root,
     bucket::{
@@ -56,63 +53,9 @@ use super::{
     require_s3_object_context,
 };
 
-const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
-const OWNER: &str = "acme";
-const NAME: &str = "models";
-const BUCKET: &str = "acme.models";
-
 // ---------------------------------------------------------------------------
-// Reused test harness (duplicated; see module doc).
+// Suite-specific router and fault helpers.
 // ---------------------------------------------------------------------------
-
-async fn build_test_state() -> (Arc<AppState>, TempDir) {
-    let tmp = TempDir::new().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(65536).unwrap();
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        tmp.path().to_path_buf(),
-        chunk_size,
-    )
-    .with_server_frontends([ServerFrontend::S3])
-    .expect("server frontends")
-    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key")
-    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap()) // 1 MiB
-    .expect("s3 max part bytes")
-    .with_s3_min_part_bytes(NonZeroU64::new(1).unwrap())
-    .expect("s3 min part bytes")
-    .with_s3_upload_session_max_bytes(NonZeroU64::new(1 << 40).unwrap())
-    .expect("s3 session max bytes");
-
-    let backend = crate::ServerBackend::from_config(&config)
-        .await
-        .expect("backend from config");
-    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
-
-    let state = Arc::new(AppState {
-        config,
-        role: ServerRole::All,
-        backend,
-        auth: Some(auth),
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
-        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256).unwrap()),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    });
-
-    (state, tmp)
-}
-
-fn mint_token(scope: TokenScope, owner: &str, name: &str) -> String {
-    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-    let repo = RepositoryScope::new(RepositoryProvider::Generic, owner, name, None).unwrap();
-    let claims = TokenClaims::new("shardline", "test", scope, repo, u64::MAX).unwrap();
-    provider.mint_token(&claims).unwrap()
-}
 
 /// Mints and re-verifies `claims` through a real provider, producing the same
 /// `VerifiedAuthContext` the auth layer hands to the capability seam (the seal
@@ -121,13 +64,6 @@ fn verified_context(claims: &TokenClaims) -> shardline_server_core::VerifiedAuth
     let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let token = provider.mint_token(claims).unwrap();
     provider.verify_verified(&token).unwrap()
-}
-
-fn sigv4_auth(token: &str) -> String {
-    format!(
-        "AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request, \
-         SignedHeaders=host;x-amz-date, Signature=deadbeef"
-    )
 }
 
 fn s3_router(state: Arc<AppState>) -> Router {
@@ -150,26 +86,6 @@ fn s3_router(state: Arc<AppState>) -> Router {
                 .delete(s3_delete_object),
         )
         .with_state(state)
-}
-
-async fn body_bytes(response: axum::http::Response<Body>) -> Vec<u8> {
-    axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap()
-        .to_vec()
-}
-
-fn put_request(uri: String, body: Vec<u8>) -> axum::http::Request<Body> {
-    Request::builder()
-        .method("PUT")
-        .uri(uri)
-        .header(
-            header::AUTHORIZATION,
-            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
-        )
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(Body::from(body))
-        .unwrap()
 }
 
 fn copy_request(uri: String, copy_source: String) -> axum::http::Request<Body> {
