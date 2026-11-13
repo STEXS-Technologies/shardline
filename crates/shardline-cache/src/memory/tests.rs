@@ -1103,73 +1103,7 @@ fn eviction_key_partial_cmp() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn get_race_with_write_lock_contention() {
-    // Use a longer TTL so pre-seeded entries don't expire before we race.
-    // The goal is to have get()'s read-lock see loading=true on an expired
-    // entry, then lose the write-lock race to a concurrent operation,
-    // landing on lines 260-270.
-    let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(10_000).unwrap_or(NonZeroUsize::MIN),
-    ));
-
-    let mut handles = Vec::new();
-    for i in 0..500 {
-        let key = ReconstructionCacheKey::latest(&format!("contention-{i}"), None);
-
-        // Write-lock contender (put)
-        let c1 = std::sync::Arc::clone(&cache);
-        let k1 = key.clone();
-        let h1 = tokio::spawn(async move {
-            let _ = c1.put(&k1, b"preloaded").await;
-        });
-
-        // Write-lock contender (delete)
-        let c2 = std::sync::Arc::clone(&cache);
-        let k2 = key.clone();
-        let h2 = tokio::spawn(async move {
-            let _ = c2.delete(&k2).await;
-        });
-
-        // Failing loader (get_or_load)
-        let c3 = std::sync::Arc::clone(&cache);
-        let k3 = key.clone();
-        let h3 = tokio::spawn(async move {
-            let _ = c3
-                .get_or_load(&k3, || {
-                    Box::pin(async {
-                        tokio::time::sleep(Duration::from_micros(100)).await;
-                        Err::<Vec<u8>, ReconstructionCacheError>(
-                            ReconstructionCacheError::Operation,
-                        )
-                    })
-                })
-                .await;
-        });
-
-        // Getter
-        let c4 = std::sync::Arc::clone(&cache);
-        let k4 = key.clone();
-        let h4 = tokio::spawn(async move {
-            let _ = c4.get(&k4).await;
-        });
-
-        // Extra write-lock contender
-        let c5 = std::sync::Arc::clone(&cache);
-        let k5 = key.clone();
-        let h5 = tokio::spawn(async move {
-            let _ = c5.put(&k5, b"extra").await;
-        });
-
-        handles.push(h1);
-        handles.push(h2);
-        handles.push(h3);
-        handles.push(h4);
-        handles.push(h5);
-    }
-
-    for h in handles {
-        let _ = h.await;
-    }
+    exercise_get_contention(GetContention::PreloadedMutations).await;
 }
 
 // ── Concurrency stress tests ──────────────────────────────────────────
@@ -1353,53 +1287,100 @@ async fn get_write_lock_recheck_finds_valid_entry() {
     }
 }
 
-// ── get(): creates a new loading entry after a previous one vanished ──
-//
-// This covers lines ~267-277 where get() finds NO loading entry in the
-// write lock (it was removed by a concurrent failing loader between
-// the read and write lock), so it creates a fresh loading entry.
+enum GetContention {
+    DisappearingLoader,
+    ConcurrentMutations,
+    ShortLivedSeed,
+    PreloadedMutations,
+}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn get_creates_loading_entry_when_loader_disappears() {
-    let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+async fn exercise_get_contention(scenario: GetContention) {
+    use std::sync::Arc;
+
+    let (rounds, capacity, readers_per_key, ttl, delay, seed, mutate) = match scenario {
+        GetContention::PreloadedMutations => (500, 10_000, 1, 3600, 100, true, true),
+        GetContention::DisappearingLoader => (1000, 100, 1, 3600, 10, false, false),
+        GetContention::ConcurrentMutations => (3000, 10_000, 3, 3600, 1, false, true),
+        GetContention::ShortLivedSeed => (2000, 10_000, 3, 1, 1, true, true),
+    };
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(ttl).unwrap(),
+        NonZeroUsize::new(capacity).unwrap(),
     ));
-    // Use a unique key per round so stale loading entries from one
-    // round never cascade into another round's 30-second timeout.
-    let mut handles = Vec::new();
-    for i in 0..1000 {
-        let key = ReconstructionCacheKey::latest(&format!("disappearing-loader-{i}"), None);
-
-        // Failing get_or_load — fast 10 µs sleep
-        let c1 = std::sync::Arc::clone(&cache);
-        let k1 = key.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = c1
-                .get_or_load(&k1, || {
-                    Box::pin(async {
-                        tokio::time::sleep(Duration::from_micros(10)).await;
-                        Err::<Vec<u8>, ReconstructionCacheError>(
-                            ReconstructionCacheError::Operation,
-                        )
+    let mut writers = Vec::new();
+    let mut readers = Vec::new();
+    for number in 0..rounds {
+        let key = ReconstructionCacheKey::latest(&format!("contention-{number}"), None);
+        if seed {
+            let seed_cache = Arc::clone(&cache);
+            let seed_key = key.clone();
+            writers.push(tokio::spawn(async move {
+                seed_cache.put(&seed_key, b"seed").await.unwrap();
+            }));
+        }
+        let loader_cache = Arc::clone(&cache);
+        let loader_key = key.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        writers.push(tokio::spawn(async move {
+            let mut started = Some(started);
+            let result = loader_cache
+                .get_or_load(&loader_key, || {
+                    started.take().unwrap().send(()).unwrap();
+                    Box::pin(async move {
+                        tokio::time::sleep(Duration::from_micros(delay)).await;
+                        Err::<Vec<u8>, _>(ReconstructionCacheError::Operation)
                     })
                 })
                 .await;
+            // A seeded cache hit does not invoke the loader callback.
+            if let Some(started) = started {
+                started.send(()).unwrap();
+            }
+            assert!(matches!(
+                result,
+                Ok(_) | Err(ReconstructionCacheError::Operation)
+            ));
         }));
-
-        // get() — may race to see loading entry in read lock but not
-        // in write lock, exercising lines 261-271.
-        let c2 = std::sync::Arc::clone(&cache);
-        let k2 = key.clone();
-        handles.push(tokio::spawn(async move {
-            let result = c2.get(&k2).await;
-            assert!(result.is_ok(), "get() should not error");
-        }));
+        ready.await.unwrap();
+        let mut waiters = Vec::new();
+        for _ in 0..readers_per_key {
+            let reader_cache = Arc::clone(&cache);
+            let reader_key = key.clone();
+            waiters.push(tokio::spawn(async move {
+                reader_cache.get(&reader_key).await.unwrap();
+            }));
+        }
+        if mutate {
+            let put_cache = Arc::clone(&cache);
+            let put_key = key.clone();
+            writers.push(tokio::spawn(async move {
+                put_cache.put(&put_key, b"noise").await.unwrap();
+            }));
+            let delete_cache = Arc::clone(&cache);
+            let delete_key = key.clone();
+            writers.push(tokio::spawn(async move {
+                delete_cache.delete(&delete_key).await.unwrap();
+            }));
+        }
+        readers.push((key, waiters));
     }
-
-    for h in handles {
-        let _ = h.await;
+    for writer in writers {
+        writer.await.unwrap();
     }
+    for (key, waiters) in readers {
+        // No mutators remain. Fulfill any cold get() reservation left by the
+        // race, then drain that key before capacity eviction can remove it.
+        cache.put(&key, b"settled").await.unwrap();
+        for waiter in waiters {
+            waiter.await.unwrap();
+        }
+        assert_eq!(cache.get(&key).await.unwrap(), Some(b"settled".to_vec()));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn get_creates_loading_entry_when_loader_disappears() {
+    exercise_get_contention(GetContention::DisappearingLoader).await;
 }
 
 // ── put() notifies waiters when a loading entry exists ─────────────────
@@ -1898,171 +1879,39 @@ async fn concurrent_put_and_get_loading_entry_stress() {
             let c_put = std::sync::Arc::clone(&cache);
             let k_put = key.clone();
             handles.push(tokio::spawn(async move {
-                let _ = c_put.put(&k_put, b"data").await;
+                c_put.put(&k_put, b"data").await.unwrap();
             }));
 
             let c_get = std::sync::Arc::clone(&cache);
             let k_get = key.clone();
             handles.push(tokio::spawn(async move {
-                let result = c_get.get(&k_get).await;
-                assert!(result.is_ok(), "get should not error under stress");
+                if c_get.get(&k_get).await.unwrap().is_none() {
+                    // This task has no loader to fulfill its cold reservation.
+                    c_get.release_loading(&k_get);
+                }
             }));
 
             let c_del = std::sync::Arc::clone(&cache);
             let k_del = key.clone();
             handles.push(tokio::spawn(async move {
-                let _ = c_del.delete(&k_del).await;
+                c_del.delete(&k_del).await.unwrap();
             }));
         }
     }
 
     for h in handles {
-        let _ = h.await;
+        h.await.unwrap();
     }
 }
-
-// ── get: phantom loading entry + write-lock re-check with contention ─
-//
-// Spawns many concurrent operations (get_or_load, get, put, delete)
-// on the same cache to create write-lock contention.  This improves
-// the chance that get()'s write-lock acquisition yields, allowing:
-//
-//   a) A loading entry to disappear between read lock and write lock,
-//      triggering the phantom loading entry path (lines 261-271).
-//
-//   b) A put() to store an entry between read lock and write lock,
-//      triggering the write-lock re-check path (lines 230-233).
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn get_phantom_loading_recheck_with_contention() {
-    let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(10_000).unwrap_or(NonZeroUsize::MIN),
-    ));
-
-    let mut handles = Vec::new();
-
-    for i in 0..3000 {
-        let key = ReconstructionCacheKey::latest(&format!("contention-{i}"), None);
-
-        // Fast-failing get_or_load — creates a loading entry that
-        // vanishes quickly.
-        let c1 = std::sync::Arc::clone(&cache);
-        let k1 = key.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = c1
-                .get_or_load(&k1, || {
-                    Box::pin(async {
-                        tokio::time::sleep(Duration::from_micros(1)).await;
-                        Err::<Vec<u8>, ReconstructionCacheError>(
-                            ReconstructionCacheError::Operation,
-                        )
-                    })
-                })
-                .await;
-        }));
-
-        // get() calls that race against the loader.
-        for _ in 0..3 {
-            let c = std::sync::Arc::clone(&cache);
-            let k = key.clone();
-            handles.push(tokio::spawn(async move {
-                let result = c.get(&k).await;
-                assert!(result.is_ok(), "get() should not error");
-            }));
-        }
-
-        // put() calls to create write-lock contention
-        let c_put2 = std::sync::Arc::clone(&cache);
-        let k_put2 = key.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = c_put2.put(&k_put2, b"data").await;
-        }));
-
-        // delete() calls for more write-lock contention
-        let c_del2 = std::sync::Arc::clone(&cache);
-        let k_del2 = key.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = c_del2.delete(&k_del2).await;
-        }));
-    }
-
-    for h in handles {
-        let _ = h.await;
-    }
+    exercise_get_contention(GetContention::ConcurrentMutations).await;
 }
-
-// ── get: phantom loading with expired entry removal ──────────────────
-//
-// When the phantom loading path is hit AND an expired entry exists,
-// the `should_remove` check (line 267) is true and the expired entry
-// is cleaned up (lines 268-269).  Uses high contention to hit the
-// race.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn get_phantom_loading_removes_expired_entry() {
-    let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
-        NonZeroU64::new(1).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(10_000).unwrap_or(NonZeroUsize::MIN),
-    ));
-
-    let mut handles = Vec::new();
-
-    for i in 0..2000 {
-        // Each key gets a short-TTL entry via the main cache (1s TTL).
-        // By the time operations race, the entry may be expired,
-        // exercising the should_remove check in the phantom path.
-        let key = ReconstructionCacheKey::latest(&format!("phantom-exp-{i}"), None);
-
-        // Seed: put with 1s TTL
-        let c_seed = std::sync::Arc::clone(&cache);
-        let k_seed = key.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = c_seed.put(&k_seed, b"seed").await;
-        }));
-
-        // Fast-failing loader
-        let c1 = std::sync::Arc::clone(&cache);
-        let k1 = key.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = c1
-                .get_or_load(&k1, || {
-                    Box::pin(async {
-                        tokio::time::sleep(Duration::from_micros(1)).await;
-                        Err::<Vec<u8>, ReconstructionCacheError>(
-                            ReconstructionCacheError::Operation,
-                        )
-                    })
-                })
-                .await;
-        }));
-
-        // get() calls
-        for _ in 0..3 {
-            let c_get2 = std::sync::Arc::clone(&cache);
-            let k_get2 = key.clone();
-            handles.push(tokio::spawn(async move {
-                let result = c_get2.get(&k_get2).await;
-                assert!(result.is_ok(), "get() should not error");
-            }));
-        }
-
-        // Additional write-lock contention via put/delete
-        let c_put3 = std::sync::Arc::clone(&cache);
-        let k_put3 = key.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = c_put3.put(&k_put3, b"noise").await;
-        }));
-        let c_del3 = std::sync::Arc::clone(&cache);
-        let k_del3 = key.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = c_del3.delete(&k_del3).await;
-        }));
-    }
-
-    for h in handles {
-        let _ = h.await;
-    }
+    exercise_get_contention(GetContention::ShortLivedSeed).await;
 }
 
 // ── CacheInner evict_oldest on empty cache ────────────────────────────
