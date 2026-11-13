@@ -15,7 +15,7 @@ use crate::{
     ServerError,
     chunk_store::chunk_object_key,
     download_stream::{
-        ServerByteStream, VerifiedXorb, collect_file_record_bytes, file_record_byte_stream,
+        ServerByteStream, VerifiedXorb, collect_file_record_bytes, file_record_response_stream,
         object_byte_range_stream, object_byte_stream, prepare_xorb_byte_range,
     },
     error::IndexError,
@@ -174,27 +174,13 @@ impl super::PostgresBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
-        let total_bytes = record.total_bytes;
-        crate::metrics::record_object_read_by_repr(record.storage_repr.as_str(), total_bytes);
-        let stream = if record.storage_layout() == FileRecordStorageLayout::ReferencedObjectTerms {
-            if range.is_some() {
-                return Err(ServerError::RangeNotSatisfiable);
-            }
-            crate::server_frontend::xet::referenced_file_record_byte_stream(
-                self.object_store(),
-                record,
-                self.stream_work_pool.clone(),
-            )?
-        } else {
-            file_record_byte_stream(
-                self.object_store(),
-                record,
-                range,
-                self.stream_work_pool.clone(),
-            )
-            .await?
-        };
-        Ok((stream, total_bytes))
+        file_record_response_stream(
+            self.object_store(),
+            record,
+            range,
+            self.stream_work_pool.clone(),
+        )
+        .await
     }
 
     /// Verifies that the local object store and required Postgres metadata tables are

@@ -6,7 +6,7 @@ use std::{
 
 use axum::body::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
-use shardline_index::{FileRecord, parse_xet_hash_hex};
+use shardline_index::{FileRecord, FileRecordStorageLayout, parse_xet_hash_hex};
 use shardline_protocol::ByteRange;
 use shardline_server_core::MaterializedObject;
 use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore};
@@ -61,6 +61,26 @@ fn retain_memory_permit_for_materialized_object(
 }
 
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
+
+/// Selects the download representation after the backend resolves an authorized record.
+pub(crate) async fn file_record_response_stream(
+    object_store: ServerObjectStore,
+    record: FileRecord,
+    range: Option<ByteRange>,
+    pool: BoundedPool,
+) -> Result<(ServerByteStream, u64), ServerError> {
+    let total_bytes = record.total_bytes;
+    crate::metrics::record_object_read_by_repr(record.storage_repr.as_str(), total_bytes);
+    let stream = if record.storage_layout() == FileRecordStorageLayout::ReferencedObjectTerms {
+        if range.is_some() {
+            return Err(ServerError::RangeNotSatisfiable);
+        }
+        crate::server_frontend::xet::referenced_file_record_byte_stream(object_store, record, pool)?
+    } else {
+        file_record_byte_stream(object_store, record, range, pool).await?
+    };
+    Ok((stream, total_bytes))
+}
 
 struct SerializedXorbStreamState {
     file: XorbReadFile,
