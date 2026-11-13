@@ -55,7 +55,7 @@ md-5.workspace = true
 multer.workspace = true
 crc-fast = "1.10"
 sha1.workspace = true
-reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 sha2.workspace = true
 hmac.workspace = true
 sqlx = { workspace = true, features = [
@@ -69,7 +69,7 @@ tempfile.workspace = true
 quick-xml.workspace = true
 toml.workspace = true
 dotenvy.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 url.workspace = true
 percent-encoding = "2.3"
@@ -81,6 +81,7 @@ lz4_flex = "0.11"
 zeroize.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 shardline-cas = { workspace = true, features = ["test-fault-injection"] }
 shardline-storage = { workspace = true, features = ["test-fault-injection"] }
 dotenvy.workspace = true
@@ -88,7 +89,7 @@ ed25519-dalek.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
 proptest.workspace = true
 redis = { workspace = true, features = ["tokio-rustls-comp"] }
-reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls", "stream"] }
 rusqlite = { workspace = true, features = ["bundled"] }
 shardline-test-support.workspace = true
 wiremock = "0.6"
