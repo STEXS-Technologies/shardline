@@ -90,6 +90,7 @@ mod hub_secret_upgrade;
 mod ingest_bench;
 mod jwks_provider;
 mod jwt_algorithm;
+mod jwt_keys;
 mod lifecycle_repair;
 mod local_backend;
 mod local_fs;

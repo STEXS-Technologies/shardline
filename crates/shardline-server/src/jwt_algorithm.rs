@@ -68,12 +68,6 @@ impl JwtAlgorithm {
         )
     }
 
-    /// Returns `true` for symmetric shared-secret algorithms (HS*).
-    #[must_use]
-    pub const fn is_symmetric(self) -> bool {
-        matches!(self, Self::Hs256 | Self::Hs384 | Self::Hs512)
-    }
-
     /// Returns `true` for the unauthenticated `none` algorithm.
     #[must_use]
     pub const fn is_none(self) -> bool {
@@ -165,7 +159,6 @@ mod tests {
         ] {
             let parsed: JwtAlgorithm = value.parse().expect("valid algorithm");
             assert!(parsed.is_asymmetric(), "{value:?} should be asymmetric");
-            assert!(!parsed.is_symmetric(), "{value:?} should not be symmetric");
             assert!(!parsed.is_none(), "{value:?} should not be none");
         }
     }
@@ -174,7 +167,6 @@ mod tests {
     fn classifies_symmetric_algorithms() {
         for value in ["HS256", "HS384", "HS512"] {
             let parsed: JwtAlgorithm = value.parse().expect("valid algorithm");
-            assert!(parsed.is_symmetric(), "{value:?} should be symmetric");
             assert!(
                 !parsed.is_asymmetric(),
                 "{value:?} should not be asymmetric"
@@ -188,6 +180,5 @@ mod tests {
         let parsed: JwtAlgorithm = "none".parse().expect("valid algorithm");
         assert!(parsed.is_none(), "none should be none");
         assert!(!parsed.is_asymmetric(), "none should not be asymmetric");
-        assert!(!parsed.is_symmetric(), "none should not be symmetric");
     }
 }
