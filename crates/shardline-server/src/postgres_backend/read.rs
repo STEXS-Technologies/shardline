@@ -21,7 +21,7 @@ use crate::{
     error::IndexError,
     object_store::{reconstruct_file_record_bytes, visit_object_prefix},
     record_store::parse_stored_file_record_bytes,
-    validation::{ensure_directory, validate_content_hash, validate_identifier},
+    validation::ensure_directory,
     xet_adapter::{
         FileReconstructionResponse, build_reconstruction_response, resolve_dedupe_shard_object,
         xorb_object_key,
@@ -509,37 +509,18 @@ impl super::PostgresBackend {
         repository_references_hash_in_scope(&self.record_store, hash_hex, repository_scope).await
     }
 
-    fn file_record_locator(
-        &self,
-        file_id: &str,
-        content_hash: Option<&str>,
-        repository_scope: Option<&RepositoryScope>,
-    ) -> Result<shardline_index::PostgresRecordLocator, ServerError> {
-        validate_identifier(file_id)?;
-        let probe = FileRecord {
-            file_id: file_id.to_owned(),
-            content_hash: content_hash.unwrap_or_default().to_owned(),
-            total_bytes: 0,
-            chunk_size: 0,
-            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
-            repository_scope: repository_scope.cloned(),
-            chunks: Vec::new(),
-        };
-        Ok(if let Some(content_hash) = content_hash {
-            validate_content_hash(content_hash)?;
-            self.record_store.version_record_locator(&probe)
-        } else {
-            self.record_store.latest_record_locator(&probe)
-        })
-    }
-
     pub(crate) async fn read_record(
         &self,
         file_id: &str,
         content_hash: Option<&str>,
         repository_scope: Option<&RepositoryScope>,
     ) -> Result<FileRecord, ServerError> {
-        let locator = self.file_record_locator(file_id, content_hash, repository_scope)?;
+        let locator = crate::record_store::file_record_locator(
+            &self.record_store,
+            file_id,
+            content_hash,
+            repository_scope,
+        )?;
         let bytes = RecordTraversal::read_record_bytes(&self.record_store, &locator)
             .await
             .map_err(map_record_store_error)?;
@@ -554,7 +535,12 @@ impl super::PostgresBackend {
         content_hash: Option<&str>,
         repository_scope: Option<&RepositoryScope>,
     ) -> Result<FileRecord, ServerError> {
-        let locator = self.file_record_locator(file_id, content_hash, repository_scope)?;
+        let locator = crate::record_store::file_record_locator(
+            &self.record_store,
+            file_id,
+            content_hash,
+            repository_scope,
+        )?;
         let bytes = if let Some(mut connection) =
             crate::maintenance_barrier::RequestSession::connection_for(
                 &self.request_session_identity,

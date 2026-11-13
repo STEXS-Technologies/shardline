@@ -6,8 +6,7 @@ use shardline_protocol::RepositoryScope;
 use crate::{
     ServerError,
     error::IndexError,
-    record_store::parse_stored_file_record_bytes,
-    validation::{validate_content_hash, validate_identifier},
+    record_store::{file_record_locator, parse_stored_file_record_bytes},
 };
 
 pub(super) async fn read_record(
@@ -16,33 +15,8 @@ pub(super) async fn read_record(
     content_hash: Option<&str>,
     repository_scope: Option<&RepositoryScope>,
 ) -> Result<FileRecord, ServerError> {
-    validate_identifier(file_id)?;
-    let bytes = if let Some(hash) = content_hash {
-        validate_content_hash(hash)?;
-        let record = FileRecord {
-            file_id: file_id.to_owned(),
-            content_hash: hash.to_owned(),
-            total_bytes: 0,
-            chunk_size: 0,
-            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
-            repository_scope: repository_scope.cloned(),
-            chunks: Vec::new(),
-        };
-        let locator = RecordTraversal::version_record_locator(record_store, &record);
-        read_record_bytes(record_store, &locator).await?
-    } else {
-        let record = FileRecord {
-            file_id: file_id.to_owned(),
-            content_hash: String::new(),
-            total_bytes: 0,
-            chunk_size: 0,
-            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
-            repository_scope: repository_scope.cloned(),
-            chunks: Vec::new(),
-        };
-        let locator = RecordTraversal::latest_record_locator(record_store, &record);
-        read_record_bytes(record_store, &locator).await?
-    };
+    let locator = file_record_locator(record_store, file_id, content_hash, repository_scope)?;
+    let bytes = read_record_bytes(record_store, &locator).await?;
     parse_stored_file_record_bytes(&bytes)
 }
 
