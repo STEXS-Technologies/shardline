@@ -392,3 +392,25 @@ fn decoding_keys_reject_unsupported_algorithms() {
         );
     }
 }
+
+#[test]
+fn secure_url_policy() {
+    for (url, allowed) in [
+        ("", false),
+        ("ftp://example.com/jwks", false),
+        ("ftp://keys.example.com/jwks", false),
+        ("http://127.0.0.1:8080/jwks", true),
+        ("http://[::1]:8080/jwks", true),
+        ("http://accounts.example.com", false),
+        ("http://attacker.example.com/jwks", false),
+        ("http://keys.example.com/jwks", false),
+        ("http://localhost:8080/jwks", true),
+        ("https://accounts.example.com", true),
+        ("https://accounts.example.com/.well-known/jwks", true),
+        ("https://keys.example.com/jwks", true),
+        ("https://keys.example.com:8443/jwks", true),
+        ("not-a-url", false),
+    ] {
+        assert_eq!(is_secure_url(url), allowed, "URL {url:?}");
+    }
+}

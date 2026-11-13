@@ -816,164 +816,104 @@ mod tests {
         assert_eq!(disco.issuer, "https://example.com");
     }
 
-    // ── is_secure_url ─────────────────────────────────────────────────────
-
+    /// Origins include their port: default ports normalize, explicit ports
+    /// must match, and a portless allowlist entry pins the scheme default.
     #[test]
-    fn is_secure_url_accepts_https() {
-        assert!(is_secure_url("https://accounts.example.com"));
-        assert!(is_secure_url(
-            "https://accounts.example.com/.well-known/jwks"
-        ));
-    }
-
-    #[test]
-    fn is_secure_url_rejects_non_https_non_loopback() {
-        assert!(!is_secure_url("http://accounts.example.com"));
-        assert!(!is_secure_url("http://attacker.example.com/jwks"));
-        assert!(!is_secure_url("ftp://example.com/jwks"));
-        assert!(!is_secure_url("not-a-url"));
-    }
-
-    #[test]
-    fn is_secure_url_accepts_loopback_http() {
-        assert!(is_secure_url("http://127.0.0.1:8080/jwks"));
-        assert!(is_secure_url("http://localhost:8080/jwks"));
-        assert!(is_secure_url("http://[::1]:8080/jwks"));
-    }
-
-    // ── jwks_host_is_allowed (F-83) ──────────────────────────────────────
-
-    #[test]
-    fn jwks_host_allowed_accepts_issuer_host() {
-        assert!(jwks_host_is_allowed(
-            "https://accounts.example.com/.well-known/jwks",
-            "https://accounts.example.com",
-            &[],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_rejects_foreign_host_without_allowlist() {
-        assert!(!jwks_host_is_allowed(
-            "https://attacker.example.com/jwks",
-            "https://accounts.example.com",
-            &[],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_accepts_allowlisted_host() {
-        // Google legitimately cross-hosts JWKS onto www.googleapis.com while
-        // the issuer is accounts.google.com — the allowlist is the escape
-        // hatch for such setups.
-        assert!(jwks_host_is_allowed(
-            "https://www.googleapis.com/oauth2/v3/certs",
-            "https://accounts.google.com",
-            &["www.googleapis.com".to_owned()],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_allowlist_matching_is_case_insensitive() {
-        assert!(jwks_host_is_allowed(
-            "https://www.googleapis.com/oauth2/v3/certs",
-            "https://accounts.google.com",
-            &["WWW.GOOGLEAPIS.COM".to_owned()],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_rejects_host_not_in_allowlist() {
-        assert!(!jwks_host_is_allowed(
-            "https://evil.example.com/jwks",
-            "https://accounts.example.com",
-            &["trusted.example.com".to_owned()],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_rejects_unparsable_urls() {
-        assert!(!jwks_host_is_allowed(
-            "not-a-url",
-            "https://accounts.example.com",
-            &[],
-        ));
-        assert!(!jwks_host_is_allowed(
-            "https://accounts.example.com/.well-known/jwks",
-            "not-a-url",
-            &[],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_accepts_issuer_host_explicit_scheme_default_port() {
-        // F-96: an explicit port equal to the scheme default (443 for https)
-        // is treated the same as an absent port.
-        assert!(jwks_host_is_allowed(
-            "https://accounts.example.com:443/.well-known/jwks",
-            "https://accounts.example.com",
-            &[],
-        ));
-        assert!(jwks_host_is_allowed(
-            "https://accounts.example.com/.well-known/jwks",
-            "https://accounts.example.com:443",
-            &[],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_rejects_same_host_non_default_port() {
-        // F-96 regression: the port is part of the pinned origin. A discovery
-        // document that echoes the issuer host on an arbitrary port
-        // (same-host SSRF / port-scan oracle) must be rejected.
-        assert!(!jwks_host_is_allowed(
-            "https://accounts.example.com:8443/.well-known/jwks",
-            "https://accounts.example.com",
-            &[],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_accepts_issuer_host_matching_non_default_port() {
-        // When the pinned issuer itself uses a non-default port, the jwks_uri
-        // must carry the exact same port.
-        assert!(jwks_host_is_allowed(
-            "https://accounts.example.com:8443/.well-known/jwks",
-            "https://accounts.example.com:8443",
-            &[],
-        ));
-        assert!(!jwks_host_is_allowed(
-            "https://accounts.example.com/.well-known/jwks",
-            "https://accounts.example.com:8443",
-            &[],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_accepts_allowlisted_host_with_port() {
-        // Allowlist entries may carry ports; the port is compared exactly.
-        assert!(jwks_host_is_allowed(
-            "https://www.googleapis.com:8443/oauth2/v3/certs",
-            "https://accounts.google.com",
-            &["www.googleapis.com:8443".to_owned()],
-        ));
-    }
-
-    #[test]
-    fn jwks_host_allowed_portless_allowlist_entry_pins_scheme_default_port() {
-        // A portless allowlist entry pins the scheme-default port, so a
-        // non-default port on an allowlisted host is rejected rather than
-        // silently accepted.
-        assert!(!jwks_host_is_allowed(
-            "https://www.googleapis.com:8443/oauth2/v3/certs",
-            "https://accounts.google.com",
-            &["www.googleapis.com".to_owned()],
-        ));
-        assert!(jwks_host_is_allowed(
-            "https://www.googleapis.com/oauth2/v3/certs",
-            "https://accounts.google.com",
-            &["www.googleapis.com".to_owned()],
-        ));
+    fn jwks_host_allowlist_policy() {
+        let cases: &[(&str, &str, &[String], bool)] = &[
+            (
+                "https://accounts.example.com/.well-known/jwks",
+                "https://accounts.example.com",
+                &[],
+                true,
+            ),
+            (
+                "https://attacker.example.com/jwks",
+                "https://accounts.example.com",
+                &[],
+                false,
+            ),
+            (
+                "https://www.googleapis.com/oauth2/v3/certs",
+                "https://accounts.google.com",
+                &["www.googleapis.com".to_owned()],
+                true,
+            ),
+            (
+                "https://www.googleapis.com/oauth2/v3/certs",
+                "https://accounts.google.com",
+                &["WWW.GOOGLEAPIS.COM".to_owned()],
+                true,
+            ),
+            (
+                "https://evil.example.com/jwks",
+                "https://accounts.example.com",
+                &["trusted.example.com".to_owned()],
+                false,
+            ),
+            ("not-a-url", "https://accounts.example.com", &[], false),
+            (
+                "https://accounts.example.com/.well-known/jwks",
+                "not-a-url",
+                &[],
+                false,
+            ),
+            (
+                "https://accounts.example.com:443/.well-known/jwks",
+                "https://accounts.example.com",
+                &[],
+                true,
+            ),
+            (
+                "https://accounts.example.com/.well-known/jwks",
+                "https://accounts.example.com:443",
+                &[],
+                true,
+            ),
+            (
+                "https://accounts.example.com:8443/.well-known/jwks",
+                "https://accounts.example.com",
+                &[],
+                false,
+            ),
+            (
+                "https://accounts.example.com:8443/.well-known/jwks",
+                "https://accounts.example.com:8443",
+                &[],
+                true,
+            ),
+            (
+                "https://accounts.example.com/.well-known/jwks",
+                "https://accounts.example.com:8443",
+                &[],
+                false,
+            ),
+            (
+                "https://www.googleapis.com:8443/oauth2/v3/certs",
+                "https://accounts.google.com",
+                &["www.googleapis.com:8443".to_owned()],
+                true,
+            ),
+            (
+                "https://www.googleapis.com:8443/oauth2/v3/certs",
+                "https://accounts.google.com",
+                &["www.googleapis.com".to_owned()],
+                false,
+            ),
+            (
+                "https://www.googleapis.com/oauth2/v3/certs",
+                "https://accounts.google.com",
+                &["www.googleapis.com".to_owned()],
+                true,
+            ),
+        ];
+        for &(jwks_uri, issuer, allowlist, allowed) in cases {
+            assert_eq!(
+                jwks_host_is_allowed(jwks_uri, issuer, allowlist),
+                allowed,
+                "JWKS {jwks_uri:?}, issuer {issuer:?}, allowlist {allowlist:?}"
+            );
+        }
     }
 
     // ── OidcProvider construction helpers ────────────────────────────────

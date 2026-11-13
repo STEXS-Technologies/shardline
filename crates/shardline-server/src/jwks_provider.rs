@@ -519,68 +519,26 @@ mod tests {
     // ── parse_cache_max_age ──────────────────────────────────────────────
 
     #[test]
-    fn parse_cache_max_age_valid() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("cache-control", "max-age=300".parse().unwrap());
-        assert_eq!(
-            parse_cache_max_age(&headers),
-            Some(Duration::from_secs(300))
-        );
-    }
-
-    #[test]
-    fn parse_cache_max_age_missing_header() {
-        let headers = reqwest::header::HeaderMap::new();
-        assert_eq!(parse_cache_max_age(&headers), None);
-    }
-
-    #[test]
-    fn parse_cache_max_age_unrelated_directive() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("cache-control", "no-cache".parse().unwrap());
-        assert_eq!(parse_cache_max_age(&headers), None);
-    }
-
-    #[test]
-    fn parse_cache_max_age_below_min_clamped() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("cache-control", "max-age=30".parse().unwrap());
-        // Clamped to MIN_JWKS_REFRESH_INTERVAL (60s)
-        assert_eq!(
-            parse_cache_max_age(&headers),
-            Some(MIN_JWKS_REFRESH_INTERVAL)
-        );
-    }
-
-    #[test]
-    fn parse_cache_max_age_above_max_clamped() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("cache-control", "max-age=7200".parse().unwrap());
-        // Clamped to MAX_JWKS_REFRESH_INTERVAL (3600s)
-        assert_eq!(
-            parse_cache_max_age(&headers),
-            Some(MAX_JWKS_REFRESH_INTERVAL)
-        );
-    }
-
-    #[test]
-    fn parse_cache_max_age_multiple_directives() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "cache-control",
-            "public, max-age=300, must-revalidate".parse().unwrap(),
-        );
-        assert_eq!(
-            parse_cache_max_age(&headers),
-            Some(Duration::from_secs(300))
-        );
-    }
-
-    #[test]
-    fn parse_cache_max_age_invalid_max_age_value() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("cache-control", "max-age=not-a-number".parse().unwrap());
-        assert_eq!(parse_cache_max_age(&headers), None);
+    fn parse_cache_max_age_policy() {
+        for (value, seconds) in [
+            (None, None),
+            (Some("max-age=300"), Some(300)),
+            (Some("no-cache"), None),
+            (Some("max-age=30"), Some(60)),
+            (Some("max-age=7200"), Some(3600)),
+            (Some("public, max-age=300, must-revalidate"), Some(300)),
+            (Some("max-age=not-a-number"), None),
+        ] {
+            let mut headers = reqwest::header::HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert("cache-control", value.parse().unwrap());
+            }
+            assert_eq!(
+                parse_cache_max_age(&headers),
+                seconds.map(Duration::from_secs),
+                "Cache-Control {value:?}"
+            );
+        }
     }
 
     // ── JwksProvider construction helpers ─────────────────────────────────
@@ -594,30 +552,6 @@ mod tests {
             background_handle: Arc::new(RefreshTask::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    // ── is_secure_jwks_url (F-95) ────────────────────────────────────────
-
-    #[test]
-    fn is_secure_jwks_url_accepts_https() {
-        assert!(is_secure_jwks_url("https://keys.example.com/jwks"));
-        assert!(is_secure_jwks_url("https://keys.example.com:8443/jwks"));
-    }
-
-    #[test]
-    fn is_secure_jwks_url_accepts_loopback_http() {
-        assert!(is_secure_jwks_url("http://127.0.0.1:8080/jwks"));
-        assert!(is_secure_jwks_url("http://localhost:8080/jwks"));
-        assert!(is_secure_jwks_url("http://[::1]:8080/jwks"));
-    }
-
-    #[test]
-    fn is_secure_jwks_url_rejects_non_https_non_loopback() {
-        assert!(!is_secure_jwks_url("http://keys.example.com/jwks"));
-        assert!(!is_secure_jwks_url("http://attacker.example.com/jwks"));
-        assert!(!is_secure_jwks_url("ftp://keys.example.com/jwks"));
-        assert!(!is_secure_jwks_url("not-a-url"));
-        assert!(!is_secure_jwks_url(""));
     }
 
     // ── JwksProvider::new error path ─────────────────────────────────────
