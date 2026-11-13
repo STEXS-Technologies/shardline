@@ -1,14 +1,11 @@
 use std::{num::NonZeroUsize, path::PathBuf};
 
-use shardline_index::{
-    PostgresIndexStore, PostgresRecordStore, RepoKey, RevisionRecord, TreeEntry, TreeKey, TreeStore,
-};
-use shardline_protocol::unix_now_seconds_lossy;
+use shardline_index::{PostgresIndexStore, PostgresRecordStore};
 
 use super::connect_postgres_metadata_pool;
 use crate::{
     ServerError, ServerFrontend, config::default_upload_max_in_flight_chunks,
-    object_store::ServerObjectStore, validation::validate_content_hash,
+    object_store::ServerObjectStore,
 };
 
 /// Server backend that keeps file metadata in Postgres and object bytes in the selected store.
@@ -208,162 +205,6 @@ impl PostgresBackend {
             |file_id, scope| async move { self.read_record(&file_id, None, scope.as_ref()).await },
         )
         .await
-    }
-
-    /// Resolves a single canonical path to its tree entry, if any.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index lookup fails.
-    pub(crate) async fn resolve_tree_path(
-        &self,
-        key: &TreeKey,
-        path: &str,
-    ) -> Result<Option<TreeEntry>, ServerError> {
-        Ok(self.index_store.tree_entry(key, path).await?)
-    }
-
-    /// Scans raw tree rows for a revision under `prefix`, resuming after `cursor`,
-    /// returning at most `limit` raw rows ordered by path.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index scan fails.
-    pub(crate) async fn scan_tree_raw(
-        &self,
-        key: &TreeKey,
-        prefix: &str,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<TreeEntry>, ServerError> {
-        Ok(self
-            .index_store
-            .scan_tree(key, prefix, cursor, limit)
-            .await?)
-    }
-
-    /// Validates the referenced file record, then atomically checks repository
-    /// capacity and publishes the revision and path mapping. Storage transactions
-    /// serialize registration with revision deletion/pruning across connections.
-    /// Existing revision creation time is preserved while update time refreshes.
-    /// An existing revision remains usable at the revision cap; the tree-entry
-    /// cap retains the existing rule that refreshes at full capacity are rejected.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError::UnregisteredFile`] when no record exists in the revision
-    /// scope, [`ServerError::InvalidContentHash`] for a malformed `file_id`,
-    /// [`ServerError::TooManyRevisions`] at the per-repo revision or tree-entry cap,
-    /// or the adapter error when persistence fails.
-    pub(crate) async fn register_tree_path(
-        &self,
-        key: &TreeKey,
-        path: &str,
-        file_id: &str,
-        repository_scope: Option<&shardline_protocol::RepositoryScope>,
-        max_revisions_per_repo: NonZeroUsize,
-        max_tree_entries_per_repo: NonZeroUsize,
-    ) -> Result<crate::backend::RegisterPathOutcome, ServerError> {
-        validate_content_hash(file_id)?;
-        let record = match self.read_record(file_id, None, repository_scope).await {
-            Ok(record) => record,
-            Err(ServerError::NotFound) => {
-                return Err(ServerError::UnregisteredFile(key.revision.clone()));
-            }
-            Err(error) => return Err(error),
-        };
-        let now = unix_now_seconds_lossy();
-        let entry = TreeEntry {
-            provider: key.provider.clone(),
-            owner: key.owner.clone(),
-            repo: key.repo.clone(),
-            revision: key.revision.clone(),
-            path: path.to_owned(),
-            file_id: file_id.to_owned(),
-            size_bytes: record.total_bytes,
-            updated_at_unix_seconds: now,
-        };
-        let outcome = match self
-            .index_store
-            .register_tree_entry(
-                &entry,
-                max_revisions_per_repo.get(),
-                max_tree_entries_per_repo.get(),
-            )
-            .await?
-        {
-            shardline_index::TreeRegistrationOutcome::Registered(outcome) => outcome,
-            shardline_index::TreeRegistrationOutcome::LimitExceeded => {
-                return Err(ServerError::TooManyRevisions);
-            }
-        };
-        Ok(crate::backend::RegisterPathOutcome {
-            entry,
-            created: outcome.created,
-        })
-    }
-
-    /// Deletes one path mapping (or the path and every descendant when `recursive`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index deletion fails.
-    pub(crate) async fn delete_tree_path(
-        &self,
-        key: &TreeKey,
-        path: &str,
-        recursive: bool,
-    ) -> Result<u64, ServerError> {
-        Ok(self
-            .index_store
-            .delete_tree_entries(key, path, recursive)
-            .await?)
-    }
-
-    /// Lists the revision registry for a repository, resuming after `cursor`
-    /// and returning at most `limit` rows (bounded in the index backend).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index lookup fails.
-    pub(crate) async fn list_revisions(
-        &self,
-        key: &RepoKey,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<RevisionRecord>, ServerError> {
-        Ok(self.index_store.list_revisions(key, cursor, limit).await?)
-    }
-
-    /// Creates a revision registry row, returning whether it was newly created.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index insertion fails.
-    pub(crate) async fn create_revision(
-        &self,
-        rev: &RevisionRecord,
-        max_revisions: usize,
-    ) -> Result<shardline_index::RevisionCreationOutcome, ServerError> {
-        Ok(self
-            .index_store
-            .create_revision_bounded(rev, max_revisions)
-            .await?)
-    }
-
-    /// Deletes a revision and all of its tree entries, returning whether the revision
-    /// previously existed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index deletion fails.
-    pub(crate) async fn delete_revision(
-        &self,
-        key: &RepoKey,
-        rev: &str,
-    ) -> Result<bool, ServerError> {
-        let removed = self.index_store.delete_revision(key, rev).await?;
-        Ok(removed > 0)
     }
 }
 

@@ -10,9 +10,9 @@ use axum::body::Bytes;
 use sha2::{Digest, Sha256};
 use shardline_index::{
     CreateResumableSessionOutcome, FileRecord, OciObjectKey, OciTagEntry,
-    PublishResumablePartOutcome, RepoKey, ResourceLockKey, ResumableCompletionFence,
-    ResumablePartRange, ResumableSession, ResumableSessionPart, ResumableSessionState,
-    RevisionRecord, S3ObjectEntry, S3PublishCondition, TreeEntry, TreeKey,
+    PublishResumablePartOutcome, ResourceLockKey, ResumableCompletionFence, ResumablePartRange,
+    ResumableSession, ResumableSessionPart, ResumableSessionState, S3ObjectEntry,
+    S3PublishCondition,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_server_core::protocol_support::protocol_object_file_id;
@@ -41,6 +41,7 @@ mod delta;
 mod hub_read;
 mod lfs_locks;
 mod protocol_index;
+mod tree;
 mod xorb_authorization;
 
 #[cfg(test)]
@@ -1768,113 +1769,6 @@ impl ServerBackend {
                     .delete_file_reference_if_latest(file_id, expected_content_hash)
                     .await
             }
-        }
-    }
-
-    pub(crate) async fn resolve_tree_path(
-        &self,
-        key: &TreeKey,
-        path: &str,
-    ) -> Result<Option<TreeEntry>, ServerError> {
-        match self {
-            Self::Local(backend) => backend.resolve_tree_path(key, path).await,
-            Self::Postgres(backend) => backend.resolve_tree_path(key, path).await,
-        }
-    }
-
-    pub(crate) async fn scan_tree_raw(
-        &self,
-        key: &TreeKey,
-        prefix: &str,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<TreeEntry>, ServerError> {
-        match self {
-            Self::Local(backend) => backend.scan_tree_raw(key, prefix, cursor, limit).await,
-            Self::Postgres(backend) => backend.scan_tree_raw(key, prefix, cursor, limit).await,
-        }
-    }
-
-    pub(crate) async fn register_tree_path(
-        &self,
-        key: &TreeKey,
-        path: &str,
-        file_id: &str,
-        scope: Option<&RepositoryScope>,
-        max_revisions_per_repo: NonZeroUsize,
-        max_tree_entries_per_repo: NonZeroUsize,
-    ) -> Result<RegisterPathOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => {
-                backend
-                    .register_tree_path(
-                        key,
-                        path,
-                        file_id,
-                        scope,
-                        max_revisions_per_repo,
-                        max_tree_entries_per_repo,
-                    )
-                    .await
-            }
-            Self::Postgres(backend) => {
-                backend
-                    .register_tree_path(
-                        key,
-                        path,
-                        file_id,
-                        scope,
-                        max_revisions_per_repo,
-                        max_tree_entries_per_repo,
-                    )
-                    .await
-            }
-        }
-    }
-
-    pub(crate) async fn delete_tree_path(
-        &self,
-        key: &TreeKey,
-        path: &str,
-        recursive: bool,
-    ) -> Result<u64, ServerError> {
-        match self {
-            Self::Local(backend) => backend.delete_tree_path(key, path, recursive).await,
-            Self::Postgres(backend) => backend.delete_tree_path(key, path, recursive).await,
-        }
-    }
-
-    pub(crate) async fn list_revisions(
-        &self,
-        key: &RepoKey,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<RevisionRecord>, ServerError> {
-        match self {
-            Self::Local(backend) => backend.list_revisions(key, cursor, limit).await,
-            Self::Postgres(backend) => backend.list_revisions(key, cursor, limit).await,
-        }
-    }
-
-    pub(crate) async fn create_revision(
-        &self,
-        rev: &RevisionRecord,
-        max_revisions: usize,
-    ) -> Result<shardline_index::RevisionCreationOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => backend.create_revision(rev, max_revisions).await,
-            Self::Postgres(backend) => backend.create_revision(rev, max_revisions).await,
-        }
-    }
-
-    pub(crate) async fn delete_revision(
-        &self,
-        key: &RepoKey,
-        rev: &str,
-    ) -> Result<bool, ServerError> {
-        match self {
-            Self::Local(backend) => backend.delete_revision(key, rev).await,
-            Self::Postgres(backend) => backend.delete_revision(key, rev).await,
         }
     }
 }
