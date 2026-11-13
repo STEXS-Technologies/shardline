@@ -1,8 +1,8 @@
 use std::{num::NonZeroUsize, path::PathBuf, sync::Arc};
 
 use shardline_index::{
-    FileChunkRecord, LocalIndexStore, LocalRecordStore, OciObjectKey, OciObjectStore, OciTagEntry,
-    OciTagStore, ReconstructionStore, RecordTraversal, RepoKey, RevisionRecord, S3ObjectEntry,
+    LocalIndexStore, LocalRecordStore, OciObjectKey, OciObjectStore, OciTagEntry, OciTagStore,
+    ReconstructionStore, RecordTraversal, RepoKey, RevisionRecord, S3ObjectEntry,
     S3ObjectIndexStore, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
@@ -851,130 +851,18 @@ async fn transition_intent_for_recovery(
 /// assert_eq!(hash.hex_string().len(), 64);
 /// assert_eq!(hash, chunk_hash(b"hello world"));
 /// ```
-#[must_use]
-pub fn chunk_hash(bytes: &[u8]) -> shardline_protocol::ShardlineHash {
-    let digest = blake3::hash(bytes);
-    shardline_protocol::ShardlineHash::from_bytes(*digest.as_bytes())
-}
-
-pub(crate) fn content_hash(
-    total_bytes: u64,
-    chunk_size: u64,
-    chunks: &[FileChunkRecord],
-) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&total_bytes.to_le_bytes());
-    hasher.update(&chunk_size.to_le_bytes());
-    for chunk in chunks {
-        hasher.update(chunk.hash.as_bytes());
-        hasher.update(&chunk.offset.to_le_bytes());
-        hasher.update(&chunk.length.to_le_bytes());
-    }
-    hasher.finalize().to_hex().to_string()
-}
+pub use shardline_server_core::chunk_hash;
+pub(crate) use shardline_server_core::content_hash;
 
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
 
-    use shardline_index::{FileChunkRecord, UploadIntent, UploadIntentState, UploadIntentStore};
+    use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
     use shardline_protocol::ShardlineHash;
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
     use super::LocalBackend;
-    use super::{chunk_hash, content_hash};
-
-    #[test]
-    fn chunk_hash_is_deterministic() {
-        let data = b"hello world";
-        let hash1 = chunk_hash(data);
-        let hash2 = chunk_hash(data);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn chunk_hash_differs_for_different_inputs() {
-        let hash1 = chunk_hash(b"hello");
-        let hash2 = chunk_hash(b"world");
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn chunk_hash_returns_fixed_length() {
-        let hash = chunk_hash(b"test data");
-        assert_eq!(hash.as_bytes().len(), 32);
-    }
-
-    #[test]
-    fn chunk_hash_empty_input() {
-        let hash = chunk_hash(b"");
-        // Should still produce a valid hash
-        assert_eq!(hash.as_bytes().len(), 32);
-    }
-
-    #[test]
-    fn content_hash_is_deterministic() {
-        let chunks = [FileChunkRecord {
-            hash: "abc".to_owned(),
-            offset: 0,
-            length: 10,
-            range_start: 0,
-            range_end: 1,
-            packed_start: 0,
-            packed_end: 10,
-        }];
-        let hash1 = content_hash(10, 10, &chunks);
-        let hash2 = content_hash(10, 10, &chunks);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn content_hash_differs_for_different_chunks() {
-        let chunks_a = [FileChunkRecord {
-            hash: "abc".to_owned(),
-            offset: 0,
-            length: 10,
-            range_start: 0,
-            range_end: 1,
-            packed_start: 0,
-            packed_end: 10,
-        }];
-        let chunks_b = [FileChunkRecord {
-            hash: "def".to_owned(),
-            offset: 0,
-            length: 10,
-            range_start: 0,
-            range_end: 1,
-            packed_start: 0,
-            packed_end: 10,
-        }];
-        assert_ne!(
-            content_hash(10, 10, &chunks_a),
-            content_hash(10, 10, &chunks_b)
-        );
-    }
-
-    #[test]
-    fn content_hash_empty_chunks() {
-        let hash = content_hash(0, 0, &[]);
-        assert!(!hash.is_empty());
-        assert_eq!(hash.len(), 64); // blake3 hex is 64 chars
-    }
-
-    #[test]
-    fn content_hash_includes_total_bytes_and_chunk_size() {
-        let chunks = [FileChunkRecord {
-            hash: "abc".to_owned(),
-            offset: 0,
-            length: 10,
-            range_start: 0,
-            range_end: 1,
-            packed_start: 0,
-            packed_end: 10,
-        }];
-        // Different total_bytes should produce different hashes
-        assert_ne!(content_hash(10, 10, &chunks), content_hash(20, 10, &chunks));
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_backend_new_creates_directories() {
@@ -1480,47 +1368,5 @@ mod tests {
             "ready() with blackhole store should succeed since metadata returns Ok(None), got: {:?}",
             result.err()
         );
-    }
-
-    #[test]
-    fn content_hash_with_single_chunk() {
-        let chunks = [FileChunkRecord {
-            hash: "abc".to_owned(),
-            offset: 0,
-            length: 10,
-            range_start: 0,
-            range_end: 1,
-            packed_start: 0,
-            packed_end: 10,
-        }];
-        let hash = content_hash(10, 10, &chunks);
-        assert_eq!(hash.len(), 64); // blake3 hex
-    }
-
-    #[test]
-    fn content_hash_with_multiple_chunks() {
-        let chunks = [
-            FileChunkRecord {
-                hash: "abc".to_owned(),
-                offset: 0,
-                length: 10,
-                range_start: 0,
-                range_end: 1,
-                packed_start: 0,
-                packed_end: 10,
-            },
-            FileChunkRecord {
-                hash: "def".to_owned(),
-                offset: 10,
-                length: 20,
-                range_start: 1,
-                range_end: 2,
-                packed_start: 10,
-                packed_end: 30,
-            },
-        ];
-        let hash = content_hash(30, 10, &chunks);
-        assert_eq!(hash.len(), 64);
-        assert!(!hash.is_empty());
     }
 }

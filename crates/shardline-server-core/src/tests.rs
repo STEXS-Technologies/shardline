@@ -1344,8 +1344,9 @@ fn chunk_hash_produces_deterministic_output() {
 
 #[test]
 fn chunk_hash_returns_32_byte_hash() {
-    let hash = chunk_hash(b"test");
-    assert_eq!(hash.as_bytes().len(), 32);
+    for input in [b"".as_slice(), b"test"] {
+        assert_eq!(chunk_hash(input).as_bytes().len(), 32);
+    }
 }
 
 // ── unix_now_seconds_checked ─────────────────────────────────────────
@@ -1844,9 +1845,37 @@ fn parse_stored_file_record_error_json_display_message() {
 // ── content_hash edge cases ─────────────────────────────────────────
 
 #[test]
-fn content_hash_empty_chunks() {
-    let hash = content_hash(0, 0, &[]);
-    assert_eq!(hash.len(), 64);
+fn content_hash_empty_single_and_multiple_chunks() {
+    let chunk = shardline_index::FileChunkRecord {
+        hash: "abc".to_owned(),
+        offset: 0,
+        length: 10,
+        range_start: 0,
+        range_end: 1,
+        packed_start: 0,
+        packed_end: 10,
+    };
+    let second = shardline_index::FileChunkRecord {
+        hash: "def".to_owned(),
+        offset: 10,
+        length: 20,
+        range_start: 1,
+        range_end: 2,
+        packed_start: 10,
+        packed_end: 30,
+    };
+    for (total_bytes, chunk_size, chunks) in [
+        (0, 0, vec![]),
+        (10, 10, vec![chunk.clone()]),
+        (30, 10, vec![chunk, second]),
+    ] {
+        let hash = content_hash(total_bytes, chunk_size, &chunks);
+        assert_eq!(hash.len(), 64);
+        assert!(
+            hash.bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+    }
 }
 
 #[test]
@@ -1864,6 +1893,7 @@ fn content_hash_different_total_bytes_produces_different_hash() {
     let hash1 = content_hash(100, 10, &chunks);
     let hash2 = content_hash(200, 10, &chunks);
     assert_ne!(hash1, hash2);
+    assert_ne!(hash1, content_hash(100, 20, &chunks));
 }
 
 // ── ServerObjectStore constructors ─────────────────────────────────
