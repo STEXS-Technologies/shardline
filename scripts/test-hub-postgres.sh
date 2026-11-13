@@ -48,8 +48,14 @@ for entry in \
     url="postgres://postgres:hub-disposable-only@127.0.0.1:$port/$target"
     "$SHARDLINE_BIN" db migrate up --database-url "$url"
     export "$variable=$url"
+    # Both publication suites share a binary, but retain separate databases.
+    filter='test(postgres_)'
+    case "$target" in
+        hub_commit_bounds) filter='test(postgres_) and not test(hierarchy::)' ;;
+        hub_tree_hierarchy) target=hub_commit_bounds; filter='test(hierarchy::postgres_)' ;;
+    esac
     cargo nextest run --locked -p shardline-hub-api --test "$target" \
-        -E 'test(postgres_)' --no-fail-fast
+        -E "$filter" --no-fail-fast
 done
 
 # Keep publication contention and damaged-evidence rejection mandatory. This

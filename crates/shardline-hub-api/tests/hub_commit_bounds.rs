@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod batching;
 mod commit_publication;
+mod hierarchy;
 use axum::{
     Router,
     body::Body,
