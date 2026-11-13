@@ -4,7 +4,6 @@ use shardline_index::{
     PostgresIndexStore, PostgresRecordStore, RepoKey, RevisionRecord, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
-use shardline_reliability::verify_lifecycle_chain_ends_at;
 
 use super::connect_postgres_metadata_pool;
 use crate::{
@@ -200,216 +199,15 @@ impl PostgresBackend {
         minimum_age: std::time::Duration,
         pass: &crate::upload_intent_recovery::startup::RecoveryPass,
     ) -> Result<bool, ServerError> {
-        use shardline_index::{UploadIntentState, UploadIntentStore};
-        use shardline_storage::{AsyncObjectStore, ObjectKey};
-        use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-        let mut reconciled = 0u64;
-        let mut pending_files = false;
-        for state in &[
-            UploadIntentState::Created,
-            UploadIntentState::Storing,
-            UploadIntentState::Stored,
-            UploadIntentState::MetadataCommitted,
-        ] {
-            if pass.stopped() {
-                return Ok(pending_files);
-            }
-            let intents = match self.index_store.intents_by_state(*state).await {
-                Ok(intents) => intents,
-                Err(e) => {
-                    // If the intents table does not exist yet (no migration has created it),
-                    // there is nothing to reconcile. Log and continue.
-                    tracing::debug!("intent query skipped (table may not exist): {e}");
-                    continue;
-                }
-            };
-            for intent in &intents {
-                if pass.stopped() {
-                    return Ok(pending_files);
-                }
-                if !pass.visits(intent) {
-                    continue;
-                }
-                let reliability_events = self
-                    .index_store
-                    .reliability_events(intent.intent_id())
-                    .await?;
-                if let Err(error) =
-                    verify_lifecycle_chain_ends_at(&reliability_events, intent.state())
-                {
-                    let current = self.index_store.intent_by_id(intent.intent_id()).await?;
-                    if current
-                        .as_ref()
-                        .is_none_or(|current| current.state() != intent.state())
-                    {
-                        // Another node committed a valid transition after this
-                        // recovery scan loaded its row. The next pass must use
-                        // the authoritative state rather than rejecting startup
-                        // for a stale snapshot.
-                        continue;
-                    }
-                    return Err(ServerError::Io(std::io::Error::other(error.to_string())));
-                }
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO);
-                let age = now.saturating_sub(intent.created_at());
-                if age < minimum_age {
-                    continue;
-                }
-                tracing::warn!(
-                    intent_id = %intent.intent_id(),
-                    state = ?intent.state(),
-                    age_secs = age.as_secs(),
-                    "reconciling stuck intent"
-                );
-                let file_intent = intent.object_key().starts_with("record/");
-                if file_intent
-                    && !crate::upload_intent_recovery::file_publication_may_have_completed(intent)
-                {
-                    tracing::warn!(intent_id = %intent.intent_id(), "file upload has no Stored checkpoint; preserving unfinished intent for a fresh validated request");
-                    continue;
-                }
-                let visible_file_record = if let Some(file_id) =
-                    intent.object_key().strip_prefix("record/")
-                {
-                    let crate::upload_intent_recovery::FileRecoveryScope::Known(scope) =
-                        crate::upload_intent_recovery::file_recovery_scope(&reliability_events)
-                    else {
-                        tracing::warn!(intent_id = %intent.intent_id(), "legacy file scope cannot be verified; preserving unfinished intent");
-                        continue;
-                    };
-                    match self.read_record(file_id, None, scope.as_ref()).await {
-                        Ok(record) => {
-                            if pass.defers_file_bytes() {
-                                pending_files |= crate::upload_intent_recovery::file_record_has_expected_identity(intent, &reliability_events, &record);
-                                continue;
-                            }
-                            match crate::upload_intent_recovery::file_record_matches_intent(
-                                intent,
-                                &reliability_events,
-                                record,
-                                self.object_store(),
-                                self.stream_work_pool.clone(),
-                                pass,
-                            )
-                            .await
-                            {
-                                Ok(matches) => matches,
-                                Err(error) => {
-                                    tracing::warn!(intent_id = %intent.intent_id(), %error, "file upload verification unavailable; preserving unfinished intent");
-                                    false
-                                }
-                            }
-                        }
-                        Err(ServerError::NotFound) => false,
-                        Err(error) => return Err(error),
-                    }
-                } else {
-                    false
-                };
-                if pass.stopped() {
-                    return Ok(pending_files);
-                }
-                if visible_file_record {
-                    // The atomic file-record commit is the visibility boundary.
-                    // Walk every durable boundary so recovery remains valid even
-                    // when the process stopped while the intent was still Stored.
-                    let mut recovery_from = intent.state();
-                    for recovery_state in [
-                        UploadIntentState::Storing,
-                        UploadIntentState::Stored,
-                        UploadIntentState::MetadataCommitted,
-                        UploadIntentState::Visible,
-                    ] {
-                        if pass.stopped() {
-                            return Ok(pending_files);
-                        }
-                        let transitioned = transition_intent_for_recovery(
-                            &self.index_store,
-                            intent.intent_id(),
-                            recovery_from,
-                            recovery_state,
-                        )
-                        .await;
-                        match transitioned {
-                            Ok(true) => recovery_from = recovery_state,
-                            Ok(false) => {}
-                            Err(error) => {
-                                tracing::warn!(
-                                    intent_id = %intent.intent_id(),
-                                    %error,
-                                    "intent recovery transition failed"
-                                );
-                                return Err(error);
-                            }
-                        }
-                    }
-                    reconciled = reconciled.saturating_add(1);
-                    continue;
-                }
-                if file_intent {
-                    // This is a logical record key, not a physical CAS object.
-                    // Missing or unrelated latest metadata cannot settle it.
-                    tracing::warn!(intent_id = %intent.intent_id(), "file upload outcome cannot be verified; preserving unfinished intent for a fresh validated request");
-                    continue;
-                }
-                let target_state = match ObjectKey::parse(intent.object_key()) {
-                    Ok(key) => match AsyncObjectStore::metadata(&self.object_store, &key).await? {
-                        Some(metadata) if metadata.length() != intent.object_length()
-                            && !crate::upload_intent_recovery::native_xorb_has_equivalent_encoding(
-                                intent, self.object_store.clone(), &self.stream_work_pool,
-                            ).await? => {
-                            Some(UploadIntentState::Failed)
-                        }
-                        Some(_) if intent.state() == UploadIntentState::MetadataCommitted => {
-                            Some(UploadIntentState::Visible)
-                        }
-                        Some(_) => {
-                            // The immutable write may have committed before its
-                            // response was lost. Earlier states do not prove that
-                            // protocol metadata is visible (notably for shards),
-                            // so preserve the retryable state instead of guessing.
-                            tracing::warn!(
-                                intent_id = %intent.intent_id(),
-                                state = ?intent.state(),
-                                "durable object found for in-flight intent; preserving for retry"
-                            );
-                            None
-                        }
-                        None if crate::upload_intent_recovery::missing_request_key_is_inconclusive(intent) => {
-                            tracing::warn!(intent_id = %intent.intent_id(), "native shard request key is absent; normalized storage may use another key, preserving for validated retry");
-                            None
-                        }
-                        None => Some(UploadIntentState::Failed),
-                    },
-                    Err(_) => Some(UploadIntentState::Failed),
-                };
-                let Some(target_state) = target_state else {
-                    continue;
-                };
-                match transition_intent_for_recovery(
-                    &self.index_store,
-                    intent.intent_id(),
-                    intent.state(),
-                    target_state,
-                )
-                .await
-                {
-                    Ok(_) => reconciled = reconciled.saturating_add(1),
-                    Err(error) => tracing::warn!(
-                        intent_id = %intent.intent_id(),
-                        error = %error,
-                        "intent transition failed, skipping"
-                    ),
-                }
-            }
-        }
-        if reconciled > 0 {
-            tracing::info!(count = reconciled, "intent reconciliation complete");
-        }
-        Ok(pending_files)
+        crate::upload_intent_recovery::reconcile(
+            &self.index_store,
+            self.object_store(),
+            self.stream_work_pool.clone(),
+            minimum_age,
+            pass,
+            |file_id, scope| async move { self.read_record(&file_id, None, scope.as_ref()).await },
+        )
+        .await
     }
 
     /// Resolves a single canonical path to its tree entry, if any.
@@ -567,18 +365,6 @@ impl PostgresBackend {
         let removed = self.index_store.delete_revision(key, rev).await?;
         Ok(removed > 0)
     }
-}
-
-async fn transition_intent_for_recovery(
-    store: &shardline_index::PostgresIndexStore,
-    intent_id: &str,
-    before: shardline_index::UploadIntentState,
-    after: shardline_index::UploadIntentState,
-) -> Result<bool, ServerError> {
-    if !before.can_transition_to(after) {
-        return Ok(false);
-    }
-    Ok(shardline_index::UploadIntentStore::transition_intent(store, intent_id, after).await?)
 }
 
 #[cfg(test)]

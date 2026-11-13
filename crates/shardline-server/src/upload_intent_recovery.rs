@@ -8,6 +8,8 @@ use shardline_protocol::RepositoryScope;
 use shardline_reliability::LifecycleEvent;
 
 use crate::upload_identity::SCOPE_PREFIX;
+mod reconcile;
+pub(crate) use reconcile::reconcile;
 pub(crate) mod startup;
 mod xorb_encoding;
 pub(crate) use xorb_encoding::native_xorb_has_equivalent_encoding;
