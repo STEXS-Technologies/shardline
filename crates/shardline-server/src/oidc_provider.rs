@@ -708,183 +708,32 @@ mod tests {
 
     #[test]
     fn jwt_verification_respects_rsa_jwk_metadata_and_selects_signing_key() {
-        use jsonwebtoken::{EncodingKey, Header, encode};
-        let claims = serde_json::json!({"iss":"https://example.com", "sub":"metadata-proof", "aud":"test-audience", "scope":"read", "exp":9999999999_u64});
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some("metadata".to_owned());
-        let token = encode(
-            &header,
-            &claims,
-            &EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("local RSA fixture"),
-        )
-        .expect("signed JWT");
-        let key = test_rsa_jwk("metadata");
-        let base = serde_json::json!({"kid":"metadata", "kty":"RSA", "n":key.n, "e":key.e});
-        let make = |keys: Vec<Jwk>| {
-            make_provider(
+        crate::jwt_keys::test_support::assert_rsa_jwk_metadata_policy(|keys| {
+            let provider = make_provider(
                 "https://example.com",
                 Some("test-audience".to_owned()),
                 Some(CachedJwks {
                     keys: Arc::new(keys),
                     fetched_at: Instant::now(),
                 }),
-            )
-        };
-        for (metadata, allowed) in [
-            (serde_json::json!({}), true),
-            (
-                serde_json::json!({"use":"sig", "key_ops":["verify"], "alg":"RS256"}),
-                true,
-            ),
-            (serde_json::json!({"key_ops":["sign", "verify"]}), true),
-            (serde_json::json!({"use":"enc"}), false),
-            (serde_json::json!({"key_ops":["encrypt"]}), false),
-            (serde_json::json!({"key_ops":["sign"]}), false),
-            (serde_json::json!({"key_ops":[]}), false),
-            (serde_json::json!({"key_ops":["verify", "verify"]}), false),
-            (serde_json::json!({"key_ops":["verify", "encrypt"]}), false),
-            (
-                serde_json::json!({"use":"sig", "key_ops":["encrypt"]}),
-                false,
-            ),
-            (serde_json::json!({"alg":"RS512"}), false),
-            (serde_json::json!({"alg":"RSA-OAEP"}), false),
-        ] {
-            let mut value = base.clone();
-            for (field, value_part) in metadata.as_object().expect("metadata object") {
-                value[field] = value_part.clone();
-            }
-            let jwk: Jwk = serde_json::from_value(value).expect("JWK JSON");
-            let provider = make(vec![jwk]);
-            assert_eq!(
-                provider.verify_token(&token).is_ok(),
-                allowed,
-                "JWK metadata {metadata}"
             );
-            // A valid declared purpose must not weaken cryptographic verification.
-            let mut corrupted = token.as_bytes().to_vec();
-            let offset = corrupted.len().checked_sub(4).expect("signature byte");
-            let byte = corrupted.get_mut(offset).expect("signature byte");
-            *byte = if *byte == b'A' { b'B' } else { b'A' };
-            assert!(
-                provider
-                    .verify_token(std::str::from_utf8(&corrupted).expect("JWT ASCII"))
-                    .is_err()
-            );
-        }
-        let mut encryption = base.clone();
-        encryption["use"] = serde_json::json!("enc");
-        let mut wrong_algorithm = base.clone();
-        wrong_algorithm["alg"] = serde_json::json!("RS512");
-        let mut signing = base;
-        signing["use"] = serde_json::json!("sig");
-        signing["alg"] = serde_json::json!("RS256");
-        let keys = [encryption, wrong_algorithm, signing]
-            .into_iter()
-            .map(|value| serde_json::from_value(value).expect("JWK JSON"))
-            .collect();
-        assert!(
-            make(keys).verify_token(&token).is_ok(),
-            "ineligible same-kid keys must not shadow signing key"
-        );
+            move |token: &str| provider.verify_token(token).is_ok()
+        });
     }
 
     #[test]
     fn jwt_verification_requires_matching_ec_curve_metadata() {
-        use jsonwebtoken::{EncodingKey, Header, encode};
-        let claims = serde_json::json!({"iss":"https://example.com", "sub":"metadata-proof", "aud":"test-audience", "scope":"read", "exp":9999999999_u64});
-        let make = |keys: Vec<Jwk>| {
-            make_provider(
+        crate::jwt_keys::test_support::assert_ec_jwk_curve_policy(|keys| {
+            let provider = make_provider(
                 "https://example.com",
                 Some("test-audience".to_owned()),
                 Some(CachedJwks {
                     keys: Arc::new(keys),
                     fetched_at: Instant::now(),
                 }),
-            )
-        };
-
-        {
-            // Local synthetic ES256 fixture; never an operational signing key.
-            let pem = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgH1qSATO7+He02xGt\n7sd8J1ZU9vtd8z/QR0zrX5P2jdmhRANCAARBR606IUs63njTAEXDffW3BQZ0rG+N\nPo7ztoRDu5dA6RSblr8zAxMdBoTg+Ly8ZDuDRgGMKawWURMNUjLl2nke\n-----END PRIVATE KEY-----\n";
-            let mut header = Header::new(Algorithm::ES256);
-            header.kid = Some("curve".to_owned());
-            let token = encode(
-                &header,
-                &claims,
-                &EncodingKey::from_ec_pem(pem.as_bytes()).expect("local EC fixture"),
-            )
-            .expect("signed EC JWT");
-            for curve in [
-                None,
-                Some("P-256"),
-                Some("P-384"),
-                Some("P-521"),
-                Some("invalid"),
-            ] {
-                let mut value = serde_json::json!({"kid":"curve", "kty":"EC", "alg":"ES256", "use":"sig", "key_ops":["verify"], "x":"QUetOiFLOt540wBFw331twUGdKxvjT6O87aEQ7uXQOk", "y":"FJuWvzMDEx0GhOD4vLxkO4NGAYwprBZREw1SMuXaeR4"});
-                if let Some(curve) = curve {
-                    value["crv"] = serde_json::json!(curve);
-                }
-                let jwk: Jwk = serde_json::from_value(value).expect("EC JWK JSON");
-                let provider = make(vec![jwk]);
-                assert_eq!(
-                    provider.verify_token(&token).is_ok(),
-                    curve == Some("P-256"),
-                    "ES256 declared curve {curve:?}"
-                );
-                let mut corrupted = token.as_bytes().to_vec();
-                let offset = corrupted.len().checked_sub(4).expect("signature byte");
-                let byte = corrupted.get_mut(offset).expect("signature byte");
-                *byte = if *byte == b'A' { b'B' } else { b'A' };
-                assert!(
-                    provider
-                        .verify_token(std::str::from_utf8(&corrupted).expect("JWT ASCII"))
-                        .is_err()
-                );
-            }
-        }
-
-        {
-            // Local synthetic ES384 fixture; never an operational signing key.
-            let pem = "-----BEGIN PRIVATE KEY-----\nMIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDANM2Y5m/XXz77CWk/E\nYfKJgizMx4kzDus+kCstElM0GqmTplqihO/HY6pLoigZPCChZANiAATp4XHxidU6\noyNqpqdwq1yuhFeU8DyZ8m9iyrq6T7rEPd3UvdNXQANAjQz4rg74c5BuOMl6wKd4\nYLB9EG+4gd668oYQXY/EEvtiQ4aimM9H5GZJ7FLC2+dPQeyZr/1wpe4=\n-----END PRIVATE KEY-----\n";
-            let mut header = Header::new(Algorithm::ES384);
-            header.kid = Some("curve".to_owned());
-            let token = encode(
-                &header,
-                &claims,
-                &EncodingKey::from_ec_pem(pem.as_bytes()).expect("local EC fixture"),
-            )
-            .expect("signed EC JWT");
-            for curve in [
-                None,
-                Some("P-256"),
-                Some("P-384"),
-                Some("P-521"),
-                Some("invalid"),
-            ] {
-                let mut value = serde_json::json!({"kid":"curve", "kty":"EC", "alg":"ES384", "use":"sig", "key_ops":["verify"], "x":"6eFx8YnVOqMjaqancKtcroRXlPA8mfJvYsq6uk-6xD3d1L3TV0ADQI0M-K4O-HOQ", "y":"bjjJesCneGCwfRBvuIHeuvKGEF2PxBL7YkOGopjPR-RmSexSwtvnT0Hsma_9cKXu"});
-                if let Some(curve) = curve {
-                    value["crv"] = serde_json::json!(curve);
-                }
-                let jwk: Jwk = serde_json::from_value(value).expect("EC JWK JSON");
-                let provider = make(vec![jwk]);
-                assert_eq!(
-                    provider.verify_token(&token).is_ok(),
-                    curve == Some("P-384"),
-                    "ES384 declared curve {curve:?}"
-                );
-                let mut corrupted = token.as_bytes().to_vec();
-                let offset = corrupted.len().checked_sub(4).expect("signature byte");
-                let byte = corrupted.get_mut(offset).expect("signature byte");
-                *byte = if *byte == b'A' { b'B' } else { b'A' };
-                assert!(
-                    provider
-                        .verify_token(std::str::from_utf8(&corrupted).expect("JWT ASCII"))
-                        .is_err()
-                );
-            }
-        }
+            );
+            move |token: &str| provider.verify_token(token).is_ok()
+        });
     }
 
     // ── OidcProviderError display ────────────────────────────────────────
