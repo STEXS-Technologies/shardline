@@ -9,27 +9,17 @@ use std::{
 };
 
 use reqwest::{Client, StatusCode};
-use shardline_index::xet_hash_hex_string;
-use shardline_protocol::ShardlineHash;
-use shardline_server::{ServerConfig, serve_with_listener};
+use shardline_server::{
+    ServerConfig, serve_with_listener,
+    test_fixtures::{single_chunk_xorb, single_file_shard},
+};
 use shardline_vcs::{
     AuthorizationRequest, BuiltInProviderCatalog, GitHubAdapter, GrantedRepositoryAccess,
     ProviderIssuedToken, ProviderKind, ProviderRepositoryPolicy, ProviderSubject,
     ProviderTokenIssuer, RepositoryAccess, RepositoryRef, RepositoryVisibility, RevisionRef,
     configured_metadata,
 };
-use shardline_xet_core::{
-    merklehash::{MerkleHash, compute_data_hash, file_hash, xorb_hash},
-    metadata_shard::{
-        file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
-        shard_format::MDBShardInfo,
-        shard_in_memory::MDBInMemoryShard,
-        xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
-    },
-    xorb_object::{
-        CompressionScheme, xorb_format_test_utils::serialized_xorb_object_from_components,
-    },
-};
+
 use support::ServerE2eInvariantError;
 use tokio::{net::TcpListener, spawn};
 
@@ -144,95 +134,6 @@ async fn exercise_provider_token_flow() -> Result<(), Box<dyn Error>> {
 
     server.abort();
     Ok(())
-}
-
-fn xet_hash_hex(hash: &MerkleHash) -> String {
-    let bytes: [u8; 32] = hash.to_bytes();
-    xet_hash_hex_string(ShardlineHash::from_bytes(bytes))
-}
-
-fn single_chunk_xorb(bytes: &[u8]) -> (Vec<u8>, String) {
-    let chunk_hash = compute_data_hash(bytes);
-    let xorb_hash = xorb_hash(&[(chunk_hash, u64::try_from(bytes.len()).unwrap_or(0))]);
-    let serialized = serialized_xorb_object_from_components(
-        &xorb_hash,
-        bytes.to_vec(),
-        vec![(chunk_hash, u64::try_from(bytes.len()).unwrap_or(0))],
-        CompressionScheme::None,
-    )
-    .ok();
-    assert!(serialized.is_some());
-    let Some(serialized) = serialized else {
-        return (Vec::new(), String::new());
-    };
-    (serialized.serialized_data, xet_hash_hex(&xorb_hash))
-}
-
-fn single_file_shard(parts: &[(&[u8], &str)]) -> (Vec<u8>, String) {
-    let mut shard = MDBInMemoryShard::default();
-    let mut file_segments = Vec::with_capacity(parts.len());
-    let mut file_chunks = Vec::with_capacity(parts.len());
-
-    for (bytes, xorb_hash_hex) in parts {
-        let xorb_hash = MerkleHash::from_hex(xorb_hash_hex).ok();
-        assert!(xorb_hash.is_some());
-        let Some(xorb_hash) = xorb_hash else {
-            return (Vec::new(), String::new());
-        };
-        let chunk_hash = compute_data_hash(bytes);
-        let add_xorb = shard
-            .add_xorb_block(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(
-                    xorb_hash,
-                    1_u64,
-                    u64::try_from(bytes.len()).unwrap_or(0),
-                ),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    u64::try_from(bytes.len()).unwrap_or(0),
-                    0_u64,
-                )],
-            })
-            .ok();
-        assert!(add_xorb.is_some());
-        if add_xorb.is_none() {
-            return (Vec::new(), String::new());
-        }
-        file_segments.push(FileDataSequenceEntry::new(
-            xorb_hash,
-            u64::try_from(bytes.len()).unwrap_or(0),
-            0_u64,
-            1_u64,
-        ));
-        file_chunks.push((chunk_hash, u64::try_from(bytes.len()).unwrap_or(0)));
-    }
-
-    let file_hash = file_hash(&file_chunks);
-    let add_file = shard
-        .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(
-                file_hash,
-                u64::try_from(file_segments.len()).unwrap_or(0),
-                false,
-                false,
-            ),
-            segments: file_segments,
-            verification: Vec::new(),
-            metadata_ext: None,
-        })
-        .ok();
-    assert!(add_file.is_some());
-    if add_file.is_none() {
-        return (Vec::new(), String::new());
-    }
-
-    let mut serialized = Vec::new();
-    let serialized_result = MDBShardInfo::serialize_from(&mut serialized, &shard, None).ok();
-    assert!(serialized_result.is_some());
-    if serialized_result.is_none() {
-        return (Vec::new(), String::new());
-    }
-    (serialized, xet_hash_hex(&file_hash))
 }
 
 fn github_adapter() -> Result<GitHubAdapter, Box<dyn Error>> {
