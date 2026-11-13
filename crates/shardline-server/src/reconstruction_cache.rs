@@ -134,33 +134,14 @@ impl ReconstructionCacheService {
     {
         let reservation = if self.writes_enabled {
             match self.adapter.get_or_reserve(key).await {
-                Ok(ReconstructionCacheLookup::Hit(payload)) if payload_within_bound(&payload) => {
-                    if let Ok(response) = from_slice::<FileReconstructionResponse>(&payload) {
+                Ok(ReconstructionCacheLookup::Hit(payload)) => {
+                    if payload_within_bound(&payload)
+                        && let Ok(response) = from_slice::<FileReconstructionResponse>(&payload)
+                    {
                         shardline_metrics::record_reconstruction_cache_hit();
                         return Ok(response);
                     }
                     // A cache value is never authoritative. Remove malformed or
-                    // oversized data, and locate for a fenced reconstruction
-                    // reservation instead of allowing every replica to rebuild it.
-                    self.adapter.delete(key).await.ok();
-                    match self.adapter.get_or_reserve(key).await {
-                        Ok(ReconstructionCacheLookup::Hit(refetched))
-                            if payload_within_bound(&refetched) =>
-                        {
-                            if let Ok(response) =
-                                from_slice::<FileReconstructionResponse>(&refetched)
-                            {
-                                shardline_metrics::record_reconstruction_cache_hit();
-                                return Ok(response);
-                            }
-                            None
-                        }
-                        Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
-                        Ok(ReconstructionCacheLookup::Hit(_)) | Err(_) => None,
-                    }
-                }
-                Ok(ReconstructionCacheLookup::Hit(_invalid_payload)) => {
-                    // A cache entry is never authoritative. Remove malformed or
                     // oversized data, and compete for a fenced reconstruction
                     // reservation instead of allowing every replica to rebuild it.
                     self.adapter.delete(key).await.ok();
@@ -643,31 +624,37 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_service_ignores_corrupt_cached_payload_and_repairs_entry() {
-        let put_calls = Arc::new(AtomicUsize::new(0));
-        let adapter: SharedReconstructionCache = Arc::new(StaticCache {
-            payload: Some(b"not a reconstruction response".to_vec()),
-            put_calls: Arc::clone(&put_calls),
-        });
-        let cache = ReconstructionCacheService::for_tests("static", adapter);
-        let key = ReconstructionCacheKey::latest("asset.bin", None);
-        let loader_calls = AtomicUsize::new(0);
+        for payload in [
+            b"not a reconstruction response".as_slice(),
+            b"not-a-valid-reconstruction-response",
+            b"{}",
+        ] {
+            let put_calls = Arc::new(AtomicUsize::new(0));
+            let adapter: SharedReconstructionCache = Arc::new(StaticCache {
+                payload: Some(payload.to_vec()),
+                put_calls: Arc::clone(&put_calls),
+            });
+            let cache = ReconstructionCacheService::for_tests("static", adapter);
+            let key = ReconstructionCacheKey::latest("asset.bin", None);
+            let loader_calls = AtomicUsize::new(0);
 
-        let response = cache
-            .get_or_load(&key, || {
-                loader_calls.fetch_add(1, Ordering::SeqCst);
-                async { Ok(sample_response("chunk-repaired")) }
-            })
-            .await;
+            let response = cache
+                .get_or_load(&key, || {
+                    loader_calls.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(sample_response("chunk-repaired")) }
+                })
+                .await;
 
-        assert!(response.is_ok());
-        assert_eq!(loader_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(put_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            response
-                .ok()
-                .and_then(|value| value.terms.first().map(|term| term.hash.clone())),
-            Some("chunk-repaired".to_owned())
-        );
+            assert!(response.is_ok());
+            assert_eq!(loader_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(put_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                response
+                    .ok()
+                    .and_then(|value| value.terms.first().map(|term| term.hash.clone())),
+                Some("chunk-repaired".to_owned())
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -716,27 +703,15 @@ mod tests {
     // ── ReconstructionCacheAdapter ───────────────────────────────────────
 
     #[test]
-    fn adapter_parse_disabled() {
-        assert_eq!(
-            ReconstructionCacheAdapter::parse("disabled").unwrap(),
-            ReconstructionCacheAdapter::Disabled
-        );
-    }
-
-    #[test]
-    fn adapter_parse_memory() {
-        assert_eq!(
-            ReconstructionCacheAdapter::parse("memory").unwrap(),
-            ReconstructionCacheAdapter::Memory
-        );
-    }
-
-    #[test]
-    fn adapter_parse_redis() {
-        assert_eq!(
-            ReconstructionCacheAdapter::parse("redis").unwrap(),
-            ReconstructionCacheAdapter::Redis
-        );
+    fn adapter_parse_known_variants() {
+        for (name, adapter) in [
+            ("disabled", ReconstructionCacheAdapter::Disabled),
+            ("memory", ReconstructionCacheAdapter::Memory),
+            ("redis", ReconstructionCacheAdapter::Redis),
+        ] {
+            assert_eq!(ReconstructionCacheAdapter::parse(name).unwrap(), adapter);
+            assert_eq!(adapter.as_str(), name);
+        }
     }
 
     #[test]
@@ -745,13 +720,6 @@ mod tests {
             ReconstructionCacheAdapter::parse("unknown"),
             Err(ServerConfigError::InvalidReconstructionCacheAdapter)
         ));
-    }
-
-    #[test]
-    fn adapter_as_str() {
-        assert_eq!(ReconstructionCacheAdapter::Disabled.as_str(), "disabled");
-        assert_eq!(ReconstructionCacheAdapter::Memory.as_str(), "memory");
-        assert_eq!(ReconstructionCacheAdapter::Redis.as_str(), "redis");
     }
 
     // ── payload_within_bound ─────────────────────────────────────────────
@@ -816,40 +784,6 @@ mod tests {
         assert!(debug.contains("disabled"));
     }
 
-    // ── ReconstructionCacheService::from_config — Redis adapter ───────────
-
-    #[test]
-    fn from_config_redis_without_url_errors() {
-        let _config = ServerConfig::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-            "http://localhost:8080".to_owned(),
-            PathBuf::from("/tmp/test"),
-            NonZeroUsize::new(4096).unwrap(),
-        );
-        // Default adapter is memory. To test the Redis path without a URL we
-        // would need to construct a config with adapter=Redis but no URL set,
-        // which is not possible through the public API. The error path is
-        // exercised by the ServerError::MissingReconstructionCacheRedisUrl
-        // variant.
-    }
-
-    #[test]
-    fn from_config_redis_adapter_missing_url() {
-        // Create a config where reconstruction cache adapter is Redis but no URL
-        // is set. This requires reaching into the config internals.
-        let _config = ServerConfig::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-            "http://localhost:8080".to_owned(),
-            PathBuf::from("/tmp/test"),
-            NonZeroUsize::new(4096).unwrap(),
-        );
-        // We can't directly set the adapter to Redis without a URL through the
-        // public API. The with_reconstruction_cache_redis method requires a URL.
-        // Instead, verify that the error code path exists by checking the
-        // MissingReconstructionCacheRedisUrl variant.
-        let _err = ServerError::MissingReconstructionCacheRedisUrl;
-    }
-
     // ── ready() method ───────────────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -892,37 +826,6 @@ mod tests {
         assert!(!key_str.is_empty());
     }
 
-    // ── get_or_load — deserialization failure ────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cache_service_falls_back_when_cached_payload_fails_deserialize() {
-        // When the cached payload is valid JSON but not a valid
-        // FileReconstructionResponse, the cache should fall back to the loader.
-        let adapter: SharedReconstructionCache = Arc::new(StaticCache {
-            payload: Some(b"not-a-valid-reconstruction-response".to_vec()),
-            put_calls: Arc::new(AtomicUsize::new(0)),
-        });
-        let cache = ReconstructionCacheService::for_tests("static", adapter);
-        let key = ReconstructionCacheKey::latest("asset.bin", None);
-        let loader_calls = AtomicUsize::new(0);
-
-        let response = cache
-            .get_or_load(&key, || {
-                loader_calls.fetch_add(1, Ordering::SeqCst);
-                async { Ok(sample_response("loaded-chunk")) }
-            })
-            .await;
-
-        assert!(response.is_ok());
-        assert_eq!(loader_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            response
-                .ok()
-                .and_then(|r| r.terms.first().map(|t| t.hash.clone())),
-            Some("loaded-chunk".to_owned())
-        );
-    }
-
     // ── get_or_load — payload at exact max bound ─────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -933,11 +836,13 @@ mod tests {
         // We need valid JSON that deserializes to FileReconstructionResponse.
         // Create a response and serialize it, then pad to exactly max bytes.
         let response = sample_response("chunk-at-bound");
-        let serialized = serde_json::to_vec(&response).unwrap();
+        let mut serialized = serde_json::to_vec(&response).unwrap();
         assert!(
             serialized.len() <= max,
             "sample response must fit within max bound for this test"
         );
+        serialized.resize(max, b' ');
+        assert_eq!(serialized.len(), max);
         let adapter: SharedReconstructionCache = Arc::new(StaticCache {
             payload: Some(serialized),
             put_calls: Arc::new(AtomicUsize::new(0)),
@@ -1014,23 +919,6 @@ mod tests {
     #[test]
     fn payload_within_bound_accepts_zero_length() {
         assert!(payload_within_bound(b""));
-    }
-
-    // ── ReconstructionCacheAdapter::as_str — coverage ────────────────────
-
-    #[test]
-    fn adapter_as_str_all_variants() {
-        assert_eq!(ReconstructionCacheAdapter::Disabled.as_str(), "disabled");
-        assert_eq!(ReconstructionCacheAdapter::Memory.as_str(), "memory");
-        assert_eq!(ReconstructionCacheAdapter::Redis.as_str(), "redis");
-    }
-
-    // ── ReconstructionCacheService::disabled — default name ──────────────
-
-    #[test]
-    fn disabled_service_backend_name_is_disabled() {
-        let service = ReconstructionCacheService::disabled();
-        assert_eq!(service.backend_name(), "disabled");
     }
 
     // ── benchmark_memory_reconstruction_cache_with_loader ───────────────
