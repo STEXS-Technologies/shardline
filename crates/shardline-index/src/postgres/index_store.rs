@@ -2340,6 +2340,16 @@ impl UploadIntentStore for super::PostgresIndexStore {
         }
     }
 
+    fn is_upload_intents_table_missing(error: &Self::Error) -> bool {
+        matches!(error,
+            PostgresMetadataStoreError::Sqlx(error)
+                if error.as_database_error().is_some_and(|error|
+                    error.code().as_deref() == Some("42P01")
+                        && error.message() == "relation \"shardline_upload_intents\" does not exist"
+                )
+        )
+    }
+
     async fn intents_by_state(
         &self,
         state: UploadIntentState,

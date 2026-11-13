@@ -249,6 +249,18 @@ pub trait UploadIntentStore: Send + Sync {
     /// Returns the adapter error when the lookup fails.
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error>;
 
+    /// Recognizes only an absent legacy upload-intents table.
+    ///
+    /// Recovery may skip this condition during legacy-schema compatibility.
+    /// Other missing tables, schema defects, and storage failures must return
+    /// false. Adapters that cannot identify this condition fail closed.
+    fn is_upload_intents_table_missing(_error: &Self::Error) -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
     /// Lists all intents in a given state.
     ///
     /// # Errors

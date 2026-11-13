@@ -2187,6 +2187,14 @@ impl UploadIntentStore for super::LocalIndexStore {
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
     }
 
+    fn is_upload_intents_table_missing(error: &Self::Error) -> bool {
+        matches!(error,
+            LocalIndexStoreError::Sqlite(rusqlite::Error::SqliteFailure(code, Some(message)))
+                if code.extended_code == rusqlite::ffi::SQLITE_ERROR
+                    && message == "no such table: shardline_upload_intents"
+        )
+    }
+
     async fn intents_by_state(
         &self,
         state: UploadIntentState,

@@ -39,12 +39,11 @@ where
         }
         let intents = match store.intents_by_state(*state).await {
             Ok(intents) => intents,
-            Err(e) => {
-                // If the intents table does not exist yet (no migration has created it),
-                // there is nothing to reconcile. Log and continue.
-                tracing::debug!("intent query skipped (table may not exist): {e}");
-                continue;
+            Err(error) if Store::is_upload_intents_table_missing(&error) => {
+                tracing::debug!(%error, "legacy upload-intents table absent; reconciliation skipped");
+                return Ok(pending_files);
             }
+            Err(error) => return Err(error.into()),
         };
         for intent in &intents {
             if pass.stopped() {
@@ -251,3 +250,6 @@ where
     }
     Ok(shardline_index::UploadIntentStore::transition_intent(store, intent_id, after).await?)
 }
+
+#[cfg(test)]
+mod tests;
