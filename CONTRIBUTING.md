@@ -44,9 +44,15 @@ Use `cargo check -p shardline` for quick feedback and
 without compiling unrelated workspace tools. Scope test runs to the crate or
 module being changed before running the contributor gates.
 
-`cargo make build` and `cargo make build-prod` build the full workspace and
-reuse Cargo's existing artifacts. Use `cargo make build-clean` or
-`cargo make build-prod-clean` when an explicitly clean build is needed.
+`cargo make build` and `cargo make build-prod` build the server/CLI and its
+runtime dependencies, reusing Cargo's artifacts. They use the same package,
+binary and default features as the container build. Use
+`cargo make build-workspace` to compile all workspace tools and optional
+features, including fuzz targets; append `--release` for an optimized build.
+Workspace-wide lint and test gates remain part of `cargo make ci`.
+
+Use `cargo make build-clean` or `cargo make build-prod-clean` when an
+explicitly clean server/CLI build is needed.
 `cargo clean` removes the shared build cache, so keep it out of routine edit,
 build and test cycles.
 

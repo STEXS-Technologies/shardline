@@ -43,7 +43,7 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
 
       - name: Build shardline binary
-        run: cargo build --locked --release
+        run: cargo build --locked --release -p shardline --bin shardline
 
       - name: Verify disposable backend data volumes are reclaimed
         run: >-
