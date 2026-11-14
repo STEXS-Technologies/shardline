@@ -1,0 +1,79 @@
+# Focused coverage ledger for the storage/recovery paths changed by maintenance cleanup.
+# This is an index of retained checks, not a test runner or a complete product safety map.
+# Before removing a test, compare its inputs, injected failure and assertions with
+# its replacement. A matching invariant ID alone does not establish redundancy.
+# Listed tests remain required by their existing CI/release gates. Docker-backed
+# qualification must set SHARDLINE_REQUIRE_NATIVE_CLIENTS=1; optional skips are not evidence.
+version = 1
+
+[[invariant]]
+id = "I-BYTES"
+guarantee = "Reject object bytes whose expected length or storage digest does not match."
+owners = ["crates/shardline-storage/src/object.rs", "crates/shardline-storage/src/local/util.rs", "crates/shardline-storage/src/s3/operations.rs"]
+failure_boundaries = ["length mismatch", "hash mismatch", "empty object", "existing immutable object"]
+tests = [
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "local_verify_integrity_accepts_matching", backend = "local" },
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "local_verify_integrity_rejects_length_mismatch", backend = "local" },
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "local_verify_integrity_rejects_hash_mismatch", backend = "local" },
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "local_existing_object_outcome_integrity_contract", backend = "local" },
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "verify_integrity_accepts_matching_hash_and_length", backend = "s3-helper" },
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "verify_integrity_rejects_length_mismatch", backend = "s3-helper" },
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "verify_integrity_rejects_hash_mismatch", backend = "s3-helper" },
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "verify_integrity_rejects_empty_bytes_with_nonzero_length", backend = "s3-helper" },
+]
+
+[[invariant]]
+id = "I-LOCAL-PATH"
+guarantee = "Object reads, writes and deletion must not escape the object root through symlinks or parent replacement."
+owners = ["crates/shardline-storage/src/local_fs.rs", "crates/shardline-storage/src/local_path.rs"]
+failure_boundaries = ["symlinked parent", "parent swap during conditional write", "parent swap during overwrite", "stray committed file"]
+tests = [
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "local_object_store_rejects_symlinked_parent_directory_reads", backend = "local-unix", prerequisites = ["Unix"] },
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "local_object_store_rejects_symlinked_parent_directory_writes", backend = "local-unix", prerequisites = ["Unix"] },
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "local_object_store_rejects_symlinked_parent_directory_deletes", backend = "local-unix", prerequisites = ["Unix"] },
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "local_object_store_writes_reject_parent_swap_race", backend = "local-unix", prerequisites = ["Unix"] },
+]
+
+[[invariant]]
+id = "I-DURABILITY"
+guarantee = "A duplicate publication must satisfy directory durability; an uncertain remote deletion must propagate failure without an invented retry outcome."
+owners = ["crates/shardline-storage/src/local/io.rs", "crates/shardline-storage/src/s3/operations.rs"]
+failure_boundaries = ["parent sync failure after interrupted install", "asynchronous sync failure", "dropped DELETE reply", "retryable DELETE response"]
+tests = [
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "duplicate_publication_requires_parent_durability_after_interrupted_install", backend = "local-unix", prerequisites = ["Unix"] },
+  { file = "crates/shardline-storage/src/local/tests.rs", name = "async_duplicate_publication_propagates_parent_sync_failure", backend = "local-unix", prerequisites = ["Unix"] },
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "single_attempt_delete_does_not_retry_dropped_reply_or_retryable_server_error", backend = "s3-http-fixture" },
+]
+
+[[invariant]]
+id = "I-GC-TEMP"
+guarantee = "Generated temporary-object names must not shadow or sweep legal user object keys."
+owners = ["crates/shardline-storage/src/temporary_name.rs", "crates/shardline-storage/src/s3/operations.rs"]
+failure_boundaries = ["legacy temp-shaped user names", "listing", "flat namespace listing", "stale-temp sweep"]
+tests = [
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "is_temp_upload_key_does_not_shadow_user_keys", backend = "s3-helper" },
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "is_temp_upload_key_rejects_user_keys_that_look_like_generated_temps", backend = "s3-helper" },
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "minio_collision_shaped_user_keys_are_listed_and_never_swept", backend = "minio", prerequisites = ["Docker", "SHARDLINE_REQUIRE_NATIVE_CLIENTS=1"] },
+]
+
+[[invariant]]
+id = "I-RECOVERY-QUERY"
+guarantee = "Only the recognized missing upload-intents table may skip reconciliation; genuine database and storage failures propagate."
+owners = ["crates/shardline-server/src/upload_intent_recovery/reconcile.rs"]
+failure_boundaries = ["missing intents table", "malformed intents schema", "missing evidence table", "SQLite busy", "permission denied", "closed PostgreSQL pool"]
+tests = [
+  { file = "crates/shardline-server/src/upload_intent_recovery/reconcile/tests.rs", name = "sqlite_recovery_skips_only_the_missing_intents_table", backend = "sqlite" },
+  { file = "crates/shardline-server/src/upload_intent_recovery/reconcile/tests.rs", name = "sqlite_legacy_detection_rejects_storage_failures_and_other_tables", backend = "sqlite" },
+  { file = "crates/shardline-server/src/upload_intent_recovery/reconcile/tests.rs", name = "postgres_recovery_distinguishes_missing_table_from_database_failure", backend = "postgres", prerequisites = ["server feature docker", "Docker", "SHARDLINE_REQUIRE_NATIVE_CLIENTS=1"] },
+]
+
+[[invariant]]
+id = "I-LIFECYCLE-EVIDENCE"
+guarantee = "Corrupt lifecycle evidence must reject mutation and leave the stored metadata intact."
+owners = ["crates/shardline-index/src/memory.rs"]
+failure_boundaries = ["quarantine release", "quarantine replacement", "retention release", "conditional release"]
+tests = [
+  { file = "crates/shardline-index/src/memory.rs", name = "memory_delete_quarantine_candidate_preserves_tampered_state", backend = "memory" },
+  { file = "crates/shardline-index/src/memory.rs", name = "memory_upsert_quarantine_candidate_preserves_tampered_evidence", backend = "memory" },
+  { file = "crates/shardline-index/src/memory.rs", name = "memory_retention_hold_read_rejects_tampered_evidence", backend = "memory" },
+]
