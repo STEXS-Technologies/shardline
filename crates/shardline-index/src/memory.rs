@@ -2231,8 +2231,7 @@ mod tests {
     #[test]
     fn local_index_store_satisfies_index_store_lifecycle_contract() {
         let storage = shardline_test_support::TempStorage::new();
-        let store = LocalIndexStore::new(storage.path_buf());
-        let store = store.unwrap();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
 
         assert_index_store_lifecycle_contract(&store, |store, file_id, reconstruction, xorb_id| {
             store.insert_reconstruction(file_id, reconstruction)?;
@@ -2243,57 +2242,44 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_satisfies_record_store_lifecycle_contract() {
         let store = MemoryRecordStore::new();
-        let record = scoped_file_record();
-        let record = record.unwrap();
+        let record = scoped_file_record().unwrap();
 
-        let inserted_version = store.insert_version_record(&record);
-        assert!(inserted_version.is_ok());
-        let written_latest = store.write_latest_record(&record).await;
-        assert!(written_latest.is_ok());
+        store.insert_version_record(&record).unwrap();
+        store.write_latest_record(&record).await.unwrap();
 
         let latest_locator = store.latest_record_locator(&record);
         let version_locator = store.version_record_locator(&record);
 
-        let latest_locators = store.list_latest_record_locators().await;
-        assert!(latest_locators.is_ok());
-        if let Ok(latest_locators) = latest_locators {
-            assert_eq!(latest_locators, vec![latest_locator.clone()]);
-        }
+        let latest_locators = store.list_latest_record_locators().await.unwrap();
+        assert_eq!(latest_locators, vec![latest_locator.clone()]);
 
-        let version_locators = store.list_version_record_locators().await;
-        assert!(version_locators.is_ok());
-        if let Ok(version_locators) = version_locators {
-            assert_eq!(version_locators, vec![version_locator.clone()]);
-        }
+        let version_locators = store.list_version_record_locators().await.unwrap();
+        assert_eq!(version_locators, vec![version_locator.clone()]);
 
         let latest_exists = store.record_locator_exists(&latest_locator).await;
         assert!(matches!(latest_exists, Ok(true)));
         let version_exists = store.record_locator_exists(&version_locator).await;
         assert!(matches!(version_exists, Ok(true)));
 
-        let latest_bytes = store.read_latest_record_bytes(&record).await;
-        assert!(latest_bytes.is_ok());
-        if let Ok(Some(latest_bytes)) = latest_bytes {
-            let decoded = from_slice::<FileRecord>(&latest_bytes);
-            assert!(matches!(decoded, Ok(ref decoded) if decoded == &record));
-        }
+        let latest_bytes = store
+            .read_latest_record_bytes(&record)
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded = from_slice::<FileRecord>(&latest_bytes);
+        assert!(matches!(decoded, Ok(ref decoded) if decoded == &record));
 
-        let version_bytes = store.read_record_bytes(&version_locator).await;
-        assert!(version_bytes.is_ok());
-        if let Ok(version_bytes) = version_bytes {
-            let decoded = from_slice::<FileRecord>(&version_bytes);
-            assert!(matches!(decoded, Ok(ref decoded) if decoded == &record));
-        }
+        let version_bytes = store.read_record_bytes(&version_locator).await.unwrap();
+        let decoded = from_slice::<FileRecord>(&version_bytes);
+        assert!(matches!(decoded, Ok(ref decoded) if decoded == &record));
 
         let version_modified = store.modified_since_epoch(&version_locator).await;
         assert!(matches!(version_modified, Ok(duration) if duration > Duration::ZERO));
 
-        let deleted_latest = store.delete_record_locator(&latest_locator).await;
-        assert!(deleted_latest.is_ok());
+        store.delete_record_locator(&latest_locator).await.unwrap();
         let latest_exists_after_delete = store.record_locator_exists(&latest_locator).await;
         assert!(matches!(latest_exists_after_delete, Ok(false)));
-        let pruned = store.prune_empty_latest_records().await;
-        assert!(pruned.is_ok());
+        store.prune_empty_latest_records().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2328,17 +2314,15 @@ mod tests {
         let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
         let locators = store
             .list_repository_version_record_locators(&repository)
-            .await;
-        assert!(locators.is_ok());
-        if let Ok(locators) = locators {
-            assert_eq!(
-                locators,
-                vec![
-                    store.version_record_locator(&main_record),
-                    store.version_record_locator(&release_record),
-                ]
-            );
-        }
+            .await
+            .unwrap();
+        assert_eq!(
+            locators,
+            vec![
+                store.version_record_locator(&main_record),
+                store.version_record_locator(&release_record),
+            ]
+        );
     }
 
     #[test]
@@ -2351,8 +2335,7 @@ mod tests {
         let hash2 = ShardlineHash::from_bytes([11; 32]);
         let file_id1 = FileId::new(hash1);
         let file_id2 = FileId::new(hash2);
-        let range = ChunkRange::new(0, 1);
-        let range = range.unwrap();
+        let range = ChunkRange::new(0, 1).unwrap();
         let reconstruction1 =
             FileReconstruction::new(vec![ReconstructionTerm::new(XorbId::new(hash1), range, 64)]);
         let reconstruction2 = FileReconstruction::new(vec![ReconstructionTerm::new(
@@ -2379,8 +2362,7 @@ mod tests {
         let store = MemoryIndexStore::new();
         let hash = ShardlineHash::from_bytes([12; 32]);
         let file_id = FileId::new(hash);
-        let range = ChunkRange::new(0, 1);
-        let range = range.unwrap();
+        let range = ChunkRange::new(0, 1).unwrap();
         let reconstruction =
             FileReconstruction::new(vec![ReconstructionTerm::new(XorbId::new(hash), range, 64)]);
 
@@ -2413,8 +2395,7 @@ mod tests {
     fn memory_index_store_dedupe_shard_mapping_roundtrip() {
         let store = MemoryIndexStore::new();
         let hash = ShardlineHash::from_bytes([14; 32]);
-        let key = ObjectKey::parse("shards/aa/example.shard");
-        let key = key.unwrap();
+        let key = ObjectKey::parse("shards/aa/example.shard").unwrap();
         let mapping = DedupeShardMapping::new(hash, key);
 
         assert!(store.dedupe_shard_mapping(&hash).unwrap().is_none());
@@ -2850,8 +2831,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_visit_latest_records() {
         let store = MemoryRecordStore::new();
-        let record = scoped_file_record();
-        let record = record.unwrap();
+        let record = scoped_file_record().unwrap();
         store.write_latest_record(&record).await.unwrap();
 
         let mut visited = Vec::new();
@@ -2868,8 +2848,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_visit_version_records() {
         let store = MemoryRecordStore::new();
-        let record = scoped_file_record();
-        let record = record.unwrap();
+        let record = scoped_file_record().unwrap();
         store.insert_version_record(&record).unwrap();
 
         let mut visited = Vec::new();
@@ -2886,8 +2865,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_visit_latest_record_locators() {
         let store = MemoryRecordStore::new();
-        let record = scoped_file_record();
-        let record = record.unwrap();
+        let record = scoped_file_record().unwrap();
         store.write_latest_record(&record).await.unwrap();
 
         let mut visited = Vec::new();
@@ -2905,8 +2883,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_visit_version_record_locators() {
         let store = MemoryRecordStore::new();
-        let record = scoped_file_record();
-        let record = record.unwrap();
+        let record = scoped_file_record().unwrap();
         store.insert_version_record(&record).unwrap();
 
         let mut visited = Vec::new();
@@ -2976,8 +2953,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_record_locator_exists_false() {
         let store = MemoryRecordStore::new();
-        let record = scoped_file_record();
-        let record = record.unwrap();
+        let record = scoped_file_record().unwrap();
         let locator = store.version_record_locator(&record);
 
         let exists = store.record_locator_exists(&locator).await.unwrap();
@@ -3000,8 +2976,7 @@ mod tests {
         let hash = ShardlineHash::from_bytes([9; 32]);
         let file_id = FileId::new(hash);
         let xorb_id = XorbId::new(hash);
-        let range = ChunkRange::new(2, 5);
-        let range = range.unwrap();
+        let range = ChunkRange::new(2, 5).unwrap();
         let reconstruction =
             FileReconstruction::new(vec![ReconstructionTerm::new(xorb_id, range, 128)]);
 
@@ -3010,31 +2985,24 @@ mod tests {
         let missing_xorb = store.contains_xorb(&xorb_id);
         assert!(matches!(missing_xorb, Ok(false)));
 
-        let seeded = seed_index(store, &file_id, &reconstruction, &xorb_id);
-        assert!(seeded.is_ok());
+        seed_index(store, &file_id, &reconstruction, &xorb_id).unwrap();
 
         let loaded_reconstruction = store.reconstruction(&file_id);
         assert!(matches!(loaded_reconstruction, Ok(Some(ref loaded)) if loaded == &reconstruction));
         let contains_xorb = store.contains_xorb(&xorb_id);
         assert!(matches!(contains_xorb, Ok(true)));
 
-        let object_key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
-        let object_key = object_key.unwrap();
-        let candidate = QuarantineCandidate::new(object_key.clone(), 128, 10, 20);
-        let candidate = candidate.unwrap();
+        let object_key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
+        let candidate = QuarantineCandidate::new(object_key.clone(), 128, 10, 20).unwrap();
 
         let missing_candidate = store.quarantine_candidate(&object_key);
         assert!(matches!(missing_candidate, Ok(None)));
-        let upserted = store.upsert_quarantine_candidate(&candidate);
-        assert!(upserted.is_ok());
+        store.upsert_quarantine_candidate(&candidate).unwrap();
 
         let loaded_candidate = store.quarantine_candidate(&object_key);
         assert!(matches!(loaded_candidate, Ok(Some(ref loaded)) if loaded == &candidate));
-        let listed_candidates = store.list_quarantine_candidates();
-        assert!(listed_candidates.is_ok());
-        if let Ok(listed_candidates) = listed_candidates {
-            assert_eq!(listed_candidates, vec![candidate.clone()]);
-        }
+        let listed_candidates = store.list_quarantine_candidates().unwrap();
+        assert_eq!(listed_candidates, vec![candidate.clone()]);
         let mut visited_candidates = Vec::new();
         let visited_candidates_result = store.visit_quarantine_candidates(|entry| {
             visited_candidates.push(entry);
@@ -3055,21 +3023,17 @@ mod tests {
             "provider deletion grace".to_owned(),
             30,
             Some(90),
-        );
-        let hold = hold.unwrap();
+        )
+        .unwrap();
 
         let missing_hold = store.retention_hold(&object_key);
         assert!(matches!(missing_hold, Ok(None)));
-        let upserted_hold = store.upsert_retention_hold(&hold);
-        assert!(upserted_hold.is_ok());
+        store.upsert_retention_hold(&hold).unwrap();
 
         let loaded_hold = store.retention_hold(&object_key);
         assert!(matches!(loaded_hold, Ok(Some(ref loaded)) if loaded == &hold));
-        let listed_holds = store.list_retention_holds();
-        assert!(listed_holds.is_ok());
-        if let Ok(listed_holds) = listed_holds {
-            assert_eq!(listed_holds, vec![hold.clone()]);
-        }
+        let listed_holds = store.list_retention_holds().unwrap();
+        assert_eq!(listed_holds, vec![hold.clone()]);
         let mut visited_holds = Vec::new();
         let visited_holds_result = store.visit_retention_holds(|entry| {
             visited_holds.push(entry);
@@ -3091,8 +3055,8 @@ mod tests {
             "assets".to_owned(),
             "delivery-1".to_owned(),
             100,
-        );
-        let webhook_delivery = webhook_delivery.unwrap();
+        )
+        .unwrap();
         let recorded_delivery = store.record_webhook_delivery(&webhook_delivery);
         assert!(matches!(recorded_delivery, Ok(true)));
         let duplicate_delivery = store.record_webhook_delivery(&webhook_delivery);
