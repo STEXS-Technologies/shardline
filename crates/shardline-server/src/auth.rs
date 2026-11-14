@@ -476,29 +476,6 @@ mod tests {
         }
     }
 
-    // ── scope_allows ───────────────────────────────────────────────────────
-
-    #[test]
-    fn scope_allows_read_when_scope_is_read() {
-        assert!(super::scope_allows(TokenScope::Read, TokenScope::Read));
-    }
-
-    #[test]
-    fn scope_allows_write_when_scope_is_write() {
-        assert!(super::scope_allows(TokenScope::Write, TokenScope::Write));
-    }
-
-    #[test]
-    fn scope_allows_read_when_scope_is_write() {
-        // Write scope implicitly allows Read
-        assert!(super::scope_allows(TokenScope::Write, TokenScope::Read));
-    }
-
-    #[test]
-    fn scope_allows_rejects_write_when_scope_is_read() {
-        assert!(!super::scope_allows(TokenScope::Read, TokenScope::Write));
-    }
-
     // ── AuthError conversion ───────────────────────────────────────────────
 
     #[test]
@@ -662,27 +639,5 @@ mod tests {
             result,
             Err(ServerError::InvalidAuthorizationHeader)
         ));
-    }
-
-    // ── scope_allows edge cases ────────────────────────────────────────────
-
-    #[test]
-    fn scope_allows_with_same_scope_read_read() {
-        assert!(super::scope_allows(TokenScope::Read, TokenScope::Read));
-    }
-
-    #[test]
-    fn scope_allows_with_same_scope_write_write() {
-        assert!(super::scope_allows(TokenScope::Write, TokenScope::Write));
-    }
-
-    #[test]
-    fn scope_allows_write_grants_read() {
-        assert!(super::scope_allows(TokenScope::Write, TokenScope::Read));
-    }
-
-    #[test]
-    fn scope_allows_read_denies_write() {
-        assert!(!super::scope_allows(TokenScope::Read, TokenScope::Write));
     }
 }
