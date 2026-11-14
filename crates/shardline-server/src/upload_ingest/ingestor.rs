@@ -789,21 +789,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingestor_processes_aligned_request_frames_without_staging_copy() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let object_store = ServerObjectStore::local(storage.path().join("chunks"));
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
-        let chunk_size = NonZeroUsize::new(128);
-        assert!(chunk_size.is_some());
-        let Some(chunk_size) = chunk_size else {
-            return;
-        };
+        let storage = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(storage.path().join("chunks")).unwrap();
+        let chunk_size = NonZeroUsize::new(128).unwrap();
         let mut ingestor = FileUploadIngestor::new(chunk_size, false);
 
         let ingested = ingestor
@@ -814,13 +802,10 @@ mod tests {
             .await;
         assert!(ingested.is_ok());
 
-        let finished = ingestor
+        let (_record, response) = ingestor
             .finish(&object_store, "asset.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((_record, response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
 
         // With CDC, chunk count depends on content-defined boundaries
         assert!(response.inserted_chunks > 0);
@@ -831,11 +816,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingestor_blackhole_does_not_queue_completed_chunks_from_split_request_frames() {
         let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128);
-        assert!(chunk_size.is_some());
-        let Some(chunk_size) = chunk_size else {
-            return;
-        };
+        let chunk_size = NonZeroUsize::new(128).unwrap();
         let mut ingestor = FileUploadIngestor::new(chunk_size, false);
 
         let first = ingestor
@@ -853,13 +834,10 @@ mod tests {
         assert!(second.is_ok());
         assert_eq!(ingestor.in_flight_chunks.len(), 0);
 
-        let finished = ingestor
+        let (record, response) = ingestor
             .finish(&object_store, "asset.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((record, response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
 
         assert_eq!(record.total_bytes, 72);
         assert!(response.inserted_chunks > 0);
@@ -869,11 +847,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingestor_blackhole_does_not_queue_completed_aligned_request_frames() {
         let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128);
-        assert!(chunk_size.is_some());
-        let Some(chunk_size) = chunk_size else {
-            return;
-        };
+        let chunk_size = NonZeroUsize::new(128).unwrap();
         let mut ingestor = FileUploadIngestor::new(chunk_size, false);
 
         // Send data; with CDC, small data may stay pending until finish()
@@ -885,13 +859,10 @@ mod tests {
             .await;
         assert!(ingested.is_ok());
 
-        let finished = ingestor
+        let (_record, response) = ingestor
             .finish(&object_store, "aligned.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((_record, response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
 
         assert!(response.inserted_chunks > 0);
     }
@@ -899,11 +870,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingestor_recycles_pooled_pending_buffers_after_upload_completion() {
         let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128);
-        assert!(chunk_size.is_some());
-        let Some(chunk_size) = chunk_size else {
-            return;
-        };
+        let chunk_size = NonZeroUsize::new(128).unwrap();
         let mut ingestor = FileUploadIngestor::new(chunk_size, false);
 
         let ingested = ingestor
@@ -930,21 +897,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingestor_reuses_existing_chunks_for_aligned_request_frames() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let object_store = ServerObjectStore::local(storage.path().join("chunks"));
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
-        let chunk_size = NonZeroUsize::new(128);
-        assert!(chunk_size.is_some());
-        let Some(chunk_size) = chunk_size else {
-            return;
-        };
+        let storage = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(storage.path().join("chunks")).unwrap();
+        let chunk_size = NonZeroUsize::new(128).unwrap();
 
         // Use data large enough for CDC to find boundaries
         let test_data: Vec<u8> =
@@ -961,11 +916,10 @@ mod tests {
         let second_data = Bytes::from(test_data.clone());
         let second_ingested = second.ingest_body_chunk(&object_store, &second_data).await;
         assert!(second_ingested.is_ok());
-        let second_finished = second.finish(&object_store, "second.bin", None, None).await;
-        assert!(second_finished.is_ok());
-        let Ok((_record, response)) = second_finished else {
-            return;
-        };
+        let (_record, response) = second
+            .finish(&object_store, "second.bin", None, None)
+            .await
+            .unwrap();
 
         // CDC produces the same chunks for identical data → reused chunks
         assert_eq!(response.inserted_chunks, 0);
@@ -975,21 +929,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingestor_preserves_tail_bytes_across_mixed_frame_sizes() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let object_store = ServerObjectStore::local(storage.path().join("chunks"));
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
-        let chunk_size = NonZeroUsize::new(128);
-        assert!(chunk_size.is_some());
-        let Some(chunk_size) = chunk_size else {
-            return;
-        };
+        let storage = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(storage.path().join("chunks")).unwrap();
+        let chunk_size = NonZeroUsize::new(128).unwrap();
         let mut ingestor = FileUploadIngestor::new(chunk_size, false);
 
         // With CDC, data smaller than min_chunk stays in pending until finish()
@@ -1007,13 +949,10 @@ mod tests {
         // With CDC, 62 bytes may stay pending if no boundary found
         // (target=128, min=16, max=256 — boundary depends on content hash)
 
-        let finished = ingestor
+        let (record, response) = ingestor
             .finish(&object_store, "asset.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((record, response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
 
         assert!(response.inserted_chunks > 0);
         assert_eq!(record.total_bytes, 62);
@@ -1039,21 +978,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingestor_reports_hash_mismatch_when_expected_digest_differs() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let object_store = ServerObjectStore::local(storage.path().join("chunks"));
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
-        let chunk_size = NonZeroUsize::new(128);
-        assert!(chunk_size.is_some());
-        let Some(chunk_size) = chunk_size else {
-            return;
-        };
+        let storage = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(storage.path().join("chunks")).unwrap();
+        let chunk_size = NonZeroUsize::new(128).unwrap();
         let mut ingestor = FileUploadIngestor::new(chunk_size, true);
 
         let ingested = ingestor
@@ -1078,13 +1005,10 @@ mod tests {
         let chunk_size = NonZeroUsize::new(128).unwrap();
         let ingestor = FileUploadIngestor::new(chunk_size, false);
 
-        let finished = ingestor
+        let (record, response) = ingestor
             .finish(&object_store, "empty.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((record, response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
         assert_eq!(record.total_bytes, 0);
         assert_eq!(response.inserted_chunks, 0);
         assert_eq!(response.reused_chunks, 0);
@@ -1121,13 +1045,10 @@ mod tests {
             .unwrap();
         assert!(!ingestor.pending.is_empty());
 
-        let finished = ingestor
+        let (record, response) = ingestor
             .finish(&object_store, "single.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((record, response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
         assert_eq!(record.total_bytes, 4);
         assert!(response.inserted_chunks >= 1);
         assert!(!response.chunks.is_empty());
@@ -1164,13 +1085,10 @@ mod tests {
         // CDC may or may not have flushed all chunks depending on boundaries
         assert!(!ingestor.completed_chunks.is_empty());
 
-        let finished = ingestor
+        let (record, _response) = ingestor
             .finish(&object_store, "multi-chunk.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((record, _response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
         assert_eq!(record.total_bytes, 320);
         assert!(!record.chunks.is_empty());
     }
@@ -1239,13 +1157,10 @@ mod tests {
             .unwrap();
 
         // completed_chunks should already be in sequence order
-        let finished = ingestor
+        let (record, _response) = ingestor
             .finish(&object_store, "presorted.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((record, _response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
         assert!(!record.chunks.is_empty());
         assert_eq!(record.total_bytes, 72);
     }
@@ -1267,11 +1182,10 @@ mod tests {
             .ingest_body_chunk(&object_store, &Bytes::from_static(content))
             .await
             .unwrap();
-        let first_finished = first.finish(&object_store, "first.bin", None, None).await;
-        assert!(first_finished.is_ok());
-        let Ok((_record, first_response)) = first_finished else {
-            return;
-        };
+        let (_record, first_response) = first
+            .finish(&object_store, "first.bin", None, None)
+            .await
+            .unwrap();
         assert!(first_response.inserted_chunks >= 1);
         assert_eq!(first_response.reused_chunks, 0);
 
@@ -1281,11 +1195,10 @@ mod tests {
             .ingest_body_chunk(&object_store, &Bytes::from_static(content))
             .await
             .unwrap();
-        let second_finished = second.finish(&object_store, "second.bin", None, None).await;
-        assert!(second_finished.is_ok());
-        let Ok((_record, second_response)) = second_finished else {
-            return;
-        };
+        let (_record, second_response) = second
+            .finish(&object_store, "second.bin", None, None)
+            .await
+            .unwrap();
         // Blackhole always returns Inserted
         assert!(second_response.inserted_chunks >= 1);
         assert_eq!(second_response.reused_chunks, 0);
@@ -1315,13 +1228,10 @@ mod tests {
         let ingested = ingestor.ingest_body_chunk(&object_store, &body).await;
         assert!(ingested.is_ok());
 
-        let finished = ingestor
+        let (_record, response) = ingestor
             .finish(&object_store, "cdc-test.bin", None, None)
-            .await;
-        assert!(finished.is_ok());
-        let Ok((_record, response)) = finished else {
-            return;
-        };
+            .await
+            .unwrap();
 
         // Should have produced at least one chunk
         assert!(response.inserted_chunks > 0);
