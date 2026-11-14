@@ -1053,16 +1053,11 @@ impl AsyncIndexStore for MemoryIndexStore {
         key: &'operation RepoKey,
         max_revisions: usize,
     ) -> IndexStoreFuture<'operation, u64, Self::Error> {
-        let store = self.clone();
-        let key = key.clone();
-        Box::pin(
-            async move { TreeStore::prune_revisions_over_cap(&store, &key, max_revisions).await },
-        )
+        TreeStore::prune_revisions_over_cap(self, key, max_revisions)
     }
 
     fn list_revision_repo_keys(&self) -> IndexStoreFuture<'_, Vec<RepoKey>, Self::Error> {
-        let store = self.clone();
-        Box::pin(async move { TreeStore::list_revision_repo_keys(&store).await })
+        TreeStore::list_revision_repo_keys(self)
     }
 
     impl_async_lifecycle_delegation!(MemoryIndexStore);
