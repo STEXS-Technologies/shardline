@@ -377,37 +377,19 @@ mod tests {
     }
 
     #[test]
-    fn bucket_binding_rejects_owner_mismatch() {
+    fn bucket_binding_rejects_scope_and_bucket_errors() {
         let claims = scope("acme", "models");
-        let error = require_s3_bucket_binding(Some(&claims), "other.models").unwrap_err();
-        assert_eq!(error.code, "AccessDenied");
-        assert_eq!(error.status, 403);
-    }
-
-    #[test]
-    fn bucket_binding_rejects_name_mismatch() {
-        let claims = scope("acme", "models");
-        let error = require_s3_bucket_binding(Some(&claims), "acme.datasets").unwrap_err();
-        assert_eq!(error.code, "AccessDenied");
-        assert_eq!(error.status, 403);
-    }
-
-    #[test]
-    fn bucket_binding_rejects_missing_claims() {
-        let error = require_s3_bucket_binding(None, "acme.models").unwrap_err();
-        assert_eq!(error.code, "AccessDenied");
-        assert_eq!(error.status, 403);
-    }
-
-    #[test]
-    fn bucket_binding_rejects_undecodable_bucket() {
-        let claims = scope("acme", "models");
-        let error = require_s3_bucket_binding(Some(&claims), "not-a-bucket").unwrap_err();
-        assert_eq!(error.code, "NoSuchBucket");
-        assert_eq!(error.status, 404);
-        // Uppercase buckets are undecodable too.
-        let error = require_s3_bucket_binding(Some(&claims), "Acme.models").unwrap_err();
-        assert_eq!(error.code, "NoSuchBucket");
+        for (claims, bucket, code, status) in [
+            (Some(&claims), "other.models", "AccessDenied", 403),
+            (Some(&claims), "acme.datasets", "AccessDenied", 403),
+            (None, "acme.models", "AccessDenied", 403),
+            (Some(&claims), "not-a-bucket", "NoSuchBucket", 404),
+            (Some(&claims), "Acme.models", "NoSuchBucket", 404),
+        ] {
+            let error = require_s3_bucket_binding(claims, bucket).unwrap_err();
+            assert_eq!(error.code, code, "bucket {bucket:?}, claims {claims:?}");
+            assert_eq!(error.status, status, "bucket {bucket:?}, claims {claims:?}");
+        }
     }
 
     #[test]
