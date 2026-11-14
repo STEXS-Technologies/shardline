@@ -3748,19 +3748,19 @@ metadata.
 
 ## Maintenance cleanup source inventory
 
-The November 14, 2026 inventory compares baseline
+The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`b0a9221b0a421ae39504721b683562010b737d38`. It counts all tracked `.rs`
+`4c0aa805255b11b41269dfdabf903ddb70eb8190`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 586,892 | 16,757 (2.78%) |
+| Entire repository | 603,649 | 586,265 | 17,384 (2.88%) |
 | Server | 220,570 | 213,052 | 7,518 (3.41%) |
 | Server core | 6,454 | 5,627 | 827 (12.81%) |
-| Hub API | 43,749 | 43,291 | 458 (1.05%) |
+| Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
 | S3 adapter | 10,954 | 10,323 | 631 (5.76%) |
 | OCI adapter | 7,700 | 7,422 | 278 (3.61%) |
@@ -3783,8 +3783,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' b0a9221b0a421ae39504721b683562010b737d38 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' b0a9221b0a421ae39504721b683562010b737d38 -- '*.rs' | wc -l
+git grep -I -n '^' 4c0aa805255b11b41269dfdabf903ddb70eb8190 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 4c0aa805255b11b41269dfdabf903ddb70eb8190 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
