@@ -171,6 +171,30 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
     }
 }
 
+/// Reactivates from a verified prior snapshot, preserving its original fields.
+/// The domain decides which prior state permits reactivation.
+pub(crate) fn verify_and_reactivate_snapshot<S: SnapshotEvidence>(
+    mut evidence: SnapshotEvidenceLog<S>,
+    snapshot: S,
+    can_reactivate: impl FnOnce(&S) -> bool,
+) -> Result<(SnapshotEvidenceLog<S>, bool), ReliabilityError> {
+    if evidence.events.is_empty() {
+        return Ok((SnapshotEvidenceLog::baseline(snapshot)?, true));
+    }
+    if !evidence.head_only {
+        verify_snapshot_chain(&evidence.events)?;
+    }
+    let last = evidence
+        .events
+        .last()
+        .ok_or(ReliabilityError::OperationMismatch)?;
+    if !can_reactivate(&last.after) {
+        return Err(ReliabilityError::StateMismatch);
+    }
+    evidence.record(snapshot)?;
+    Ok((evidence, false))
+}
+
 /// Verifies a persisted snapshot log against the materialized state, or
 /// reconstructs its canonical baseline when the log is absent in legacy data.
 ///
