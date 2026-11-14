@@ -783,7 +783,7 @@ async fn test_all_frontends_health_and_ready() {
 // ===========================================================================
 
 /// Build a temporary OCI app for oneshot tests backed by Postgres + S3.
-async fn oci_oneshot_app() -> (axum::Router, String) {
+async fn oci_oneshot_app() -> (axum::Router, String, TempDir) {
     let (pg_url, s3_prefix) = ensure_stack().await;
     let tmp = TempDir::new().unwrap();
     let chunk_size = NonZeroUsize::new(65536).unwrap();
@@ -811,232 +811,45 @@ async fn oci_oneshot_app() -> (axum::Router, String) {
     let claims =
         TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
     let token = provider.mint_token(&claims).unwrap();
-    let _ = Box::new(tmp);
-    (app, token)
-}
-
-fn oci_digest_hex(data: &[u8]) -> String {
-    sha256_hex(data)
-}
-
-async fn oci_upload_blob_oneshot(
-    app: &axum::Router,
-    token: &str,
-    repo: &str,
-    data: &[u8],
-) -> String {
-    let digest = oci_digest_hex(data);
-    let uri = format!("/v2/{repo}/blobs/uploads/?digest=sha256:{digest}");
-    let req = axum::http::Request::builder()
-        .method("POST")
-        .uri(&uri)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(axum::body::Body::from(data.to_vec()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), 201, "blob upload: status={}", resp.status());
-    digest
-}
-
-fn oci_manifest_json(
-    config_digest: &str,
-    layer_digest: &str,
-    config_size: usize,
-    layer_size: usize,
-) -> String {
-    serde_json::json!({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "config": {
-            "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": config_size,
-            "digest": format!("sha256:{config_digest}")
-        },
-        "layers": [
-            {
-                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": layer_size,
-                "digest": format!("sha256:{layer_digest}")
-            }
-        ]
-    })
-    .to_string()
+    (app, token, tmp)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_manifest_push_and_get_by_tag() {
-    let (app, token) = oci_oneshot_app().await;
-    let repo = "test/test";
-    let tag = "pg-s3-v0.0.1";
-
-    let config_data = b"{}";
-    let layer_data = b"\x1f\x8b\x08\x00";
-    let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
-    let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
-    let manifest_body = oci_manifest_json(
-        &config_digest,
-        &layer_digest,
-        config_data.len(),
-        layer_data.len(),
-    );
-    let manifest_digest = oci_digest_hex(manifest_body.as_bytes());
-
-    let put_uri = format!("/v2/{repo}/manifests/{tag}");
-    let put_req = axum::http::Request::builder()
-        .method("PUT")
-        .uri(&put_uri)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(axum::body::Body::from(manifest_body))
-        .unwrap();
-    let put_resp = app.clone().oneshot(put_req).await.unwrap();
-    assert_eq!(put_resp.status(), 201);
-    let dh = put_resp
-        .headers()
-        .get("Docker-Content-Digest")
-        .and_then(|v| v.to_str().ok());
-    assert!(dh.is_some());
-    assert!(dh.unwrap().contains(&manifest_digest));
-
-    let get_req = axum::http::Request::builder()
-        .method("GET")
-        .uri(&format!("/v2/{repo}/manifests/{tag}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let get_resp = app.clone().oneshot(get_req).await.unwrap();
-    assert_eq!(get_resp.status(), 200);
-    let j: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(get_resp.into_body(), usize::MAX)
-            .await
-            .unwrap(),
+    let (app, token, _tmp) = oci_oneshot_app().await;
+    http_contracts::oci::manifest_by_tag(
+        &app,
+        &token,
+        "test/test",
+        "pg-s3-v0.0.1",
+        b"\x1f\x8b\x08\x00",
     )
-    .unwrap();
-    assert_eq!(j["schemaVersion"], 2);
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_manifest_get_by_digest() {
-    let (app, token) = oci_oneshot_app().await;
-    let repo = "test/test";
-    let tag = "pg-s3-digest-ref";
-
-    let config_digest = oci_upload_blob_oneshot(&app, &token, repo, b"{}").await;
-    let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, b"pg-s3-dl").await;
-    let manifest_body = oci_manifest_json(
-        &config_digest,
-        &layer_digest,
-        b"{}".len(),
-        b"pg-s3-dl".len(),
-    );
-    let manifest_digest = oci_digest_hex(manifest_body.as_bytes());
-
-    app.clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("PUT")
-                .uri(&format!("/v2/{repo}/manifests/{tag}"))
-                .header("Authorization", format!("Bearer {token}"))
-                .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-                .body(axum::body::Body::from(manifest_body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let get_resp = app
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("GET")
-                .uri(&format!("/v2/{repo}/manifests/sha256:{manifest_digest}"))
-                .header("Authorization", format!("Bearer {token}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(get_resp.status(), 200);
+    let (app, token, _tmp) = oci_oneshot_app().await;
+    http_contracts::oci::manifest_by_digest(
+        &app,
+        &token,
+        "test/test",
+        "pg-s3-digest-ref",
+        b"pg-s3-dl",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_tags_list() {
-    let (app, token) = oci_oneshot_app().await;
-    let repo = "test/test";
-    let tag = "pg-s3-tag";
-
-    let cd = oci_upload_blob_oneshot(&app, &token, repo, b"{}").await;
-    let ld = oci_upload_blob_oneshot(&app, &token, repo, b"pg-s3-tl").await;
-    app.clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("PUT")
-                .uri(&format!("/v2/{repo}/manifests/{tag}"))
-                .header("Authorization", format!("Bearer {token}"))
-                .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-                .body(axum::body::Body::from(oci_manifest_json(
-                    &cd,
-                    &ld,
-                    b"{}".len(),
-                    b"pg-s3-tl".len(),
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let list_resp = app
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("GET")
-                .uri(&format!("/v2/{repo}/tags/list"))
-                .header("Authorization", format!("Bearer {token}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(list_resp.status(), 200);
-    let j: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(list_resp.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(j["name"], repo);
-    assert!(j["tags"].as_array().unwrap().iter().any(|t| t == tag));
+    let (app, token, _tmp) = oci_oneshot_app().await;
+    http_contracts::oci::tags_list(&app, &token, "test/test", "pg-s3-tag", b"pg-s3-tl").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_blob_head() {
-    let (app, token) = oci_oneshot_app().await;
-    let repo = "test/test";
-    let content = b"pg-s3-head-content";
-    let digest = oci_upload_blob_oneshot(&app, &token, repo, content).await;
-
-    let head_resp = app
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("HEAD")
-                .uri(&format!("/v2/{repo}/blobs/sha256:{digest}"))
-                .header("Authorization", format!("Bearer {token}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(head_resp.status(), 200);
-    let cl: u64 = head_resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    assert_eq!(cl, content.len() as u64);
-    assert!(head_resp.headers().get("Docker-Content-Digest").is_some());
+    let (app, token, _tmp) = oci_oneshot_app().await;
+    http_contracts::oci::blob_head(&app, &token, "test/test", b"pg-s3-head-content").await;
 }
 
 // ===========================================================================
@@ -1368,7 +1181,7 @@ async fn test_error_invalid_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_error_oci_manifest_not_found() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let resp = app
         .clone()
         .oneshot(
@@ -1593,7 +1406,7 @@ async fn test_pgs3_codeberg_webhook_push() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_oci_upload_invalid_digest_algorithm() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let req = axum::http::Request::builder()
@@ -1612,7 +1425,7 @@ async fn test_pgs3_oci_upload_invalid_digest_algorithm() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_oci_upload_body_hash_mismatch() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
     let wrong_digest = sha256_hex(b"different");
 
@@ -1631,7 +1444,7 @@ async fn test_pgs3_oci_upload_body_hash_mismatch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_oci_patch_nonexistent_session() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let req = axum::http::Request::builder()
@@ -1650,7 +1463,7 @@ async fn test_pgs3_oci_patch_nonexistent_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_oci_put_finalize_without_digest() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let req = axum::http::Request::builder()
@@ -1667,7 +1480,7 @@ async fn test_pgs3_oci_put_finalize_without_digest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_oci_get_nonexistent_blob() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let req = axum::http::Request::builder()
@@ -1682,7 +1495,7 @@ async fn test_pgs3_oci_get_nonexistent_blob() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_oci_delete_nonexistent_manifest() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let req = axum::http::Request::builder()
@@ -1697,7 +1510,7 @@ async fn test_pgs3_oci_delete_nonexistent_manifest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_oci_push_manifest_with_nonexistent_blob() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let manifest_body = serde_json::json!({
