@@ -138,6 +138,16 @@ mod tests {
                 ))),
                 "s3",
             ),
+            (
+                XetAdapterError::FileRecordInvariant(FileRecordInvariantError::EmptyChunk),
+                "invalid",
+            ),
+            (
+                XetAdapterError::IndexStore(
+                    shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
+                ),
+                "index",
+            ),
             (XetAdapterError::InvalidContentHash, "64"),
             (XetAdapterError::InvalidXorbPrefix, "prefix"),
             (XetAdapterError::XorbHashMismatch, "hash"),
@@ -165,22 +175,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn xet_adapter_error_file_record_invariant_display() {
-        let error = XetAdapterError::FileRecordInvariant(FileRecordInvariantError::EmptyChunk);
-        let msg = error.to_string();
-        assert!(!msg.is_empty());
-        assert!(msg.contains("invalid"));
-    }
-
-    #[test]
-    fn xet_adapter_error_index_store_bridge_display() {
-        use shardline_index::LocalIndexStoreError;
-        let error = XetAdapterError::IndexStore(LocalIndexStoreError::InvalidLegacyImportState);
-        let msg = error.to_string();
-        assert!(!msg.is_empty());
-    }
-
     // ── From<XorbParseError> ───────────────────────────────────────────
 
     #[test]
@@ -190,23 +184,14 @@ mod tests {
     }
 
     #[test]
-    fn from_xorb_parse_error_invalid_format() {
-        let err: XetAdapterError =
-            XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed)
-                .into();
-        assert!(matches!(err, XetAdapterError::InvalidSerializedXorb));
-    }
-
-    #[test]
-    fn from_xorb_parse_error_numeric_conversion() {
-        let err: XetAdapterError =
-            XorbParseError::NumericConversion(u64::try_from(-1i32).unwrap_err()).into();
-        assert!(matches!(err, XetAdapterError::InvalidSerializedXorb));
-    }
-
-    #[test]
-    fn from_xorb_parse_error_io() {
-        let err: XetAdapterError = XorbParseError::Io(std::io::Error::other("disk failure")).into();
-        assert!(matches!(err, XetAdapterError::InvalidSerializedXorb));
+    fn malformed_xorb_errors_become_invalid_serialized_xorb() {
+        for source in [
+            XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed),
+            XorbParseError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+            XorbParseError::Io(std::io::Error::other("disk failure")),
+        ] {
+            let error: XetAdapterError = source.into();
+            assert!(matches!(error, XetAdapterError::InvalidSerializedXorb));
+        }
     }
 }
