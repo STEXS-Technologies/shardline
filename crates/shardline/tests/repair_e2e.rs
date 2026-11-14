@@ -33,31 +33,9 @@ fn run(command: &mut Command) -> std::io::Result<Output> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lifecycle_repair_cleans_stale_metadata_and_keeps_live_quarantine() {
-    let result = exercise_lifecycle_repair().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "lifecycle repair e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lifecycle_repair_fails_closed_on_corrupt_webhook_delivery_metadata() {
-    let result =
-        exercise_lifecycle_repair_fails_closed_on_corrupt_webhook_delivery_metadata().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "lifecycle repair corrupt metadata e2e failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repair_orchestrator_rebuilds_repairs_and_verifies() {
-    let result = exercise_repair_orchestrator().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "repair orchestrator e2e failed: {error:?}");
-}
-
-async fn exercise_lifecycle_repair() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn lifecycle_repair_cleans_stale_metadata_and_keeps_live_quarantine()
+-> Result<(), Box<dyn Error>> {
     let now_unix_seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
@@ -250,7 +228,9 @@ async fn exercise_lifecycle_repair() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_repair_orchestrator() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn repair_orchestrator_rebuilds_repairs_and_verifies() -> Result<(), Box<dyn Error>> {
     let now_unix_seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
@@ -332,7 +312,9 @@ async fn exercise_repair_orchestrator() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_lifecycle_repair_fails_closed_on_corrupt_webhook_delivery_metadata()
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn lifecycle_repair_fails_closed_on_corrupt_webhook_delivery_metadata()
 -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());

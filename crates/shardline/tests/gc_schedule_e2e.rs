@@ -12,36 +12,8 @@ use support::CliE2eInvariantError;
 
 #[cfg(target_os = "linux")]
 #[test]
-fn gc_schedule_install_and_uninstall_manage_systemd_units() {
-    let result = exercise_gc_schedule_install_and_uninstall();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "gc schedule e2e failed: {error:?}");
-}
-
-#[cfg(unix)]
-#[test]
-fn gc_schedule_install_rejects_symlinked_output_directory() {
-    let result = exercise_gc_schedule_install_rejects_symlinked_output_directory();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc schedule symlink output-dir e2e failed: {error:?}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn gc_schedule_install_rejects_symlinked_working_directory() {
-    let result = exercise_gc_schedule_install_rejects_symlinked_working_directory();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc schedule symlink working-dir e2e failed: {error:?}"
-    );
-}
-
-#[cfg(target_os = "linux")]
-fn exercise_gc_schedule_install_and_uninstall() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+fn gc_schedule_install_and_uninstall_manage_systemd_units() -> Result<(), Box<dyn Error>> {
     let sandbox = tempfile::tempdir()?;
     let output_dir = sandbox.path().join("systemd");
     let shardline_bin = shardline_binary()?;
@@ -165,7 +137,9 @@ fn exercise_gc_schedule_install_and_uninstall() -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(unix)]
-fn exercise_gc_schedule_install_rejects_symlinked_output_directory() -> Result<(), Box<dyn Error>> {
+#[test]
+#[allow(clippy::panic_in_result_fn)]
+fn gc_schedule_install_rejects_symlinked_output_directory() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
 
     let sandbox = tempfile::tempdir()?;
@@ -236,8 +210,9 @@ fn exercise_gc_schedule_install_rejects_symlinked_output_directory() -> Result<(
 }
 
 #[cfg(unix)]
-fn exercise_gc_schedule_install_rejects_symlinked_working_directory() -> Result<(), Box<dyn Error>>
-{
+#[test]
+#[allow(clippy::panic_in_result_fn)]
+fn gc_schedule_install_rejects_symlinked_working_directory() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
 
     let sandbox = tempfile::tempdir()?;

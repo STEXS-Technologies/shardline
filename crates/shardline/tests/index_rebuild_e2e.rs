@@ -10,13 +10,8 @@ use shardline_server::LocalBackend;
 use support::CliE2eInvariantError;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn index_rebuild_restores_missing_latest_record() {
-    let result = exercise_index_rebuild().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "index rebuild e2e failed: {error:?}");
-}
-
-async fn exercise_index_rebuild() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn index_rebuild_restores_missing_latest_record() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),

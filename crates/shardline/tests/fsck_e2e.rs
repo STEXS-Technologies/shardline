@@ -22,33 +22,9 @@ fn run(command: &mut Command) -> std::io::Result<Output> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fsck_succeeds_for_clean_storage_and_fails_for_missing_chunk() {
-    let result = exercise_fsck().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "fsck e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fsck_detects_corrupted_reachable_chunk_after_gc_leaves_it_in_place() {
-    let result = exercise_corrupted_reachable_chunk_is_detected_after_gc().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "corrupted reachable chunk fsck/gc e2e failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fsck_fails_closed_on_corrupt_webhook_delivery_metadata() {
-    let result = exercise_fsck_fails_closed_on_corrupt_webhook_delivery_metadata().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "corrupt webhook metadata fsck e2e failed: {error:?}"
-    );
-}
-
-async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn fsck_succeeds_for_clean_storage_and_fails_for_missing_chunk() -> Result<(), Box<dyn Error>>
+{
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
@@ -115,7 +91,10 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn fsck_detects_corrupted_reachable_chunk_after_gc_leaves_it_in_place()
+-> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
@@ -182,8 +161,9 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
     Ok(())
 }
 
-async fn exercise_fsck_fails_closed_on_corrupt_webhook_delivery_metadata()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn fsck_fails_closed_on_corrupt_webhook_delivery_metadata() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
     let delivery = WebhookDelivery::new(

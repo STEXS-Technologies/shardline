@@ -47,24 +47,8 @@ fn verify_packed_payloads(source: &Path, destination: &Path) -> Result<(), Box<d
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn storage_migrate_copies_local_objects_idempotently() {
-    let result = exercise_storage_migrate_local_to_local().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "storage migration e2e failed: {error:?}");
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn storage_migrate_rejects_symlinked_local_root() {
-    let result = exercise_storage_migrate_rejects_symlinked_local_root().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "storage migration symlink root e2e failed: {error:?}"
-    );
-}
-
-async fn exercise_storage_migrate_local_to_local() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn storage_migrate_copies_local_objects_idempotently() -> Result<(), Box<dyn Error>> {
     let source = tempfile::tempdir()?;
     let destination = tempfile::tempdir()?;
     let backend = LocalBackend::new(
@@ -157,7 +141,9 @@ async fn exercise_storage_migrate_local_to_local() -> Result<(), Box<dyn Error>>
 }
 
 #[cfg(unix)]
-async fn exercise_storage_migrate_rejects_symlinked_local_root() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn storage_migrate_rejects_symlinked_local_root() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
 
     let source = tempfile::tempdir()?;

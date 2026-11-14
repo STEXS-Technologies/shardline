@@ -28,17 +28,9 @@ use crate::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn postgres_backend_ready_accepts_live_postgres_metadata_store() {
-    let result = exercise_postgres_backend_ready_accepts_live_postgres_metadata_store().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "postgres backend readiness flow failed: {error:?}"
-    );
-}
-
-async fn exercise_postgres_backend_ready_accepts_live_postgres_metadata_store()
--> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn postgres_backend_ready_accepts_live_postgres_metadata_store() -> Result<(), Box<dyn Error>>
+{
     let Some(base_url) = env_var("DATABASE_URL").ok() else {
         return Ok(());
     };

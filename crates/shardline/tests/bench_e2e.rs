@@ -5,34 +5,8 @@ use std::{env::var, error::Error, path::PathBuf, process::Command};
 use support::CliE2eInvariantError;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bench_reports_sparse_update_metrics() {
-    let result = exercise_bench().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "bench e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bench_reports_focused_scenario_output() {
-    let result = exercise_focused_bench().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "focused bench e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bench_reports_cached_reconstruction_metrics() {
-    let result = exercise_cached_bench().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "cached bench e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bench_reports_configured_backend_target() {
-    let result = exercise_configured_bench().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "configured bench e2e failed: {error:?}");
-}
-
-async fn exercise_bench() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn bench_reports_sparse_update_metrics() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let root = storage.path().join("bench-root");
     let shardline_bin = shardline_binary()?;
@@ -157,7 +131,9 @@ async fn exercise_bench() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_configured_bench() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn bench_reports_configured_backend_target() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let root = storage.path().join("bench-root");
     let shardline_bin = shardline_binary()?;
@@ -212,7 +188,9 @@ async fn exercise_configured_bench() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_cached_bench() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn bench_reports_cached_reconstruction_metrics() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let root = storage.path().join("bench-root");
     let shardline_bin = shardline_binary()?;
@@ -268,7 +246,9 @@ async fn exercise_cached_bench() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_focused_bench() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn bench_reports_focused_scenario_output() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let root = storage.path().join("bench-root");
     let shardline_bin = shardline_binary()?;

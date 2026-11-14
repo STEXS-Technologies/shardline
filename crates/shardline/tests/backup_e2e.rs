@@ -20,55 +20,8 @@ fn run(command: &mut Command) -> std::io::Result<Output> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn backup_manifest_inventories_local_deployment() {
-    let result = exercise_backup_manifest().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "backup manifest e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn backup_manifest_uses_current_directory_deployment_root() {
-    let result = exercise_backup_manifest_from_current_directory().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "backup manifest cwd root e2e failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn backup_manifest_uses_project_local_state_root() {
-    let result = exercise_backup_manifest_from_project_directory().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "backup manifest project root e2e failed: {error:?}"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn backup_manifest_rejects_symlinked_output_path() {
-    let result = exercise_backup_manifest_rejects_symlinked_output_path().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "backup manifest symlink output e2e failed: {error:?}"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn backup_manifest_rejects_symlinked_root_override() {
-    let result = exercise_backup_manifest_rejects_symlinked_root_override().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "backup manifest symlink root e2e failed: {error:?}"
-    );
-}
-
-async fn exercise_backup_manifest() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn backup_manifest_inventories_local_deployment() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
@@ -152,7 +105,9 @@ async fn exercise_backup_manifest() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_backup_manifest_from_current_directory() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn backup_manifest_uses_current_directory_deployment_root() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let resolved_root = std::fs::canonicalize(storage.path())?;
     let backend = LocalBackend::new(
@@ -203,7 +158,9 @@ async fn exercise_backup_manifest_from_current_directory() -> Result<(), Box<dyn
     Ok(())
 }
 
-async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn backup_manifest_uses_project_local_state_root() -> Result<(), Box<dyn Error>> {
     let project = tempfile::tempdir()?;
     let storage_root = project.path().join(".shardline").join("data");
     let backend = LocalBackend::new(
@@ -256,7 +213,9 @@ async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn
 }
 
 #[cfg(unix)]
-async fn exercise_backup_manifest_rejects_symlinked_output_path() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn backup_manifest_rejects_symlinked_output_path() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
 
     let storage = tempfile::tempdir()?;
@@ -306,7 +265,9 @@ async fn exercise_backup_manifest_rejects_symlinked_output_path() -> Result<(), 
 }
 
 #[cfg(unix)]
-async fn exercise_backup_manifest_rejects_symlinked_root_override() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn backup_manifest_rejects_symlinked_root_override() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
 
     let storage = tempfile::tempdir()?;

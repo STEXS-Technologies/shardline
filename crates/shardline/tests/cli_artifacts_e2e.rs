@@ -11,24 +11,8 @@ use std::{
 use support::CliE2eInvariantError;
 
 #[test]
-fn completion_and_manpage_commands_emit_artifacts() {
-    let result = exercise_completion_and_manpage();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "cli artifact e2e failed: {error:?}");
-}
-
-#[cfg(unix)]
-#[test]
-fn completion_command_rejects_symlinked_output_path() {
-    let result = exercise_completion_rejects_symlinked_output_path();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "cli artifact symlink-output e2e failed: {error:?}"
-    );
-}
-
-fn exercise_completion_and_manpage() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+fn completion_and_manpage_commands_emit_artifacts() -> Result<(), Box<dyn Error>> {
     let shardline_bin = shardline_binary()?;
     let sandbox = tempfile::tempdir()?;
     let completion_path = sandbox.path().join("shardline.bash");
@@ -88,7 +72,9 @@ fn exercise_completion_and_manpage() -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(unix)]
-fn exercise_completion_rejects_symlinked_output_path() -> Result<(), Box<dyn Error>> {
+#[test]
+#[allow(clippy::panic_in_result_fn)]
+fn completion_command_rejects_symlinked_output_path() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
 
     let shardline_bin = shardline_binary()?;

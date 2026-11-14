@@ -15,13 +15,8 @@ fn run(command: &mut Command) -> std::io::Result<Output> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hold_set_list_and_release_roundtrip() {
-    let result = exercise_hold_roundtrip().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "hold e2e failed: {error:?}");
-}
-
-async fn exercise_hold_roundtrip() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn hold_set_list_and_release_roundtrip() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let shardline_bin = shardline_binary()?;
     let object_key = format!("de/{}", "de".repeat(32));

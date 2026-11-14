@@ -7,13 +7,8 @@ use shardline_protocol::{RepositoryProvider, TokenScope};
 use support::CliE2eInvariantError;
 
 #[test]
-fn admin_cli_mints_ed25519_token_that_provider_verifies() {
-    let result = exercise_admin_cli_mints_ed25519_token_that_provider_verifies();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "Ed25519 admin-token e2e failed: {error:?}");
-}
-
-fn exercise_admin_cli_mints_ed25519_token_that_provider_verifies() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+fn admin_cli_mints_ed25519_token_that_provider_verifies() -> Result<(), Box<dyn Error>> {
     let seed = [11_u8; 32];
     let key = tempfile::NamedTempFile::new()?;
     std::fs::write(key.path(), seed)?;

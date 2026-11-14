@@ -20,48 +20,8 @@ fn run(command: &mut Command) -> std::io::Result<Output> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mark_and_sweep_deletes_candidates() {
-    let result = exercise_gc_mark_and_sweep().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "gc e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_can_export_retention_report_and_orphan_inventory() {
-    let result = exercise_gc_exports().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "gc export e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mark_and_sweep_deletes_orphan_native_xet_objects() {
-    let result = exercise_gc_mark_and_sweep_for_native_xet_objects().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "gc native xet e2e failed: {error:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_fails_closed_on_corrupt_webhook_delivery_metadata() {
-    let result = exercise_gc_fails_closed_on_corrupt_webhook_delivery_metadata().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc corrupt webhook metadata e2e failed: {error:?}"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_rejects_symlinked_export_artifact_path() {
-    let result = exercise_gc_rejects_symlinked_export_artifact_path().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc symlinked artifact e2e failed: {error:?}"
-    );
-}
-
-async fn exercise_gc_mark_and_sweep() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mark_and_sweep_deletes_candidates() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "de".repeat(32);
     let orphan_path = write_orphan_chunk(storage.path(), &orphan_hash, b"orphan")?;
@@ -116,7 +76,9 @@ async fn exercise_gc_mark_and_sweep() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_gc_exports() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_can_export_retention_report_and_orphan_inventory() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "de".repeat(32);
     write_orphan_chunk(storage.path(), &orphan_hash, b"orphan")?;
@@ -198,7 +160,9 @@ async fn exercise_gc_exports() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn exercise_gc_mark_and_sweep_for_native_xet_objects() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mark_and_sweep_deletes_orphan_native_xet_objects() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let xorb_hash = "ab".repeat(32);
     let shard_hash = "cd".repeat(32);
@@ -264,7 +228,9 @@ async fn exercise_gc_mark_and_sweep_for_native_xet_objects() -> Result<(), Box<d
 }
 
 #[cfg(unix)]
-async fn exercise_gc_rejects_symlinked_export_artifact_path() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_rejects_symlinked_export_artifact_path() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
 
     let storage = tempfile::tempdir()?;
@@ -312,8 +278,9 @@ async fn exercise_gc_rejects_symlinked_export_artifact_path() -> Result<(), Box<
     Ok(())
 }
 
-async fn exercise_gc_fails_closed_on_corrupt_webhook_delivery_metadata()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_fails_closed_on_corrupt_webhook_delivery_metadata() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
     let delivery = WebhookDelivery::new(

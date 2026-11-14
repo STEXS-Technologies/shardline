@@ -12,14 +12,9 @@ use support::CliE2eInvariantError;
 use url::Url;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn db_migrate_applies_reports_and_reverts_live_postgres_schema() {
-    let result = exercise_db_migrate_applies_reports_and_reverts_live_postgres_schema().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "db migrate e2e failed: {error:?}");
-}
-
-async fn exercise_db_migrate_applies_reports_and_reverts_live_postgres_schema()
--> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn db_migrate_applies_reports_and_reverts_live_postgres_schema() -> Result<(), Box<dyn Error>>
+{
     let Some(base_url) = var("DATABASE_URL").ok() else {
         return Ok(());
     };
