@@ -3880,6 +3880,48 @@ not a substitute for the existing integration and release gates. Further source
 cuts require evidence of duplicated inputs, failure boundaries and assertions;
 the inventory does not justify removing an arbitrary percentage of tests.
 
+### Metrics recording without HTTP middleware
+
+On November 15, 2026, `0c57f12d5df4d39847488b3a8f5ea2035664012e`
+made the metrics crate's HTTP middleware optional and moved the Xet adapter's
+Axum fixture dependency to development dependencies. The metrics crate keeps
+`http` enabled by default for public API compatibility; engine dependencies opt
+out and server/Hub dependencies enable it explicitly. Recording, registration,
+and Prometheus text encoding use the same implementation in both configurations.
+
+Compared with parent `5f5351eb780a477b963a1b6ebc0623a64363ece4`, normal dependency
+trees exclude Axum, axum-core, matchit, mime, and serde_path_to_error from isolated
+SDK and index builds. The index additionally excludes httpdate; the SDK still
+uses it for client retry handling. These packages remain available to HTTP tests.
+
+A focused check of the metrics-only target used Rust 1.99.0, Cargo 1.99.0,
+x86_64 Linux, two build jobs, the repository's default dev profile, no compiler
+wrapper, and three initially absent target directories per revision on `/tmp`
+tmpfs. Registry and OS caches were retained. All six checks passed, in order
+baseline, candidate, candidate, baseline, baseline, candidate.
+
+| Metrics-only check | Baseline | With optional HTTP middleware |
+| --- | ---: | ---: |
+| Compiled packages, each sample | 60 | 23 |
+| Wall time, median (range) | 7.25 s (6.86–7.60 s) | 3.10 s (2.74–3.15 s) |
+
+Run from each revision with a new target directory for every sample:
+
+```bash
+/usr/bin/time -v env RUSTC_WRAPPER= \
+  CARGO_TARGET_DIR=/tmp/shardline-metrics-REVISION-SAMPLE \
+  cargo check --offline --locked -j2 -p shardline-metrics \
+    --no-default-features --lib --message-format=json-render-diagnostics
+```
+
+Package counts are distinct `package_id` values in Cargo's `compiler-artifact`
+JSON messages. These are shared-host, fresh-artifact checks, not cold-machine
+builds. They demonstrate less work for metrics-only consumers; they do not
+measure a full SDK or index build-time improvement. Server/CLI builds retain
+HTTP middleware, so no server/CLI, release or CI speedup is attributed to this
+change. Both metrics feature configurations, Xet HTTP fixtures, and the real
+server metrics semantics test pass; default-profile and CI gates remain intact.
+
 ## Shared protocol chunk reuse qualification
 
 The shared ingestion path now consults the existing scoped native chunk index,
