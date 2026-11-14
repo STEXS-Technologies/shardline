@@ -1302,18 +1302,11 @@ pub(crate) fn verify_integrity(
     bytes: &[u8],
     integrity: &ObjectIntegrity,
 ) -> Result<(), S3ObjectStoreError> {
-    let body_length =
-        u64::try_from(bytes.len()).map_err(|_error| S3ObjectStoreError::IntegrityLengthMismatch)?;
-    if body_length != integrity.length() {
-        return Err(S3ObjectStoreError::IntegrityLengthMismatch);
-    }
-
-    let actual = chunk_hash(bytes);
-    if actual != integrity.hash() {
-        return Err(S3ObjectStoreError::IntegrityHashMismatch);
-    }
-
-    Ok(())
+    integrity.verify_bytes(
+        bytes,
+        S3ObjectStoreError::IntegrityLengthMismatch,
+        S3ObjectStoreError::IntegrityHashMismatch,
+    )
 }
 
 pub(crate) fn existing_object_outcome_from_file(
@@ -1370,10 +1363,8 @@ pub(crate) fn verify_file_length(
     Ok(())
 }
 
-pub(crate) fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
-    let digest = blake3::hash(bytes);
-    ShardlineHash::from_bytes(*digest.as_bytes())
-}
+#[cfg(test)]
+pub(crate) use crate::object::chunk_hash;
 
 #[cfg(test)]
 pub(crate) fn temporary_upload_location(key_prefix: &Option<String>) -> ObjectStorePath {

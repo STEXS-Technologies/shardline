@@ -95,6 +95,21 @@ impl ObjectIntegrity {
     pub const fn length(&self) -> u64 {
         self.length
     }
+
+    pub(crate) fn verify_bytes<Error>(
+        &self,
+        bytes: &[u8],
+        length_error: Error,
+        hash_error: Error,
+    ) -> Result<(), Error> {
+        if u64::try_from(bytes.len()).ok() != Some(self.length()) {
+            return Err(length_error);
+        }
+        if chunk_hash(bytes) != self.hash() {
+            return Err(hash_error);
+        }
+        Ok(())
+    }
 }
 
 /// Result of an idempotent object write.
@@ -171,6 +186,10 @@ pub enum DeleteOutcome {
     Deleted,
     /// The object was already absent.
     NotFound,
+}
+
+pub(crate) fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
+    ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes())
 }
 
 #[cfg(test)]

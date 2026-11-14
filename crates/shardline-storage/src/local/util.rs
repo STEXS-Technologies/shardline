@@ -1,7 +1,5 @@
 use std::cell::RefCell;
 
-use shardline_protocol::ShardlineHash;
-
 use crate::{DirectoryPathError, ObjectIntegrity};
 
 use super::LocalObjectStoreError;
@@ -18,24 +16,15 @@ pub fn verify_integrity(
     bytes: &[u8],
     integrity: &ObjectIntegrity,
 ) -> Result<(), LocalObjectStoreError> {
-    let body_length = u64::try_from(bytes.len())
-        .map_err(|_error| LocalObjectStoreError::IntegrityLengthMismatch)?;
-    if body_length != integrity.length() {
-        return Err(LocalObjectStoreError::IntegrityLengthMismatch);
-    }
-
-    let actual = chunk_hash(bytes);
-    if actual != integrity.hash() {
-        return Err(LocalObjectStoreError::IntegrityHashMismatch);
-    }
-
-    Ok(())
+    integrity.verify_bytes(
+        bytes,
+        LocalObjectStoreError::IntegrityLengthMismatch,
+        LocalObjectStoreError::IntegrityHashMismatch,
+    )
 }
 
-pub fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
-    let digest = blake3::hash(bytes);
-    ShardlineHash::from_bytes(*digest.as_bytes())
-}
+#[cfg(test)]
+pub(crate) use crate::object::chunk_hash;
 
 pub fn map_directory_path_error(error: DirectoryPathError) -> LocalObjectStoreError {
     match error {
