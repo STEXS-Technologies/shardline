@@ -99,48 +99,52 @@ mod tests {
     }
 
     #[test]
-    fn oci_repository_validator_rejects_traversal_and_uppercase() {
+    fn oci_repository_validator_rejects_unsafe_names() {
         assert!(validate_oci_repository_name("team/assets").is_ok());
-        assert!(matches!(
-            validate_oci_repository_name("../assets"),
-            Err(OciAdapterError::InvalidRepositoryName)
-        ));
-        assert!(matches!(
-            validate_oci_repository_name("Team/assets"),
-            Err(OciAdapterError::InvalidRepositoryName)
-        ));
-        assert!(matches!(
-            validate_oci_repository_name("team//assets"),
-            Err(OciAdapterError::InvalidRepositoryName)
-        ));
-    }
-
-    #[test]
-    fn oci_repository_name_with_null_byte_rejected() {
-        // Null bytes are not valid ASCII lowercase/digit/punctuation and
-        // must be rejected.
-        assert!(matches!(
-            validate_oci_repository_name("team/asset\0s"),
-            Err(OciAdapterError::InvalidRepositoryName)
-        ));
-        assert!(matches!(
-            validate_oci_repository_name("\0team/assets"),
-            Err(OciAdapterError::InvalidRepositoryName)
-        ));
+        for repository in [
+            "../assets",
+            "Team/assets",
+            "team//assets",
+            "team/asset\0s",
+            "\0team/assets",
+        ] {
+            assert!(
+                matches!(
+                    validate_oci_repository_name(repository),
+                    Err(OciAdapterError::InvalidRepositoryName)
+                ),
+                "{repository:?}"
+            );
+        }
     }
 
     #[test]
     fn oci_tag_validator_enforces_allowed_characters() {
-        assert!(validate_oci_tag("v1").is_ok());
-        assert!(validate_oci_tag("_debug.2026-04-23").is_ok());
-        assert!(matches!(
-            validate_oci_tag("bad/tag"),
-            Err(OciAdapterError::InvalidManifestReference)
-        ));
-        assert!(matches!(
-            validate_oci_tag("-bad"),
-            Err(OciAdapterError::InvalidManifestReference)
-        ));
+        for tag in [
+            "v1",
+            "_debug.2026-04-23",
+            "v1.0.0",
+            "latest",
+            "build-2026-04-23",
+        ] {
+            assert!(validate_oci_tag(tag).is_ok(), "{tag:?}");
+        }
+        for tag in [
+            "bad/tag",
+            "-bad",
+            "contains spaces",
+            "tag/with/slashes",
+            "-starts-with-hyphen",
+            ".starts-with-dot",
+        ] {
+            assert!(
+                matches!(
+                    validate_oci_tag(tag),
+                    Err(OciAdapterError::InvalidManifestReference)
+                ),
+                "{tag:?}"
+            );
+        }
     }
 
     #[test]
@@ -298,33 +302,6 @@ mod tests {
         assert!(matches!(
             validate_upload_session_id(&long),
             Err(OciAdapterError::InvalidUploadSession)
-        ));
-    }
-
-    #[test]
-    fn validate_oci_tag_valid_tags() {
-        assert!(validate_oci_tag("v1.0.0").is_ok());
-        assert!(validate_oci_tag("latest").is_ok());
-        assert!(validate_oci_tag("build-2026-04-23").is_ok());
-    }
-
-    #[test]
-    fn validate_oci_tag_invalid_tags() {
-        assert!(matches!(
-            validate_oci_tag("contains spaces"),
-            Err(OciAdapterError::InvalidManifestReference)
-        ));
-        assert!(matches!(
-            validate_oci_tag("tag/with/slashes"),
-            Err(OciAdapterError::InvalidManifestReference)
-        ));
-        assert!(matches!(
-            validate_oci_tag("-starts-with-hyphen"),
-            Err(OciAdapterError::InvalidManifestReference)
-        ));
-        assert!(matches!(
-            validate_oci_tag(".starts-with-dot"),
-            Err(OciAdapterError::InvalidManifestReference)
         ));
     }
 
