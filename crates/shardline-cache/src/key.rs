@@ -212,6 +212,14 @@ mod tests {
 
     use super::{ReconstructionCacheKey, RepositoryScopeCacheKey, provider_token};
 
+    const PROVIDERS: [(RepositoryProvider, &str); 5] = [
+        (RepositoryProvider::GitHub, "github"),
+        (RepositoryProvider::GitLab, "gitlab"),
+        (RepositoryProvider::Gitea, "gitea"),
+        (RepositoryProvider::Codeberg, "codeberg"),
+        (RepositoryProvider::Generic, "generic"),
+    ];
+
     #[test]
     fn cache_key_keeps_version_and_scope_components() {
         let scope =
@@ -294,19 +302,9 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     #[test]
     fn cache_key_latest_with_each_provider() {
-        let providers = [
-            (RepositoryProvider::GitHub, "github"),
-            (RepositoryProvider::GitLab, "gitlab"),
-            (RepositoryProvider::Gitea, "gitea"),
-            (RepositoryProvider::Codeberg, "codeberg"),
-            (RepositoryProvider::Generic, "generic"),
-        ];
-        for (provider, expected_token) in &providers {
+        for (provider, expected_token) in &PROVIDERS {
             let scope = RepositoryScope::new(*provider, "owner", "repo", Some("branch"));
-            assert!(scope.is_ok(), "scope creation failed for {expected_token}");
-            let Ok(scope) = scope else {
-                continue;
-            };
+            let scope = scope.unwrap();
             let key = ReconstructionCacheKey::latest("file.bin", Some(&scope));
             let scope_key = key.repository_scope().unwrap();
             assert_eq!(scope_key.provider(), *expected_token);
@@ -323,19 +321,9 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     #[test]
     fn cache_key_version_with_each_provider() {
-        let providers = [
-            (RepositoryProvider::GitHub, "github"),
-            (RepositoryProvider::GitLab, "gitlab"),
-            (RepositoryProvider::Gitea, "gitea"),
-            (RepositoryProvider::Codeberg, "codeberg"),
-            (RepositoryProvider::Generic, "generic"),
-        ];
-        for (provider, expected_token) in &providers {
+        for (provider, expected_token) in &PROVIDERS {
             let scope = RepositoryScope::new(*provider, "org", "project", None);
-            assert!(scope.is_ok(), "scope creation failed for {expected_token}");
-            let Ok(scope) = scope else {
-                continue;
-            };
+            let scope = scope.unwrap();
             let key = ReconstructionCacheKey::version("ver.bin", "hash123", Some(&scope));
             let scope_key = key.repository_scope().unwrap();
             assert_eq!(scope_key.provider(), *expected_token);
@@ -368,19 +356,9 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     #[test]
     fn cache_key_version_with_each_provider_no_revision() {
-        let providers = [
-            RepositoryProvider::GitHub,
-            RepositoryProvider::GitLab,
-            RepositoryProvider::Gitea,
-            RepositoryProvider::Codeberg,
-            RepositoryProvider::Generic,
-        ];
-        for provider in &providers {
+        for (provider, _) in &PROVIDERS {
             let scope = RepositoryScope::new(*provider, "ns", "name", None);
-            assert!(scope.is_ok(), "scope creation failed for {provider:?}");
-            let Ok(scope) = scope else {
-                continue;
-            };
+            let scope = scope.unwrap();
             let key = ReconstructionCacheKey::version("v.bin", "abc", Some(&scope));
             let scope_key = key.repository_scope().unwrap();
             assert_eq!(
@@ -393,18 +371,9 @@ mod tests {
 
     #[test]
     fn repository_scope_cache_key_from_scope_with_all_providers() {
-        for provider in &[
-            RepositoryProvider::GitHub,
-            RepositoryProvider::GitLab,
-            RepositoryProvider::Gitea,
-            RepositoryProvider::Codeberg,
-            RepositoryProvider::Generic,
-        ] {
+        for (provider, _) in &PROVIDERS {
             let scope = RepositoryScope::new(*provider, "owner", "repo", Some("main"));
-            assert!(scope.is_ok(), "scope creation failed for {provider:?}");
-            let Ok(scope) = scope else {
-                continue;
-            };
+            let scope = scope.unwrap();
             let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
             assert_eq!(scope_key.owner(), "owner");
             assert_eq!(scope_key.repo(), "repo");
@@ -414,18 +383,9 @@ mod tests {
 
     #[test]
     fn repository_scope_cache_key_from_scope_without_revision() {
-        for provider in &[
-            RepositoryProvider::GitHub,
-            RepositoryProvider::GitLab,
-            RepositoryProvider::Gitea,
-            RepositoryProvider::Codeberg,
-            RepositoryProvider::Generic,
-        ] {
+        for (provider, _) in &PROVIDERS {
             let scope = RepositoryScope::new(*provider, "own", "proj", None);
-            assert!(scope.is_ok(), "scope creation failed for {provider:?}");
-            let Ok(scope) = scope else {
-                continue;
-            };
+            let scope = scope.unwrap();
             let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
             assert_eq!(scope_key.owner(), "own");
             assert_eq!(scope_key.repo(), "proj");
@@ -455,19 +415,9 @@ mod tests {
 
     #[test]
     fn repository_scope_cache_key_provider_kind_roundtrip_all_variants() {
-        let providers = [
-            (RepositoryProvider::GitHub, "github"),
-            (RepositoryProvider::Gitea, "gitea"),
-            (RepositoryProvider::GitLab, "gitlab"),
-            (RepositoryProvider::Codeberg, "codeberg"),
-            (RepositoryProvider::Generic, "generic"),
-        ];
-        for (provider, token) in providers {
+        for (provider, token) in PROVIDERS {
             let scope = RepositoryScope::new(provider, "owner", "repo", None);
-            assert!(scope.is_ok(), "scope creation failed for {token}");
-            let Ok(scope) = scope else {
-                continue;
-            };
+            let scope = scope.unwrap();
             let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
             assert_eq!(scope_key.provider(), token);
             assert_eq!(scope_key.provider_kind(), provider);
