@@ -1138,25 +1138,51 @@ impl ServerBackend {
         }
     }
 
+    /// Fully verifies the stored xorb before callers authorize a requested range.
     pub(crate) async fn prepare_xorb_range(
         &self,
         hash_hex: &str,
         total_length: Option<u64>,
     ) -> Result<crate::download_stream::VerifiedXorb, ServerError> {
-        match self {
-            Self::Local(backend) => backend.prepare_xorb_range(hash_hex, total_length).await,
-            Self::Postgres(backend) => backend.prepare_xorb_range(hash_hex, total_length).await,
-        }
+        let object_store = self.object_store();
+        let object_key = crate::xet_adapter::xorb_object_key(hash_hex)?;
+        crate::download_stream::prepare_xorb_byte_range(
+            &object_store,
+            &object_key,
+            hash_hex,
+            total_length,
+            self.stream_work_pool().clone(),
+        )
+        .await
     }
 
     pub(crate) async fn read_dedupe_shard_stream(
         &self,
         hash_hex: &str,
     ) -> Result<(ServerByteStream, u64), ServerError> {
-        match self {
-            Self::Local(backend) => backend.read_dedupe_shard_stream(hash_hex).await,
-            Self::Postgres(backend) => backend.read_dedupe_shard_stream(hash_hex).await,
-        }
+        let object_store = self.object_store();
+        let (object_key, total_length) = match self {
+            Self::Local(backend) => {
+                crate::xet_adapter::resolve_dedupe_shard_object(
+                    backend.index_store(),
+                    &object_store,
+                    hash_hex,
+                )
+                .await?
+            }
+            Self::Postgres(backend) => {
+                crate::xet_adapter::resolve_dedupe_shard_object(
+                    backend.index_store(),
+                    &object_store,
+                    hash_hex,
+                )
+                .await?
+            }
+        };
+        let stream =
+            crate::download_stream::object_byte_stream(object_store, object_key, total_length)
+                .await?;
+        Ok((stream, total_length))
     }
 
     pub(crate) async fn first_xorb_coverage(
@@ -1237,6 +1263,13 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.object_store(),
             Self::Postgres(backend) => backend.object_store(),
+        }
+    }
+
+    pub(crate) const fn stream_work_pool(&self) -> &crate::admission::BoundedPool {
+        match self {
+            Self::Local(backend) => &backend.stream_work_pool,
+            Self::Postgres(backend) => &backend.stream_work_pool,
         }
     }
 

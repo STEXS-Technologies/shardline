@@ -135,6 +135,25 @@ async fn native_shard_publication_and_retries_have_independent_repository_eviden
         .unwrap(),
         legacy_events
     );
+    let length = backend.xorb_length(&hash).await.unwrap();
+    let verified = fixture
+        .backend
+        .prepare_xorb_range(&hash, Some(length))
+        .await
+        .unwrap();
+    assert_eq!(verified.total_length(), length);
+    let member = shardline_xet_core::merklehash::compute_data_hash(payload).hex();
+    let (mut stream, length) = fixture
+        .backend
+        .read_dedupe_shard_stream(&member)
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    while let Some(frame) = futures_util::StreamExt::next(&mut stream).await {
+        bytes.extend_from_slice(&frame.unwrap());
+    }
+    assert_eq!(length, shard.len() as u64);
+    assert_eq!(bytes, shard);
     fixture.finish().await;
 }
 

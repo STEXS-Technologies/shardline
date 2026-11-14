@@ -29,10 +29,7 @@ impl ServerBackend {
             Self::Local(backend) => backend.file_record(file_id, None, scope).await?,
             Self::Postgres(backend) => backend.read_record(file_id, None, scope).await?,
         };
-        let (objects, pool) = match self {
-            Self::Local(backend) => (backend.object_store(), backend.stream_work_pool.clone()),
-            Self::Postgres(backend) => (backend.object_store(), backend.stream_work_pool.clone()),
-        };
+        let (objects, pool) = (self.object_store(), self.stream_work_pool().clone());
         let mut chunks = Vec::new();
         let mut segments = Vec::new();
         let mut length = 0u64;

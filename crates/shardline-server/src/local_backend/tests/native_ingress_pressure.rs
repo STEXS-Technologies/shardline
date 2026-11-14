@@ -41,7 +41,7 @@ async fn stalled_native_upload_allows_another_upload_and_verified_read() {
         .unwrap();
     let verified = tokio::time::timeout(
         Duration::from_secs(5),
-        backend.prepare_xorb_range(&hash, None),
+        crate::ServerBackend::Local(backend.clone()).prepare_xorb_range(&hash, None),
     )
     .await
     .expect("the completed object must remain readable while the client is idle")

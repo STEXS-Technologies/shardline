@@ -69,14 +69,7 @@ impl ServerBackend {
                 if u64::try_from(shard.len())? != length {
                     return Err(invalid_descriptor());
                 }
-                let (objects, pool) = match self {
-                    Self::Local(backend) => {
-                        (backend.object_store(), backend.stream_work_pool.clone())
-                    }
-                    Self::Postgres(backend) => {
-                        (backend.object_store(), backend.stream_work_pool.clone())
-                    }
-                };
+                let (objects, pool) = (self.object_store(), self.stream_work_pool().clone());
                 let lookup_hash = chunk_hash.to_owned();
                 let claims = blocking_work(&pool, move || {
                     Ok(shardline_xet_adapter::dedup_xorb_candidates(
@@ -194,14 +187,7 @@ impl ServerBackend {
                     .iter()
                     .map(|(source, _, _)| crate::xet_adapter::xorb_object_key(&source.hash))
                     .collect::<Result<Vec<_>, _>>()?;
-                let (objects, pool) = match self {
-                    Self::Local(backend) => {
-                        (backend.object_store(), backend.stream_work_pool.clone())
-                    }
-                    Self::Postgres(backend) => {
-                        (backend.object_store(), backend.stream_work_pool.clone())
-                    }
-                };
+                let (objects, pool) = (self.object_store(), self.stream_work_pool().clone());
                 // Do not advertise an unresolved remote deletion, even if a late
                 // object-store response still reports the object as present.
                 let mut settled_keys = None;

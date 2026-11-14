@@ -9,11 +9,8 @@ use shardline_storage::ObjectStore;
 use super::LocalBackend;
 use crate::{
     ServerError,
-    download_stream::{
-        ServerByteStream, VerifiedXorb, object_byte_stream, prepare_xorb_byte_range,
-    },
     upload_ingest::{RequestBodyReader, prepare_native_xorb, store_admitted_xorb},
-    xet_adapter::{XorbUploadResponse, resolve_dedupe_shard_object, xorb_object_key},
+    xet_adapter::{XorbUploadResponse, xorb_object_key},
 };
 
 impl LocalBackend {
@@ -70,42 +67,6 @@ impl LocalBackend {
                 store_admitted_xorb(&object_store, staged, permit).await
             })
             .await
-    }
-
-    pub(crate) async fn read_dedupe_shard_stream(
-        &self,
-        hash_hex: &str,
-    ) -> Result<(ServerByteStream, u64), ServerError> {
-        let object_store = self.object_store();
-        let (object_key, total_length) =
-            resolve_dedupe_shard_object(&self.index_store, &object_store, hash_hex).await?;
-        let byte_stream = object_byte_stream(object_store, object_key, total_length).await?;
-
-        Ok((byte_stream, total_length))
-    }
-
-    /// Prepares a fully verified xorb for subsequent range authorization.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the hash is invalid, the xorb is missing, or the
-    /// stored length or content fails verification.
-    pub(crate) async fn prepare_xorb_range(
-        &self,
-        hash_hex: &str,
-        total_length: Option<u64>,
-    ) -> Result<VerifiedXorb, ServerError> {
-        let object_store = self.object_store();
-        let object_key = xorb_object_key(hash_hex)?;
-
-        prepare_xorb_byte_range(
-            &object_store,
-            &object_key,
-            hash_hex,
-            total_length,
-            self.stream_work_pool.clone(),
-        )
-        .await
     }
 
     /// Loads the stored byte length for a serialized xorb object.

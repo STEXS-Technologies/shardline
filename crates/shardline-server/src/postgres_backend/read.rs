@@ -11,17 +11,14 @@ use crate::{
     ServerError,
     chunk_store::chunk_object_key,
     download_stream::{
-        ServerByteStream, VerifiedXorb, download_file_record_bytes, file_record_response_stream,
-        object_byte_range_stream, object_byte_stream, prepare_xorb_byte_range,
+        ServerByteStream, download_file_record_bytes, file_record_response_stream,
+        object_byte_range_stream, object_byte_stream,
     },
     error::IndexError,
     object_store::visit_object_prefix,
     record_store::{parse_stored_file_record_bytes, repository_references_hash_in_scope},
     validation::ensure_directory,
-    xet_adapter::{
-        FileReconstructionResponse, build_reconstruction_response, resolve_dedupe_shard_object,
-        xorb_object_key,
-    },
+    xet_adapter::{FileReconstructionResponse, build_reconstruction_response, xorb_object_key},
 };
 
 const REQUIRED_METADATA_TABLES: [&str; 6] = [
@@ -398,42 +395,6 @@ impl super::PostgresBackend {
         };
 
         Ok(metadata.length())
-    }
-
-    pub(crate) async fn read_dedupe_shard_stream(
-        &self,
-        hash_hex: &str,
-    ) -> Result<(ServerByteStream, u64), ServerError> {
-        let object_store = self.object_store();
-        let (object_key, total_length) =
-            resolve_dedupe_shard_object(&self.index_store, &object_store, hash_hex).await?;
-        let byte_stream = object_byte_stream(object_store, object_key, total_length).await?;
-
-        Ok((byte_stream, total_length))
-    }
-
-    /// Prepares a fully verified xorb for subsequent range authorization.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the hash is invalid, the xorb is missing, or the
-    /// stored length or content fails verification.
-    pub(crate) async fn prepare_xorb_range(
-        &self,
-        hash_hex: &str,
-        total_length: Option<u64>,
-    ) -> Result<VerifiedXorb, ServerError> {
-        let object_store = self.object_store();
-        let object_key = xorb_object_key(hash_hex)?;
-
-        prepare_xorb_byte_range(
-            &object_store,
-            &object_key,
-            hash_hex,
-            total_length,
-            self.stream_work_pool.clone(),
-        )
-        .await
     }
 
     /// Reads a stored chunk only when it is reachable from a concrete file version.
