@@ -20,7 +20,8 @@ use sqlx::{PgPool, postgres::PgPoolOptions, query};
 use thiserror::Error;
 use url::Url;
 
-use super::{PostgresBackend, repository_references_hash_in_scope};
+use super::PostgresBackend;
+use crate::record_store::repository_references_hash_in_scope;
 use crate::{
     ServerError, apply_database_migrations, error::InvalidReconstructionResponseError,
     object_store::ServerObjectStore,

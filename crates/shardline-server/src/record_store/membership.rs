@@ -56,3 +56,32 @@ where
         Err(LookupError::Storage(error)) => Err(ServerError::from(error)),
     }
 }
+
+pub(crate) async fn repository_references_hash_in_scope<RecordAdapter>(
+    record_store: &RecordAdapter,
+    hash_hex: &str,
+    repository_scope: &RepositoryScope,
+) -> Result<bool, ServerError>
+where
+    RecordAdapter: RecordTraversal + Sync,
+    RecordAdapter::Error: Send,
+    ServerError: From<RecordAdapter::Error>,
+{
+    any_repository_hash_record(record_store, repository_scope, hash_hex, |bytes| {
+        stored_record_references_hash(bytes, hash_hex, repository_scope)
+    })
+    .await
+}
+
+pub(crate) fn stored_record_references_hash(
+    bytes: &[u8],
+    hash_hex: &str,
+    repository_scope: &RepositoryScope,
+) -> Result<bool, ServerError> {
+    let record = super::parse_stored_file_record_bytes(bytes)?;
+    if record.repository_scope.as_ref() != Some(repository_scope) {
+        return Ok(false);
+    }
+
+    Ok(record.chunks.iter().any(|chunk| chunk.hash == hash_hex))
+}

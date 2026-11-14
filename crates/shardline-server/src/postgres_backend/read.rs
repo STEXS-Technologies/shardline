@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use shardline_index::{
-    FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordStore, RecordTraversal,
+    FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordTraversal,
 };
 use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
 #[cfg(test)]
@@ -19,7 +19,7 @@ use crate::{
     },
     error::IndexError,
     object_store::{reconstruct_file_record_bytes, visit_object_prefix},
-    record_store::parse_stored_file_record_bytes,
+    record_store::{parse_stored_file_record_bytes, repository_references_hash_in_scope},
     validation::ensure_directory,
     xet_adapter::{
         FileReconstructionResponse, build_reconstruction_response, resolve_dedupe_shard_object,
@@ -576,38 +576,6 @@ impl super::PostgresBackend {
     }
 }
 
-pub(crate) async fn repository_references_hash_in_scope<RecordAdapter>(
-    record_store: &RecordAdapter,
-    hash_hex: &str,
-    repository_scope: &RepositoryScope,
-) -> Result<bool, ServerError>
-where
-    RecordAdapter: RecordStore + Sync,
-    RecordAdapter::Error: Send,
-    ServerError: From<RecordAdapter::Error>,
-{
-    crate::record_store::any_repository_hash_record(
-        record_store,
-        repository_scope,
-        hash_hex,
-        |bytes| stored_record_references_hash(bytes, hash_hex, repository_scope),
-    )
-    .await
-}
-
-fn stored_record_references_hash(
-    bytes: &[u8],
-    hash_hex: &str,
-    repository_scope: &RepositoryScope,
-) -> Result<bool, ServerError> {
-    let record = parse_stored_file_record_bytes(bytes)?;
-    if record.repository_scope.as_ref() != Some(repository_scope) {
-        return Ok(false);
-    }
-
-    Ok(record.chunks.iter().any(|chunk| chunk.hash == hash_hex))
-}
-
 pub(crate) fn connect_postgres_metadata_pool(
     index_postgres_url: &str,
     max_connections: u32,
@@ -674,6 +642,7 @@ mod tests {
     use super::*;
     use crate::error::IndexError;
     use crate::object_store::ServerObjectStore;
+    use crate::record_store::stored_record_references_hash;
     use serde_json::to_vec;
     use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore, RecordMutation};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
