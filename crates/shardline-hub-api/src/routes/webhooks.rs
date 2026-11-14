@@ -756,9 +756,8 @@ mod tests {
     use axum::Json;
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
-    use shardline_index::hub::{BoxedHubStore, HubRepoType};
+    use shardline_index::hub::HubRepoType;
     use shardline_protocol::SecretBytes;
-    use shardline_server_core::ServerObjectStore;
 
     use crate::models::WebhookCreateRequest;
     use crate::secrets::{WebhookSecretCipher, WebhookSecretCipherError};
@@ -766,44 +765,23 @@ mod tests {
     const ENC_KEY: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
 
     fn make_encrypted_state(key: &[u8; 32]) -> (tempfile::TempDir, HubState) {
-        let ts = tempfile::tempdir().unwrap();
-        shardline_index::hub::ensure_hub_tables(ts.path()).unwrap();
-        let store = shardline_index::LocalIndexStore::open(ts.path().to_path_buf());
-        let boxed = BoxedHubStore::from_store(store);
-        boxed
+        let (ts, mut state) = crate::routes::tests::make_test_state();
+        state
+            .store
             .create_repo(HubRepoType::Model, "org/enc", false)
             .unwrap();
-        let cipher = WebhookSecretCipher::new(SecretBytes::new(key.to_vec())).unwrap();
-        let object_store = ServerObjectStore::local(ts.path().join("lfs")).unwrap();
-        let state = HubState {
-            store: boxed,
-            object_store,
-            auth: None,
-            http_client: None,
-            webhook_secret_cipher: Some(cipher),
-            public_base_url: "http://127.0.0.1:8080".to_owned(),
-        };
+        state.webhook_secret_cipher =
+            Some(WebhookSecretCipher::new(SecretBytes::new(key.to_vec())).unwrap());
         (ts, state)
     }
 
     #[tokio::test]
     async fn webhook_create_rejects_beyond_per_repo_cap() {
-        let ts = tempfile::tempdir().unwrap();
-        shardline_index::hub::ensure_hub_tables(ts.path()).unwrap();
-        let store = shardline_index::LocalIndexStore::open(ts.path().to_path_buf());
-        let boxed = BoxedHubStore::from_store(store);
-        boxed
+        let (_ts, state) = crate::routes::tests::make_test_state();
+        state
+            .store
             .create_repo(HubRepoType::Model, "org/cap", false)
             .unwrap();
-        let object_store = ServerObjectStore::local(ts.path().join("lfs")).unwrap();
-        let state = HubState {
-            store: boxed,
-            object_store,
-            auth: None,
-            http_client: None,
-            webhook_secret_cipher: None,
-            public_base_url: "http://127.0.0.1:8080".to_owned(),
-        };
         let headers = axum::http::HeaderMap::new();
 
         // Registering up to the cap succeeds.
@@ -995,22 +973,11 @@ mod tests {
 
     #[test]
     fn without_key_secret_stored_and_read_as_plaintext() {
-        let ts = tempfile::tempdir().unwrap();
-        shardline_index::hub::ensure_hub_tables(ts.path()).unwrap();
-        let store = shardline_index::LocalIndexStore::open(ts.path().to_path_buf());
-        let boxed = BoxedHubStore::from_store(store);
-        boxed
+        let (_ts, state) = crate::routes::tests::make_test_state();
+        state
+            .store
             .create_repo(HubRepoType::Model, "org/plain", false)
             .unwrap();
-        let object_store = ServerObjectStore::local(ts.path().join("lfs")).unwrap();
-        let state = HubState {
-            store: boxed,
-            object_store,
-            auth: None,
-            http_client: None,
-            webhook_secret_cipher: None,
-            public_base_url: "http://127.0.0.1:8080".to_owned(),
-        };
         state
             .store
             .create_webhook(
