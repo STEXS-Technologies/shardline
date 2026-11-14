@@ -1656,32 +1656,6 @@ impl RecordTraversal for MemoryRecordStore {
         })
     }
 
-    fn visit_latest_record_locators<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> RecordStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(Self::Locator) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            let locators = self
-                .lock_state()
-                .map_err(Into::into)?
-                .latest_records
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            for locator in locators {
-                visitor(locator)?;
-            }
-
-            Ok(())
-        })
-    }
-
     fn visit_latest_records<'operation, Visitor, VisitorError>(
         &'operation self,
         mut visitor: Visitor,
@@ -1784,32 +1758,6 @@ impl RecordTraversal for MemoryRecordStore {
                 .filter(|locator| locator.matches_repository(repository))
                 .cloned()
                 .collect::<Vec<_>>())
-        })
-    }
-
-    fn visit_version_record_locators<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> RecordStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(Self::Locator) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            let locators = self
-                .lock_state()
-                .map_err(Into::into)?
-                .version_records
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            for locator in locators {
-                visitor(locator)?;
-            }
-
-            Ok(())
         })
     }
 
@@ -3529,62 +3477,68 @@ mod tests {
         );
     }
 
-    // ── visit methods with no records ──────────────────────────────────────
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_record_store_visit_latest_records_empty() {
+    async fn memory_record_store_empty_visitor_contract() {
         let store = MemoryRecordStore::new();
-        let mut visited = Vec::new();
         store
-            .visit_latest_records(|stored| {
-                visited.push(stored);
-                Ok::<(), MemoryRecordStoreError>(())
+            .visit_latest_records(|_| -> Result<(), MemoryRecordStoreError> {
+                panic!("empty latest_records visitor received a record")
             })
             .await
             .unwrap();
-        assert!(visited.is_empty());
+        store
+            .visit_version_records(|_| -> Result<(), MemoryRecordStoreError> {
+                panic!("empty version_records visitor received a record")
+            })
+            .await
+            .unwrap();
+        store
+            .visit_latest_record_locators(|_| -> Result<(), MemoryRecordStoreError> {
+                panic!("empty latest_record_locators visitor received a record")
+            })
+            .await
+            .unwrap();
+        store
+            .visit_version_record_locators(|_| -> Result<(), MemoryRecordStoreError> {
+                panic!("empty version_record_locators visitor received a record")
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_record_store_visit_version_records_empty() {
-        let store = MemoryRecordStore::new();
-        let mut visited = Vec::new();
-        store
-            .visit_version_records(|stored| {
-                visited.push(stored);
-                Ok::<(), MemoryRecordStoreError>(())
-            })
-            .await
-            .unwrap();
-        assert!(visited.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_record_store_visit_latest_record_locators_empty() {
-        let store = MemoryRecordStore::new();
-        let mut visited = Vec::new();
-        store
-            .visit_latest_record_locators(|loc| {
-                visited.push(loc);
-                Ok::<(), MemoryRecordStoreError>(())
-            })
-            .await
-            .unwrap();
-        assert!(visited.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_record_store_visit_version_record_locators_empty() {
-        let store = MemoryRecordStore::new();
-        let mut visited = Vec::new();
-        store
-            .visit_version_record_locators(|loc| {
-                visited.push(loc);
-                Ok::<(), MemoryRecordStoreError>(())
-            })
-            .await
-            .unwrap();
-        assert!(visited.is_empty());
+    async fn memory_record_locator_visitors_release_lock_and_stop_on_error() {
+        for version in [false, true] {
+            let store = MemoryRecordStore::new();
+            let mut record = scoped_file_record().unwrap();
+            for name in ["b", "a"] {
+                record.file_id = name.into();
+                store.write_latest_record(&record).await.unwrap();
+                store.insert_version_record(&record).unwrap();
+            }
+            let expected = if version {
+                store.list_version_record_locators().await.unwrap()
+            } else {
+                store.list_latest_record_locators().await.unwrap()
+            };
+            assert_eq!(expected.len(), 2);
+            let mut visited = Vec::new();
+            let visitor = |locator| {
+                visited.push(locator);
+                store.insert_version_record(&record).unwrap();
+                Err::<(), _>(MemoryRecordStoreError::RecordNotFound)
+            };
+            let result = if version {
+                store.visit_version_record_locators(visitor).await
+            } else {
+                store.visit_latest_record_locators(visitor).await
+            };
+            assert!(matches!(
+                result,
+                Err(MemoryRecordStoreError::RecordNotFound)
+            ));
+            assert_eq!(visited, vec![expected[0].clone()]);
+        }
     }
 
     #[test]
