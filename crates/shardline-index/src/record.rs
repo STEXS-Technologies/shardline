@@ -669,17 +669,21 @@ mod tests {
         StorageRepresentation,
     };
 
-    #[test]
-    fn file_record_storage_layout_referenced_terms_when_chunk_size_is_zero() {
-        let record = FileRecord {
+    fn whole_file_record(total_bytes: u64, chunks: Vec<FileChunkRecord>) -> FileRecord {
+        FileRecord {
             file_id: "a".repeat(64),
             content_hash: "c".repeat(64),
-            total_bytes: 8,
+            total_bytes,
             chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
+            storage_repr: StorageRepresentation::WholeFileV1,
             repository_scope: None,
-            chunks: Vec::new(),
-        };
+            chunks,
+        }
+    }
+
+    #[test]
+    fn file_record_storage_layout_referenced_terms_when_chunk_size_is_zero() {
+        let record = whole_file_record(8, Vec::new());
         assert_eq!(
             record.storage_layout(),
             super::FileRecordStorageLayout::ReferencedObjectTerms
@@ -717,14 +721,9 @@ mod tests {
 
     #[test]
     fn file_record_reconstruction_plan_rejects_empty_chunk() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 0,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![FileChunkRecord {
+        let record = whole_file_record(
+            0,
+            vec![FileChunkRecord {
                 hash: "a".repeat(64),
                 offset: 0,
                 length: 0,
@@ -733,7 +732,7 @@ mod tests {
                 packed_start: 0,
                 packed_end: 1,
             }],
-        };
+        );
         assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::EmptyChunk)
@@ -742,14 +741,9 @@ mod tests {
 
     #[test]
     fn file_record_reconstruction_plan_rejects_invalid_chunk_range() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 4,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![FileChunkRecord {
+        let record = whole_file_record(
+            4,
+            vec![FileChunkRecord {
                 hash: "a".repeat(64),
                 offset: 0,
                 length: 4,
@@ -758,7 +752,7 @@ mod tests {
                 packed_start: 0,
                 packed_end: 4,
             }],
-        };
+        );
         assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::InvalidChunkRange)
@@ -767,14 +761,9 @@ mod tests {
 
     #[test]
     fn file_record_reconstruction_plan_rejects_invalid_packed_range() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 4,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![FileChunkRecord {
+        let record = whole_file_record(
+            4,
+            vec![FileChunkRecord {
                 hash: "a".repeat(64),
                 offset: 0,
                 length: 4,
@@ -783,7 +772,7 @@ mod tests {
                 packed_start: 4,
                 packed_end: 2,
             }],
-        };
+        );
         assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::InvalidPackedRange)
@@ -792,15 +781,7 @@ mod tests {
 
     #[test]
     fn file_record_reconstruction_plan_rejects_empty_chunks_with_nonzero_total_bytes() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 4,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![],
-        };
+        let record = whole_file_record(4, vec![]);
         assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::TotalBytesMismatch)
@@ -846,14 +827,9 @@ mod tests {
 
     #[test]
     fn file_record_reconstruction_plan_accepts_contiguous_native_chunks() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 8,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![
+        let record = whole_file_record(
+            8,
+            vec![
                 FileChunkRecord {
                     hash: "a".repeat(64),
                     offset: 0,
@@ -873,21 +849,16 @@ mod tests {
                     packed_end: 8,
                 },
             ],
-        };
+        );
 
         assert!(record.validate_reconstruction_plan().is_ok());
     }
 
     #[test]
     fn file_record_reconstruction_plan_rejects_gapped_offsets() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 8,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![
+        let record = whole_file_record(
+            8,
+            vec![
                 FileChunkRecord {
                     hash: "a".repeat(64),
                     offset: 0,
@@ -907,7 +878,7 @@ mod tests {
                     packed_end: 8,
                 },
             ],
-        };
+        );
 
         assert!(matches!(
             record.validate_reconstruction_plan(),
@@ -977,14 +948,9 @@ mod tests {
 
     #[test]
     fn file_record_reconstruction_plan_rejects_length_overflow() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 0,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![
+        let record = whole_file_record(
+            0,
+            vec![
                 FileChunkRecord {
                     hash: "a".repeat(64),
                     offset: 0,
@@ -1004,7 +970,7 @@ mod tests {
                     packed_end: 1,
                 },
             ],
-        };
+        );
         assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::LengthOverflow)
@@ -1067,14 +1033,9 @@ mod tests {
 
     #[test]
     fn file_record_reconstruction_plan_rejects_total_bytes_mismatch() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 10,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![FileChunkRecord {
+        let record = whole_file_record(
+            10,
+            vec![FileChunkRecord {
                 hash: "a".repeat(64),
                 offset: 0,
                 length: 8,
@@ -1083,7 +1044,7 @@ mod tests {
                 packed_start: 0,
                 packed_end: 8,
             }],
-        };
+        );
         assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::TotalBytesMismatch)
@@ -1092,15 +1053,7 @@ mod tests {
 
     #[test]
     fn file_record_reconstruction_plan_accepts_empty_chunks_zero_bytes() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 0,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![],
-        };
+        let record = whole_file_record(0, vec![]);
         assert!(record.validate_reconstruction_plan().is_ok());
     }
 
@@ -1507,14 +1460,9 @@ mod tests {
 
     #[tokio::test]
     async fn file_record_validate_rejects_invalid_chunk_hash() {
-        let record = FileRecord {
-            file_id: "a".repeat(64),
-            content_hash: "c".repeat(64),
-            total_bytes: 1,
-            chunk_size: 0,
-            storage_repr: crate::StorageRepresentation::WholeFileV1,
-            repository_scope: None,
-            chunks: vec![FileChunkRecord {
+        let record = whole_file_record(
+            1,
+            vec![FileChunkRecord {
                 hash: "not-a-valid-hex-string".to_owned(),
                 offset: 0,
                 length: 1,
@@ -1523,7 +1471,7 @@ mod tests {
                 packed_start: 0,
                 packed_end: 1,
             }],
-        };
+        );
         let result = record.validate_reconstruction_plan();
         assert!(result.is_err());
         // The error should wrap a HashParseError via #[from]
