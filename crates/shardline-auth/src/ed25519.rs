@@ -345,13 +345,27 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_sign_and_verify() {
+    fn private_key_formats_sign_and_verify() {
         let seed = test_seed();
-        let provider = Ed25519AuthProvider::new(&seed).expect("valid provider");
+        let signing_key = SigningKey::from_bytes(&seed);
+        let keypair = signing_key.to_keypair_bytes();
+        let pem = signing_key
+            .to_pkcs8_pem(Default::default())
+            .expect("PEM serialization should succeed");
         let claims = test_claims();
-        let token = provider.mint_token(&claims).expect("should mint token");
-        let verified = provider.verify_token(&token).expect("should verify");
-        assert_eq!(verified, claims);
+        for (format, bytes) in [
+            ("32-byte seed", seed.as_slice()),
+            ("64-byte keypair", keypair.as_slice()),
+            ("PKCS8 PEM", pem.as_bytes()),
+        ] {
+            let provider = Ed25519AuthProvider::new(bytes).expect(format);
+            let token = provider.mint_token(&claims).expect(format);
+            assert_eq!(
+                provider.verify_token(&token).expect(format),
+                claims,
+                "{format}"
+            );
+        }
     }
 
     #[test]
@@ -497,19 +511,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_64_byte_keypair() {
-        let seed = test_seed();
-        let signing_key = SigningKey::from_bytes(&seed);
-        let keypair_bytes = signing_key.to_keypair_bytes();
-        let provider =
-            Ed25519AuthProvider::new(&keypair_bytes).expect("should accept 64-byte keypair");
-        let claims = test_claims();
-        let token = provider.mint_token(&claims).expect("should mint");
-        let verified = provider.verify_token(&token).expect("should verify");
-        assert_eq!(verified, claims);
-    }
-
-    #[test]
     fn cross_instance_verify_with_public_key_only() {
         // Provider A (has private key) mints a token.
         let seed = test_seed();
@@ -526,20 +527,6 @@ mod tests {
         let verified = provider_b
             .verify_token(&token)
             .expect("should verify cross-instance");
-        assert_eq!(verified, claims);
-    }
-
-    #[test]
-    fn accept_pem_format_key() {
-        let seed = test_seed();
-        let signing_key = SigningKey::from_bytes(&seed);
-        let pem = signing_key
-            .to_pkcs8_pem(Default::default())
-            .expect("PEM serialization should succeed");
-        let provider = Ed25519AuthProvider::new(pem.as_bytes()).expect("should accept PEM");
-        let claims = test_claims();
-        let token = provider.mint_token(&claims).expect("should mint");
-        let verified = provider.verify_token(&token).expect("should verify");
         assert_eq!(verified, claims);
     }
 
