@@ -458,12 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_params_rejects_bad_max_keys() {
-        assert!(parse_list_objects_v2_params(&query(&[("max-keys", "many")])).is_err());
-        assert!(parse_list_objects_v2_params(&query(&[("max-keys", "-1")])).is_err());
-    }
-
-    #[test]
     fn parse_params_decodes_continuation_token() {
         let token = encode_continuation_token("data/2.txt");
         let params =
@@ -716,16 +710,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_params_rejects_multi_char_delimiter() {
-        for delimiter in ["//", "ab", "%%"] {
-            let result = parse_list_objects_v2_params(&query(&[("delimiter", delimiter)]));
-            assert!(result.is_err(), "delimiter {delimiter:?} must be rejected");
-            let error = result.unwrap_err();
-            assert_eq!(error.code, "InvalidArgument");
-        }
-    }
-
-    #[test]
     fn parse_params_unknown_keys_are_ignored() {
         // Unknown fetch-owner / list-type remain ignored; encoding-type is
         // recognized (list-type=2 is a sub-resource).
@@ -756,12 +740,9 @@ mod tests {
         assert_eq!(params.delimiter, Some(Delimiter('/')));
         assert_eq!(params.max_keys, 12);
         assert_eq!(params.marker.as_deref(), Some("dir/old"));
-        assert!(parse_list_objects_v1_params(&query(&[("max-keys", "-1")])).is_err());
-        assert!(parse_list_objects_v1_params(&query(&[("max-keys", "bad")])).is_err());
-        assert!(parse_list_objects_v1_params(&query(&[("delimiter", "//")])).is_err());
     }
     #[test]
-    fn url_encoding_is_opt_in_and_rejects_unsupported_values() {
+    fn url_encoding_is_opt_in_and_preserves_raw_keys() {
         assert!(!parse_list_objects_url_encoding(&[]).unwrap());
         let raw = query(&[
             ("encoding-type", "url"),
@@ -775,9 +756,27 @@ mod tests {
         assert_eq!(v1.prefix, "é/+%");
         assert_eq!(v1.marker.as_deref(), Some("a%2Fb"));
         assert_eq!(v2.start_after.as_deref(), Some("é/+%"));
-        for value in ["", "URL", "base64"] {
-            assert!(parse_list_objects_v1_params(&query(&[("encoding-type", value)])).is_err());
-            assert!(parse_list_objects_v2_params(&query(&[("encoding-type", value)])).is_err());
+    }
+    #[test]
+    fn both_listing_versions_reject_invalid_common_parameters() {
+        for (name, value) in [
+            ("max-keys", "many"),
+            ("max-keys", "-1"),
+            ("max-keys", "bad"),
+            ("delimiter", "//"),
+            ("delimiter", "ab"),
+            ("delimiter", "%%"),
+            ("encoding-type", ""),
+            ("encoding-type", "URL"),
+            ("encoding-type", "base64"),
+        ] {
+            let query = query(&[(name, value)]);
+            for error in [
+                parse_list_objects_v1_params(&query).unwrap_err(),
+                parse_list_objects_v2_params(&query).unwrap_err(),
+            ] {
+                assert_eq!(error.code, "InvalidArgument", "{name}={value:?}");
+            }
         }
     }
 }
