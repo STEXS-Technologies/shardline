@@ -5,7 +5,7 @@ use crate::{
     OperationKind, ProviderLifecycleEvent, QuarantineLifecycleEvent, ReliabilityError,
     ReliabilityMerkleCommit, RepairEvidenceEvent, RetentionHoldLifecycleEvent,
     S3ObjectLifecycleEvent, StateTransitionEvent, WebhookDeliveryLifecycleEvent,
-    reliability_merkle_commit_json_with_previous,
+    build_reliability_merkle_commit_with_previous,
 };
 
 /// Verifies one persisted reliability event using the canonical domain decoder.
@@ -127,6 +127,18 @@ pub fn build_persisted_merkle_commit_with_previous(
     event_json: Value,
     previous_json: Option<Value>,
 ) -> Result<Value, ReliabilityError> {
+    Ok(serde_json::to_value(build_persisted_commit(
+        operation_kind,
+        event_json,
+        previous_json,
+    )?)?)
+}
+
+fn build_persisted_commit(
+    operation_kind: OperationKind,
+    event_json: Value,
+    previous_json: Option<Value>,
+) -> Result<ReliabilityMerkleCommit, ReliabilityError> {
     let previous = previous_json
         .map(serde_json::from_value::<ReliabilityMerkleCommit>)
         .transpose()?;
@@ -203,10 +215,8 @@ pub fn verify_persisted_merkle_commit_with_previous(
             operation_kind.as_str()
         ))
     })?;
-    let expected =
-        build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous_json)?;
+    let expected_commit = build_persisted_commit(operation_kind, event_json, previous_json)?;
     let observed_commit = serde_json::from_value::<ReliabilityMerkleCommit>(observed)?;
-    let expected_commit = serde_json::from_value::<ReliabilityMerkleCommit>(expected)?;
     if observed_commit.schema_version > crate::RELIABILITY_MERKLE_SCHEMA_VERSION
         || observed_commit.body != expected_commit.body
         || observed_commit.event != expected_commit.event
@@ -342,7 +352,7 @@ fn build<E>(
     operation_kind: OperationKind,
     event_json: Value,
     previous: Option<&ReliabilityMerkleCommit>,
-) -> Result<Value, ReliabilityError>
+) -> Result<ReliabilityMerkleCommit, ReliabilityError>
 where
     E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
 {
@@ -350,7 +360,7 @@ where
     if event.operation_identity().kind != operation_kind {
         return Err(ReliabilityError::OperationMismatch);
     }
-    reliability_merkle_commit_json_with_previous(&event, previous)
+    build_reliability_merkle_commit_with_previous(&event, previous)
 }
 
 #[cfg(test)]
