@@ -3290,16 +3290,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        sqlx::query(
-            "DELETE FROM shardline_provider_repository_states
-             WHERE provider = $1 AND owner = $2 AND repo = $3",
-        )
-        .bind(RepositoryProvider::GitHub.as_str())
-        .bind("concurrent-team")
-        .bind("concurrent-state")
-        .execute(&pool)
-        .await
-        .expect("clean provider state fixture");
 
         let access_store = make_pg_store(pool.clone());
         let revision_store = make_pg_store(pool);
@@ -3373,25 +3363,6 @@ mod tests {
             Some(200),
             Some("refs/heads/main".into()),
         );
-        for repo in ["first", "second"] {
-            sqlx::query(
-                "DELETE FROM shardline_provider_repository_states
-                 WHERE provider = 'github' AND owner = $1 AND repo = $2",
-            )
-            .bind(owner)
-            .bind(repo)
-            .execute(&pool)
-            .await
-            .expect("clean provider state fixture");
-            sqlx::query(
-                "DELETE FROM shardline_reliability_events
-                 WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
-            )
-            .bind(format!("github:{owner}:{repo}"))
-            .execute(&pool)
-            .await
-            .expect("clean provider evidence fixture");
-        }
         store
             .upsert_provider_repository_state(&first)
             .await
@@ -3407,26 +3378,6 @@ mod tests {
             .expect("list provider states with batched evidence verification");
         assert!(states.iter().any(|state| state.repo() == "first"));
         assert!(states.iter().any(|state| state.repo() == "second"));
-
-        for repo in ["first", "second"] {
-            sqlx::query(
-                "DELETE FROM shardline_provider_repository_states
-                 WHERE provider = 'github' AND owner = $1 AND repo = $2",
-            )
-            .bind(owner)
-            .bind(repo)
-            .execute(&pool)
-            .await
-            .expect("clean provider state fixture");
-            sqlx::query(
-                "DELETE FROM shardline_reliability_events
-                 WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
-            )
-            .bind(format!("github:{owner}:{repo}"))
-            .execute(&pool)
-            .await
-            .expect("clean provider evidence fixture");
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3436,21 +3387,6 @@ mod tests {
             return;
         };
         let store = make_pg_store(pool.clone());
-        sqlx::query(
-            "DELETE FROM shardline_provider_repository_states
-             WHERE provider = 'github' AND owner = 'evidence-team' AND repo = 'tampered'",
-        )
-        .execute(&pool)
-        .await
-        .expect("clean provider state fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'ProviderEvent'
-               AND operation_id = 'github:evidence-team:tampered'",
-        )
-        .execute(&pool)
-        .await
-        .expect("clean provider evidence fixture");
         let state = ProviderRepositoryState::new(
             RepositoryProvider::GitHub,
             "evidence-team".into(),
@@ -3492,21 +3428,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        sqlx::query(
-            "DELETE FROM shardline_provider_repository_states
-             WHERE provider = 'github' AND owner = 'evidence-team' AND repo = 'tampered'",
-        )
-        .execute(&pool)
-        .await
-        .expect("clean provider state fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'ProviderEvent'
-               AND operation_id = 'github:evidence-team:tampered'",
-        )
-        .execute(&pool)
-        .await
-        .expect("clean provider evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3519,23 +3440,6 @@ mod tests {
         let owner = "evidence-repair-team";
         let repo = "missing-journal";
         let operation_id = format!("{}:{owner}:{repo}", RepositoryProvider::GitHub.as_str());
-        sqlx::query(
-            "DELETE FROM shardline_provider_repository_states
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean provider state fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
-        )
-        .bind(&operation_id)
-        .execute(&pool)
-        .await
-        .expect("clean provider evidence fixture");
         sqlx::query(
             "INSERT INTO shardline_provider_repository_states
                 (provider, owner, repo, last_access_changed_at_unix_seconds)
@@ -3562,24 +3466,6 @@ mod tests {
         .await
         .expect("count evidence");
         assert_eq!(event_count, 0);
-
-        sqlx::query(
-            "DELETE FROM shardline_provider_repository_states
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean state fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
-        )
-        .bind(&operation_id)
-        .execute(&pool)
-        .await
-        .expect("clean evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3590,19 +3476,6 @@ mod tests {
         };
         let store = make_pg_store(pool.clone());
         let object_key = shardline_storage::ObjectKey::parse("gc/replayed-noop-cost").unwrap();
-        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
-            .bind(object_key.as_str())
-            .execute(&pool)
-            .await
-            .expect("clean quarantine fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
-        )
-        .bind(object_key.as_str())
-        .execute(&pool)
-        .await
-        .expect("clean quarantine evidence fixture");
 
         let candidate = QuarantineCandidate::new(object_key.clone(), 4, 100, 200).unwrap();
         store
@@ -3647,20 +3520,6 @@ mod tests {
         .expect("count replay evidence");
         assert_eq!(xmin, original_xmin, "identical row should not be rewritten");
         assert_eq!(event_count, original_event_count + 1);
-
-        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
-            .bind(object_key.as_str())
-            .execute(&pool)
-            .await
-            .expect("clean quarantine fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
-        )
-        .bind(object_key.as_str())
-        .execute(&pool)
-        .await
-        .expect("clean quarantine evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3671,19 +3530,6 @@ mod tests {
         };
         let store = make_pg_store(pool.clone());
         let object_key = shardline_storage::ObjectKey::parse("gc/visitor-tampered").unwrap();
-        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
-            .bind(object_key.as_str())
-            .execute(&pool)
-            .await
-            .expect("clean quarantine fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
-        )
-        .bind(object_key.as_str())
-        .execute(&pool)
-        .await
-        .expect("clean quarantine evidence fixture");
 
         let candidate = QuarantineCandidate::new(object_key.clone(), 4, 100, 200).unwrap();
         store
@@ -3709,20 +3555,6 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(!visited, "tampered state must not reach GC visitors");
-
-        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
-            .bind(object_key.as_str())
-            .execute(&pool)
-            .await
-            .expect("clean quarantine fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
-        )
-        .bind(object_key.as_str())
-        .execute(&pool)
-        .await
-        .expect("clean quarantine evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3767,19 +3599,6 @@ mod tests {
         };
         let store = make_pg_store(pool.clone());
         let object_key = shardline_storage::ObjectKey::parse("gc/delete-repair").unwrap();
-        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
-            .bind(object_key.as_str())
-            .execute(&pool)
-            .await
-            .expect("clean quarantine fixture");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
-        )
-        .bind(object_key.as_str())
-        .execute(&pool)
-        .await
-        .expect("clean quarantine evidence fixture");
         let candidate = QuarantineCandidate::new(object_key.clone(), 4, 100, 200).unwrap();
         store
             .upsert_quarantine_candidate(&candidate)
@@ -3810,15 +3629,6 @@ mod tests {
         .await
         .expect("inspect repaired quarantine evidence");
         assert_eq!((count, minimum, maximum), (2, 0, 1));
-
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
-        )
-        .bind(object_key.as_str())
-        .execute(&pool)
-        .await
-        .expect("clean repaired quarantine evidence");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4447,11 +4257,6 @@ mod tests {
             return;
         };
         let intent_id = "pg-scoped-legacy-transition";
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent_id)
-            .execute(&pool)
-            .await
-            .expect("clean leftover intent");
         let store = make_pg_store(pool.clone());
         let intent = UploadIntent::new(
             intent_id.into(),
@@ -4539,19 +4344,6 @@ mod tests {
             return;
         };
         let intent_id = "pg-scoped-legacy-identity-migration";
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Upload' AND operation_id = $1",
-        )
-        .bind(intent_id)
-        .execute(&pool)
-        .await
-        .expect("clean legacy evidence fixture");
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent_id)
-            .execute(&pool)
-            .await
-            .expect("clean legacy intent fixture");
 
         let intent = UploadIntent::new(
             intent_id.into(),
@@ -4618,20 +4410,6 @@ mod tests {
         assert!(events.iter().all(|event| {
             event.operation.tenant == "tenant-pg" && event.operation.repository == "repo-pg"
         }));
-
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Upload' AND operation_id = $1",
-        )
-        .bind(intent_id)
-        .execute(&pool)
-        .await
-        .expect("clean migrated evidence fixture");
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent_id)
-            .execute(&pool)
-            .await
-            .expect("clean migrated intent fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4654,14 +4432,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        // Purge the fixed fixture ids so assertions observe only this run's rows.
-        for id in ["query-state-a", "query-state-b"] {
-            sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-                .bind(id)
-                .execute(&pool)
-                .await
-                .expect("clean fixture");
-        }
         let store = make_pg_store(pool);
         // Create two intents with different states
         let a = UploadIntent::new("query-state-a".into(), "test/a".into(), "01".repeat(32), 10);
