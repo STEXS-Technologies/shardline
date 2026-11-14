@@ -21,11 +21,13 @@ jobs:
       - name: Setup coverage toolchain
         uses: ./.github/actions/rust-ci-setup
         with:
-          rust-components: rustfmt,clippy,llvm-tools-preview
-          cargo-tools: cargo-make,cargo-nextest@0.9.123,cargo-llvm-cov
+          rust-components: llvm-tools-preview
+          cargo-tools: cargo-nextest@0.9.123,cargo-llvm-cov
 
       - name: Generate coverage and enforce ratchet
-        run: cargo make coverage-check
+        run: |
+          bash scripts/run_coverage_json.sh
+          bash scripts/check_coverage_ratchet.sh
 
       - name: Upload coverage summary
         if: always()
