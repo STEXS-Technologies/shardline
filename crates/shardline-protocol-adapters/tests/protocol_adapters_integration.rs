@@ -242,9 +242,10 @@ fn scope_namespace_none_returns_global() {
 fn scope_namespace_scoped_returns_hash() {
     let scope = test_scope();
     let ns = scope_namespace(Some(&scope));
-    // Should be a 64-char hex string (SHA-256).
-    assert_eq!(ns.len(), 64);
-    assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(
+        ns,
+        "fd457cb0fbe89aff261644aa6caa4067dee22f9d5415a7d87dc6d069fb34f83b"
+    );
 }
 
 #[test]

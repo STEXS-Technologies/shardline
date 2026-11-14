@@ -4270,10 +4270,8 @@ dependencies = [
 name = "shardline-protocol-adapters"
 version = "1.13.0"
 dependencies = [
- "hex",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "shardline-protocol",
  "shardline-server-core",
  "shardline-storage",

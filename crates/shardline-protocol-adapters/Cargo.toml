@@ -10,10 +10,8 @@ readme = "README.md"
 description = "Shared protocol adapters for Git LFS, Bazel HTTP cache, and related object-key mapping."
 
 [dependencies]
-hex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha2.workspace = true
 shardline-protocol.workspace = true
 shardline-server-core.workspace = true
 shardline-storage.workspace = true

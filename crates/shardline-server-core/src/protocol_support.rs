@@ -317,9 +317,10 @@ mod tests {
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
                 .unwrap();
         let ns = scope_namespace(Some(&scope));
-        // Should be a 64-char hex string (SHA-256)
-        assert_eq!(ns.len(), 64);
-        assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            ns,
+            "dd80a080687cba3deddd237177f7f99484811e475ba6bac34ec5e4295fd8cb32"
+        );
     }
 
     #[test]
@@ -328,7 +329,10 @@ mod tests {
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
         let ns = scope_namespace(Some(&scope));
-        assert_eq!(ns.len(), 64);
+        assert_eq!(
+            ns,
+            "d6db281729e70151c911326ac411108165abfc2bb78a3313c14d99cf7ec2cfd2"
+        );
     }
 
     #[test]

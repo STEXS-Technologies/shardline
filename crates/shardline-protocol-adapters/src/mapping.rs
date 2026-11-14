@@ -80,22 +80,5 @@ pub fn object_key(value: &str) -> Result<ObjectKey, ProtocolError> {
 /// ```
 #[must_use]
 pub fn scope_namespace(repository_scope: Option<&shardline_protocol::RepositoryScope>) -> String {
-    use sha2::{Digest, Sha256};
-
-    repository_scope.map_or_else(
-        || "global".to_owned(),
-        |scope| {
-            let mut hasher = Sha256::new();
-            hasher.update(scope.provider().as_str().as_bytes());
-            hasher.update([0]);
-            hasher.update(scope.owner().as_bytes());
-            hasher.update([0]);
-            hasher.update(scope.name().as_bytes());
-            hasher.update([0]);
-            if let Some(revision) = scope.revision() {
-                hasher.update(revision.as_bytes());
-            }
-            hex::encode(hasher.finalize())
-        },
-    )
+    shardline_server_core::protocol_support::scope_namespace(repository_scope)
 }
