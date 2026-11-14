@@ -624,19 +624,15 @@ mod tests {
     #[test]
     fn normalize_default_revision_prepends_refs_heads() {
         let result = super::normalize_default_revision("main");
-        assert!(result.is_ok());
-        if let Ok(rev) = result {
-            assert_eq!(rev.as_str(), "refs/heads/main");
-        }
+        let rev = result.expect("expected valid rev");
+        assert_eq!(rev.as_str(), "refs/heads/main");
     }
 
     #[test]
     fn normalize_default_revision_preserves_refs_prefix() {
         let result = super::normalize_default_revision("refs/tags/v1.0");
-        assert!(result.is_ok());
-        if let Ok(rev) = result {
-            assert_eq!(rev.as_str(), "refs/tags/v1.0");
-        }
+        let rev = result.expect("expected valid rev");
+        assert_eq!(rev.as_str(), "refs/tags/v1.0");
     }
 
     #[test]
@@ -819,10 +815,8 @@ mod tests {
     #[test]
     fn normalize_default_revision_accepts_empty_as_refs_heads() {
         let result = super::normalize_default_revision("");
-        assert!(result.is_ok());
-        if let Ok(rev) = result {
-            assert_eq!(rev.as_str(), "refs/heads/");
-        }
+        let rev = result.expect("expected valid rev");
+        assert_eq!(rev.as_str(), "refs/heads/");
     }
 
     #[test]

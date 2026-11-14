@@ -180,12 +180,10 @@ mod tests {
     fn repository_ref_keeps_provider_owner_and_name() {
         let reference = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
 
-        assert!(reference.is_ok());
-        if let Ok(value) = reference {
-            assert_eq!(value.provider(), ProviderKind::GitHub);
-            assert_eq!(value.owner(), "team");
-            assert_eq!(value.name(), "assets");
-        }
+        let value = reference.expect("expected valid value");
+        assert_eq!(value.provider(), ProviderKind::GitHub);
+        assert_eq!(value.owner(), "team");
+        assert_eq!(value.name(), "assets");
     }
 
     #[test]
@@ -214,10 +212,8 @@ mod tests {
     fn revision_ref_keeps_value() {
         let revision = RevisionRef::new("refs/heads/main");
 
-        assert!(revision.is_ok());
-        if let Ok(value) = revision {
-            assert_eq!(value.as_str(), "refs/heads/main");
-        }
+        let value = revision.expect("expected valid value");
+        assert_eq!(value.as_str(), "refs/heads/main");
     }
 
     #[test]

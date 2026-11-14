@@ -564,9 +564,7 @@ mod tests {
         let event = provider.parse_webhook(request);
 
         let event = event.expect("expected valid event");
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected normalized push event");
         let revision = RevisionRef::new("refs/heads/main");
 
         let revision = revision.expect("expected valid revision");
@@ -646,28 +644,22 @@ mod tests {
     #[test]
     fn provider_subject_keeps_value() {
         let subject = ProviderSubject::new("github-user-42");
-        assert!(subject.is_ok());
-        if let Ok(subject) = subject {
-            assert_eq!(subject.as_str(), "github-user-42");
-        }
+        let subject = subject.expect("expected valid subject");
+        assert_eq!(subject.as_str(), "github-user-42");
     }
 
     #[test]
     fn canonical_clone_url_keeps_value() {
         let url = CanonicalCloneUrl::new("https://github.example/team/assets.git");
-        assert!(url.is_ok());
-        if let Ok(url) = url {
-            assert_eq!(url.as_str(), "https://github.example/team/assets.git");
-        }
+        let url = url.expect("expected valid url");
+        assert_eq!(url.as_str(), "https://github.example/team/assets.git");
     }
 
     #[test]
     fn webhook_delivery_id_keeps_value() {
         let id = WebhookDeliveryId::new("delivery-abc-123");
-        assert!(id.is_ok());
-        if let Ok(id) = id {
-            assert_eq!(id.as_str(), "delivery-abc-123");
-        }
+        let id = id.expect("expected valid id");
+        assert_eq!(id.as_str(), "delivery-abc-123");
     }
 
     #[test]

@@ -265,10 +265,7 @@ mod tests {
         );
         let deny = GrantedRepositoryAccess::from_decision(&request, AuthorizationDecision::Deny);
 
-        assert!(allow.is_some());
-        let Some(allow) = allow else {
-            return;
-        };
+        let allow = allow.expect("expected granted repository access");
         assert_eq!(allow.subject(), &subject);
         assert_eq!(allow.access(), RepositoryAccess::Write);
         assert_eq!(deny, None);
@@ -303,18 +300,10 @@ mod tests {
         let allowed = GrantedRepositoryAccess::authorize(&adapter, &allowed_request);
         let denied = GrantedRepositoryAccess::authorize(&adapter, &denied_request);
 
-        assert!(allowed.is_ok());
-        assert!(denied.is_ok());
-        let Ok(allowed) = allowed else {
-            return;
-        };
-        let Ok(denied) = denied else {
-            return;
-        };
-        assert!(allowed.is_some());
-        let Some(allowed) = allowed else {
-            return;
-        };
+        let allowed = allowed
+            .expect("expected successful authorization")
+            .expect("expected granted repository access");
+        let denied = denied.expect("expected successful authorization");
         assert_eq!(allowed.subject(), &allowed_subject);
         assert_eq!(denied, None);
     }
