@@ -326,21 +326,7 @@ mod tests {
 
     fn empty_repair_report() -> RepairReport {
         RepairReport {
-            index_rebuild: LocalIndexRebuildReport {
-                scanned_version_records: 0,
-                scanned_retained_shards: 0,
-                rebuilt_latest_records: 0,
-                unchanged_latest_records: 0,
-                removed_stale_latest_records: 0,
-                scanned_reconstructions: 0,
-                unchanged_reconstructions: 0,
-                removed_stale_reconstructions: 0,
-                rebuilt_dedupe_shard_mappings: 0,
-                unchanged_dedupe_shard_mappings: 0,
-                removed_stale_dedupe_shard_mappings: 0,
-                preserved_latest_records_unreadable_version: vec![],
-                issues: vec![],
-            },
+            index_rebuild: LocalIndexRebuildReport::default(),
             lifecycle_repair: LifecycleRepairReport {
                 scanned_records: 0,
                 referenced_objects: 0,
@@ -355,16 +341,7 @@ mod tests {
                 removed_stale_webhook_deliveries: 0,
                 removed_future_webhook_deliveries: 0,
             },
-            fsck: LocalFsckReport {
-                latest_records: 0,
-                version_records: 0,
-                inspected_chunk_references: 0,
-                inspected_dedupe_shard_mappings: 0,
-                inspected_reconstructions: 0,
-                inspected_webhook_deliveries: 0,
-                inspected_provider_repository_states: 0,
-                issues: vec![],
-            },
+            fsck: LocalFsckReport::default(),
         }
     }
 
@@ -382,12 +359,12 @@ mod tests {
                 rebuilt_dedupe_shard_mappings: 4,
                 unchanged_dedupe_shard_mappings: 10,
                 removed_stale_dedupe_shard_mappings: 1,
-                preserved_latest_records_unreadable_version: vec![],
                 issues: vec![LocalIndexRebuildIssue {
                     kind: LocalIndexRebuildIssueKind::InvalidVersionRecordJson,
                     location: "records/abc".to_owned(),
                     detail: IndexRebuildIssueDetail::RecordJsonInvalid,
                 }],
+                ..LocalIndexRebuildReport::default()
             },
             lifecycle_repair: LifecycleRepairReport {
                 scanned_records: 100,

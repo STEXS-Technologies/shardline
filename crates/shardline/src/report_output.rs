@@ -681,7 +681,7 @@ mod tests {
             inspected_reconstructions: 25,
             inspected_webhook_deliveries: 10,
             inspected_provider_repository_states: 5,
-            issues: vec![],
+            ..LocalFsckReport::default()
         };
         print_fsck_summary(&report);
     }
@@ -696,7 +696,7 @@ mod tests {
             inspected_reconstructions: 5,
             inspected_webhook_deliveries: 6,
             inspected_provider_repository_states: 7,
-            issues: vec![],
+            ..LocalFsckReport::default()
         };
         print_fsck_cli_summary(&report, Path::new("/root"));
     }
@@ -704,13 +704,6 @@ mod tests {
     #[test]
     fn fsck_summary_reports_issue_count() {
         let report = LocalFsckReport {
-            latest_records: 0,
-            version_records: 0,
-            inspected_chunk_references: 0,
-            inspected_dedupe_shard_mappings: 0,
-            inspected_reconstructions: 0,
-            inspected_webhook_deliveries: 0,
-            inspected_provider_repository_states: 0,
             issues: vec![
                 LocalFsckIssue {
                     kind: FsckIssueKind::MissingChunk,
@@ -725,6 +718,7 @@ mod tests {
                     detail: FsckIssueDetail::RecordJsonInvalid,
                 },
             ],
+            ..LocalFsckReport::default()
         };
         assert_eq!(report.issue_count(), 2);
         print_fsck_summary(&report);
@@ -735,13 +729,6 @@ mod tests {
     #[test]
     fn fsck_issues_runs() {
         let report = LocalFsckReport {
-            latest_records: 0,
-            version_records: 0,
-            inspected_chunk_references: 0,
-            inspected_dedupe_shard_mappings: 0,
-            inspected_reconstructions: 0,
-            inspected_webhook_deliveries: 0,
-            inspected_provider_repository_states: 0,
             issues: vec![LocalFsckIssue {
                 kind: FsckIssueKind::MissingChunk,
                 location: "chunks/abc".to_owned(),
@@ -749,6 +736,7 @@ mod tests {
                     version_locator: "records/abc".to_owned(),
                 },
             }],
+            ..LocalFsckReport::default()
         };
         print_fsck_issues(&report);
     }
@@ -768,21 +756,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn empty_index_rebuild_report() -> LocalIndexRebuildReport {
-        LocalIndexRebuildReport {
-            scanned_version_records: 0,
-            scanned_retained_shards: 0,
-            rebuilt_latest_records: 0,
-            unchanged_latest_records: 0,
-            removed_stale_latest_records: 0,
-            scanned_reconstructions: 0,
-            unchanged_reconstructions: 0,
-            removed_stale_reconstructions: 0,
-            rebuilt_dedupe_shard_mappings: 0,
-            unchanged_dedupe_shard_mappings: 0,
-            removed_stale_dedupe_shard_mappings: 0,
-            preserved_latest_records_unreadable_version: vec![],
-            issues: vec![],
-        }
+        LocalIndexRebuildReport::default()
     }
 
     #[test]
@@ -992,16 +966,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn empty_fsck_report() -> LocalFsckReport {
-        LocalFsckReport {
-            latest_records: 0,
-            version_records: 0,
-            inspected_chunk_references: 0,
-            inspected_dedupe_shard_mappings: 0,
-            inspected_reconstructions: 0,
-            inspected_webhook_deliveries: 0,
-            inspected_provider_repository_states: 0,
-            issues: vec![],
-        }
+        LocalFsckReport::default()
     }
     struct FailingReportWriter {
         fail_write: bool,
