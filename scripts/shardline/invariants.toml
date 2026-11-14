@@ -94,3 +94,43 @@ tests = [
   { file = "crates/shardline-server/src/postgres_backend/read.rs", name = "list_object_flat_namespace_page_returns_at_most_limit", backend = "postgres-adapter/local-objects" },
   { file = "crates/shardline-server/src/postgres_backend/read.rs", name = "list_object_flat_namespace_page_with_limit", backend = "postgres-adapter/local-objects" },
 ]
+
+[[invariant]]
+id = "I-SNAPSHOT-HISTORY"
+guarantee = "Verify snapshot history and its current materialized state without changing released evidence encodings."
+owners = ["crates/shardline-reliability/src/snapshot_event.rs", "crates/shardline-reliability/src/snapshot_log.rs"]
+failure_boundaries = ["sequence gap", "sequence overflow", "current state mismatch", "tampered commitment", "rewritten storage sequence", "released encoding compatibility"]
+tests = [
+  { file = "crates/shardline-reliability/src/tests.rs", name = "snapshot_chain_rejects_sequence_gaps", backend = "typed-evidence" },
+  { file = "crates/shardline-reliability/src/tests.rs", name = "snapshot_evidence_rejects_sequence_overflow", backend = "typed-evidence" },
+  { file = "crates/shardline-reliability/src/tests.rs", name = "snapshot_evidence_helpers_share_baseline_repair_and_append_policy", backend = "typed-evidence" },
+  { file = "crates/shardline-reliability/src/tests.rs", name = "snapshot_transition_helper_verifies_before_and_appends_after", backend = "typed-evidence" },
+  { file = "crates/shardline-reliability/tests/deployment_compatibility.rs", name = "historical_deployment_evidence_preserves_commitments_and_signatures", backend = "released-fixtures" },
+  { file = "crates/shardline-reliability/tests/deployment_compatibility.rs", name = "historical_evidence_rejects_tampering_and_storage_sequence_rewrites", backend = "released-fixtures" },
+]
+
+[[invariant]]
+id = "I-SNAPSHOT-REACTIVATION"
+guarantee = "Use the verified released snapshot as the reactivation boundary when a retention hold or quarantine observation changes."
+owners = ["crates/shardline-reliability/src/snapshot_log.rs", "crates/shardline-reliability/src/retention_evidence.rs", "crates/shardline-reliability/src/quarantine_evidence.rs"]
+failure_boundaries = ["changed retention reason and timestamps", "changed quarantine length and timestamps", "repeated release", "tampered snapshot"]
+tests = [
+  { file = "crates/shardline-reliability/src/retention_evidence.rs", name = "reactivation_uses_the_released_snapshot_as_transition_boundary", backend = "retention-evidence" },
+  { file = "crates/shardline-reliability/src/quarantine_evidence.rs", name = "reactivation_uses_the_released_snapshot_as_transition_boundary", backend = "quarantine-evidence" },
+  { file = "crates/shardline-reliability/src/quarantine_evidence.rs", name = "released_candidate_cannot_be_released_twice", backend = "quarantine-evidence" },
+  { file = "crates/shardline-reliability/src/quarantine_evidence.rs", name = "state_digest_tampering_is_rejected", backend = "quarantine-evidence" },
+]
+
+[[invariant]]
+id = "I-MULTIPART-JOURNAL"
+guarantee = "Multipart recovery trusts committed evidence and Merkle heads, rejects tampering, and ignores or trims uncommitted crash tails."
+owners = ["crates/shardline-s3-adapter/src/multipart.rs"]
+failure_boundaries = ["tampered Merkle journal", "tampered durable head", "missing committed journal", "metadata crash after evidence append", "metadata crash after Merkle append"]
+# Filesystem fixtures qualify the adapter journal policy, not remote publication durability.
+tests = [
+  { file = "crates/shardline-s3-adapter/src/multipart.rs", name = "tampered_merkle_journal_is_rejected", backend = "local-journal" },
+  { file = "crates/shardline-s3-adapter/src/multipart.rs", name = "bounded_session_read_rejects_tampered_durable_head", backend = "local-journal" },
+  { file = "crates/shardline-s3-adapter/src/multipart.rs", name = "bounded_session_read_rejects_missing_committed_journal", backend = "local-journal" },
+  { file = "crates/shardline-s3-adapter/src/multipart.rs", name = "uncommitted_evidence_journal_tail_is_ignored_after_metadata_crash", backend = "local-journal" },
+  { file = "crates/shardline-s3-adapter/src/multipart.rs", name = "uncommitted_merkle_journal_tail_is_trimmed_after_metadata_crash", backend = "local-journal" },
+]
