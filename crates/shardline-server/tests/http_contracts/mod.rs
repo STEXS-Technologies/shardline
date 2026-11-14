@@ -57,36 +57,7 @@ async fn test_stats_with_auth_returns_200() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_put_and_get() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"Hello, LFS over HTTP!";
-    let oid = sha256_hex(content);
-
-    // PUT the object.
-    let put_resp = client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        put_resp.status().is_success(),
-        "LFS PUT failed: {}",
-        put_resp.status()
-    );
-
-    // GET the object back.
-    let get_resp = client
-        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get_resp.status(), 200);
-    let body = get_resp.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), content);
+    lfs::put_and_get(&server, b"Hello, LFS over HTTP!").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1306,7 +1306,7 @@ async fn test_lfs_batch_mixed_existing_missing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_upload_empty_file() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    http_contracts::lfs::upload_empty(&server).await;
+    http_contracts::lfs::put_and_get(&server, b"").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1775,38 +1775,13 @@ async fn test_metrics_after_lfs_upload() {
 }
 
 // ===========================================================================
-// 16. Cross-protocol: upload via LFS, read via OCI blob
+// 16. LFS round trip with OCI enabled
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cross_protocol_lfs_to_oci() {
     let server = TestServer::start(&[ServerFrontend::Lfs, ServerFrontend::Oci]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"cross-protocol-content";
-    let oid = sha256_hex(content);
-
-    // Upload via LFS (v1 API)
-    let put_resp = client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert!(put_resp.status().is_success());
-
-    // Read the same object via a GET request (not OCI — just confirm it's there)
-    let get_resp = client
-        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get_resp.status(), 200);
-    let body = get_resp.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), content);
+    http_contracts::lfs::put_and_get(&server, b"cross-protocol-content").await;
 }
 
 // ===========================================================================

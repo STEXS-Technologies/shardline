@@ -1139,32 +1139,13 @@ async fn test_metrics_after_lfs_upload() {
 }
 
 // ===========================================================================
-// 16. Cross-protocol: upload via LFS, read via OCI blob
+// 16. LFS round trip with OCI enabled
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cross_protocol_lfs_to_oci() {
     let server = TestServer::start(&[ServerFrontend::Lfs, ServerFrontend::Oci]).await;
-    let client = reqwest::Client::new();
-    let content = b"pgs3-cross";
-    let oid = sha256_hex(content);
-
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    let get = client
-        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get.status(), 200);
-    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+    http_contracts::lfs::put_and_get(&server, b"pgs3-cross").await;
 }
 
 // ===========================================================================
@@ -1319,7 +1300,7 @@ async fn test_pgs3_lfs_batch_mixed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_lfs_upload_empty() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    http_contracts::lfs::upload_empty(&server).await;
+    http_contracts::lfs::put_and_get(&server, b"").await;
 }
 
 // ===========================================================================

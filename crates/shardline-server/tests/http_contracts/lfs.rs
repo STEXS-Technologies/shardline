@@ -204,13 +204,13 @@ pub(crate) async fn batch_mixed(
     );
 }
 
-pub(crate) async fn upload_empty(server: &TestServer) {
+pub(crate) async fn put_and_get(server: &TestServer, content: &[u8]) {
     let client = reqwest::Client::new();
-    let oid = put_object(server, &client, b"").await;
+    let oid = put_object(server, &client, content).await;
     let response = object_request(server, &client, reqwest::Method::GET, &oid)
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    assert!(response.bytes().await.unwrap().is_empty());
+    assert_eq!(response.bytes().await.unwrap().as_ref(), content);
 }
