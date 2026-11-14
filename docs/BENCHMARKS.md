@@ -3750,19 +3750,19 @@ metadata.
 
 The November 14, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`b2f90cf7507d9306467346bd33a0dfbc450131f3`. It counts all tracked `.rs`
+`5b0ec78e3762afb151eeb51042ef1f91a24b2380`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 587,860 | 15,789 (2.62%) |
+| Entire repository | 603,649 | 587,722 | 15,927 (2.64%) |
 | Server | 220,570 | 213,092 | 7,478 (3.39%) |
 | Server core | 6,454 | 5,627 | 827 (12.81%) |
-| Storage | 20,373 | 19,469 | 904 (4.44%) |
-| S3 adapter | 10,954 | 10,365 | 589 (5.38%) |
-| Cache | 6,573 | 5,933 | 640 (9.74%) |
+| Storage | 20,373 | 19,440 | 933 (4.58%) |
+| S3 adapter | 10,954 | 10,323 | 631 (5.76%) |
+| Cache | 6,573 | 5,866 | 707 (10.76%) |
 | Index | 71,472 | 69,403 | 2,069 (2.89%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
 | GC | 10,954 | 10,621 | 333 (3.04%) |
@@ -3781,8 +3781,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' b2f90cf7507d9306467346bd33a0dfbc450131f3 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' b2f90cf7507d9306467346bd33a0dfbc450131f3 -- '*.rs' | wc -l
+git grep -I -n '^' 5b0ec78e3762afb151eeb51042ef1f91a24b2380 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 5b0ec78e3762afb151eeb51042ef1f91a24b2380 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
