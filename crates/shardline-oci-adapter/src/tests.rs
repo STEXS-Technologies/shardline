@@ -1585,19 +1585,62 @@ fn oci_tag_target_key_with_scope() {
 }
 
 #[test]
-fn oci_tag_target_key_empty_repo_errors() {
-    assert!(matches!(
-        super::oci_tag_target_key("", VALID_DIGEST, "latest", None),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
+fn oci_keys_reject_invalid_repositories() {
+    for (case, result) in [
+        (
+            "oci_tag_target_key_empty_repo_errors",
+            super::oci_tag_target_key("", VALID_DIGEST, "latest", None).err(),
+        ),
+        (
+            "oci_tag_target_prefix_empty_repo_errors",
+            super::oci_tag_target_prefix("", VALID_DIGEST, None).err(),
+        ),
+        (
+            "oci_tag_key_invalid_repo_errors",
+            super::oci_tag_key("", "latest", None).err(),
+        ),
+        (
+            "oci_manifest_prefix_invalid_repo_errors",
+            super::oci_manifest_prefix("", None).err(),
+        ),
+        (
+            "oci_tag_prefix_invalid_repo_errors",
+            super::oci_tag_prefix("", None).err(),
+        ),
+        (
+            "oci_manifest_media_type_key_empty_repo_errors",
+            super::oci_manifest_media_type_key(
+                "",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                None,
+            )
+            .err(),
+        ),
+    ] {
+        assert!(
+            matches!(result, Some(OciAdapterError::InvalidRepositoryName)),
+            "{case}: {result:?}"
+        );
+    }
 }
 
 #[test]
-fn oci_tag_target_key_empty_tag_errors() {
-    assert!(matches!(
-        super::oci_tag_target_key("team/assets", VALID_DIGEST, "", None),
-        Err(OciAdapterError::InvalidManifestReference)
-    ));
+fn oci_keys_reject_invalid_tags() {
+    for (case, result) in [
+        (
+            "oci_tag_target_key_empty_tag_errors",
+            super::oci_tag_target_key("team/assets", VALID_DIGEST, "", None).err(),
+        ),
+        (
+            "oci_tag_key_invalid_tag_errors",
+            super::oci_tag_key("team/assets", "bad/tag", None).err(),
+        ),
+    ] {
+        assert!(
+            matches!(result, Some(OciAdapterError::InvalidManifestReference)),
+            "{case}: {result:?}"
+        );
+    }
 }
 
 #[test]
@@ -1620,35 +1663,26 @@ fn oci_tag_target_prefix_with_scope() {
 }
 
 #[test]
-fn oci_tag_target_prefix_empty_repo_errors() {
-    assert!(matches!(
-        super::oci_tag_target_prefix("", VALID_DIGEST, None),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
-fn oci_tag_target_prefix_invalid_digest_errors() {
-    assert!(matches!(
-        super::oci_tag_target_prefix("team/assets", "not-a-digest", None),
-        Err(OciAdapterError::InvalidDigest)
-    ));
-}
-
-#[test]
-fn oci_tag_key_invalid_tag_errors() {
-    assert!(matches!(
-        super::oci_tag_key("team/assets", "bad/tag", None),
-        Err(OciAdapterError::InvalidManifestReference)
-    ));
-}
-
-#[test]
-fn oci_tag_key_invalid_repo_errors() {
-    assert!(matches!(
-        super::oci_tag_key("", "latest", None),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
+fn oci_keys_reject_invalid_digests() {
+    for (case, result) in [
+        (
+            "oci_tag_target_prefix_invalid_digest_errors",
+            super::oci_tag_target_prefix("team/assets", "not-a-digest", None).err(),
+        ),
+        (
+            "oci_tag_target_key_invalid_digest_errors",
+            super::oci_tag_target_key("team/assets", "bad", "latest", None).err(),
+        ),
+        (
+            "oci_tag_target_prefix_errors_with_invalid_digest",
+            super::oci_tag_target_prefix("repo", "short", None).err(),
+        ),
+    ] {
+        assert!(
+            matches!(result, Some(OciAdapterError::InvalidDigest)),
+            "{case}: {result:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2046,30 +2080,6 @@ fn oci_manifest_media_type_key_includes_digest_in_path() {
         s.contains("test-digest"),
         "digest should be embedded in key, got: {s}"
     );
-}
-
-#[test]
-fn oci_manifest_prefix_invalid_repo_errors() {
-    assert!(matches!(
-        super::oci_manifest_prefix("", None),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
-fn oci_tag_prefix_invalid_repo_errors() {
-    assert!(matches!(
-        super::oci_tag_prefix("", None),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
-fn oci_tag_target_key_invalid_digest_errors() {
-    assert!(matches!(
-        super::oci_tag_target_key("team/assets", "bad", "latest", None),
-        Err(OciAdapterError::InvalidDigest)
-    ));
 }
 
 #[test]
@@ -3003,26 +3013,6 @@ fn oci_blob_key_with_path_traversal_digest_rejected() {
         result.is_err(),
         "path traversal in digest should produce an error"
     );
-}
-
-#[test]
-fn oci_manifest_media_type_key_empty_repo_errors() {
-    assert!(matches!(
-        super::oci_manifest_media_type_key(
-            "",
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            None
-        ),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
-fn oci_tag_target_prefix_errors_with_invalid_digest() {
-    assert!(matches!(
-        super::oci_tag_target_prefix("repo", "short", None),
-        Err(OciAdapterError::InvalidDigest)
-    ));
 }
 
 #[test]
