@@ -37,10 +37,8 @@ fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
 
     let range = ByteRange::new(2, 5).unwrap();
     let read = store.read_range(&key, range);
-    assert!(read.is_ok());
-    if let Ok(read) = read {
-        assert_eq!(read, b"cdef".to_vec());
-    }
+    let read = read.expect("expected valid read");
+    assert_eq!(read, b"cdef".to_vec());
 
     let prefix = ObjectPrefix::parse("xorbs/default/").unwrap();
     let listed = store.list_prefix(&prefix).unwrap();

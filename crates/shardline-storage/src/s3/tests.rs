@@ -424,10 +424,8 @@ fn s3_location_applies_key_prefix() {
     let key = ObjectKey::parse("xorbs/default/aa/hash.xorb").unwrap();
     let location = store.location_for_key(&key);
 
-    assert!(location.is_ok());
-    if let Ok(location) = location {
-        assert_eq!(location.as_ref(), "tenant-a/xorbs/default/aa/hash.xorb");
-    }
+    let location = location.expect("expected valid location");
+    assert_eq!(location.as_ref(), "tenant-a/xorbs/default/aa/hash.xorb");
 }
 
 #[test]
@@ -533,10 +531,7 @@ async fn stream_payload_for_range_preserves_streamed_bytes() {
     let mut stream = stream_payload_for_range(result, 0..4).unwrap();
     let mut observed = Vec::new();
     while let Some(item) = stream.next().await {
-        assert!(item.is_ok());
-        let Ok(chunk) = item else {
-            return;
-        };
+        let chunk = item.expect("expected valid chunk");
         observed.extend_from_slice(&chunk);
     }
 
@@ -989,10 +984,7 @@ fn s3_config_with_virtual_hosted_style() {
 fn temp_key_for_reserved_prefix_shape() {
     let key = ObjectKey::parse("test/object.xorb").unwrap();
     let result: Result<ObjectKey, S3ObjectStoreError> = temp_key_for(&key);
-    assert!(result.is_ok());
-    let Ok(temp) = result else {
-        return;
-    };
+    let temp = result.expect("expected valid temp");
     let temp_str: &str = temp.as_str();
     // F-80: the temp lives in the reserved `__tmp/shardline-overwrite/`
     // namespace (never under the base key, so a user key cannot collide with
@@ -1549,8 +1541,7 @@ mod minio_tests {
         let body = b"content addressed payload";
 
         let begin = store.begin_content_addressed_upload(&canonical).await;
-        assert!(begin.is_ok());
-        let Ok(begin) = begin else { return };
+        let begin = begin.expect("expected valid begin");
 
         match begin {
             BeginMultipartUploadResult::AlreadyExists => {
@@ -1954,8 +1945,7 @@ fn s3_store_debug_shows_runtime_status() {
             .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
             .with_allow_http(true),
     );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
+    let store = store.expect("expected valid store");
     let rendered = format!("{store:?}");
     // Should mention runtime status
     assert!(rendered.contains("runtime"));
@@ -1990,8 +1980,7 @@ fn temp_key_for_overflow_key_rejected() {
     // independent of the base key's length, so it always parses.
     let long_base = "a".repeat(4090);
     let key = ObjectKey::parse(&long_base);
-    assert!(key.is_ok());
-    let Ok(key) = key else { return };
+    let key = key.expect("expected valid key");
 
     let result = temp_key_for(&key);
     let temp = result.expect("temp_key_for must not overflow on a long base key");
@@ -2093,8 +2082,7 @@ fn metadata_from_external_strips_prefix() {
             .with_allow_http(true)
             .with_key_prefix(Some("tenant-x")),
     );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
+    let store = store.expect("expected valid store");
 
     let meta = object_store::ObjectMeta {
         location: ObjectStorePath::from("tenant-x/ns/key.xorb"),
@@ -2104,11 +2092,9 @@ fn metadata_from_external_strips_prefix() {
         version: None,
     };
     let result = store.metadata_from_external(&meta);
-    assert!(result.is_ok());
-    if let Ok(metadata) = result {
-        assert_eq!(metadata.key().as_str(), "ns/key.xorb");
-        assert_eq!(metadata.length(), 42);
-    }
+    let metadata = result.expect("expected valid metadata");
+    assert_eq!(metadata.key().as_str(), "ns/key.xorb");
+    assert_eq!(metadata.length(), 42);
 }
 
 #[test]
@@ -2120,8 +2106,7 @@ fn metadata_from_external_no_prefix() {
             .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
             .with_allow_http(true),
     );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
+    let store = store.expect("expected valid store");
 
     let meta = object_store::ObjectMeta {
         location: ObjectStorePath::from("plain/key.xorb"),
@@ -2131,11 +2116,9 @@ fn metadata_from_external_no_prefix() {
         version: None,
     };
     let result = store.metadata_from_external(&meta);
-    assert!(result.is_ok());
-    if let Ok(metadata) = result {
-        assert_eq!(metadata.key().as_str(), "plain/key.xorb");
-        assert_eq!(metadata.length(), 100);
-    }
+    let metadata = result.expect("expected valid metadata");
+    assert_eq!(metadata.key().as_str(), "plain/key.xorb");
+    assert_eq!(metadata.length(), 100);
 }
 
 #[test]
@@ -2148,8 +2131,7 @@ fn metadata_from_external_rejects_outside_prefix() {
             .with_allow_http(true)
             .with_key_prefix(Some("tenant-x")),
     );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
+    let store = store.expect("expected valid store");
 
     let meta = object_store::ObjectMeta {
         location: ObjectStorePath::from("other-prefix/key.xorb"),

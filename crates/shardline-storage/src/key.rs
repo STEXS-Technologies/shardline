@@ -170,10 +170,8 @@ mod tests {
     fn object_key_accepts_relative_content_paths() {
         let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
 
-        assert!(key.is_ok());
-        if let Ok(value) = key {
-            assert_eq!(value.as_str(), "xorbs/default/aa/bb/hash.xorb");
-        }
+        let value = key.expect("expected valid value");
+        assert_eq!(value.as_str(), "xorbs/default/aa/bb/hash.xorb");
     }
 
     #[test]
@@ -243,20 +241,16 @@ mod tests {
     fn object_prefix_accepts_empty_prefix() {
         let prefix = ObjectPrefix::parse("");
 
-        assert!(prefix.is_ok());
-        if let Ok(value) = prefix {
-            assert_eq!(value.as_str(), "");
-        }
+        let value = prefix.expect("expected valid value");
+        assert_eq!(value.as_str(), "");
     }
 
     #[test]
     fn object_prefix_accepts_relative_content_prefix() {
         let prefix = ObjectPrefix::parse("xorbs/default/");
 
-        assert!(prefix.is_ok());
-        if let Ok(value) = prefix {
-            assert_eq!(value.as_str(), "xorbs/default/");
-        }
+        let value = prefix.expect("expected valid value");
+        assert_eq!(value.as_str(), "xorbs/default/");
     }
 
     #[test]
