@@ -21,10 +21,12 @@ default_fuzz_target() {
     esac
 }
 
-FUZZ_TARGET="${SHARDLINE_FUZZ_TARGET:-$(default_fuzz_target)}"
-
 list_targets() {
-    cargo +nightly fuzz list --fuzz-dir "${FUZZ_DIR}"
+    # Listing needs only Cargo metadata and Python 3, not nightly or cargo-fuzz.
+    cargo metadata --locked --no-deps --format-version 1 --manifest-path "${FUZZ_DIR}/Cargo.toml" |
+        python3 -c 'import json, sys
+package = next(p for p in json.load(sys.stdin)["packages"] if p["name"] == "shardline-fuzz")
+print("\n".join(sorted(t["name"] for t in package["targets"] if "bin" in t["kind"])))'
 }
 
 list_reliability_targets() {
@@ -216,6 +218,10 @@ run_reliability() {
 
 main() {
     local command="${1:-smoke}"
+
+    if [[ "${command}" != list && "${command}" != reliability-list ]]; then
+        FUZZ_TARGET="${SHARDLINE_FUZZ_TARGET:-$(default_fuzz_target)}"
+    fi
 
     case "${command}" in
         list)
