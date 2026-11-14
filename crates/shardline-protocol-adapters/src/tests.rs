@@ -173,14 +173,6 @@ fn cross_protocol_namespace_isolation() {
 // --- Deterministic key construction ---
 
 #[test]
-fn deterministic_bazel_cache_object_key() {
-    let hash = "a".repeat(64);
-    let key1 = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None)).unwrap();
-    let key2 = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None)).unwrap();
-    assert_eq!(key1, key2);
-}
-
-#[test]
 fn deterministic_lfs_object_key() {
     let hash = "a".repeat(64);
     let key1 = lfs_object_key(&hash, &test_capability(None)).unwrap();
@@ -211,22 +203,6 @@ fn key_format_stability_lfs() {
     let hash = "a".repeat(64);
     let key = lfs_object_key(&hash, &test_capability(None)).unwrap();
     let expected_suffix = format!("protocols/lfs/global/objects/{hash}");
-    assert!(key.as_str().ends_with(&expected_suffix));
-}
-
-#[test]
-fn key_format_stability_bazel_cas() {
-    let hash = "a".repeat(64);
-    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None)).unwrap();
-    let expected_suffix = format!("protocols/bazel/global/cas/{hash}");
-    assert!(key.as_str().ends_with(&expected_suffix));
-}
-
-#[test]
-fn key_format_stability_bazel_ac() {
-    let hash = "a".repeat(64);
-    let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, &test_capability(None)).unwrap();
-    let expected_suffix = format!("protocols/bazel/global/ac/{hash}");
     assert!(key.as_str().ends_with(&expected_suffix));
 }
 

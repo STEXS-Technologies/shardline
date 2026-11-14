@@ -77,7 +77,9 @@ mod tests {
         for (kind, segment) in [(BazelCacheKind::Ac, "ac"), (BazelCacheKind::Cas, "cas")] {
             for scope in [None, Some(test_scope())] {
                 let scoped = scope.is_some();
-                let key = bazel_cache_object_key(kind, &hash, &test_capability(scope)).unwrap();
+                let auth = test_capability(scope);
+                let key = bazel_cache_object_key(kind, &hash, &auth).unwrap();
+                assert_eq!(key, bazel_cache_object_key(kind, &hash, &auth).unwrap());
                 assert!(
                     key.as_str().contains("protocols/bazel/"),
                     "{kind:?}, {scoped}"
@@ -90,10 +92,9 @@ mod tests {
                 if scoped {
                     assert!(!key.as_str().contains("global"), "{kind:?}");
                 } else {
-                    assert!(
-                        key.as_str()
-                            .contains(&format!("protocols/bazel/global/{segment}/")),
-                        "{kind:?}"
+                    assert_eq!(
+                        key.as_str(),
+                        format!("protocols/bazel/global/{segment}/{hash}")
                     );
                 }
             }
