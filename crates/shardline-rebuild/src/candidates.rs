@@ -997,86 +997,41 @@ mod tests {
     // ---- reconstruction_plan_error_detail tests ----
 
     #[test]
-    fn reconstruction_plan_error_detail_chunk_hash() {
-        let error = FileRecordInvariantError::ChunkHash(HashParseError::InvalidLength);
-        let detail = reconstruction_plan_error_detail(&error);
-        assert_eq!(
-            detail,
-            IndexRebuildIssueDetail::InvalidReconstructionPlan(
-                IndexRebuildReconstructionPlanDetail::ChunkHashInvalid
-            )
-        );
-    }
-
-    #[test]
-    fn reconstruction_plan_error_detail_empty_chunk() {
-        let error = FileRecordInvariantError::EmptyChunk;
-        let detail = reconstruction_plan_error_detail(&error);
-        assert_eq!(
-            detail,
-            IndexRebuildIssueDetail::InvalidReconstructionPlan(
-                IndexRebuildReconstructionPlanDetail::EmptyChunk
-            )
-        );
-    }
-
-    #[test]
-    fn reconstruction_plan_error_detail_non_contiguous_offsets() {
-        let error = FileRecordInvariantError::NonContiguousChunkOffsets;
-        let detail = reconstruction_plan_error_detail(&error);
-        assert_eq!(
-            detail,
-            IndexRebuildIssueDetail::InvalidReconstructionPlan(
-                IndexRebuildReconstructionPlanDetail::NonContiguousChunkOffsets
-            )
-        );
-    }
-
-    #[test]
-    fn reconstruction_plan_error_detail_invalid_chunk_range() {
-        let error = FileRecordInvariantError::InvalidChunkRange;
-        let detail = reconstruction_plan_error_detail(&error);
-        assert_eq!(
-            detail,
-            IndexRebuildIssueDetail::InvalidReconstructionPlan(
-                IndexRebuildReconstructionPlanDetail::InvalidChunkRange
-            )
-        );
-    }
-
-    #[test]
-    fn reconstruction_plan_error_detail_invalid_packed_range() {
-        let error = FileRecordInvariantError::InvalidPackedRange;
-        let detail = reconstruction_plan_error_detail(&error);
-        assert_eq!(
-            detail,
-            IndexRebuildIssueDetail::InvalidReconstructionPlan(
-                IndexRebuildReconstructionPlanDetail::InvalidPackedRange
-            )
-        );
-    }
-
-    #[test]
-    fn reconstruction_plan_error_detail_length_overflow() {
-        let error = FileRecordInvariantError::LengthOverflow;
-        let detail = reconstruction_plan_error_detail(&error);
-        assert_eq!(
-            detail,
-            IndexRebuildIssueDetail::InvalidReconstructionPlan(
-                IndexRebuildReconstructionPlanDetail::LengthOverflow
-            )
-        );
-    }
-
-    #[test]
-    fn reconstruction_plan_error_detail_total_bytes_mismatch() {
-        let error = FileRecordInvariantError::TotalBytesMismatch;
-        let detail = reconstruction_plan_error_detail(&error);
-        assert_eq!(
-            detail,
-            IndexRebuildIssueDetail::InvalidReconstructionPlan(
-                IndexRebuildReconstructionPlanDetail::TotalBytesMismatch
-            )
-        );
+    fn reconstruction_plan_errors_preserve_details() {
+        for (error, expected) in [
+            (
+                FileRecordInvariantError::ChunkHash(HashParseError::InvalidLength),
+                IndexRebuildReconstructionPlanDetail::ChunkHashInvalid,
+            ),
+            (
+                FileRecordInvariantError::EmptyChunk,
+                IndexRebuildReconstructionPlanDetail::EmptyChunk,
+            ),
+            (
+                FileRecordInvariantError::NonContiguousChunkOffsets,
+                IndexRebuildReconstructionPlanDetail::NonContiguousChunkOffsets,
+            ),
+            (
+                FileRecordInvariantError::InvalidChunkRange,
+                IndexRebuildReconstructionPlanDetail::InvalidChunkRange,
+            ),
+            (
+                FileRecordInvariantError::InvalidPackedRange,
+                IndexRebuildReconstructionPlanDetail::InvalidPackedRange,
+            ),
+            (
+                FileRecordInvariantError::LengthOverflow,
+                IndexRebuildReconstructionPlanDetail::LengthOverflow,
+            ),
+            (
+                FileRecordInvariantError::TotalBytesMismatch,
+                IndexRebuildReconstructionPlanDetail::TotalBytesMismatch,
+            ),
+        ] {
+            assert_eq!(
+                reconstruction_plan_error_detail(&error),
+                IndexRebuildIssueDetail::InvalidReconstructionPlan(expected)
+            );
+        }
     }
 }

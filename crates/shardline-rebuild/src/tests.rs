@@ -285,33 +285,6 @@ fn rebuild_error_from_rebuild_overflow_error() {
     assert!(matches!(error, RebuildError::Overflow));
 }
 
-// ---- RebuildError display messages ----
-
-#[test]
-fn rebuild_error_display_messages_are_non_empty() {
-    let errors: Vec<RebuildError> = vec![
-        RebuildError::Io(std::io::Error::other("test")),
-        RebuildError::Json(serde_json::from_str::<serde_json::Value>("bad json}}").unwrap_err()),
-        RebuildError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
-        RebuildError::InvalidContentHash,
-        RebuildError::InvalidFileId,
-        RebuildError::Overflow,
-        RebuildError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath),
-        RebuildError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
-            std::io::Error::other("test"),
-        )),
-        RebuildError::StoredFileMetadataTooLarge {
-            observed_bytes: 1,
-            maximum_bytes: 0,
-        },
-    ];
-
-    for error in &errors {
-        let msg = error.to_string();
-        assert!(!msg.is_empty(), "display message was empty for: {error:?}");
-    }
-}
-
 #[test]
 fn rebuild_error_stored_file_metadata_too_large_display_includes_sizes() {
     let error = RebuildError::StoredFileMetadataTooLarge {
@@ -793,48 +766,39 @@ fn rebuild_error_display_stored_file_metadata_too_large() {
 // ---- IndexRebuildReconstructionPlanDetail Display tests ----
 
 #[test]
-fn reconstruction_plan_detail_display_chunk_hash_invalid() {
-    let detail = IndexRebuildReconstructionPlanDetail::ChunkHashInvalid;
-    assert_eq!(detail.to_string(), "record chunk hash is invalid");
-}
-
-#[test]
-fn reconstruction_plan_detail_display_empty_chunk() {
-    let detail = IndexRebuildReconstructionPlanDetail::EmptyChunk;
-    assert_eq!(detail.to_string(), "record contains an empty chunk");
-}
-
-#[test]
-fn reconstruction_plan_detail_display_non_contiguous() {
-    let detail = IndexRebuildReconstructionPlanDetail::NonContiguousChunkOffsets;
-    assert_eq!(detail.to_string(), "record chunks are not contiguous");
-}
-
-#[test]
-fn reconstruction_plan_detail_display_invalid_chunk_range() {
-    let detail = IndexRebuildReconstructionPlanDetail::InvalidChunkRange;
-    assert_eq!(detail.to_string(), "record chunk range is invalid");
-}
-
-#[test]
-fn reconstruction_plan_detail_display_invalid_packed_range() {
-    let detail = IndexRebuildReconstructionPlanDetail::InvalidPackedRange;
-    assert_eq!(detail.to_string(), "record packed range is invalid");
-}
-
-#[test]
-fn reconstruction_plan_detail_display_length_overflow() {
-    let detail = IndexRebuildReconstructionPlanDetail::LengthOverflow;
-    assert_eq!(detail.to_string(), "record length overflowed");
-}
-
-#[test]
-fn reconstruction_plan_detail_display_total_bytes_mismatch() {
-    let detail = IndexRebuildReconstructionPlanDetail::TotalBytesMismatch;
-    assert_eq!(
-        detail.to_string(),
-        "record total byte count did not match chunks"
-    );
+fn reconstruction_plan_detail_display_messages() {
+    for (detail, expected) in [
+        (
+            IndexRebuildReconstructionPlanDetail::ChunkHashInvalid,
+            "record chunk hash is invalid",
+        ),
+        (
+            IndexRebuildReconstructionPlanDetail::EmptyChunk,
+            "record contains an empty chunk",
+        ),
+        (
+            IndexRebuildReconstructionPlanDetail::NonContiguousChunkOffsets,
+            "record chunks are not contiguous",
+        ),
+        (
+            IndexRebuildReconstructionPlanDetail::InvalidChunkRange,
+            "record chunk range is invalid",
+        ),
+        (
+            IndexRebuildReconstructionPlanDetail::InvalidPackedRange,
+            "record packed range is invalid",
+        ),
+        (
+            IndexRebuildReconstructionPlanDetail::LengthOverflow,
+            "record length overflowed",
+        ),
+        (
+            IndexRebuildReconstructionPlanDetail::TotalBytesMismatch,
+            "record total byte count did not match chunks",
+        ),
+    ] {
+        assert_eq!(detail.to_string(), expected);
+    }
 }
 
 // ---- run_index_rebuild_with_stores stale latest records ----
