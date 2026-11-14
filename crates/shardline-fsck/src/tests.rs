@@ -104,165 +104,67 @@ fn push_issue_increments_count_for_multiple_issues() {
     assert_eq!(report.issue_count(), 5);
 }
 
-// ── push_reconstruction_plan_issue ──────────────────────────────────
+// ── Reconstruction error reporting ──────────────────────────────────
 
 #[test]
-fn reconstruction_plan_issue_chunk_hash_maps_to_invalid_content_hash() {
-    let mut report = clean_report();
-    let err =
-        FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength);
-    push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
-    assert_eq!(report.issue_count(), 1);
-    assert_eq!(report.issues[0].kind, FsckIssueKind::InvalidContentHash);
-    assert_eq!(
-        report.issues[0].detail,
-        FsckIssueDetail::InvalidReconstructionPlan(FsckReconstructionPlanDetail::ChunkHashInvalid)
-    );
-}
-
-#[test]
-fn reconstruction_plan_issue_empty_chunk() {
-    let mut report = clean_report();
-    let err = FileRecordInvariantError::EmptyChunk;
-    push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
-    assert_eq!(report.issues[0].kind, FsckIssueKind::EmptyChunk);
-    assert_eq!(
-        report.issues[0].detail,
-        FsckIssueDetail::InvalidReconstructionPlan(FsckReconstructionPlanDetail::EmptyChunk)
-    );
-}
-
-#[test]
-fn reconstruction_plan_issue_non_contiguous_chunk_offsets() {
-    let mut report = clean_report();
-    let err = FileRecordInvariantError::NonContiguousChunkOffsets;
-    push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
-    assert_eq!(report.issues[0].kind, FsckIssueKind::NonContiguousChunks);
-    assert_eq!(
-        report.issues[0].detail,
-        FsckIssueDetail::InvalidReconstructionPlan(
-            FsckReconstructionPlanDetail::NonContiguousChunkOffsets
-        )
-    );
-}
-
-#[test]
-fn reconstruction_plan_issue_invalid_chunk_range() {
-    let mut report = clean_report();
-    let err = FileRecordInvariantError::InvalidChunkRange;
-    push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
-    assert_eq!(report.issues[0].kind, FsckIssueKind::InvalidChunkRange);
-    assert_eq!(
-        report.issues[0].detail,
-        FsckIssueDetail::InvalidReconstructionPlan(FsckReconstructionPlanDetail::InvalidChunkRange)
-    );
-}
-
-#[test]
-fn reconstruction_plan_issue_invalid_packed_range() {
-    let mut report = clean_report();
-    let err = FileRecordInvariantError::InvalidPackedRange;
-    push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
-    assert_eq!(report.issues[0].kind, FsckIssueKind::InvalidPackedRange);
-    assert_eq!(
-        report.issues[0].detail,
-        FsckIssueDetail::InvalidReconstructionPlan(
-            FsckReconstructionPlanDetail::InvalidPackedRange
-        )
-    );
-}
-
-#[test]
-fn reconstruction_plan_issue_length_overflow() {
-    let mut report = clean_report();
-    let err = FileRecordInvariantError::LengthOverflow;
-    push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
-    assert_eq!(report.issues[0].kind, FsckIssueKind::TotalBytesMismatch);
-    assert_eq!(
-        report.issues[0].detail,
-        FsckIssueDetail::InvalidReconstructionPlan(FsckReconstructionPlanDetail::LengthOverflow)
-    );
-}
-
-#[test]
-fn reconstruction_plan_issue_total_bytes_mismatch() {
-    let mut report = clean_report();
-    let err = FileRecordInvariantError::TotalBytesMismatch;
-    push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
-    assert_eq!(report.issues[0].kind, FsckIssueKind::TotalBytesMismatch);
-    assert_eq!(
-        report.issues[0].detail,
-        FsckIssueDetail::InvalidReconstructionPlan(
-            FsckReconstructionPlanDetail::TotalBytesMismatch
-        )
-    );
-}
-
-// ── reconstruction_plan_error_detail ─────────────────────────────────
-
-#[test]
-fn reconstruction_plan_error_detail_chunk_hash() {
-    let err = FileRecordInvariantError::ChunkHash(
-        shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
-    );
-    assert_eq!(
-        reconstruction_plan_error_detail(&err),
-        FsckReconstructionPlanDetail::ChunkHashInvalid
-    );
-}
-
-#[test]
-fn reconstruction_plan_error_detail_empty_chunk() {
-    let err = FileRecordInvariantError::EmptyChunk;
-    assert_eq!(
-        reconstruction_plan_error_detail(&err),
-        FsckReconstructionPlanDetail::EmptyChunk
-    );
-}
-
-#[test]
-fn reconstruction_plan_error_detail_non_contiguous() {
-    let err = FileRecordInvariantError::NonContiguousChunkOffsets;
-    assert_eq!(
-        reconstruction_plan_error_detail(&err),
-        FsckReconstructionPlanDetail::NonContiguousChunkOffsets
-    );
-}
-
-#[test]
-fn reconstruction_plan_error_detail_invalid_chunk_range() {
-    let err = FileRecordInvariantError::InvalidChunkRange;
-    assert_eq!(
-        reconstruction_plan_error_detail(&err),
-        FsckReconstructionPlanDetail::InvalidChunkRange
-    );
-}
-
-#[test]
-fn reconstruction_plan_error_detail_invalid_packed_range() {
-    let err = FileRecordInvariantError::InvalidPackedRange;
-    assert_eq!(
-        reconstruction_plan_error_detail(&err),
-        FsckReconstructionPlanDetail::InvalidPackedRange
-    );
-}
-
-#[test]
-fn reconstruction_plan_error_detail_length_overflow() {
-    let err = FileRecordInvariantError::LengthOverflow;
-    assert_eq!(
-        reconstruction_plan_error_detail(&err),
-        FsckReconstructionPlanDetail::LengthOverflow
-    );
-}
-
-#[test]
-fn reconstruction_plan_error_detail_total_bytes_mismatch() {
-    let err = FileRecordInvariantError::TotalBytesMismatch;
-    assert_eq!(
-        reconstruction_plan_error_detail(&err),
-        FsckReconstructionPlanDetail::TotalBytesMismatch
-    );
+fn reconstruction_plan_errors_preserve_issue_kind_and_detail() {
+    for (error, kind, detail) in [
+        (
+            FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength),
+            FsckIssueKind::InvalidContentHash,
+            FsckReconstructionPlanDetail::ChunkHashInvalid,
+        ),
+        (
+            FileRecordInvariantError::ChunkHash(
+                shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
+            ),
+            FsckIssueKind::InvalidContentHash,
+            FsckReconstructionPlanDetail::ChunkHashInvalid,
+        ),
+        (
+            FileRecordInvariantError::EmptyChunk,
+            FsckIssueKind::EmptyChunk,
+            FsckReconstructionPlanDetail::EmptyChunk,
+        ),
+        (
+            FileRecordInvariantError::NonContiguousChunkOffsets,
+            FsckIssueKind::NonContiguousChunks,
+            FsckReconstructionPlanDetail::NonContiguousChunkOffsets,
+        ),
+        (
+            FileRecordInvariantError::InvalidChunkRange,
+            FsckIssueKind::InvalidChunkRange,
+            FsckReconstructionPlanDetail::InvalidChunkRange,
+        ),
+        (
+            FileRecordInvariantError::InvalidPackedRange,
+            FsckIssueKind::InvalidPackedRange,
+            FsckReconstructionPlanDetail::InvalidPackedRange,
+        ),
+        (
+            FileRecordInvariantError::LengthOverflow,
+            FsckIssueKind::TotalBytesMismatch,
+            FsckReconstructionPlanDetail::LengthOverflow,
+        ),
+        (
+            FileRecordInvariantError::TotalBytesMismatch,
+            FsckIssueKind::TotalBytesMismatch,
+            FsckReconstructionPlanDetail::TotalBytesMismatch,
+        ),
+    ] {
+        assert_eq!(reconstruction_plan_error_detail(&error), detail);
+        let mut report = clean_report();
+        push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &error).unwrap();
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues,
+            vec![FsckIssue {
+                kind,
+                location: "loc".to_owned(),
+                detail: FsckIssueDetail::InvalidReconstructionPlan(detail),
+            }]
+        );
+    }
 }
 
 // ── FsckIssueKind::as_str ───────────────────────────────────────────
