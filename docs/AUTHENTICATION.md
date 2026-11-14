@@ -197,8 +197,8 @@ SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST=www.googleapis.com
 ```
 
 Set `SHARDLINE_AUTH_OIDC_AUDIENCE` to require a specific `aud`
-claim (and reject tokens that omit it). Token minting is not supported; use an
-external identity provider to issue tokens.
+claim (and reject tokens that omit it). This audience is required at startup.
+The identity provider issues external JWTs; see internal token issuance below.
 
 ### JWKS
 
@@ -211,7 +211,7 @@ SHARDLINE_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 
 Keys are fetched and refreshed every 300 seconds. This is useful when you have an
 external service that already issues JWTs signed with keys published at a JWKS endpoint.
-Token minting is not supported.
+External JWT issuance remains the identity provider's responsibility.
 
 Refresh failures retain the last successfully fetched keys; the refresh interval
 is not a cache expiry deadline. Static JWKS verification does not enforce an
@@ -229,6 +229,26 @@ must declare P-256, and ES384 keys must declare P-384. Optional
 purpose and algorithm metadata may be omitted, but conflicting declarations
 are rejected, including when a JWKS contains encryption and signing keys with
 the same key ID.
+
+### Internal token issuance with OIDC or JWKS
+
+Set `SHARDLINE_TOKEN_SIGNING_KEY` alongside the external verifier configuration
+when clients need LFS/Xet or Hub credential exchange. This existing key setting
+then controls Shardline's internal HMAC credentials independently of the external
+JWT signing keys. Use at least 32 bytes and configure the same secret on all
+replicas that issue or verify these credentials. Do not generate a key per process.
+
+External JWTs still pass through the configured OIDC/JWKS verifier, including its
+issuer, audience and key checks. Internal credentials pass through the existing
+native verifier. Their distinct envelopes select one verifier; failed validation
+never falls back to the other. Standalone LFS and Hub share this configured
+provider, preserving repository, ref, permission and expiry restrictions. Hub
+read-only Xet credentials retain their existing CAS-only restrictions.
+
+Without an internal key, external verification still works, but credential
+exchange fails explicitly rather than advertising Xet with a missing token.
+Changing the internal key invalidates previously issued internal credentials;
+external JWT verification continues using the identity provider's keys.
 
 ### Passthrough
 

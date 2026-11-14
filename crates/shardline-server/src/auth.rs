@@ -36,6 +36,18 @@ impl ServerAuth {
         }
     }
 
+    pub(crate) fn from_external_jwt_provider(
+        provider: Box<dyn AuthProvider>,
+        internal_key: Option<&[u8]>,
+    ) -> Result<Self, ServerError> {
+        let Some(key) = internal_key else {
+            return Ok(Self::from_provider(provider));
+        };
+        Ok(Self::from_provider(Box::new(
+            shardline_server_core::auth::ExternalJwtWithLocalIssuer::new(Arc::from(provider), key)?,
+        )))
+    }
+
     /// Returns a reference to the underlying [`AuthProvider`].
     #[must_use]
     pub fn provider(&self) -> &dyn AuthProvider {

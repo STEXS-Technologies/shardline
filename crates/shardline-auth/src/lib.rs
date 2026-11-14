@@ -19,12 +19,14 @@
 //! asymmetric-key authentication.
 
 pub mod ed25519;
+mod external_jwt;
 pub mod local_hmac;
 pub mod passthrough;
 mod provider;
 mod types;
 
 pub use ed25519::Ed25519AuthProvider;
+pub use external_jwt::ExternalJwtWithLocalIssuer;
 pub use local_hmac::LocalHmacProvider;
 pub use passthrough::PassthroughProvider;
 pub use provider::AuthProvider;

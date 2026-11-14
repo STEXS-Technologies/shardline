@@ -1552,6 +1552,105 @@ mod tests {
         let token_claims = result.unwrap();
         assert_eq!(token_claims.issuer(), "https://example.com");
         assert_eq!(token_claims.subject(), "jwks-e2e-user");
+
+        // Exercise startup wiring and the real LFS exchange with a verifier
+        // that cannot sign: the internal key must own issuance and CAS reads.
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let root = tempfile::tempdir().unwrap();
+        let internal_key = b"internal-jwks-exchange-key-0123456789";
+        let config = crate::ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://localhost".to_owned(),
+            root.path().to_owned(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
+        )
+        .with_server_frontends([crate::ServerFrontend::Lfs])
+        .unwrap()
+        .with_auth_provider(crate::AuthProviderKind::Jwks)
+        .with_auth_jwks_url(url)
+        .with_auth_jwks_issuer("https://example.com".to_owned())
+        .with_token_signing_key(internal_key.to_vec())
+        .unwrap();
+        let app = crate::app::router(config).await.unwrap();
+        let external = encode(&header, &claims, &encoding_key).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lfs/objects/batch")
+                    .header("authorization", format!("Bearer {external}"))
+                    .header("content-type", "application/vnd.git-lfs+json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "operation": "download", "transfers": ["xet"], "objects": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let batch: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(batch["transfer"], "xet");
+
+        let verifier = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![test_rsa_jwk("e2e-key")]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let auth = crate::auth::ServerAuth::from_external_jwt_provider(
+            Box::new(verifier),
+            Some(internal_key),
+        )
+        .unwrap();
+        let hub = shardline_hub_api::auth::HubAuth::from_arc(auth.provider_arc());
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {external}").parse().unwrap(),
+        );
+        let verified = hub.authorize(&headers, TokenScope::Read).unwrap();
+        let internal = hub.provider().mint_token(verified.claims()).unwrap();
+        headers.insert(
+            "authorization",
+            format!("Bearer {internal}").parse().unwrap(),
+        );
+        assert_eq!(
+            auth.authorize_xet(&headers, TokenScope::Read)
+                .unwrap()
+                .claims(),
+            &token_claims
+        );
+        assert!(auth.authorize_xet(&headers, TokenScope::Write).is_err());
+        assert_eq!(
+            hub.authorize(&headers, TokenScope::Read).unwrap().claims(),
+            &token_claims
+        );
+        let read_only = TokenClaims::new(
+            shardline_protocol::HUB_XET_READ_TOKEN_ISSUER,
+            token_claims.subject(),
+            TokenScope::Read,
+            token_claims.repository().clone(),
+            token_claims.expires_at_unix_seconds(),
+        )
+        .unwrap();
+        let restricted = hub.provider().mint_token(&read_only).unwrap();
+        headers.insert(
+            "authorization",
+            format!("Bearer {restricted}").parse().unwrap(),
+        );
+        assert!(auth.authorize_xet(&headers, TokenScope::Read).is_ok());
+        assert!(auth.authorize_xet(&headers, TokenScope::Write).is_err());
+        assert!(auth.authorize(&headers, TokenScope::Read).is_err());
+        assert!(hub.authorize(&headers, TokenScope::Read).is_err());
     }
 
     #[tokio::test]

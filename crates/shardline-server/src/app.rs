@@ -1284,7 +1284,10 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             )
             .await
             .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
-            Ok(Some(ServerAuth::from_provider(Box::new(provider))))
+            Ok(Some(ServerAuth::from_external_jwt_provider(
+                Box::new(provider),
+                config.token_signing_key(),
+            )?))
         }
         AuthProviderKind::Jwks => {
             let jwks_url = config
@@ -1294,7 +1297,10 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let provider = JwksProvider::new(jwks_url, issuer)
                 .await
                 .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
-            Ok(Some(ServerAuth::from_provider(Box::new(provider))))
+            Ok(Some(ServerAuth::from_external_jwt_provider(
+                Box::new(provider),
+                config.token_signing_key(),
+            )?))
         }
         AuthProviderKind::Ed25519 => {
             let provider = match (config.ed25519_private_key(), config.ed25519_public_key()) {
