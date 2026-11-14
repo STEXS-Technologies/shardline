@@ -245,8 +245,11 @@ never falls back to the other. Standalone LFS and Hub share this configured
 provider, preserving repository, ref, permission and expiry restrictions. Hub
 read-only Xet credentials retain their existing CAS-only restrictions.
 
-Without an internal key, external verification still works, but credential
-exchange fails explicitly rather than advertising Xet with a missing token.
+Without an internal key, external verification still works. Standalone LFS
+selects basic transfer when the authorized client offers it and internal token
+issuance is unavailable; Xet-only requests and Hub credential exchange fail
+explicitly. Permission errors and invalid or expired credentials never trigger
+this transfer fallback.
 Changing the internal key invalidates previously issued internal credentials;
 external JWT verification continues using the identity provider's keys.
 

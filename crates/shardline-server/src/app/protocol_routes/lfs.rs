@@ -925,8 +925,28 @@ pub(crate) async fn lfs_batch(
         .collect();
     let supports_xet = adapters.contains(&Some(TransferAdapter::Xet));
     let supports_basic = adapters.contains(&Some(TransferAdapter::Basic));
-    let use_xet = supports_xet && state.auth.is_some() && auth.claims().is_some();
-    let transfer = if use_xet {
+    // Authorization above is mandatory for every adapter. Only an internal
+    // signing failure may fall back; token and permission failures stay errors.
+    let cas_token = if supports_xet && state.auth.is_some() && auth.claims().is_some() {
+        let claims = auth.claims().ok_or(ServerError::MissingAuthorization)?;
+        let server_auth = state
+            .auth
+            .as_ref()
+            .ok_or(ServerError::MissingAuthorization)?;
+        match server_auth.provider().mint_token(claims) {
+            Ok(token) => Some(token),
+            Err(shardline_server_core::AuthError::ProviderError(_)) if supports_basic => None,
+            Err(shardline_server_core::AuthError::ProviderError(_)) => {
+                return Err(ServerError::SigningKeyError(
+                    "CAS token issuance is unavailable".to_owned(),
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
+    let transfer = if cas_token.is_some() {
         "xet"
     } else if request.transfers.is_empty() || supports_basic {
         "basic"
@@ -937,26 +957,6 @@ pub(crate) async fn lfs_batch(
             Json(json!({ "message": "unsupported transfer adapter" })),
         )
             .into_response());
-    };
-
-    // Mint a CAS token when using xet transfer. The existing claims are
-    // re-signed so git-xet receives a scoped token for the CAS layer.
-    let cas_token = if use_xet {
-        let claims = auth.claims().ok_or(ServerError::MissingAuthorization)?;
-        let server_auth = state
-            .auth
-            .as_ref()
-            .ok_or(ServerError::MissingAuthorization)?;
-        Some(
-            server_auth
-                .provider()
-                .mint_token(claims)
-                .map_err(|_error| {
-                    ServerError::SigningKeyError("CAS token issuance is unavailable".to_owned())
-                })?,
-        )
-    } else {
-        None
     };
     let cas_url = state
         .config
@@ -2917,9 +2917,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn batch_never_advertises_xet_when_verifier_cannot_issue_cas_tokens() {
+    async fn batch_falls_back_only_on_internal_cas_issuance_failure() {
         use shardline_server_core::auth::{AuthError, AuthProvider};
-        struct VerifyOnly(Arc<dyn AuthProvider>);
+        struct VerifyOnly(Arc<dyn AuthProvider>, fn() -> AuthError);
         impl AuthProvider for VerifyOnly {
             fn verify_token(
                 &self,
@@ -2931,51 +2931,77 @@ mod tests {
                 &self,
                 _claims: &shardline_protocol::TokenClaims,
             ) -> Result<String, AuthError> {
-                Err(AuthError::ProviderError(
-                    "private signing diagnostic".to_owned(),
-                ))
+                Err((self.1)())
             }
         }
-        let (mut state, _tmp) = build_test_state_with_auth().await;
-        let verifier = state.auth.as_ref().unwrap().provider_arc();
-        Arc::get_mut(&mut state).unwrap().auth = Some(crate::auth::ServerAuth::from_provider(
-            Box::new(VerifyOnly(verifier)),
-        ));
-        let app = lfs_router(state);
-        for (transfers, status) in [
-            (json!(["xet"]), StatusCode::INTERNAL_SERVER_ERROR),
-            (json!(["xet", "basic"]), StatusCode::INTERNAL_SERVER_ERROR),
-            (json!(["basic"]), StatusCode::OK),
-        ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/v1/lfs/objects/batch")
-                        .header("content-type", "application/vnd.git-lfs+json")
-                        .header(
-                            "authorization",
-                            format!("Bearer {}", mint_test_token(TokenScope::Read)),
-                        )
-                        .body(Body::from(
-                            serde_json::to_vec(&json!({
-                                "operation": "download", "transfers": transfers,
-                                "objects": [{"oid": test_oid_constant(), "size": 100}]
-                            }))
+        let cases = [
+            (
+                (|| AuthError::ProviderError("private signing diagnostic".to_owned()))
+                    as fn() -> AuthError,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::OK,
+            ),
+            (
+                || AuthError::InsufficientScope,
+                StatusCode::FORBIDDEN,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                || AuthError::InvalidToken,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                || AuthError::ExpiredToken,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+            ),
+        ];
+        for (failure, xet_status, mixed_status) in cases {
+            let (mut state, _tmp) = build_test_state_with_auth().await;
+            let verifier = state.auth.as_ref().unwrap().provider_arc();
+            Arc::get_mut(&mut state).unwrap().auth = Some(crate::auth::ServerAuth::from_provider(
+                Box::new(VerifyOnly(verifier, failure)),
+            ));
+            let app = lfs_router(state);
+            for (transfers, status) in [
+                (json!(["xet"]), xet_status),
+                (json!(["xet", "basic"]), mixed_status),
+                (json!(["basic"]), StatusCode::OK),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/lfs/objects/batch")
+                            .header("content-type", "application/vnd.git-lfs+json")
+                            .header(
+                                "authorization",
+                                format!("Bearer {}", mint_test_token(TokenScope::Read)),
+                            )
+                            .body(Body::from(
+                                serde_json::to_vec(&json!({
+                                    "operation": "download", "transfers": transfers,
+                                    "objects": [{"oid": test_oid_constant(), "size": 100}]
+                                }))
+                                .unwrap(),
+                            ))
                             .unwrap(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), status);
-            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            assert!(!String::from_utf8_lossy(&bytes).contains("private signing diagnostic"));
-            let parsed: Value = serde_json::from_slice(&bytes).unwrap();
-            assert_ne!(parsed["transfer"], "xet");
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains("private signing diagnostic"));
+                let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_ne!(parsed["transfer"], "xet");
+                if status == StatusCode::OK {
+                    assert_eq!(parsed["transfer"], "basic");
+                }
+            }
         }
     }
 
