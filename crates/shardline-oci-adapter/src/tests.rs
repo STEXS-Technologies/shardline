@@ -804,78 +804,58 @@ async fn upload_body_integrity_matches_expected_sha256() {
     assert_eq!(integrity.length(), data.len() as u64);
 }
 
-#[tokio::test]
-async fn new_upload_session_id_is_unique() {
+#[test]
+fn upload_session_ids_are_unique_hex_values() {
     let mut ids = std::collections::HashSet::new();
     for _ in 0..100 {
         let id = new_upload_session_id();
+        assert_eq!(id.len(), 32);
+        assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()), "{id}");
         assert!(ids.insert(id.clone()), "duplicate session id: {id}");
     }
 }
 
 #[test]
-fn upload_session_expired_returns_true_when_past_ttl() {
+fn upload_session_expiry_obeys_the_ttl_boundary() {
     let session = OciUploadSession {
         created_at_unix_seconds: 1000,
         last_touched_unix_seconds: 1000,
         ..upload_session_fixture()
     };
     let ttl = NonZeroU64::new(60).unwrap();
-    assert!(upload_session_expired(&session, ttl, 1061));
+    for (now, expired) in [(1050, false), (1059, false), (1060, true), (1061, true)] {
+        assert_eq!(upload_session_expired(&session, ttl, now), expired, "{now}");
+    }
 }
 
 #[test]
-fn upload_session_expired_returns_false_when_within_ttl() {
-    let session = OciUploadSession {
-        created_at_unix_seconds: 1000,
-        last_touched_unix_seconds: 1000,
-        ..upload_session_fixture()
-    };
-    let ttl = NonZeroU64::new(60).unwrap();
-    assert!(!upload_session_expired(&session, ttl, 1050));
-}
-
-#[test]
-fn upload_session_expires_at_exact_ttl_boundary() {
-    let session = OciUploadSession {
-        created_at_unix_seconds: 1000,
-        last_touched_unix_seconds: 1000,
-        ..upload_session_fixture()
-    };
-    let ttl = NonZeroU64::new(60).unwrap();
-    assert!(upload_session_expired(&session, ttl, 1060));
-    assert!(!upload_session_expired(&session, ttl, 1059));
-}
-
-#[test]
-fn upload_session_ids_are_hex_and_not_reused_back_to_back() {
-    let first = new_upload_session_id();
-    let second = new_upload_session_id();
-
-    assert_eq!(first.len(), 32);
-    assert_eq!(second.len(), 32);
-    assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert!(second.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert_ne!(first, second);
-}
-
-#[test]
-fn serializable_sha256_state_matches_reference_digest() {
-    let mut state = SerializableSha256State::default();
-    assert!(state.update(b"chunk-1").is_ok());
-    assert!(state.update(&vec![b'x'; 1_000_000]).is_ok());
-    assert!(state.update(b"chunk-3").is_ok());
-
-    let mut reference = Sha256::new();
-    reference.update(b"chunk-1");
-    reference.update(vec![b'x'; 1_000_000]);
-    reference.update(b"chunk-3");
-    let expected = hex::encode(reference.finalize());
-
-    assert!(matches!(
-        state.finalize_hex().as_deref(),
-        Ok(actual) if actual == expected
-    ));
+fn serializable_sha256_matches_reference_and_resumes_after_each_fragment() {
+    let large = vec![b'x'; 1_000_000];
+    let cases: [(&str, &[&[u8]]); 6] = [
+        ("empty", &[]),
+        ("single", &[b"hello"]),
+        ("fragmented", &[b"hel", b"lo", b" world"]),
+        ("partial block", &[b"partial"]),
+        ("full blocks and tail", &[&[0u8; 128], b"tail"]),
+        ("large", &[b"chunk-1", &large, b"chunk-3"]),
+    ];
+    for (case, chunks) in cases {
+        let mut state = SerializableSha256State::default();
+        let mut reference = Sha256::new();
+        for chunk in chunks {
+            state.update(chunk).unwrap();
+            reference.update(chunk);
+            let before = state.finalize_hex().unwrap();
+            assert_eq!(before, hex::encode(reference.clone().finalize()), "{case}");
+            state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+            assert_eq!(state.finalize_hex().unwrap(), before, "{case}");
+        }
+        assert_eq!(
+            state.finalize_hex().unwrap(),
+            hex::encode(reference.finalize()),
+            "{case}"
+        );
+    }
 }
 
 // ── Key construction tests ──────────────────────────────────────────────────
@@ -888,140 +868,84 @@ fn test_scope() -> RepositoryScope {
     RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap()
 }
 
-#[test]
-fn oci_blob_key_global_namespace() {
-    let key = oci_blob_key("team/assets", VALID_DIGEST_FULL, None).unwrap();
-    let s = key.as_str();
-    assert!(
-        s.contains("protocols/oci/global/repos/"),
-        "expected global namespace, got: {s}"
-    );
-    assert!(s.contains("/blobs/"), "expected blobs path, got: {s}");
-    assert!(
-        s.contains(VALID_DIGEST_FULL),
-        "expected digest in key, got: {s}"
-    );
+fn assert_oci_path(path: &str, scoped: bool, suffix: &str) {
+    let (namespace, _) = path
+        .strip_prefix("protocols/oci/")
+        .unwrap()
+        .split_once("/repos/")
+        .unwrap();
+    assert_eq!(namespace == "global", !scoped, "{path}");
+    if scoped {
+        assert_eq!(namespace.len(), 64, "{path}");
+        assert!(
+            namespace
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{path}"
+        );
+    }
+    assert!(path.ends_with(suffix), "{path} must end with {suffix}");
 }
 
 #[test]
-fn oci_blob_key_with_scope() {
-    let scope = test_scope();
-    let key = oci_blob_key("team/assets", VALID_DIGEST_FULL, Some(&scope)).unwrap();
-    let s = key.as_str();
-    assert!(
-        !s.contains("/global/"),
-        "should not contain global namespace with scope, got: {s}"
-    );
-    assert!(s.contains("/blobs/"), "expected blobs path, got: {s}");
-}
-
-#[test]
-fn oci_manifest_key_global_namespace() {
-    let key = oci_manifest_key("team/assets", VALID_DIGEST_FULL, None).unwrap();
-    let s = key.as_str();
-    assert!(
-        s.contains("protocols/oci/global/repos/"),
-        "expected global namespace, got: {s}"
-    );
-    assert!(
-        s.contains("/manifests/"),
-        "expected manifests path, got: {s}"
-    );
-}
-
-#[test]
-fn oci_manifest_key_with_scope() {
-    let scope = test_scope();
-    let key = oci_manifest_key("team/assets", VALID_DIGEST_FULL, Some(&scope)).unwrap();
-    let s = key.as_str();
-    assert!(
-        !s.contains("/global/"),
-        "should not contain global namespace with scope, got: {s}"
-    );
-    assert!(
-        s.contains("/manifests/"),
-        "expected manifests path, got: {s}"
-    );
-}
-
-#[test]
-fn oci_manifest_media_type_key_contains_expected_path() {
-    let key = oci_manifest_media_type_key("team/assets", VALID_DIGEST_FULL, None).unwrap();
-    let s = key.as_str();
-    assert!(
-        s.contains("/manifest-media-types/"),
-        "expected manifest-media-types path, got: {s}"
-    );
-}
-
-#[test]
-fn oci_tag_key_global_namespace() {
-    let key = oci_tag_key("team/assets", "latest", None).unwrap();
-    let s = key.as_str();
-    assert!(
-        s.contains("protocols/oci/global/repos/"),
-        "expected global namespace, got: {s}"
-    );
-    assert!(s.contains("/tags/latest"), "expected tags/latest, got: {s}");
-}
-
-#[test]
-fn oci_tag_key_with_scope() {
-    let scope = test_scope();
-    let key = oci_tag_key("team/assets", "v1.0", Some(&scope)).unwrap();
-    let s = key.as_str();
-    assert!(
-        !s.contains("/global/"),
-        "should not contain global namespace with scope, got: {s}"
-    );
-    assert!(s.contains("/tags/v1.0"), "expected tags/v1.0, got: {s}");
-}
-
-#[test]
-fn oci_manifest_prefix_returns_manifest_path() {
-    let prefix = oci_manifest_prefix("team/assets", None).unwrap();
-    let s = prefix.as_str();
-    assert!(
-        s.contains("/manifests/"),
-        "expected manifests path in prefix, got: {s}"
-    );
-}
-
-#[test]
-fn oci_manifest_prefix_with_scope() {
-    let scope = test_scope();
-    let prefix = oci_manifest_prefix("team/assets", Some(&scope)).unwrap();
-    let s = prefix.as_str();
-    assert!(
-        !s.contains("/global/"),
-        "should not contain global namespace with scope, got: {s}"
-    );
-    assert!(
-        s.contains("/manifests/"),
-        "expected manifests path, got: {s}"
-    );
-}
-
-#[test]
-fn oci_tag_prefix_returns_tag_path() {
-    let prefix = oci_tag_prefix("team/assets", None).unwrap();
-    let s = prefix.as_str();
-    assert!(
-        s.contains("/tags/"),
-        "expected tags path in prefix, got: {s}"
-    );
-}
-
-#[test]
-fn oci_tag_prefix_with_scope() {
-    let scope = test_scope();
-    let prefix = oci_tag_prefix("team/assets", Some(&scope)).unwrap();
-    let s = prefix.as_str();
-    assert!(
-        !s.contains("/global/"),
-        "should not contain global namespace with scope, got: {s}"
-    );
-    assert!(s.contains("/tags/"), "expected tags path, got: {s}");
+fn oci_key_and_prefix_layouts_preserve_namespaces_and_references() {
+    let repository_scope = test_scope();
+    for scope in [None, Some(&repository_scope)] {
+        // Object keys preserve historical opaque digest strings; tag-target
+        // tombstones separately require canonical SHA-256 digests.
+        for digest in [
+            VALID_DIGEST_FULL,
+            "short-digest",
+            "any-digest-string",
+            "test-digest",
+            "sha256:nothex",
+        ] {
+            for (key, kind) in [
+                (oci_blob_key("team/assets", digest, scope), "blobs"),
+                (oci_manifest_key("team/assets", digest, scope), "manifests"),
+                (
+                    oci_manifest_media_type_key("team/assets", digest, scope),
+                    "manifest-media-types",
+                ),
+            ] {
+                assert_oci_path(
+                    key.unwrap_or_else(|error| {
+                        panic!("{kind}/{digest}, scoped={}: {error}", scope.is_some())
+                    })
+                    .as_str(),
+                    scope.is_some(),
+                    &format!("/{kind}/{digest}"),
+                );
+            }
+        }
+        for tag in ["latest", "v1.0", "v1", "stable"] {
+            assert_oci_path(
+                oci_tag_key("team/assets", tag, scope).unwrap().as_str(),
+                scope.is_some(),
+                &format!("/tags/{tag}"),
+            );
+            assert_oci_path(
+                super::oci_tag_target_key("team/assets", VALID_DIGEST, tag, scope)
+                    .unwrap()
+                    .as_str(),
+                scope.is_some(),
+                &format!("/tag-targets/{VALID_DIGEST}/{tag}"),
+            );
+        }
+        for (prefix, suffix) in [
+            (
+                oci_manifest_prefix("team/assets", scope),
+                "/manifests/".to_owned(),
+            ),
+            (oci_tag_prefix("team/assets", scope), "/tags/".to_owned()),
+            (
+                super::oci_tag_target_prefix("team/assets", VALID_DIGEST, scope),
+                format!("/tag-targets/{VALID_DIGEST}/"),
+            ),
+        ] {
+            assert_oci_path(prefix.unwrap().as_str(), scope.is_some(), &suffix);
+        }
+    }
 }
 
 // ── parse_reference tests ───────────────────────────────────────────────────
@@ -1051,66 +975,6 @@ fn parse_reference_rejects_invalid_tags() {
             "{reference:?}"
         );
     }
-}
-
-// ── SerializableSha256State additional tests ────────────────────────────────
-
-#[test]
-fn serializable_sha256_empty_state_matches_reference() {
-    let state = SerializableSha256State::default();
-    let hex = state.finalize_hex().unwrap();
-    let reference = hex::encode(Sha256::new().finalize());
-    assert_eq!(hex, reference);
-}
-
-#[test]
-fn serializable_sha256_single_update_matches_reference() {
-    let mut state = SerializableSha256State::default();
-    state.update(b"hello").unwrap();
-    let hex = state.finalize_hex().unwrap();
-
-    let mut reference = Sha256::new();
-    reference.update(b"hello");
-    let expected = hex::encode(reference.finalize());
-    assert_eq!(hex, expected);
-}
-
-#[test]
-fn serializable_sha256_multiple_updates_match_concatenated() {
-    let mut state = SerializableSha256State::default();
-    state.update(b"hel").unwrap();
-    state.update(b"lo").unwrap();
-    state.update(b" world").unwrap();
-    let hex = state.finalize_hex().unwrap();
-
-    let mut reference = Sha256::new();
-    reference.update(b"hello world");
-    let expected = hex::encode(reference.finalize());
-    assert_eq!(hex, expected);
-}
-
-#[test]
-fn serializable_sha256_serialization_round_trip() {
-    let mut state = SerializableSha256State::default();
-    state.update(b"partial").unwrap();
-    let mid_hex = state.finalize_hex().unwrap();
-
-    let serialized = serde_json::to_vec(&state).unwrap();
-    let deserialized: SerializableSha256State = serde_json::from_slice(&serialized).unwrap();
-    let rt_hex = deserialized.finalize_hex().unwrap();
-    assert_eq!(mid_hex, rt_hex);
-}
-
-#[test]
-fn serializable_sha256_serialization_round_trip_after_multiple_updates() {
-    let mut state = SerializableSha256State::default();
-    state.update(&[0u8; 128]).unwrap(); // triggers block compression
-    state.update(b"tail").unwrap();
-    let expected_hex = state.finalize_hex().unwrap();
-
-    let serialized = serde_json::to_vec(&state).unwrap();
-    let deserialized: SerializableSha256State = serde_json::from_slice(&serialized).unwrap();
-    assert_eq!(expected_hex, deserialized.finalize_hex().unwrap());
 }
 
 // ── Key content-addressed uniqueness ────────────────────────────────────────
@@ -1519,25 +1383,6 @@ async fn abort_s3_multipart_upload_session_no_multipart_returns_ok() {
 }
 
 #[test]
-fn oci_tag_target_key_global_namespace() {
-    let key = super::oci_tag_target_key("team/assets", VALID_DIGEST, "latest", None).unwrap();
-    let s = key.as_str();
-    assert!(s.contains("protocols/oci/global/repos/"));
-    assert!(s.contains("/tag-targets/"));
-    assert!(s.contains(VALID_DIGEST));
-    assert!(s.ends_with("/latest"));
-}
-
-#[test]
-fn oci_tag_target_key_with_scope() {
-    let scope = test_scope();
-    let key = super::oci_tag_target_key("team/assets", VALID_DIGEST, "v1", Some(&scope)).unwrap();
-    let s = key.as_str();
-    assert!(!s.contains("/global/"));
-    assert!(s.contains("/tag-targets/"));
-}
-
-#[test]
 fn oci_keys_reject_invalid_repositories() {
     for (case, result) in [
         (
@@ -1614,25 +1459,6 @@ fn oci_keys_reject_invalid_tags() {
             "{case}: {result:?}"
         );
     }
-}
-
-#[test]
-fn oci_tag_target_prefix_global_namespace() {
-    let prefix = super::oci_tag_target_prefix("team/assets", VALID_DIGEST, None).unwrap();
-    let s = prefix.as_str();
-    assert!(s.contains("protocols/oci/global/repos/"));
-    assert!(s.contains("/tag-targets/"));
-    assert!(s.contains(VALID_DIGEST));
-    assert!(s.ends_with('/'));
-}
-
-#[test]
-fn oci_tag_target_prefix_with_scope() {
-    let scope = test_scope();
-    let prefix = super::oci_tag_target_prefix("team/assets", VALID_DIGEST, Some(&scope)).unwrap();
-    let s = prefix.as_str();
-    assert!(!s.contains("/global/"));
-    assert!(s.contains("/tag-targets/"));
 }
 
 #[test]
@@ -1917,22 +1743,6 @@ async fn read_upload_session_missing_local_body_returns_not_found() {
 }
 
 #[test]
-fn oci_tag_target_key_with_none_scope_uses_global() {
-    let key = super::oci_tag_target_key(
-        "team/assets",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "stable",
-        None,
-    )
-    .unwrap();
-    let s = key.as_str();
-    assert!(
-        s.contains("/global/"),
-        "expected global namespace without scope, got: {s}"
-    );
-}
-
-#[test]
 fn oci_blob_key_empty_digest_fails() {
     // Empty digest produces an invalid path component that fails validation
     let result = super::oci_blob_key("repo", "", None);
@@ -1940,26 +1750,6 @@ fn oci_blob_key_empty_digest_fails() {
         result.is_err(),
         "empty digest should produce an error: got: {result:?}"
     );
-}
-
-#[test]
-fn oci_manifest_key_accepts_opaque_digest() {
-    // The function doesn't validate the digest, it just uses it as part of the key path
-    let result = super::oci_manifest_key("repo", "sha256:nothex", None);
-    assert!(result.is_ok(), "digest is used as opaque path component");
-}
-
-#[test]
-fn oci_tag_target_prefix_with_none_scope() {
-    let prefix = super::oci_tag_target_prefix(
-        "team/assets",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        None,
-    )
-    .unwrap();
-    let s = prefix.as_str();
-    assert!(s.contains("/global/"));
-    assert!(s.contains("/tag-targets/"));
 }
 
 #[tokio::test]
@@ -1999,52 +1789,6 @@ fn parse_reference_rejects_invalid_digest() {
             "{reference:?}"
         );
     }
-}
-
-#[test]
-fn oci_blob_key_includes_digest_in_path() {
-    let key = super::oci_blob_key("team/assets", "short-digest", None).unwrap();
-    let s = key.as_str();
-    assert!(
-        s.contains("short-digest"),
-        "digest should be embedded in key, got: {s}"
-    );
-}
-
-#[test]
-fn oci_manifest_key_includes_digest_in_path() {
-    let key = super::oci_manifest_key("team/assets", "any-digest-string", None).unwrap();
-    let s = key.as_str();
-    assert!(
-        s.contains("any-digest-string"),
-        "digest should be embedded in key, got: {s}"
-    );
-}
-
-#[test]
-fn oci_manifest_media_type_key_includes_digest_in_path() {
-    let key = super::oci_manifest_media_type_key("team/assets", "test-digest", None).unwrap();
-    let s = key.as_str();
-    assert!(
-        s.contains("test-digest"),
-        "digest should be embedded in key, got: {s}"
-    );
-}
-
-#[test]
-fn oci_tag_key_with_scope_uses_hashed_namespace() {
-    let scope = test_scope();
-    let key = super::oci_tag_key("team/assets", "stable", Some(&scope)).unwrap();
-    let s = key.as_str();
-    // Must have a 64-char hex namespace (not "global")
-    assert!(
-        !s.contains("/global/"),
-        "expected scoped namespace, got: {s}"
-    );
-    assert!(
-        s.contains("/tags/stable"),
-        "expected /tags/stable, got: {s}"
-    );
 }
 
 // ── S3 multipart error branch coverage tests ──────────────────────────────
