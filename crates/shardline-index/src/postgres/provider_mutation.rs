@@ -683,42 +683,6 @@ mod tests {
         let repo = "repository";
         let delivery_id = "delivery-atomic";
         let resource = "github:provider-mutation-atomic/repository";
-        query(
-            "DELETE FROM shardline_webhook_deliveries
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery'
-               AND (operation_id = $1 OR operation_id = $2)",
-        )
-        .bind(webhook_operation_id(&delivery(owner, repo, delivery_id)))
-        .bind(delivery_id)
-        .execute(&pool)
-        .await
-        .expect("clean delivery evidence fixture");
-        query(
-            "DELETE FROM shardline_provider_repository_states
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean state fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
-        )
-        .bind(format!("github:{owner}:{repo}"))
-        .execute(&pool)
-        .await
-        .expect("clean provider evidence fixture");
         set_fence(&pool, resource, 41).await;
 
         let mut mutation = PostgresProviderMutation::new(delivery(owner, repo, delivery_id));
@@ -788,23 +752,6 @@ mod tests {
         let delivery_id = "delivery-baseline";
         let delivery = delivery(owner, repo, delivery_id);
         let operation_id = webhook_operation_id(&delivery);
-        query(
-            "DELETE FROM shardline_webhook_deliveries
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean delivery fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
-        )
-        .bind(&operation_id)
-        .execute(&pool)
-        .await
-        .expect("clean evidence fixture");
 
         let store = super::super::PostgresIndexStore::new(pool.clone());
         assert!(
@@ -845,24 +792,6 @@ mod tests {
                 .count(),
             1
         );
-
-        query(
-            "DELETE FROM shardline_webhook_deliveries
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean delivery fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
-        )
-        .bind(&operation_id)
-        .execute(&pool)
-        .await
-        .expect("clean evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -874,25 +803,6 @@ mod tests {
         let owner = "provider-webhook-evidence";
         let repo = "repository";
         let delivery_id = "delivery-recovery";
-        query(
-            "DELETE FROM shardline_webhook_deliveries
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean delivery fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery'
-               AND (operation_id = $1 OR operation_id = $2)",
-        )
-        .bind(webhook_operation_id(&delivery(owner, repo, delivery_id)))
-        .bind(delivery_id)
-        .execute(&pool)
-        .await
-        .expect("clean evidence fixture");
 
         let store = super::super::PostgresIndexStore::new(pool.clone());
         let delivery = delivery(owner, repo, delivery_id);
@@ -947,23 +857,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        query(
-            "DELETE FROM shardline_webhook_deliveries
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean tampered webhook fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
-        )
-        .bind(webhook_operation_id(&delivery))
-        .execute(&pool)
-        .await
-        .expect("clean tampered webhook evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -976,15 +869,6 @@ mod tests {
         let repo = "repository";
         let delivery_id = "delivery-rollback";
         let resource = "github:provider-mutation-rollback/repository";
-        query(
-            "DELETE FROM shardline_webhook_deliveries
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean fixture");
         set_fence(&pool, resource, 51).await;
 
         let mut mutation = PostgresProviderMutation::new(delivery(owner, repo, delivery_id));
@@ -1032,15 +916,6 @@ mod tests {
         let repo = "repository";
         let delivery_id = "delivery-stale";
         let resource = "github:provider-mutation-stale/repository";
-        query(
-            "DELETE FROM shardline_webhook_deliveries
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean fixture");
         set_fence(&pool, resource, 62).await;
 
         let mutation = PostgresProviderMutation::new(delivery(owner, repo, delivery_id));
@@ -1080,46 +955,6 @@ mod tests {
         let owner = "provider-mutation-tampered-delete";
         let repo = "repository";
         let resource = "github:provider-mutation-tampered-delete/repository";
-        query(
-            "DELETE FROM shardline_webhook_deliveries
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean delivery fixture");
-        query(
-            "DELETE FROM shardline_provider_repository_states
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean state fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
-        )
-        .bind(format!("github:{owner}:{repo}"))
-        .execute(&pool)
-        .await
-        .expect("clean evidence fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery'
-               AND (operation_id = $1 OR operation_id = $2)",
-        )
-        .bind(webhook_operation_id(&delivery(
-            owner,
-            repo,
-            "delivery-tampered-seed",
-        )))
-        .bind("delivery-tampered-seed")
-        .execute(&pool)
-        .await
-        .expect("clean seed delivery evidence fixture");
         set_fence(&pool, resource, 71).await;
 
         let mut seed =
@@ -1195,23 +1030,6 @@ mod tests {
         assert_eq!(delivery_count, 0);
 
         drop(connection);
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
-        )
-        .bind(format!("github:{owner}:{repo}"))
-        .execute(&pool)
-        .await
-        .expect("clean tampered provider evidence fixture");
-        query(
-            "DELETE FROM shardline_provider_repository_states
-             WHERE provider = 'github' AND owner = $1 AND repo = $2",
-        )
-        .bind(owner)
-        .bind(repo)
-        .execute(&pool)
-        .await
-        .expect("clean tampered provider state fixture");
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pg_provider_hold_batches_use_global_order_and_rollback_all_holds() {
