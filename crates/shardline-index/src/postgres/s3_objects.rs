@@ -352,10 +352,9 @@ struct S3ObjectEvidenceHead {
 
 async fn load_s3_object_evidence_head(
     connection: &mut PgConnection,
-    scope_namespace: &str,
-    object_key: &str,
+    snapshot: &S3ObjectSnapshot,
 ) -> Result<S3ObjectEvidenceHead, PostgresMetadataStoreError> {
-    let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
+    let operation = snapshot.evidence_operation()?;
     let Some(head) = super::index_store::load_postgres_latest_evidence_head(
         connection,
         OperationKind::S3Object,
@@ -393,7 +392,7 @@ async fn verify_s3_object_evidence(
     entry: &S3ObjectEntry,
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, Some(entry))?;
-    let evidence = load_s3_object_evidence_head(connection, scope_namespace, object_key).await?;
+    let evidence = load_s3_object_evidence_head(connection, &snapshot).await?;
     verify_snapshot_evidence(&evidence.evidence, &snapshot)?;
     Ok(())
 }
@@ -485,8 +484,7 @@ pub(super) async fn record_s3_object_transition(
     })?;
     let before_snapshot = s3_object_snapshot(&entry.scope_namespace, &entry.object_key, before)?;
     let after_snapshot = s3_object_snapshot(&entry.scope_namespace, &entry.object_key, after)?;
-    let stored =
-        load_s3_object_evidence_head(connection, &entry.scope_namespace, &entry.object_key).await?;
+    let stored = load_s3_object_evidence_head(connection, &before_snapshot).await?;
     // Reuse the verified persisted head from this transition's transaction.
     // Capture it before baseline repair, whose sequence-zero event is new.
     // Carry its verified commitment into each append, then chain any newly

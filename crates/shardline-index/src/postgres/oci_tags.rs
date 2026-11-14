@@ -22,22 +22,6 @@ fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError
     })
 }
 
-async fn load_tag_evidence(
-    connection: &mut PgConnection,
-    scope_namespace: &str,
-    repository: &str,
-    tag: &str,
-) -> Result<OciTagEvidenceLog, PostgresMetadataStoreError> {
-    let operation =
-        OciTagSnapshot::new(scope_namespace, repository, tag, None)?.evidence_operation()?;
-    super::index_store::load_postgres_snapshot_evidence(
-        &mut *connection,
-        OperationKind::OciTag,
-        &operation.operation_id,
-    )
-    .await
-}
-
 async fn current_tag_evidence(
     connection: &mut PgConnection,
     scope_namespace: &str,
@@ -46,7 +30,7 @@ async fn current_tag_evidence(
     digest_hex: Option<String>,
 ) -> Result<OciTagEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
-    let loaded = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
+    let loaded = super::load_postgres_snapshot_evidence_for(connection, &snapshot).await?;
     Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?.0)
 }
 
@@ -58,7 +42,7 @@ async fn verify_tag_evidence(
     digest_hex: Option<String>,
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
-    let evidence = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
+    let evidence = super::load_postgres_snapshot_evidence_for(connection, &snapshot).await?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(())
 }

@@ -63,6 +63,17 @@ where
     }
 }
 
+pub(crate) async fn load_postgres_snapshot_evidence_for<S>(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    snapshot: &S,
+) -> Result<SnapshotEvidenceLog<S>, PostgresMetadataStoreError>
+where
+    S: SnapshotEvidence + serde::de::DeserializeOwned,
+{
+    let operation = snapshot.evidence_operation()?;
+    load_postgres_snapshot_evidence(executor, operation.kind, &operation.operation_id).await
+}
+
 pub(super) struct PostgresEvidenceHead {
     pub(super) event_json: serde_json::Value,
     pub(super) merkle_commit_json: Option<serde_json::Value>,

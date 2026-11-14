@@ -22,7 +22,7 @@ use crate::{
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
-        load_postgres_latest_evidence_event, u64_to_i64,
+        load_postgres_snapshot_evidence_for, u64_to_i64,
     },
 };
 use shardline_reliability::{
@@ -40,25 +40,6 @@ fn repo_type_from_str(s: &str) -> Result<HubRepoType, PostgresMetadataStoreError
     HubRepoType::parse_str(s).ok_or(PostgresMetadataStoreError::InvalidRepoType(s.to_owned()))
 }
 
-async fn load_hub_ref_evidence_head(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    repository: &str,
-    ref_name: &str,
-) -> Result<HubRefEvidenceLog, PostgresMetadataStoreError> {
-    let operation = HubRefSnapshot::new(repository, ref_name, None)?.evidence_operation()?;
-    let Some(value) = load_postgres_latest_evidence_event(
-        &mut **transaction,
-        OperationKind::MetadataCommit,
-        &operation.operation_id,
-    )
-    .await?
-    else {
-        return Ok(HubRefEvidenceLog::default());
-    };
-    let event = from_value::<HubRefLifecycleEvent>(value)?;
-    Ok(HubRefEvidenceLog::from_head(event)?)
-}
-
 async fn current_hub_ref_evidence(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     repository: &str,
@@ -66,7 +47,7 @@ async fn current_hub_ref_evidence(
     head_sha: Option<String>,
 ) -> Result<HubRefEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = HubRefSnapshot::new(repository, ref_name, head_sha)?;
-    let evidence = load_hub_ref_evidence_head(transaction, repository, ref_name).await?;
+    let evidence = load_postgres_snapshot_evidence_for(&mut **transaction, &snapshot).await?;
     Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?.0)
 }
 
@@ -77,7 +58,7 @@ async fn verify_hub_ref_evidence(
     head_sha: Option<String>,
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = HubRefSnapshot::new(repository, ref_name, head_sha)?;
-    let evidence = load_hub_ref_evidence_head(transaction, repository, ref_name).await?;
+    let evidence = load_postgres_snapshot_evidence_for(&mut **transaction, &snapshot).await?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(())
 }

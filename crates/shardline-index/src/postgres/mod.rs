@@ -22,7 +22,8 @@ pub(crate) use record_store::{admit_record_conversion, run_record_conversion};
 
 pub(crate) use index_store::{
     insert_reliability_event, load_postgres_latest_evidence_event,
-    load_postgres_latest_evidence_heads, next_reliability_sequence,
+    load_postgres_latest_evidence_heads, load_postgres_snapshot_evidence_for,
+    next_reliability_sequence,
 };
 pub use provider_mutation::{
     PostgresProviderMutation, PostgresProviderMutationOutcome, PostgresResourceFence,
