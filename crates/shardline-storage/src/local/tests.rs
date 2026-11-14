@@ -1078,14 +1078,16 @@ fn local_object_store_put_if_absent_fails_when_root_is_file_not_directory() {
 
 #[test]
 fn local_store_error_display_io() {
-    let err = LocalObjectStoreError::Io(std::io::Error::new(
-        std::io::ErrorKind::PermissionDenied,
-        "nope",
-    ));
-    assert!(
-        err.to_string()
-            .contains("local object store operation failed")
-    );
+    for message in ["nope", "disk error"] {
+        let err = LocalObjectStoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            message,
+        ));
+        assert!(
+            err.to_string()
+                .contains("local object store operation failed")
+        );
+    }
 }
 
 #[test]
@@ -1322,79 +1324,6 @@ fn local_map_directory_path_error_io_variant() {
     let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
     let result = super::util::map_directory_path_error(crate::DirectoryPathError::Io(io_err));
     assert!(matches!(result, LocalObjectStoreError::Io(_)));
-}
-
-// ── LocalObjectStoreError Display variants ─────────────────────────────
-
-#[test]
-fn local_error_display_io() {
-    let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "disk error");
-    let err = LocalObjectStoreError::Io(io_err);
-    let msg = err.to_string();
-    assert!(msg.contains("local object store operation failed"));
-}
-
-#[test]
-fn local_error_display_integrity_length_mismatch() {
-    let err = LocalObjectStoreError::IntegrityLengthMismatch;
-    assert_eq!(
-        err.to_string(),
-        "object body length did not match expected integrity"
-    );
-}
-
-#[test]
-fn local_error_display_integrity_hash_mismatch() {
-    let err = LocalObjectStoreError::IntegrityHashMismatch;
-    assert_eq!(
-        err.to_string(),
-        "object body hash did not match expected integrity"
-    );
-}
-
-#[test]
-fn local_error_display_existing_object_conflict() {
-    let err = LocalObjectStoreError::ExistingObjectConflict;
-    assert_eq!(
-        err.to_string(),
-        "object key already exists with conflicting bytes"
-    );
-}
-
-#[test]
-fn local_error_display_range_out_of_bounds() {
-    let err = LocalObjectStoreError::RangeOutOfBounds;
-    assert_eq!(
-        err.to_string(),
-        "requested byte range exceeded stored object length"
-    );
-}
-
-#[test]
-fn local_error_display_invalid_stored_key() {
-    let err = LocalObjectStoreError::InvalidStoredKey;
-    assert_eq!(
-        err.to_string(),
-        "stored object path could not be represented as a valid object key"
-    );
-}
-
-#[test]
-fn local_error_display_invalid_object_path() {
-    let err = LocalObjectStoreError::InvalidObjectPath;
-    assert_eq!(
-        err.to_string(),
-        "validated object key could not be mapped to a local path"
-    );
-}
-
-#[test]
-fn local_error_display_invalid_start_after() {
-    let err = LocalObjectStoreError::InvalidStartAfter;
-    assert_eq!(
-        err.to_string(),
-        "start_after key is outside the requested prefix"
-    );
 }
 
 #[test]
