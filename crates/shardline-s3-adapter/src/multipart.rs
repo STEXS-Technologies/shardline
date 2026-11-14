@@ -33,7 +33,6 @@ use shardline_reliability::{
     build_persisted_merkle_chain_with_previous, build_typed_merkle_chain, canonical_state_digest,
     resumable_session_snapshot_identity, verify_and_append_session_transition,
     verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
-    verify_persisted_merkle_chain, verify_session_evidence, verify_snapshot_evidence,
 };
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
@@ -1466,22 +1465,7 @@ async fn load_session_with_snapshot(
         let committed = records.get(..head).ok_or_else(|| {
             S3SessionError::Reliability("session Merkle journal head is missing".into())
         })?;
-        let merkle_events = committed
-            .iter()
-            .flat_map(|record| record.evidence.iter().cloned())
-            .collect::<Vec<_>>();
-        let merkle_commits = committed
-            .iter()
-            .flat_map(|record| record.merkle_commits.iter().cloned())
-            .collect::<Vec<_>>();
-        let snapshot_merkle_events = committed
-            .iter()
-            .flat_map(|record| record.snapshot_evidence.iter().cloned())
-            .collect::<Vec<_>>();
-        let snapshot_merkle_commits = committed
-            .iter()
-            .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
-            .collect::<Vec<_>>();
+        let journal = PersistedMerkleJournalRecord::from_records(committed);
         let expected_events = stored_evidence
             .events()
             .iter()
@@ -1492,24 +1476,20 @@ async fn load_session_with_snapshot(
             .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
-        if merkle_events != expected_events || snapshot_merkle_events != expected_snapshot_events {
+        if journal.evidence != expected_events
+            || journal.snapshot_evidence != expected_snapshot_events
+        {
             return Err(S3SessionError::Reliability(
                 "session Merkle journal does not cover evidence journal".into(),
             ));
         }
-        verify_persisted_merkle_chain(
-            shardline_reliability::OperationKind::ResumableSession,
-            &merkle_events,
-            &merkle_commits,
-        )
-        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-        shardline_reliability::verify_typed_merkle_chain::<SnapshotEvidenceEvent<DigestSnapshot>>(
-            &snapshot_merkle_events,
-            &snapshot_merkle_commits,
-        )
-        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+        journal
+            .verify_chains::<SnapshotEvidenceEvent<DigestSnapshot>>(
+                shardline_reliability::OperationKind::ResumableSession,
+            )
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     }
-    let (evidence, evidence_was_missing) = verify_or_repair_session_evidence(
+    let (evidence, _) = verify_or_repair_session_evidence(
         stored_evidence,
         &session.scope_namespace,
         &session.upload_id,
@@ -1517,23 +1497,9 @@ async fn load_session_with_snapshot(
     )
     .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(&session)?;
-    let (snapshot_evidence, snapshot_evidence_was_missing) =
+    let (snapshot_evidence, _) =
         verify_or_repair_snapshot_evidence(stored_snapshot_evidence, snapshot)
             .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-    if !evidence_was_missing {
-        verify_session_evidence(
-            &evidence,
-            &session.scope_namespace,
-            &session.upload_id,
-            &session.key,
-        )
-        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-    }
-    if !snapshot_evidence_was_missing {
-        let expected = session_snapshot(&session)?;
-        verify_snapshot_evidence(&snapshot_evidence, &expected)
-            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-    }
     // Reads never repair durable state. A legacy session may receive an
     // in-memory baseline so existing callers retain their behavior, but the
     // baseline is persisted only by the next successful mutation or by an
@@ -2440,35 +2406,46 @@ mod tests {
 
     #[tokio::test]
     async fn tampered_merkle_journal_is_rejected() {
-        let root = make_root().await;
-        let upload_id = create_default_session(root.path(), "merkle-corrupt.bin").await;
-        let path = session_dir(root.path(), &upload_id)
-            .unwrap()
-            .join(SESSION_MERKLE_JOURNAL);
-        let mut lines: Vec<serde_json::Value> = fs::read(&path)
-            .await
-            .unwrap()
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(serde_json::from_slice)
-            .collect::<Result<_, _>>()
-            .unwrap();
-        lines[0]["snapshot_merkle_commits"][0]["body"]["sequence"] = serde_json::json!(9);
-        let mut bytes = serde_json::to_vec(&lines[0]).unwrap();
-        bytes.push(b'\n');
-        fs::write(&path, bytes).await.unwrap();
+        for (field, missing) in [
+            ("merkle_commits", false),
+            ("snapshot_merkle_commits", false),
+            ("merkle_commits", true),
+            ("snapshot_merkle_commits", true),
+        ] {
+            let root = make_root().await;
+            let upload_id = create_default_session(root.path(), "merkle-corrupt.bin").await;
+            let path = session_dir(root.path(), &upload_id)
+                .unwrap()
+                .join(SESSION_MERKLE_JOURNAL);
+            let mut lines: Vec<serde_json::Value> = fs::read(&path)
+                .await
+                .unwrap()
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(serde_json::from_slice)
+                .collect::<Result<_, _>>()
+                .unwrap();
+            if missing {
+                lines[0][field] = serde_json::json!([]);
+            } else {
+                lines[0][field][0]["body"]["sequence"] = serde_json::json!(9);
+            }
+            let mut bytes = serde_json::to_vec(&lines[0]).unwrap();
+            bytes.push(b'\n');
+            fs::write(&path, bytes).await.unwrap();
 
-        let error = load_session(&session_dir(root.path(), &upload_id).unwrap())
-            .await
-            .unwrap_err();
-        assert!(matches!(error, S3SessionError::Reliability(_)));
+            let error = load_session(&session_dir(root.path(), &upload_id).unwrap())
+                .await
+                .unwrap_err();
+            assert!(matches!(error, S3SessionError::Reliability(_)));
 
-        repair_session_evidence(root.path(), &upload_id)
-            .await
-            .unwrap();
-        load_session(&session_dir(root.path(), &upload_id).unwrap())
-            .await
-            .unwrap();
+            repair_session_evidence(root.path(), &upload_id)
+                .await
+                .unwrap();
+            load_session(&session_dir(root.path(), &upload_id).unwrap())
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]

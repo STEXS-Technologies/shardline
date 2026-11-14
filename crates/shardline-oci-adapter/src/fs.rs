@@ -11,9 +11,7 @@ use shardline_reliability::{
     SessionEvidenceLog, SnapshotEvidenceEvent, SnapshotEvidenceLog, StateTransitionEvent,
     append_or_baseline_snapshot_evidence, build_persisted_merkle_chain_with_previous,
     build_typed_merkle_chain, canonical_state_digest, resumable_session_snapshot_identity,
-    verify_and_append_session_transition, verify_persisted_merkle_chain,
-    verify_persisted_merkle_commit_with_previous, verify_session_evidence,
-    verify_snapshot_evidence,
+    verify_and_append_session_transition, verify_persisted_merkle_commit_with_previous,
 };
 #[cfg(unix)]
 use shardline_storage::{
@@ -733,60 +731,26 @@ async fn read_persisted_upload_session_with_snapshot_full(
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
         stored_snapshot_evidence = SnapshotEvidenceLog::from_events(snapshot_events)
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-        let merkle_events = committed
-            .iter()
-            .flat_map(|record| record.evidence.iter().cloned())
-            .collect::<Vec<_>>();
-        let merkle_commits = committed
-            .iter()
-            .flat_map(|record| record.merkle_commits.iter().cloned())
-            .collect::<Vec<_>>();
-        let snapshot_merkle_events = committed
-            .iter()
-            .flat_map(|record| record.snapshot_evidence.iter().cloned())
-            .collect::<Vec<_>>();
-        let snapshot_merkle_commits = committed
-            .iter()
-            .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
-            .collect::<Vec<_>>();
-        verify_persisted_merkle_chain(
-            shardline_reliability::OperationKind::ResumableSession,
-            &merkle_events,
-            &merkle_commits,
-        )
-        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-        shardline_reliability::verify_typed_merkle_chain::<SnapshotEvidenceEvent<DigestSnapshot>>(
-            &snapshot_merkle_events,
-            &snapshot_merkle_commits,
-        )
-        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-    }
-    let evidence = if stored_evidence.is_empty() {
-        SessionEvidenceLog::for_legacy_session(
-            &session.scope_namespace,
-            session_id,
-            &session.repository,
-        )
-        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
-    } else {
-        verify_session_evidence(
-            &stored_evidence,
-            &session.scope_namespace,
-            session_id,
-            &session.repository,
-        )
-        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-        stored_evidence
-    };
-    let snapshot = session_snapshot(session_id, &session)?;
-    let snapshot_evidence = if stored_snapshot_evidence.events().is_empty() {
-        SnapshotEvidenceLog::baseline(snapshot)
-            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
-    } else {
-        verify_snapshot_evidence(&stored_snapshot_evidence, &snapshot)
+        let journal = PersistedMerkleJournalRecord::from_records(committed);
+        journal
+            .verify_chains::<SnapshotEvidenceEvent<DigestSnapshot>>(
+                shardline_reliability::OperationKind::ResumableSession,
+            )
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-        stored_snapshot_evidence
-    };
+    }
+    let (evidence, _) = shardline_reliability::verify_or_repair_session_evidence(
+        stored_evidence,
+        &session.scope_namespace,
+        session_id,
+        &session.repository,
+    )
+    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    let snapshot = session_snapshot(session_id, &session)?;
+    let (snapshot_evidence, _) = shardline_reliability::verify_or_repair_snapshot_evidence(
+        stored_snapshot_evidence,
+        snapshot,
+    )
+    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     Ok((session, evidence, snapshot_evidence))
 }
 

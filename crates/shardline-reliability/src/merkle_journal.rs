@@ -30,6 +30,39 @@ pub struct PersistedMerkleJournalRecord {
     pub snapshot_merkle_commits: Vec<Value>,
 }
 
+impl PersistedMerkleJournalRecord {
+    /// Combines an ordered, committed journal prefix without changing event order.
+    #[must_use]
+    pub fn from_records(records: &[Self]) -> Self {
+        let mut combined = Self::default();
+        for record in records {
+            combined.evidence.extend(record.evidence.iter().cloned());
+            combined
+                .merkle_commits
+                .extend(record.merkle_commits.iter().cloned());
+            combined
+                .snapshot_evidence
+                .extend(record.snapshot_evidence.iter().cloned());
+            combined
+                .snapshot_merkle_commits
+                .extend(record.snapshot_merkle_commits.iter().cloned());
+        }
+        combined
+    }
+
+    /// Verifies lifecycle and snapshot commitments against their complete event chains.
+    ///
+    /// # Errors
+    /// Returns an error for malformed events, missing commitments, or broken links.
+    pub fn verify_chains<T: DeserializeOwned + EvidenceEventMetadata>(
+        &self,
+        operation_kind: OperationKind,
+    ) -> Result<(), ReliabilityError> {
+        verify_persisted_merkle_chain(operation_kind, &self.evidence, &self.merkle_commits)?;
+        verify_typed_merkle_chain::<T>(&self.snapshot_evidence, &self.snapshot_merkle_commits)
+    }
+}
+
 /// Builds a sequence of linked commitments from typed persisted event JSON.
 ///
 /// # Errors
