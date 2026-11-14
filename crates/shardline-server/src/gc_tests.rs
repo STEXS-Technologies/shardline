@@ -1192,10 +1192,7 @@ fn quarantine_record_path_matches_chunk_object_key_layout() {
     let hash = "de".repeat(32);
     let key = chunk_object_key(&hash);
 
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = key.unwrap();
     let expected_path = PathBuf::from("gc")
         .join("quarantine")
         .join(key.as_str())

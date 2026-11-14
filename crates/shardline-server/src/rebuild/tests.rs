@@ -188,20 +188,14 @@ fn synthetic_large_inventory_record(index: usize) -> Result<FileRecord, Box<dyn 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_restores_missing_latest_record() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
-    assert!(backend.is_ok());
-    let Ok(backend) = backend else {
-        return;
-    };
+    let backend = backend.unwrap();
 
     let first = backend
         .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
@@ -215,24 +209,15 @@ async fn index_rebuild_restores_missing_latest_record() {
 
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let latest_record = backend.file_record("asset.bin", None, None).await;
-    assert!(latest_record.is_ok());
-    let Ok(latest_record) = latest_record else {
-        return;
-    };
+    let latest_record = latest_record.unwrap();
     let latest_locator = RecordTraversal::latest_record_locator(&record_store, &latest_record);
     let removed = RecordMutation::delete_record_locator(&record_store, &latest_locator).await;
     assert!(removed.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
     let latest = backend.download_file("asset.bin", None, None).await;
-    assert!(latest.is_ok());
-    let Ok(latest) = latest else {
-        return;
-    };
+    let latest = latest.unwrap();
 
     assert_eq!(report.scanned_version_records, 2);
     assert_eq!(report.rebuilt_latest_records, 1);
@@ -245,10 +230,7 @@ async fn index_rebuild_restores_missing_latest_record() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_reaches_a_fixed_point_on_second_run() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let record = FileRecord {
         file_id: "asset.bin".to_owned(),
@@ -291,46 +273,31 @@ async fn index_rebuild_reaches_a_fixed_point_on_second_run() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_prunes_stale_latest_record_without_versions() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
-    assert!(backend.is_ok());
-    let Ok(backend) = backend else {
-        return;
-    };
+    let backend = backend.unwrap();
 
     let uploaded = backend
         .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
         .await;
-    assert!(uploaded.is_ok());
-    let Ok(uploaded) = uploaded else {
-        return;
-    };
+    let uploaded = uploaded.unwrap();
 
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let version_record = backend
         .file_record("asset.bin", Some(&uploaded.content_hash), None)
         .await;
-    assert!(version_record.is_ok());
-    let Ok(version_record) = version_record else {
-        return;
-    };
+    let version_record = version_record.unwrap();
     let version_locator = RecordTraversal::version_record_locator(&record_store, &version_record);
     let removed = RecordMutation::delete_record_locator(&record_store, &version_locator).await;
     assert!(removed.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
     let latest = backend.download_file("asset.bin", None, None).await;
 
     assert_eq!(report.scanned_version_records, 0);
@@ -344,28 +311,19 @@ async fn index_rebuild_prunes_stale_latest_record_without_versions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_prunes_stale_reconstruction_rows() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
     let stale_file_id = FileId::new(ShardlineHash::from_bytes([31; 32]));
     let object_id = StoredObjectId::new(ShardlineHash::from_bytes([32; 32]));
     let range = ChunkRange::new(0, 1);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = range.unwrap();
     let reconstruction =
         FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 16)]);
     let inserted = index_store.insert_reconstruction(&stale_file_id, &reconstruction);
     assert!(inserted.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
 
     let loaded = ReconstructionStore::reconstruction(&index_store, &stale_file_id);
     assert!(matches!(loaded, Ok(None)));
@@ -378,10 +336,7 @@ async fn index_rebuild_prunes_stale_reconstruction_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
     let file_hash = ShardlineHash::from_bytes([33; 32]);
@@ -399,20 +354,14 @@ async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records()
     assert!(written.is_ok());
     let object_id = StoredObjectId::new(ShardlineHash::from_bytes([35; 32]));
     let range = ChunkRange::new(0, 1);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = range.unwrap();
     let reconstruction =
         FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 16)]);
     let inserted = index_store.insert_reconstruction(&file_id, &reconstruction);
     assert!(inserted.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
 
     let loaded = ReconstructionStore::reconstruction(&index_store, &file_id);
     assert!(matches!(loaded, Ok(Some(ref loaded)) if loaded == &reconstruction));
@@ -425,32 +374,20 @@ async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_restores_repository_scoped_latest_records() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
-    assert!(backend.is_ok());
-    let Ok(backend) = backend else {
-        return;
-    };
+    let backend = backend.unwrap();
     let team_assets =
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-    assert!(team_assets.is_ok());
-    let Ok(team_assets) = team_assets else {
-        return;
-    };
+    let team_assets = team_assets.unwrap();
     let team_backup =
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "backup", Some("main"));
-    assert!(team_backup.is_ok());
-    let Ok(team_backup) = team_backup else {
-        return;
-    };
+    let team_backup = team_backup.unwrap();
 
     let first = backend
         .upload_file(
@@ -490,10 +427,7 @@ async fn index_rebuild_restores_repository_scoped_latest_records() {
     assert!(removed_second.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
     let restored_first = backend
         .download_file("asset.bin", None, Some(&team_assets))
         .await;
@@ -563,10 +497,7 @@ async fn exercise_index_rebuild_scans_large_repository_metadata_inventory()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_reports_invalid_version_record_json() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let record = FileRecord {
         file_id: "asset.bin".to_owned(),
@@ -588,10 +519,7 @@ async fn index_rebuild_reports_invalid_version_record_json() {
     let written = RecordMutation::write_version_record(&record_store, &record).await;
     assert!(written.is_ok());
     let connection = Connection::open(storage.path().join("metadata.sqlite3"));
-    assert!(connection.is_ok());
-    let Ok(connection) = connection else {
-        return;
-    };
+    let connection = connection.unwrap();
     let updated = connection.execute(
         "UPDATE shardline_file_records
              SET record = ?1
@@ -601,19 +529,13 @@ async fn index_rebuild_reports_invalid_version_record_json() {
     assert!(updated.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
 
     assert_eq!(report.scanned_version_records, 1);
     assert_eq!(report.rebuilt_latest_records, 0);
     assert_eq!(report.issue_count(), 1);
     let first_issue = report.issues.first();
-    assert!(first_issue.is_some());
-    let Some(first_issue) = first_issue else {
-        return;
-    };
+    let first_issue = first_issue.unwrap();
     assert_eq!(
         first_issue.kind,
         LocalIndexRebuildIssueKind::InvalidVersionRecordJson
@@ -623,27 +545,18 @@ async fn index_rebuild_reports_invalid_version_record_json() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_skips_invalid_version_reconstruction_plan() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
-    assert!(backend.is_ok());
-    let Ok(backend) = backend else {
-        return;
-    };
+    let backend = backend.unwrap();
     let uploaded = backend
         .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
         .await;
-    assert!(uploaded.is_ok());
-    let Ok(uploaded) = uploaded else {
-        return;
-    };
+    let uploaded = uploaded.unwrap();
 
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let version_record = backend
@@ -654,26 +567,14 @@ async fn index_rebuild_skips_invalid_version_reconstruction_plan() {
         return;
     };
     let first_chunk = version_record.chunks.first_mut();
-    assert!(first_chunk.is_some());
-    let Some(first_chunk) = first_chunk else {
-        return;
-    };
+    let first_chunk = first_chunk.unwrap();
     first_chunk.packed_end = first_chunk.packed_start;
     let corrupted = to_vec(&version_record);
-    assert!(corrupted.is_ok());
-    let Ok(corrupted) = corrupted else {
-        return;
-    };
+    let corrupted = corrupted.unwrap();
     let corrupted = String::from_utf8(corrupted);
-    assert!(corrupted.is_ok());
-    let Ok(corrupted) = corrupted else {
-        return;
-    };
+    let corrupted = corrupted.unwrap();
     let connection = Connection::open(storage.path().join("metadata.sqlite3"));
-    assert!(connection.is_ok());
-    let Ok(connection) = connection else {
-        return;
-    };
+    let connection = connection.unwrap();
     let written = connection.execute(
         "UPDATE shardline_file_records
              SET record = ?1
@@ -687,10 +588,7 @@ async fn index_rebuild_skips_invalid_version_reconstruction_plan() {
     assert!(removed.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
     let latest = backend.download_file("asset.bin", None, None).await;
 
     assert_eq!(report.scanned_version_records, 1);
@@ -704,20 +602,14 @@ async fn index_rebuild_skips_invalid_version_reconstruction_plan() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
-    assert!(backend.is_ok());
-    let Ok(backend) = backend else {
-        return;
-    };
+    let backend = backend.unwrap();
     let (xorb_body, xorb_hash) = single_chunk_xorb(b"aaaa");
     let (shard_body, _file_hash) = single_file_shard(&[(b"aaaa", &xorb_hash)]);
     let uploaded_xorb = backend.upload_xorb(&xorb_hash, xorb_body).await;
@@ -733,10 +625,7 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
 
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
     let chunk_hash = parse_xet_hash_hex(&xorb_hash);
-    assert!(chunk_hash.is_ok());
-    let Ok(chunk_hash) = chunk_hash else {
-        return;
-    };
+    let chunk_hash = chunk_hash.unwrap();
     let deleted = DedupeStore::delete_dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(deleted, Ok(true)));
     let missing = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
@@ -760,10 +649,7 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
     .unwrap();
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
 
     let restored = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(restored, Ok(Some(_))));
@@ -780,20 +666,14 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_corrupt() {
     let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = storage.unwrap();
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
-    assert!(backend.is_ok());
-    let Ok(backend) = backend else {
-        return;
-    };
+    let backend = backend.unwrap();
     let (xorb_body, xorb_hash) = single_chunk_xorb(b"aaaa");
     let (shard_body, _file_hash) = single_file_shard(&[(b"aaaa", &xorb_hash)]);
     let uploaded_xorb = backend.upload_xorb(&xorb_hash, xorb_body).await;
@@ -809,10 +689,7 @@ async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_co
 
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
     let chunk_hash = parse_xet_hash_hex(&xorb_hash);
-    assert!(chunk_hash.is_ok());
-    let Ok(chunk_hash) = chunk_hash else {
-        return;
-    };
+    let chunk_hash = chunk_hash.unwrap();
     let existing = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(existing, Ok(Some(_))));
     let Ok(Some(existing)) = existing else {
@@ -826,10 +703,7 @@ async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_co
     assert!(corrupted.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
-    assert!(report.is_ok());
-    let Ok(report) = report else {
-        return;
-    };
+    let report = report.unwrap();
 
     let preserved = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(preserved, Ok(Some(_))));

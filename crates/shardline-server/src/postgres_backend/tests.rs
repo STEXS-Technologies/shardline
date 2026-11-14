@@ -99,36 +99,21 @@ fn database_url_for(base_url: &str, database_name: &str) -> Result<String, Box<d
 #[test]
 fn local_object_store_root_stays_beneath_temp_root() {
     let root = tempfile::tempdir();
-    assert!(root.is_ok());
-    let Ok(root) = root else {
-        return;
-    };
+    let root = root.unwrap();
     let object_store = ServerObjectStore::local(root.path().join("chunks"));
-    assert!(object_store.is_ok());
-    let Ok(object_store) = object_store else {
-        return;
-    };
+    let object_store = object_store.unwrap();
     let local_root = object_store.local_root();
-    assert!(local_root.is_some());
-    let Some(local_root) = local_root else {
-        return;
-    };
+    let local_root = local_root.unwrap();
     assert!(local_root.starts_with(root.path()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_reference_lookup_stays_repository_scoped_and_avoids_global_latest_walks() {
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-    assert!(scope.is_ok());
-    let Ok(scope) = scope else {
-        return;
-    };
+    let scope = scope.unwrap();
     let other_scope =
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "other", Some("main"));
-    assert!(other_scope.is_ok());
-    let Ok(other_scope) = other_scope else {
-        return;
-    };
+    let other_scope = other_scope.unwrap();
 
     let matching_version = file_record(&scope, "wanted-hash");
     let unrelated_latest = file_record(&other_scope, "wanted-hash");

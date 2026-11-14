@@ -41,10 +41,7 @@ fn provider_subject_extraction_rejects_oversized_query_subject() {
 fn provider_subject_extraction_rejects_oversized_basic_auth_header_before_decode() {
     let oversized = "a".repeat(MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES + 1);
     let header_value = header::HeaderValue::from_str(&format!("Basic {oversized}"));
-    assert!(header_value.is_ok());
-    let Ok(header_value) = header_value else {
-        return;
-    };
+    let header_value = header_value.unwrap();
     let mut headers = HeaderMap::new();
     headers.insert(header::AUTHORIZATION, header_value);
 
@@ -104,10 +101,7 @@ fn batch_reconstruction_parser_deduplicates_file_ids() {
         "file_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&file_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&ignored=value",
     );
 
-    assert!(parsed.is_ok());
-    let Ok(parsed) = parsed else {
-        return;
-    };
+    let parsed = parsed.unwrap();
     assert_eq!(
         parsed,
         vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()]
