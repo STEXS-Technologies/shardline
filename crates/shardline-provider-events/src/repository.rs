@@ -11,9 +11,9 @@ use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent};
 use super::{
     DEFAULT_LOCAL_GC_RETENTION_SECONDS, ProviderWebhookOutcome, ProviderWebhookOutcomeKind,
     records::{
-        collect_deleted_repository_record_references, ensure_absent_or_matching_record,
-        parse_record_entry, record_belongs_to_repository, renamed_file_record,
-        repository_record_scope,
+        DeletedRepositoryReferences, collect_deleted_repository_references,
+        ensure_absent_or_matching_record, parse_record_entry, record_belongs_to_repository,
+        renamed_file_record, repository_record_scope,
     },
     state::{migrate_provider_repository_state, planned_provider_repository_state_migration},
 };
@@ -185,20 +185,14 @@ pub(super) async fn plan_postgres_repository_deleted(
         latest_records,
         version_records,
     } = collect_repository_records(record_store, event.repository()).await?;
-    let mut file_versions = 0_u64;
-    let mut chunk_hashes = HashSet::new();
-    let mut held_object_keys = HashSet::new();
-    let mut seen_record_identities = HashSet::new();
-    for record in latest_records.iter().chain(&version_records) {
-        collect_deleted_repository_record_references(
-            object_store,
-            record,
-            &mut seen_record_identities,
-            &mut file_versions,
-            &mut chunk_hashes,
-            &mut held_object_keys,
-        )?;
-    }
+    let DeletedRepositoryReferences {
+        file_versions,
+        chunk_hashes,
+        held_object_keys,
+    } = collect_deleted_repository_references(
+        object_store,
+        latest_records.iter().chain(&version_records),
+    )?;
     for object_key in held_object_keys {
         mutation.upsert_retention_hold(RetentionHold::new(
             ObjectKey::parse(&object_key)
@@ -255,20 +249,14 @@ where
         version_records,
     } = collect_repository_records(record_store, event.repository()).await?;
 
-    let mut file_versions = 0_u64;
-    let mut chunk_hashes = HashSet::new();
-    let mut held_object_keys = HashSet::new();
-    let mut seen_record_identities = HashSet::new();
-    for record in latest_records.iter().chain(&version_records) {
-        collect_deleted_repository_record_references(
-            object_store,
-            record,
-            &mut seen_record_identities,
-            &mut file_versions,
-            &mut chunk_hashes,
-            &mut held_object_keys,
-        )?;
-    }
+    let DeletedRepositoryReferences {
+        file_versions,
+        chunk_hashes,
+        held_object_keys,
+    } = collect_deleted_repository_references(
+        object_store,
+        latest_records.iter().chain(&version_records),
+    )?;
 
     let mut applied_holds = 0_u64;
     for object_key in &held_object_keys {

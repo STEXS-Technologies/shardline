@@ -6,9 +6,7 @@ use shardline_protocol::RepositoryScope;
 use shardline_vcs::RepositoryRef;
 
 use crate::ProviderEventsError;
-use shardline_server_core::{
-    ServerObjectStore, chunk_object_key, parse_stored_file_record_bytes, provider_directory,
-};
+use shardline_server_core::{ServerObjectStore, chunk_object_key, parse_stored_file_record_bytes};
 use shardline_xet_adapter::{visit_stored_xorb_chunk_hashes, xorb_object_key};
 
 pub(super) async fn ensure_absent_or_matching_record<RecordAdapter>(
@@ -38,51 +36,61 @@ where
     Err(ProviderEventsError::ConflictingRenameTargetRecord)
 }
 
-pub(super) fn collect_deleted_repository_record_references(
-    object_store: &ServerObjectStore,
-    record: &FileRecord,
-    seen_record_identities: &mut HashSet<String>,
-    file_versions: &mut u64,
-    chunk_hashes: &mut HashSet<String>,
-    held_object_keys: &mut HashSet<String>,
-) -> Result<(), ProviderEventsError> {
-    if !seen_record_identities.insert(record_identity_key(record)) {
-        return Ok(());
-    }
+pub(super) struct DeletedRepositoryReferences {
+    pub file_versions: u64,
+    pub chunk_hashes: HashSet<String>,
+    pub held_object_keys: HashSet<String>,
+}
 
-    *file_versions = file_versions
-        .checked_add(1)
-        .ok_or(ProviderEventsError::Overflow)?;
-    for chunk in &record.chunks {
-        if record.chunk_size == 0 {
-            let xorb_object_key = xorb_object_key(&chunk.hash)?;
-            held_object_keys.insert(xorb_object_key.as_str().to_owned());
-            let mut visit_result = Ok(());
-            visit_stored_xorb_chunk_hashes(object_store, &xorb_object_key, |chunk_hash_hex| {
-                match chunk_object_key(&chunk_hash_hex) {
-                    Ok(chunk_object_key) => {
-                        held_object_keys.insert(chunk_object_key.as_str().to_owned());
-                        chunk_hashes.insert(chunk_hash_hex);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        visit_result = Err(e);
-                        Err(shardline_xet_adapter::XetAdapterError::NotFound)
-                    }
-                }
-            })?;
-            visit_result?;
+pub(super) fn collect_deleted_repository_references<'record>(
+    object_store: &ServerObjectStore,
+    records: impl Iterator<Item = &'record FileRecord>,
+) -> Result<DeletedRepositoryReferences, ProviderEventsError> {
+    let mut file_versions = 0_u64;
+    let mut chunk_hashes = HashSet::new();
+    let mut held_object_keys = HashSet::new();
+    let mut seen_record_identities = HashSet::new();
+    for record in records {
+        if !seen_record_identities.insert(record_identity_key(record)) {
             continue;
         }
+        file_versions = file_versions
+            .checked_add(1)
+            .ok_or(ProviderEventsError::Overflow)?;
+        for chunk in &record.chunks {
+            if record.chunk_size == 0 {
+                let xorb_object_key = xorb_object_key(&chunk.hash)?;
+                held_object_keys.insert(xorb_object_key.as_str().to_owned());
+                let mut visit_result = Ok(());
+                visit_stored_xorb_chunk_hashes(object_store, &xorb_object_key, |chunk_hash_hex| {
+                    match chunk_object_key(&chunk_hash_hex) {
+                        Ok(chunk_object_key) => {
+                            held_object_keys.insert(chunk_object_key.as_str().to_owned());
+                            chunk_hashes.insert(chunk_hash_hex);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            visit_result = Err(e);
+                            Err(shardline_xet_adapter::XetAdapterError::NotFound)
+                        }
+                    }
+                })?;
+                visit_result?;
+                continue;
+            }
 
-        chunk_hashes.insert(chunk.hash.clone());
-        let chunk_object_key = chunk_object_key(&chunk.hash)?;
-        held_object_keys.insert(chunk_object_key.as_str().to_owned());
-        let xorb_object_key = xorb_object_key(&chunk.hash)?;
-        held_object_keys.insert(xorb_object_key.as_str().to_owned());
+            chunk_hashes.insert(chunk.hash.clone());
+            let chunk_object_key = chunk_object_key(&chunk.hash)?;
+            held_object_keys.insert(chunk_object_key.as_str().to_owned());
+            let xorb_object_key = xorb_object_key(&chunk.hash)?;
+            held_object_keys.insert(xorb_object_key.as_str().to_owned());
+        }
     }
-
-    Ok(())
+    Ok(DeletedRepositoryReferences {
+        file_versions,
+        chunk_hashes,
+        held_object_keys,
+    })
 }
 
 pub(super) fn parse_record_entry(bytes: &[u8]) -> Result<FileRecord, ProviderEventsError> {
@@ -129,23 +137,26 @@ pub(super) fn renamed_file_record(
     Ok(renamed_record)
 }
 
-fn record_identity_key(record: &FileRecord) -> String {
-    let repository_scope = record.repository_scope.as_ref().map_or_else(
-        || "unscoped".to_owned(),
-        |scope| {
-            format!(
-                "{}:{}/{}@{}",
-                provider_directory(scope.provider()),
-                scope.owner(),
-                scope.name(),
-                scope.revision().unwrap_or("latest"),
-            )
-        },
-    );
-    format!(
-        "{repository_scope}:{}:{}",
-        record.file_id, record.content_hash
-    )
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct RecordIdentity<'record> {
+    provider: Option<&'static str>,
+    owner: Option<&'record str>,
+    repository: Option<&'record str>,
+    revision: Option<&'record str>,
+    file_id: &'record str,
+    content_hash: &'record str,
+}
+
+fn record_identity_key(record: &FileRecord) -> RecordIdentity<'_> {
+    let scope = record.repository_scope.as_ref();
+    RecordIdentity {
+        provider: scope.map(|scope| scope.provider().as_str()),
+        owner: scope.map(RepositoryScope::owner),
+        repository: scope.map(RepositoryScope::name),
+        revision: scope.and_then(RepositoryScope::revision),
+        file_id: &record.file_id,
+        content_hash: &record.content_hash,
+    }
 }
 
 #[cfg(test)]
@@ -210,60 +221,83 @@ mod tests {
     }
 
     #[test]
-    fn record_identity_key_includes_scope() {
-        let record = test_record();
-        let key = record_identity_key(&record);
-        assert!(key.contains("file.bin"));
-        assert!(key.contains(&"a".repeat(64)));
-        assert!(key.contains("owner/repo"));
-    }
-
-    #[test]
-    fn record_identity_key_scopeless_uses_unscoped() {
-        let record = super::FileRecord {
-            repository_scope: None,
-            ..test_record()
-        };
-        let key = record_identity_key(&record);
-        assert!(key.contains("unscoped"));
+    fn record_identity_preserves_scope_and_file_fields() {
+        for (scoped, revision) in [(false, None), (true, None), (true, Some("main"))] {
+            for file_id in ["file.bin", "file with spaces (1).bin"] {
+                let record = super::FileRecord {
+                    repository_scope: scoped.then(|| {
+                        RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", revision)
+                            .unwrap()
+                    }),
+                    file_id: file_id.to_owned(),
+                    ..test_record()
+                };
+                let key = record_identity_key(&record);
+                assert_eq!(key.provider, scoped.then_some("github"));
+                assert_eq!(key.owner, scoped.then_some("owner"));
+                assert_eq!(key.repository, scoped.then_some("repo"));
+                assert_eq!(key.revision, revision);
+                assert_eq!(key.file_id, file_id);
+                assert_eq!(key.content_hash, "a".repeat(64));
+            }
+        }
     }
 
     #[test]
     fn collect_deleted_no_duplicate_identity_keys() {
-        let tempdir1 = tempfile::tempdir().unwrap();
-        let tempdir2 = tempfile::tempdir().unwrap();
         let record = test_record();
-        let mut seen = HashSet::new();
-        let mut file_versions = 0u64;
-        let mut chunk_hashes = HashSet::new();
-        let mut held_object_keys = HashSet::new();
+        let references = super::collect_deleted_repository_references(
+            &shardline_server_core::ServerObjectStore::blackhole(),
+            [&record, &record].into_iter(),
+        )
+        .unwrap();
+        assert_eq!(references.file_versions, 1);
+        assert_eq!(references.chunk_hashes, HashSet::from(["b".repeat(64)]));
+        assert_eq!(references.held_object_keys.len(), 2);
+    }
 
-        // First call should succeed
-        let result = super::collect_deleted_repository_record_references(
-            &shardline_server_core::ServerObjectStore::local(tempdir1.path().join("chunks"))
-                .unwrap(),
-            &record,
-            &mut seen,
-            &mut file_versions,
-            &mut chunk_hashes,
-            &mut held_object_keys,
-        );
-        assert!(result.is_ok());
-        assert_eq!(file_versions, 1);
-        assert!(chunk_hashes.contains(&"b".repeat(64)));
-
-        // Second call with same identity should be no-op
-        let result = super::collect_deleted_repository_record_references(
-            &shardline_server_core::ServerObjectStore::local(tempdir2.path().join("chunks"))
-                .unwrap(),
-            &record,
-            &mut seen,
-            &mut file_versions,
-            &mut chunk_hashes,
-            &mut held_object_keys,
-        );
-        assert!(result.is_ok());
-        assert_eq!(file_versions, 1);
+    #[test]
+    fn deletion_keeps_distinct_revisions_and_delimited_fields() {
+        for ((revision_a, file_a), (revision_b, file_b)) in [
+            ((None, "file.bin"), (Some("latest"), "file.bin")),
+            (
+                (Some("main:part"), "file.bin"),
+                (Some("main"), "part:file.bin"),
+            ),
+        ] {
+            let mut first = test_record();
+            first.repository_scope = Some(
+                RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", revision_a)
+                    .unwrap(),
+            );
+            first.file_id = file_a.to_owned();
+            let mut second = first.clone();
+            second.repository_scope = Some(
+                RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", revision_b)
+                    .unwrap(),
+            );
+            second.file_id = file_b.to_owned();
+            second.chunks[0].hash = "c".repeat(64);
+            let super::DeletedRepositoryReferences {
+                file_versions,
+                chunk_hashes,
+                held_object_keys,
+            } = super::collect_deleted_repository_references(
+                &shardline_server_core::ServerObjectStore::blackhole(),
+                [&first, &second, &first, &second].into_iter(),
+            )
+            .unwrap();
+            assert_eq!(file_versions, 2, "{revision_a:?} / {revision_b:?}");
+            assert_eq!(
+                chunk_hashes,
+                HashSet::from(["b".repeat(64), "c".repeat(64)])
+            );
+            for hash in &chunk_hashes {
+                assert!(held_object_keys.contains(super::chunk_object_key(hash).unwrap().as_str()));
+                assert!(held_object_keys.contains(super::xorb_object_key(hash).unwrap().as_str()));
+            }
+            assert_eq!(held_object_keys.len(), 4);
+        }
     }
 
     #[test]
@@ -278,22 +312,6 @@ mod tests {
     fn parse_record_entry_invalid_bytes_returns_error() {
         let result = parse_record_entry(b"not valid json");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn record_identity_key_without_revision_uses_latest() {
-        let record = super::FileRecord {
-            repository_scope: Some(
-                RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap(),
-            ),
-            ..test_record()
-        };
-        let key = record_identity_key(&record);
-        assert!(
-            key.contains("latest"),
-            "expected 'latest' in identity key, got {key:?}"
-        );
-        assert!(!key.contains("main"));
     }
 
     #[tokio::test]
@@ -362,19 +380,6 @@ mod tests {
         let renamed = renamed_file_record(&record, &new_repo).unwrap();
         let scope = renamed.repository_scope.unwrap();
         assert_eq!(scope.revision(), Some("feature-x"));
-    }
-
-    // ── record_identity_key special characters ────────────────────────────
-
-    #[test]
-    fn record_identity_key_special_characters() {
-        let record = super::FileRecord {
-            file_id: "file with spaces (1).bin".to_owned(),
-            content_hash: "a".repeat(64),
-            ..test_record()
-        };
-        let key = record_identity_key(&record);
-        assert!(key.contains("file with spaces (1).bin"));
     }
 
     #[test]
