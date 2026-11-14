@@ -1063,11 +1063,17 @@ fn parse_reference_tag() {
 }
 
 #[test]
-fn parse_reference_empty_tag_errors() {
-    assert!(matches!(
-        parse_reference(""),
-        Err(OciAdapterError::InvalidManifestReference)
-    ));
+fn parse_reference_rejects_invalid_tags() {
+    // Other digest prefixes follow tag validation, which rejects colons.
+    for reference in ["", "md5:00112233445566778899aabbccddeeff"] {
+        assert!(
+            matches!(
+                parse_reference(reference),
+                Err(OciAdapterError::InvalidManifestReference)
+            ),
+            "{reference:?}"
+        );
+    }
 }
 
 // ── SerializableSha256State additional tests ────────────────────────────────
@@ -1417,19 +1423,16 @@ fn validate_repository_accepts_valid_name() {
 }
 
 #[test]
-fn validate_repository_rejects_empty() {
-    assert!(matches!(
-        super::validate_repository(""),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
-fn validate_repository_rejects_traversal() {
-    assert!(matches!(
-        super::validate_repository("../assets"),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
+fn validate_repository_rejects_invalid_names() {
+    for repository in ["", "../assets", "Team/assets", "team//assets"] {
+        assert!(
+            matches!(
+                super::validate_repository(repository),
+                Err(OciAdapterError::InvalidRepositoryName)
+            ),
+            "{repository:?}"
+        );
+    }
 }
 
 #[test]
@@ -2003,27 +2006,16 @@ async fn lock_upload_sessions_reentrant_same_process() {
 }
 
 #[test]
-fn validate_repository_rejects_uppercase() {
-    assert!(matches!(
-        super::validate_repository("Team/assets"),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
-fn validate_repository_rejects_double_slash() {
-    assert!(matches!(
-        super::validate_repository("team//assets"),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
 fn parse_reference_rejects_invalid_digest() {
-    assert!(matches!(
-        super::parse_reference("sha256:nothex"),
-        Err(OciAdapterError::InvalidDigest)
-    ));
+    for reference in ["sha256:nothex", "sha256:xyz-not-hex"] {
+        assert!(
+            matches!(
+                parse_reference(reference),
+                Err(OciAdapterError::InvalidDigest)
+            ),
+            "{reference:?}"
+        );
+    }
 }
 
 #[test]
@@ -3030,25 +3022,6 @@ fn oci_tag_target_prefix_errors_with_invalid_digest() {
     assert!(matches!(
         super::oci_tag_target_prefix("repo", "short", None),
         Err(OciAdapterError::InvalidDigest)
-    ));
-}
-
-#[test]
-fn parse_reference_rejects_digest_with_garbage_suffix() {
-    // "sha256:" prefix detected but hex is wrong → InvalidDigest
-    assert!(matches!(
-        super::parse_reference("sha256:xyz-not-hex"),
-        Err(OciAdapterError::InvalidDigest)
-    ));
-}
-
-#[test]
-fn parse_reference_with_colon_behaves_as_tag() {
-    // "md5:" is not a "sha256:" prefix, so it's treated as a tag.
-    // Tags cannot contain colons, so it gets InvalidManifestReference.
-    assert!(matches!(
-        super::parse_reference("md5:00112233445566778899aabbccddeeff"),
-        Err(OciAdapterError::InvalidManifestReference)
     ));
 }
 
