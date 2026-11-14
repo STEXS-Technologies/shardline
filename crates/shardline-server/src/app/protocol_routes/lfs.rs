@@ -942,12 +942,19 @@ pub(crate) async fn lfs_batch(
     // Mint a CAS token when using xet transfer. The existing claims are
     // re-signed so git-xet receives a scoped token for the CAS layer.
     let cas_token = if use_xet {
-        auth.claims().and_then(|claims| {
-            state
-                .auth
-                .as_ref()
-                .and_then(|server_auth| server_auth.provider().mint_token(claims).ok())
-        })
+        let claims = auth.claims().ok_or(ServerError::MissingAuthorization)?;
+        let server_auth = state
+            .auth
+            .as_ref()
+            .ok_or(ServerError::MissingAuthorization)?;
+        Some(
+            server_auth
+                .provider()
+                .mint_token(claims)
+                .map_err(|_error| {
+                    ServerError::SigningKeyError("CAS token issuance is unavailable".to_owned())
+                })?,
+        )
     } else {
         None
     };
@@ -2907,6 +2914,69 @@ mod tests {
 
         // Read scope should still get xet transfer for downloads
         assert_eq!(parsed["transfer"], "xet");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_never_advertises_xet_when_verifier_cannot_issue_cas_tokens() {
+        use shardline_server_core::auth::{AuthError, AuthProvider};
+        struct VerifyOnly(Arc<dyn AuthProvider>);
+        impl AuthProvider for VerifyOnly {
+            fn verify_token(
+                &self,
+                token: &str,
+            ) -> Result<shardline_protocol::TokenClaims, AuthError> {
+                self.0.verify_token(token)
+            }
+            fn mint_token(
+                &self,
+                _claims: &shardline_protocol::TokenClaims,
+            ) -> Result<String, AuthError> {
+                Err(AuthError::ProviderError(
+                    "private signing diagnostic".to_owned(),
+                ))
+            }
+        }
+        let (mut state, _tmp) = build_test_state_with_auth().await;
+        let verifier = state.auth.as_ref().unwrap().provider_arc();
+        Arc::get_mut(&mut state).unwrap().auth = Some(crate::auth::ServerAuth::from_provider(
+            Box::new(VerifyOnly(verifier)),
+        ));
+        let app = lfs_router(state);
+        for (transfers, status) in [
+            (json!(["xet"]), StatusCode::INTERNAL_SERVER_ERROR),
+            (json!(["xet", "basic"]), StatusCode::INTERNAL_SERVER_ERROR),
+            (json!(["basic"]), StatusCode::OK),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/lfs/objects/batch")
+                        .header("content-type", "application/vnd.git-lfs+json")
+                        .header(
+                            "authorization",
+                            format!("Bearer {}", mint_test_token(TokenScope::Read)),
+                        )
+                        .body(Body::from(
+                            serde_json::to_vec(&json!({
+                                "operation": "download", "transfers": transfers,
+                                "objects": [{"oid": test_oid_constant(), "size": 100}]
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("private signing diagnostic"));
+            let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_ne!(parsed["transfer"], "xet");
+        }
     }
 
     // =========================================================================
