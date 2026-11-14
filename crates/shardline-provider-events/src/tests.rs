@@ -67,16 +67,6 @@ async fn local_latest_record_bytes(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repository_deleted_creates_holds_for_matching_repository_versions() {
-    let result = exercise_repository_deleted_creates_holds_for_matching_repository_versions().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook repository deletion hold flow failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_deleted_removes_stale_latest_without_version_record() {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
@@ -89,16 +79,6 @@ async fn repository_deleted_removes_stale_latest_without_version_record() {
             "provider webhook repository deletion stale latest cleanup failed: {error:?}"
         );
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() {
-    let result = exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook repository deletion native xet retention failed: {error:?}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -132,16 +112,6 @@ async fn revision_pushed_records_provider_repository_state_without_mutating_file
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn access_change_and_revision_push_state_survives_reordering() {
-    let result = exercise_access_change_and_revision_push_state_survives_reordering().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook state reordering flow failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_webhook_delivery_is_ignored_after_first_application() {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
@@ -154,27 +124,6 @@ async fn duplicate_webhook_delivery_is_ignored_after_first_application() {
             "duplicate webhook delivery no-op flow failed: {error:?}"
         );
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn matching_delivery_ids_in_different_repositories_are_not_replay_collisions() {
-    let result =
-        exercise_matching_delivery_ids_in_different_repositories_are_not_replay_collisions().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "repository-scoped webhook replay flow failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_webhook_application_can_retry_same_delivery() {
-    let result = exercise_failed_webhook_application_can_retry_same_delivery().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "failed webhook retry flow failed: {error:?}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -206,16 +155,6 @@ async fn repository_rename_removes_old_scope_latest_without_version_record() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repository_rename_rejects_conflicting_target_metadata() {
-    let result = exercise_repository_rename_rejects_conflicting_target_metadata().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "provider webhook repository rename conflict detection failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn previously_recorded_webhook_delivery_is_a_no_op() {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
@@ -229,16 +168,8 @@ async fn previously_recorded_webhook_delivery_is_a_no_op() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn webhook_failure_with_failed_cleanup_logs_warning() {
-    let result = exercise_webhook_failure_with_failed_cleanup_logs_warning().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "webhook failure with failed cleanup flow failed: {error:?}"
-    );
-}
-
-async fn exercise_repository_deleted_creates_holds_for_matching_repository_versions()
+#[allow(clippy::panic_in_result_fn)]
+async fn repository_deleted_creates_holds_for_matching_repository_versions()
 -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
@@ -463,8 +394,10 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
     Ok(())
 }
 
-async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() -> Result<(), Box<dyn Error>>
+{
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -699,8 +632,9 @@ async fn exercise_revision_pushed_records_provider_repository_state_without_muta
     Ok(())
 }
 
-async fn exercise_access_change_and_revision_push_state_survives_reordering()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn access_change_and_revision_push_state_survives_reordering() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
@@ -829,7 +763,9 @@ async fn exercise_duplicate_webhook_delivery_is_ignored_after_first_application(
     Ok(())
 }
 
-async fn exercise_matching_delivery_ids_in_different_repositories_are_not_replay_collisions()
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn matching_delivery_ids_in_different_repositories_are_not_replay_collisions()
 -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
@@ -893,8 +829,9 @@ async fn exercise_matching_delivery_ids_in_different_repositories_are_not_replay
     Ok(())
 }
 
-async fn exercise_failed_webhook_application_can_retry_same_delivery() -> Result<(), Box<dyn Error>>
-{
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn failed_webhook_application_can_retry_same_delivery() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store =
@@ -1144,7 +1081,9 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op(
     Ok(())
 }
 
-async fn exercise_webhook_failure_with_failed_cleanup_logs_warning() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn webhook_failure_with_failed_cleanup_logs_warning() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = FailAlwaysStore::new(LocalIndexStore::new(storage.path().to_path_buf())?);
@@ -1280,8 +1219,9 @@ async fn exercise_repository_rename_removes_old_scope_latest_without_version_rec
     Ok(())
 }
 
-async fn exercise_repository_rename_rejects_conflicting_target_metadata()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn repository_rename_rejects_conflicting_target_metadata() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;

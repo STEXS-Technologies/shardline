@@ -409,88 +409,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), Box<dyn Error>>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_record_store_commit_file_version_metadata_is_atomic() {
-    let result = exercise_local_record_store_commit_file_version_metadata_is_atomic().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "local sqlite file-version commit atomicity regression: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_record_store_commit_native_shard_metadata_is_atomic() {
-    let result = exercise_local_record_store_commit_native_shard_metadata_is_atomic().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "local sqlite native shard commit atomicity regression: {error:?}"
-    );
-}
-
-#[test]
-fn local_metadata_root_normalizes_gc_suffix_to_parent_database() {
-    let result = exercise_local_metadata_root_normalizes_gc_suffix_to_parent_database();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "local sqlite root normalization regression: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_sqlite_imports_legacy_filesystem_metadata() {
-    let result = exercise_local_sqlite_imports_legacy_filesystem_metadata().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "local sqlite legacy filesystem import regression: {error:?}"
-    );
-}
-
-#[test]
-fn local_sqlite_connection_enables_defensive_settings() {
-    let result = exercise_local_sqlite_connection_enables_defensive_settings();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "local sqlite connection hardening regression: {error:?}"
-    );
-}
-
-#[test]
-fn local_sqlite_rejects_invalid_legacy_import_state() {
-    let result = exercise_local_sqlite_rejects_invalid_legacy_import_state();
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "local sqlite invalid legacy import state regression: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_record_store_reads_corrupt_sqlite_bytes_verbatim() {
-    let result = exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "local sqlite raw record byte preservation regression: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_sqlite_matches_memory_adapters_across_state_machine_operations() {
-    let result =
-        exercise_local_sqlite_matches_memory_adapters_across_state_machine_operations().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "local sqlite state-machine parity regression: {error:?}"
-    );
-}
-
-async fn exercise_local_record_store_commit_file_version_metadata_is_atomic()
--> Result<(), Box<dyn Error>> {
+async fn local_record_store_commit_file_version_metadata_is_atomic() -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
     let store = LocalRecordStore::new(storage.path_buf())?;
     let record = sample_record(Some(sample_repository_scope()?));
@@ -525,8 +444,8 @@ async fn exercise_local_record_store_commit_file_version_metadata_is_atomic()
     Ok(())
 }
 
-async fn exercise_local_record_store_commit_native_shard_metadata_is_atomic()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_record_store_commit_native_shard_metadata_is_atomic() -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
     let record_store = LocalRecordStore::new(storage.path_buf())?;
     let index_store = LocalIndexStore::new(storage.path_buf())?;
@@ -574,8 +493,8 @@ async fn exercise_local_record_store_commit_native_shard_metadata_is_atomic()
     Ok(())
 }
 
-fn exercise_local_metadata_root_normalizes_gc_suffix_to_parent_database()
--> Result<(), Box<dyn Error>> {
+#[test]
+fn local_metadata_root_normalizes_gc_suffix_to_parent_database() -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
 
     let _store = LocalIndexStore::new(storage.path().join("gc"))?;
@@ -605,7 +524,8 @@ fn exercise_local_metadata_root_normalizes_gc_suffix_to_parent_database()
     Ok(())
 }
 
-fn exercise_local_sqlite_connection_enables_defensive_settings() -> Result<(), Box<dyn Error>> {
+#[test]
+fn local_sqlite_connection_enables_defensive_settings() -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
     let store = LocalIndexStore::new(storage.path_buf())?;
     let connection = store.open_connection()?;
@@ -633,7 +553,8 @@ fn exercise_local_sqlite_connection_enables_defensive_settings() -> Result<(), B
     Ok(())
 }
 
-fn exercise_local_sqlite_rejects_invalid_legacy_import_state() -> Result<(), Box<dyn Error>> {
+#[test]
+fn local_sqlite_rejects_invalid_legacy_import_state() -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
     let _store = LocalIndexStore::new(storage.path_buf())?;
     let connection = open_sqlite_connection(storage.path())?;
@@ -699,8 +620,8 @@ fn local_schema_compatibility_rejects_pending_migrations_without_mutating() {
     ));
 }
 
-async fn exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_record_store_reads_corrupt_sqlite_bytes_verbatim() -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
     let store = LocalRecordStore::new(storage.path_buf())?;
     let record = sample_record(Some(sample_repository_scope()?));
@@ -732,7 +653,8 @@ async fn exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim()
     Ok(())
 }
 
-async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_operations()
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_sqlite_matches_memory_adapters_across_state_machine_operations()
 -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
     let local_index_store = LocalIndexStore::new(storage.path_buf())?;
@@ -996,7 +918,8 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
     Ok(())
 }
 
-async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_sqlite_imports_legacy_filesystem_metadata() -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
     let scope = sample_repository_scope()?;
     let record = sample_record(Some(scope.clone()));
@@ -1892,16 +1815,7 @@ fn canonical_provider_states(states: Vec<ProviderRepositoryState>) -> Vec<Canoni
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_record_store_lifecycle_create_read_list_delete() {
-    let result = exercise_local_record_store_lifecycle().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "record store lifecycle regression: {error:?}"
-    );
-}
-
-async fn exercise_local_record_store_lifecycle() -> Result<(), Box<dyn Error>> {
+async fn local_record_store_lifecycle_create_read_list_delete() -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();
     let store = LocalRecordStore::new(storage.path_buf())?;
     let record = sample_record(Some(sample_repository_scope()?));
