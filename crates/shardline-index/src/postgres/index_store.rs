@@ -3827,13 +3827,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        // A prior (possibly interrupted) run may have left this fixed id behind
-        // in another state; purge it so the assertions observe a fresh row.
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind("test-intent-1")
-            .execute(&pool)
-            .await
-            .expect("clean fixture");
         let store = make_pg_store(pool);
         let intent = UploadIntent::new(
             "test-intent-1".into(),
@@ -3864,19 +3857,6 @@ mod tests {
             "e".repeat(64),
             42,
         );
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent.intent_id())
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Upload' AND operation_id = $1",
-        )
-        .bind(intent.intent_id())
-        .execute(&pool)
-        .await
-        .unwrap();
         let store = make_pg_store(pool.clone());
         store.create_intent(&intent).await.unwrap();
         assert!(
@@ -3902,19 +3882,6 @@ mod tests {
 
         assert!(store.intent_by_id(intent.intent_id()).await.is_err());
         assert!(store.reliability_events(intent.intent_id()).await.is_err());
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent.intent_id())
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Upload' AND operation_id = $1",
-        )
-        .bind(intent.intent_id())
-        .execute(&pool)
-        .await
-        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3929,19 +3896,6 @@ mod tests {
             "f".repeat(64),
             7,
         );
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent.intent_id())
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Upload' AND operation_id = $1",
-        )
-        .bind(intent.intent_id())
-        .execute(&pool)
-        .await
-        .unwrap();
 
         let store = make_pg_store(pool.clone());
         store.create_intent(&intent).await.unwrap();
@@ -3980,20 +3934,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(appended, 0);
-
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent.intent_id())
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Upload' AND operation_id = $1",
-        )
-        .bind(intent.intent_id())
-        .execute(&pool)
-        .await
-        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4269,11 +4209,6 @@ mod tests {
             "9a".repeat(32),
             4096,
         );
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent.intent_id())
-            .execute(&direct_pool)
-            .await
-            .expect("clean commit-response-loss fixture");
 
         let upstream = postgres_upstream(&database_url).expect("Postgres upstream address");
         let proxy = CommitResponseLossProxy::start(upstream).expect("start Postgres fault proxy");
@@ -4328,12 +4263,6 @@ mod tests {
         assert_eq!(loaded.object_hash(), intent.object_hash());
         assert_eq!(loaded.object_length(), intent.object_length());
         assert_eq!(loaded.state(), UploadIntentState::Created);
-
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind(intent.intent_id())
-            .execute(&direct_pool)
-            .await
-            .expect("clean commit-response-loss fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4456,11 +4385,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind("test-intent-conflict")
-            .execute(&pool)
-            .await
-            .expect("clean leftover intent");
         let store = make_pg_store(pool);
         let original = UploadIntent::new(
             "test-intent-conflict".into(),
@@ -4488,15 +4412,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        // Robust against a persistent Postgres: a previous run may have left
-        // this fixed-id intent in a terminal state, which would make the forward
-        // transition chain below fail. Clean the row so the test starts fresh
-        // (CI's ephemeral database does not surface this).
-        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
-            .bind("test-intent-transition")
-            .execute(&pool)
-            .await
-            .expect("clean leftover intent");
         let store = make_pg_store(pool);
         let intent = UploadIntent::new(
             "test-intent-transition".into(),
