@@ -1882,19 +1882,32 @@ mod minio_tests {
 // ── Additional pure function edge cases ──────────────────────────────
 
 #[test]
-fn location_for_key_without_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true),
-    );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
-    let key = ObjectKey::parse("simple/key.xorb").unwrap();
-    let location = store.location_for_key(&key);
-    assert!(location.is_ok());
-    if let Ok(loc) = location {
-        assert_eq!(loc.as_ref(), "simple/key.xorb");
+fn location_for_key_contract() {
+    for (port, tenant, key, expected) in [
+        (9000, None, "simple/key.xorb", "simple/key.xorb"),
+        (
+            18979,
+            Some("tenant-z"),
+            "ns/obj.xorb",
+            "tenant-z/ns/obj.xorb",
+        ),
+        (18978, None, "ns/obj.xorb", "ns/obj.xorb"),
+    ] {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some(format!("http://127.0.0.1:{port}")))
+                .with_allow_http(true)
+                .with_key_prefix(tenant),
+        )
+        .unwrap();
+        let location = store
+            .location_for_key(&ObjectKey::parse(key).unwrap())
+            .unwrap();
+        assert_eq!(
+            location.as_ref(),
+            expected,
+            "tenant={tenant:?}, key={key:?}"
+        );
     }
 }
 
@@ -2433,35 +2446,6 @@ fn s3_put_content_addressed_file_nonexistent_file() {
     let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
     let result = store.put_content_addressed_file(&key, &path, &integrity);
     assert!(matches!(result, Err(S3ObjectStoreError::Io(_))));
-}
-
-// ── location_for_key with key_prefix ───────────────────────────────
-
-#[test]
-fn s3_location_for_key_with_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18979".to_owned()))
-            .with_allow_http(true)
-            .with_key_prefix(Some("tenant-z")),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("ns/obj.xorb").unwrap();
-    let location = store.location_for_key(&key).unwrap();
-    assert_eq!(location.as_ref(), "tenant-z/ns/obj.xorb");
-}
-
-#[test]
-fn s3_location_for_key_without_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18978".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("ns/obj.xorb").unwrap();
-    let location = store.location_for_key(&key).unwrap();
-    assert_eq!(location.as_ref(), "ns/obj.xorb");
 }
 
 // ── S3MultipartUploadWriter finish via InMemory ────────────────────
