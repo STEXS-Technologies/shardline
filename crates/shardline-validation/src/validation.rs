@@ -77,15 +77,7 @@ pub struct ValidateIdentifierError;
 ///
 /// Returns [`ValidateContentHashError`] if the hash is malformed.
 pub fn validate_content_hash(value: &str) -> Result<(), ValidateContentHashError> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(ValidateContentHashError);
-    }
-
-    Ok(())
+    validate_content_hash_with(value, || ValidateContentHashError)
 }
 
 /// Content hash validation failure.
@@ -98,109 +90,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_identifier_accepts_simple_name() {
-        assert!(validate_identifier("hello.txt").is_ok());
+    fn identifier_validation_cases_and_byte_boundaries() {
+        for (value, valid) in [
+            ("hello.txt".to_owned(), true),
+            ("file.name.txt".to_owned(), true),
+            (String::new(), false),
+            ("   ".to_owned(), false),
+            (".".to_owned(), false),
+            ("/etc/passwd".to_owned(), false),
+            ("foo/../bar".to_owned(), false),
+            ("foo\\bar".to_owned(), false),
+            ("foo\tbar".to_owned(), false),
+            ("foo\0bar".to_owned(), false),
+            ("\0".to_owned(), false),
+            ("null\0end".to_owned(), false),
+            ("a".repeat(1024), true),
+            ("a".repeat(1025), false),
+            ("é".repeat(512), true),
+            ("é".repeat(513), false),
+        ] {
+            assert_eq!(validate_identifier(&value).is_ok(), valid, "{value:?}");
+        }
     }
 
     #[test]
-    fn validate_identifier_accepts_dotted_name() {
-        assert!(validate_identifier("file.name.txt").is_ok());
-    }
-
-    #[test]
-    fn validate_identifier_rejects_empty() {
-        assert!(validate_identifier("").is_err());
-    }
-
-    #[test]
-    fn validate_identifier_rejects_whitespace_only() {
-        assert!(validate_identifier("   ").is_err());
-    }
-
-    #[test]
-    fn validate_identifier_rejects_dot() {
-        assert!(validate_identifier(".").is_err());
-    }
-
-    #[test]
-    fn validate_identifier_rejects_leading_slash() {
-        assert!(validate_identifier("/etc/passwd").is_err());
-    }
-
-    #[test]
-    fn validate_identifier_rejects_traversal() {
-        assert!(validate_identifier("foo/../bar").is_err());
-    }
-
-    #[test]
-    fn validate_identifier_rejects_backslash() {
-        assert!(validate_identifier("foo\\bar").is_err());
-    }
-
-    #[test]
-    fn validate_identifier_rejects_control_char() {
-        assert!(validate_identifier("foo\tbar").is_err());
-    }
-
-    #[test]
-    fn validate_identifier_rejects_null_byte() {
-        assert!(validate_identifier("foo\0bar").is_err());
-        assert!(validate_identifier("\0").is_err());
-        assert!(validate_identifier("null\0end").is_err());
-    }
-
-    #[test]
-    fn validate_content_hash_accepts_valid_hash() {
-        let hash = "a".repeat(64);
-        assert!(validate_content_hash(&hash).is_ok());
-    }
-
-    #[test]
-    fn validate_content_hash_rejects_too_short() {
-        assert!(validate_content_hash("abc123").is_err());
-    }
-
-    #[test]
-    fn validate_content_hash_rejects_too_long() {
-        let hash = "a".repeat(65);
-        assert!(validate_content_hash(&hash).is_err());
-    }
-
-    #[test]
-    fn validate_content_hash_rejects_uppercase() {
-        let hash = "A".repeat(64);
-        assert!(validate_content_hash(&hash).is_err());
-    }
-
-    #[test]
-    fn validate_content_hash_rejects_non_hex() {
-        let mut hash = "a".repeat(64);
-        hash.push('g');
-        hash.remove(0);
-        assert!(validate_content_hash(&hash).is_err());
-    }
-
-    #[test]
-    fn validate_content_hash_with_valid_64_hex() {
-        let hash = "0123456789abcdef".repeat(4);
-        assert!(validate_content_hash_with(&hash, || ()).is_ok());
-    }
-
-    #[test]
-    fn validate_content_hash_with_too_short() {
-        assert!(validate_content_hash_with("abc123", || ()).is_err());
-    }
-
-    #[test]
-    fn validate_content_hash_with_uppercase_rejected() {
-        let hash = "A".repeat(64);
-        assert!(validate_content_hash_with(&hash, || ()).is_err());
-    }
-
-    #[test]
-    fn validate_content_hash_with_non_hex_rejected() {
-        let hash = format!("{}g{}", "a".repeat(62), "a");
-        assert!(validate_content_hash_with(&hash, || ()).is_err());
+    fn content_hash_validators_share_cases_and_preserve_custom_errors() {
+        for (value, valid) in [
+            ("a".repeat(64), true),
+            ("0123456789abcdef".repeat(4), true),
+            ("abc123".to_owned(), false),
+            ("a".repeat(65), false),
+            ("A".repeat(64), false),
+            (format!("{}g", "a".repeat(63)), false),
+            (format!("{}ga", "a".repeat(62)), false),
+            (String::new(), false),
+            ("a".repeat(63), false),
+            ("é".repeat(32), false),
+        ] {
+            assert_eq!(validate_content_hash(&value).is_ok(), valid, "{value:?}");
+            assert_eq!(
+                validate_content_hash_with(&value, || "invalid hash"),
+                if valid { Ok(()) } else { Err("invalid hash") },
+                "{value:?}",
+            );
+        }
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static ERROR_CALLS: AtomicUsize = AtomicUsize::new(0);
+        let error_factory = || ERROR_CALLS.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(
+            validate_content_hash_with(&"a".repeat(64), error_factory),
+            Ok(())
+        );
+        assert_eq!(ERROR_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(validate_content_hash_with("invalid", error_factory), Err(0));
+        assert_eq!(ERROR_CALLS.load(Ordering::Relaxed), 1);
     }
 
     #[test]
