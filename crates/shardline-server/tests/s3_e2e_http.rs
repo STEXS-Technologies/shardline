@@ -11,7 +11,9 @@
 )]
 
 mod http_contracts;
-use http_contracts::oci::{oci_manifest_json, oci_upload_blob_oneshot};
+
+#[path = "http_contracts/concurrency.rs"]
+mod concurrency_contracts;
 
 use sha2::{Digest, Sha256};
 use shardline_protocol::{
@@ -1215,127 +1217,20 @@ async fn test_s3_bazel_cas_content_hash_mismatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_concurrent_lfs_upload_same_oid() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let content = b"concurrent-same-oid-content-s3";
-    let oid = sha256_hex(content);
-    let url = server.url(&format!("/v1/lfs/objects/{oid}"));
-    let token = server.auth_header().to_owned();
-
-    let mut handles = Vec::new();
-    for _ in 0..5 {
-        let url = url.clone();
-        let token = token.clone();
-        let data = content.to_vec();
-        handles.push(tokio::spawn(async move {
-            let client = reqwest::Client::new();
-            let resp = client
-                .put(&url)
-                .header("Authorization", format!("Bearer {token}"))
-                .header("Content-Type", "application/octet-stream")
-                .body(data)
-                .send()
-                .await
-                .unwrap();
-            resp.status()
-        }));
-    }
-
-    for (i, handle) in handles.into_iter().enumerate() {
-        let status = handle.await.unwrap();
-        assert!(
-            status.is_success(),
-            "concurrent PUT {} returned {}",
-            i,
-            status
-        );
-    }
-
-    let client = reqwest::Client::new();
-    let get_resp = client
-        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get_resp.status(), 200);
-    assert_eq!(get_resp.bytes().await.unwrap().as_ref(), content);
+    concurrency_contracts::lfs_upload_same_oid(&server, b"concurrent-same-oid-content-s3").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_concurrent_oci_manifest_push_and_pull() {
     let (app, token, _tmp) = oci_oneshot_app().await;
-    let repo = "test/test";
-    let tag = "s3-concurrent-manifest";
-
-    let config_data = b"{}";
-    let layer_data = b"s3-concurrent-layer";
-    let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
-    let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
-    let manifest_body = oci_manifest_json(
-        &config_digest,
-        &layer_digest,
-        config_data.len(),
-        layer_data.len(),
-    );
-
-    let put_uri = format!("/v2/{repo}/manifests/{tag}");
-    let put_req = axum::http::Request::builder()
-        .method("PUT")
-        .uri(&put_uri)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(axum::body::Body::from(manifest_body))
-        .unwrap();
-    let put_resp = app.clone().oneshot(put_req).await.unwrap();
-    assert_eq!(put_resp.status(), 201, "manifest PUT failed");
-
-    let get_uri = format!("/v2/{repo}/manifests/{tag}");
-    let g1 = {
-        let app = app.clone();
-        let token = token.clone();
-        let uri = get_uri.clone();
-        tokio::spawn(async move {
-            let req = axum::http::Request::builder()
-                .method("GET")
-                .uri(&uri)
-                .header("Authorization", format!("Bearer {token}"))
-                .body(axum::body::Body::empty())
-                .unwrap();
-            app.clone().oneshot(req).await
-        })
-    };
-    let g2 = {
-        let app = app.clone();
-        let token = token.clone();
-        let uri = get_uri.clone();
-        tokio::spawn(async move {
-            let req = axum::http::Request::builder()
-                .method("GET")
-                .uri(&uri)
-                .header("Authorization", format!("Bearer {token}"))
-                .body(axum::body::Body::empty())
-                .unwrap();
-            app.clone().oneshot(req).await
-        })
-    };
-    let g3 = {
-        let app = app.clone();
-        let token = token.clone();
-        tokio::spawn(async move {
-            let req = axum::http::Request::builder()
-                .method("GET")
-                .uri(&get_uri)
-                .header("Authorization", format!("Bearer {token}"))
-                .body(axum::body::Body::empty())
-                .unwrap();
-            app.clone().oneshot(req).await
-        })
-    };
-
-    let (r1, r2, r3) = tokio::join!(g1, g2, g3);
-    for (i, result) in [r1, r2, r3].iter().enumerate() {
-        let resp = result.as_ref().unwrap().as_ref().unwrap();
-        assert_eq!(resp.status(), 200, "concurrent GET {} failed", i);
-    }
+    concurrency_contracts::oci_manifest_reads(
+        &app,
+        &token,
+        "test/test",
+        "s3-concurrent-manifest",
+        b"s3-concurrent-layer",
+    )
+    .await;
 }
 
 // ===========================================================================
