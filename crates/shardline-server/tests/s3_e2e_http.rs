@@ -1274,89 +1274,25 @@ async fn test_s3_lfs_upload_empty() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_bazel_ac_put_and_get() {
     let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
-    let client = reqwest::Client::new();
-    let content = b"s3-ac-content";
-    let hash = sha256_hex(content);
-
-    client
-        .put(server.url(&format!("/v1/bazel/cache/ac/{hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    let get = client
-        .get(server.url(&format!("/v1/bazel/cache/ac/{hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get.status(), 200);
-    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+    http_contracts::bazel::ac_put_and_get(&server, b"s3-ac-content").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_bazel_head_existing() {
     let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
-    let client = reqwest::Client::new();
-    let content = b"s3-head-cas";
-    let hash = sha256_hex(content);
-
-    client
-        .put(server.url(&format!("/v1/bazel/cache/cas/{hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    let head = client
-        .head(server.url(&format!("/v1/bazel/cache/cas/{hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(head.status(), 200);
-    let cl: u64 = head
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    assert_eq!(cl, content.len() as u64);
+    http_contracts::bazel::head_existing(&server, b"s3-head-cas").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_bazel_head_nonexistent() {
     let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
-    let client = reqwest::Client::new();
-    let head = client
-        .head(server.url(&format!("/v1/bazel/cache/cas/{}", "f".repeat(64))))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(head.status(), 404);
+    http_contracts::bazel::head_missing(&server, &"f".repeat(64)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_bazel_cas_content_hash_mismatch() {
     let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
-    let client = reqwest::Client::new();
-    let wrong_hash = sha256_hex(b"different-body");
-
-    let put = client
-        .put(server.url(&format!("/v1/bazel/cache/cas/{wrong_hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(b"actual-body".to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(put.status(), 400);
+    http_contracts::bazel::cas_hash_mismatch(&server, b"different-body", b"actual-body").await;
 }
 
 // ===========================================================================

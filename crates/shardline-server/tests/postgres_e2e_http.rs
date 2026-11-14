@@ -1704,116 +1704,25 @@ async fn test_hub_revisions_list_json_array() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_bazel_ac_put_and_get() {
     let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"action-cache-content";
-    let hash = sha256_hex(content);
-
-    // PUT AC
-    let put_resp = client
-        .put(server.url(&format!("/v1/bazel/cache/ac/{hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        put_resp.status().is_success(),
-        "AC PUT failed: {}",
-        put_resp.status()
-    );
-
-    // GET AC
-    let get_resp = client
-        .get(server.url(&format!("/v1/bazel/cache/ac/{hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get_resp.status(), 200);
-    let body = get_resp.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), content);
+    http_contracts::bazel::ac_put_and_get(&server, b"action-cache-content").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_bazel_head_existing() {
     let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"head-test-content";
-    let hash = sha256_hex(content);
-
-    // Upload first
-    client
-        .put(server.url(&format!("/v1/bazel/cache/cas/{hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    // HEAD existing
-    let head_resp = client
-        .head(server.url(&format!("/v1/bazel/cache/cas/{hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(head_resp.status(), 200);
-    let cl: u64 = head_resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    assert_eq!(cl, content.len() as u64);
+    http_contracts::bazel::head_existing(&server, b"head-test-content").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_bazel_head_nonexistent() {
     let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
-    let client = reqwest::Client::new();
-
-    let fake_hash = "f".repeat(64);
-
-    let head_resp = client
-        .head(server.url(&format!("/v1/bazel/cache/cas/{fake_hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        head_resp.status(),
-        404,
-        "HEAD non-existent should return 404, got {}",
-        head_resp.status()
-    );
+    http_contracts::bazel::head_missing(&server, &"f".repeat(64)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_bazel_cas_content_hash_mismatch() {
     let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"actual-body-data";
-    let wrong_hash = sha256_hex(b"different-body");
-
-    let put_resp = client
-        .put(server.url(&format!("/v1/bazel/cache/cas/{wrong_hash}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        put_resp.status(),
-        400,
-        "content hash mismatch should return 400, got {}",
-        put_resp.status()
-    );
+    http_contracts::bazel::cas_hash_mismatch(&server, b"different-body", b"actual-body-data").await;
 }
 
 // ===========================================================================
