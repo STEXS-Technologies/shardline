@@ -289,12 +289,10 @@ pub(crate) fn verify_prefixed_hmac_sha256(
     prefix: &str,
     body: &[u8],
 ) -> Result<(), BuiltInProviderError> {
-    let Some(header) = header else {
-        return Err(BuiltInProviderError::MissingWebhookAuthentication);
-    };
-    let Some(signature_hex) = header.strip_prefix(prefix) else {
-        return Err(BuiltInProviderError::InvalidWebhookAuthentication);
-    };
+    let header = header.ok_or(BuiltInProviderError::MissingWebhookAuthentication)?;
+    let signature_hex = header
+        .strip_prefix(prefix)
+        .ok_or(BuiltInProviderError::InvalidWebhookAuthentication)?;
     if signature_hex.len() != HMAC_SHA256_HEX_BYTES {
         return Err(BuiltInProviderError::InvalidWebhookAuthentication);
     }
@@ -322,9 +320,7 @@ pub(crate) fn verify_constant_time_secret(
     expected: &str,
     actual: Option<&str>,
 ) -> Result<(), BuiltInProviderError> {
-    let Some(actual) = actual else {
-        return Err(BuiltInProviderError::MissingWebhookAuthentication);
-    };
+    let actual = actual.ok_or(BuiltInProviderError::MissingWebhookAuthentication)?;
     // Always perform constant-time comparison to avoid leaking secret length
     // via timing side-channel. Pad the shorter value with zeros to equal length.
     let max_len = expected.len().max(actual.len());

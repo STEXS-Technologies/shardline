@@ -124,9 +124,8 @@ fn parse_repository_event(
 }
 
 fn github_repository(payload: &Value) -> Result<RepositoryRef, BuiltInProviderError> {
-    let Some(full_name) = value_str(payload, &["repository", "full_name"]) else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+    let full_name = value_str(payload, &["repository", "full_name"])
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
 
     parse_repository_from_full_name(ProviderKind::GitHub, full_name)
 }

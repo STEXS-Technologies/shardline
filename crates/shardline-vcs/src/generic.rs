@@ -176,12 +176,8 @@ fn generic_repository(payload: &Value, path: &str) -> Result<RepositoryRef, Buil
         .or_else(|| value_str(payload, &[path, "namespace"]))
         .or_else(|| value_str(payload, &["owner"]));
     let name = value_str(payload, &[path, "name"]).or_else(|| value_str(payload, &["name"]));
-    let Some(owner) = owner else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
-    let Some(name) = name else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+    let owner = owner.ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
+    let name = name.ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
 
     RepositoryRef::new(ProviderKind::Generic, owner, name)
         .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)

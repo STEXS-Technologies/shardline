@@ -88,9 +88,8 @@ fn parse_push_event(
     request: WebhookRequest<'_>,
     payload: &Value,
 ) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
-    let Some(full_name) = value_str(payload, &["project", "path_with_namespace"]) else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+    let full_name = value_str(payload, &["project", "path_with_namespace"])
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
     let repository = parse_repository_from_full_name(ProviderKind::GitLab, full_name)?;
     let delivery_id = parse_delivery_id(request.delivery_id())?;
     let revision = parse_revision(value_str(payload, &["ref"]).unwrap_or_default())?;
@@ -107,9 +106,8 @@ fn parse_project_event(
     payload: &Value,
 ) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
     let event_name = value_str(payload, &["event_name"]).unwrap_or_default();
-    let Some(full_name) = value_str(payload, &["path_with_namespace"]) else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+    let full_name = value_str(payload, &["path_with_namespace"])
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
     let repository = parse_repository_from_full_name(ProviderKind::GitLab, full_name)?;
     let delivery_id = parse_delivery_id(request.delivery_id())?;
 
@@ -145,12 +143,10 @@ fn parse_project_rename_event(
     request: WebhookRequest<'_>,
     payload: &Value,
 ) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
-    let Some(previous_full_name) = value_str(payload, &["old_path_with_namespace"]) else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
-    let Some(current_full_name) = value_str(payload, &["path_with_namespace"]) else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+    let previous_full_name = value_str(payload, &["old_path_with_namespace"])
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
+    let current_full_name = value_str(payload, &["path_with_namespace"])
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
     let repository = parse_repository_from_full_name(ProviderKind::GitLab, previous_full_name)?;
     let new_repository = parse_repository_from_full_name(ProviderKind::GitLab, current_full_name)?;
     let delivery_id = parse_delivery_id(request.delivery_id())?;
@@ -166,9 +162,8 @@ fn parse_project_update_event(
     request: WebhookRequest<'_>,
     payload: &Value,
 ) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
-    let Some(full_name) = value_str(payload, &["path_with_namespace"]) else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+    let full_name = value_str(payload, &["path_with_namespace"])
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
     let repository = parse_repository_from_full_name(ProviderKind::GitLab, full_name)?;
     let delivery_id = parse_delivery_id(request.delivery_id())?;
 
@@ -183,9 +178,8 @@ fn parse_repository_update_event(
     request: WebhookRequest<'_>,
     payload: &Value,
 ) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
-    let Some(full_name) = value_str(payload, &["project", "path_with_namespace"]) else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+    let full_name = value_str(payload, &["project", "path_with_namespace"])
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
     let repository = parse_repository_from_full_name(ProviderKind::GitLab, full_name)?;
     let delivery_id = parse_delivery_id(request.delivery_id())?;
     let refs = payload
@@ -195,9 +189,10 @@ fn parse_repository_update_event(
     if refs.len() != 1 {
         return Ok(None);
     }
-    let Some(revision_ref) = refs.first().and_then(Value::as_str) else {
-        return Err(BuiltInProviderError::InvalidRevisionPayload);
-    };
+    let revision_ref = refs
+        .first()
+        .and_then(Value::as_str)
+        .ok_or(BuiltInProviderError::InvalidRevisionPayload)?;
     let revision = parse_revision(revision_ref)?;
 
     Ok(Some(RepositoryWebhookEvent::new(
@@ -215,11 +210,9 @@ fn parse_repository_update_event(
 pub fn metadata_from_project_payload(
     payload: &Value,
 ) -> Result<RepositoryMetadata, BuiltInProviderError> {
-    let Some(full_name) = value_str(payload, &["path_with_namespace"])
+    let full_name = value_str(payload, &["path_with_namespace"])
         .or_else(|| value_str(payload, &["project", "path_with_namespace"]))
-    else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
     let repository = parse_repository_from_full_name(ProviderKind::GitLab, full_name)?;
     let default_branch = value_str(payload, &["default_branch"])
         .or_else(|| value_str(payload, &["project", "default_branch"]))

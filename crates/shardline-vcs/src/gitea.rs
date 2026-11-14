@@ -68,9 +68,9 @@ pub(super) fn parse_gitea_webhook(
     request: WebhookRequest<'_>,
 ) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
     if let Some(secret) = secret {
-        let Some(signature) = request.signature() else {
-            return Err(BuiltInProviderError::MissingWebhookAuthentication);
-        };
+        let signature = request
+            .signature()
+            .ok_or(BuiltInProviderError::MissingWebhookAuthentication)?;
         verify_hex_hmac_sha256(secret.expose_secret(), signature, request.body())?;
     } else {
         eprintln!(
@@ -136,21 +136,17 @@ fn gitea_repository(
     provider: ProviderKind,
     payload: &Value,
 ) -> Result<RepositoryRef, BuiltInProviderError> {
-    let Some(full_name) = value_str(payload, &["repository", "full_name"])
+    let full_name = value_str(payload, &["repository", "full_name"])
         .or_else(|| value_str(payload, &["repository", "name"]))
-    else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
 
     if full_name.contains('/') {
         return parse_repository_from_full_name(provider, full_name);
     }
 
-    let Some(owner) = value_str(payload, &["repository", "owner", "username"])
+    let owner = value_str(payload, &["repository", "owner", "username"])
         .or_else(|| value_str(payload, &["repository", "owner", "login"]))
-    else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
+        .ok_or(BuiltInProviderError::InvalidRepositoryPayload)?;
 
     RepositoryRef::new(provider, owner, full_name)
         .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)
