@@ -1352,23 +1352,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_complete_multipart_parts_rejects_empty_or_malformed() {
-        assert!(super::parse_complete_multipart_parts("").is_err());
-        assert!(super::parse_complete_multipart_parts("<CompleteMultipartUpload/>").is_err());
-        assert!(
-            super::parse_complete_multipart_parts("<Part><PartNumber>0</PartNumber></Part>")
-                .is_err()
-        );
-        assert!(
-            super::parse_complete_multipart_parts("<Part><PartNumber>10001</PartNumber></Part>")
-                .is_err()
-        );
-        assert!(
-            super::parse_complete_multipart_parts(
-                "<Part><PartNumber>not-a-number</PartNumber></Part>"
-            )
-            .is_err()
-        );
+    fn parse_complete_multipart_parts_rejects_malformed_inputs() {
+        for body in [
+            "",
+            "<CompleteMultipartUpload/>",
+            "<Part><PartNumber>0</PartNumber></Part>",
+            "<Part><PartNumber>10001</PartNumber></Part>",
+            "<Part><PartNumber>not-a-number</PartNumber></Part>",
+            "<PartNumber>1",
+            "<Part><PartNumber>1</PartNumber></Part><Part><PartNumber>",
+            "<partnumber>1</partnumber>",
+            "<PartNumber>&lt;1&gt;</PartNumber>",
+            "<PartNumber>4294967296</PartNumber>",
+            "<PartNumber>10001</PartNumber>",
+        ] {
+            assert!(
+                super::parse_complete_multipart_parts(body).is_err(),
+                "{body:?}"
+            );
+        }
     }
 
     #[test]
@@ -1420,30 +1422,6 @@ mod tests {
             headers.get(LAST_MODIFIED).unwrap().to_str().unwrap(),
             "2026-08-13T09:51:00Z"
         );
-    }
-
-    #[test]
-    fn parse_complete_multipart_parts_malformed_inputs() {
-        // Truly truncated (no closing tag for the number).
-        assert!(super::parse_complete_multipart_parts("<PartNumber>1").is_err());
-        // Truncated trailing XML must not silently discard requested parts.
-        assert!(
-            super::parse_complete_multipart_parts(
-                "<Part><PartNumber>1</PartNumber></Part><Part><PartNumber>"
-            )
-            .is_err()
-        );
-        // Wrong casing is not matched.
-        assert!(super::parse_complete_multipart_parts("<partnumber>1</partnumber>").is_err());
-        // Entity-encoded numbers do not parse as integers.
-        assert!(
-            super::parse_complete_multipart_parts("<PartNumber>&lt;1&gt;</PartNumber>").is_err()
-        );
-        // Oversized numbers (u32 overflow and above the protocol cap).
-        assert!(
-            super::parse_complete_multipart_parts("<PartNumber>4294967296</PartNumber>").is_err()
-        );
-        assert!(super::parse_complete_multipart_parts("<PartNumber>10001</PartNumber>").is_err());
     }
 
     #[test]
