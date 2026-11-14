@@ -87,15 +87,25 @@ pub fn parse_reference(reference: &str) -> Result<OciReference, OciAdapterError>
 pub fn oci_blob_key(
     repository: &str,
     digest_hex: &str,
+    scope: Option<&RepositoryScope>,
+) -> Result<ObjectKey, OciAdapterError> {
+    oci_object_key(repository, digest_hex, scope, "blobs")
+}
+
+// Digest strings remain opaque here for compatibility with existing object keys.
+// Tombstone reconstruction below separately requires a verified SHA-256 digest.
+fn oci_object_key(
+    repository: &str,
+    digest: &str,
     repository_scope: Option<&RepositoryScope>,
+    object_namespace: &str,
 ) -> Result<ObjectKey, OciAdapterError> {
     validate_repository(repository)?;
     validate_oci_repository_scope(repository, repository_scope)?;
     object_key(&format!(
-        "protocols/oci/{}/repos/{}/blobs/{}",
+        "protocols/oci/{}/repos/{}/{object_namespace}/{digest}",
         scope_namespace(repository_scope),
         stable_hex_id(repository),
-        digest_hex
     ))
 }
 
@@ -145,16 +155,9 @@ pub fn oci_blob_key_from_namespace(
 pub fn oci_manifest_key(
     repository: &str,
     digest_hex: &str,
-    repository_scope: Option<&RepositoryScope>,
+    scope: Option<&RepositoryScope>,
 ) -> Result<ObjectKey, OciAdapterError> {
-    validate_repository(repository)?;
-    validate_oci_repository_scope(repository, repository_scope)?;
-    object_key(&format!(
-        "protocols/oci/{}/repos/{}/manifests/{}",
-        scope_namespace(repository_scope),
-        stable_hex_id(repository),
-        digest_hex
-    ))
+    oci_object_key(repository, digest_hex, scope, "manifests")
 }
 
 /// Rebuilds an OCI manifest key from its durable tombstone namespace.
@@ -176,16 +179,9 @@ pub fn oci_manifest_key_from_namespace(
 pub fn oci_manifest_media_type_key(
     repository: &str,
     digest_hex: &str,
-    repository_scope: Option<&RepositoryScope>,
+    scope: Option<&RepositoryScope>,
 ) -> Result<ObjectKey, OciAdapterError> {
-    validate_repository(repository)?;
-    validate_oci_repository_scope(repository, repository_scope)?;
-    object_key(&format!(
-        "protocols/oci/{}/repos/{}/manifest-media-types/{}",
-        scope_namespace(repository_scope),
-        stable_hex_id(repository),
-        digest_hex
-    ))
+    oci_object_key(repository, digest_hex, scope, "manifest-media-types")
 }
 
 /// Rebuilds an OCI manifest media-type key from its durable tombstone namespace.
