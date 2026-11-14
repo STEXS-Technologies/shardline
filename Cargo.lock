@@ -3729,7 +3729,6 @@ dependencies = [
  "hex",
  "http-body",
  "httpdate",
- "libc",
  "percent-encoding",
  "reqwest 0.12.28",
  "serde",
@@ -4007,7 +4006,6 @@ dependencies = [
  "hex",
  "serde_json",
  "shardline-protocol",
- "subtle",
  "thiserror 2.0.18",
  "tracing",
  "zeroize",
@@ -4086,7 +4084,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4150,7 +4147,6 @@ dependencies = [
 name = "shardline-hub-api"
 version = "1.13.0"
 dependencies = [
- "aes-gcm",
  "arrow-array",
  "arrow-json",
  "arrow-schema",
@@ -4161,7 +4157,6 @@ dependencies = [
  "chrono",
  "flate2",
  "futures-util",
- "getrandom 0.3.4",
  "hex",
  "hmac 0.12.1",
  "http-body-util",
@@ -4248,7 +4243,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "shardline-index",
  "shardline-protocol",
  "shardline-reliability",
  "shardline-server-core",
@@ -4323,7 +4317,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4338,7 +4331,6 @@ dependencies = [
  "penelope",
  "penelope-core 0.2.0",
  "penelope-domain 0.1.0",
- "proptest",
  "rusqlite",
  "rustix",
  "serde",
@@ -4539,7 +4531,6 @@ version = "1.13.0"
 dependencies = [
  "axum",
  "blake3",
- "futures-util",
  "serde",
  "sha2 0.10.9",
  "shardline-index",
@@ -4561,7 +4552,6 @@ dependencies = [
  "blake3",
  "bytes",
  "countio",
- "gearhash",
  "lz4_flex 0.13.0",
  "proptest",
  "serde",

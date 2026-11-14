@@ -13,7 +13,6 @@ publish = true
 [dependencies]
 shardline-protocol.workspace = true
 thiserror.workspace = true
-subtle.workspace = true
 tracing.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true

@@ -3560,7 +3560,6 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "hex",
  "shardline-protocol",
- "subtle",
  "thiserror",
  "tracing",
  "zeroize",
@@ -3645,7 +3644,6 @@ dependencies = [
  "shardline-xet-core",
  "thiserror",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -3671,7 +3669,6 @@ dependencies = [
 name = "shardline-hub-api"
 version = "1.13.0"
 dependencies = [
- "aes-gcm",
  "arrow-array",
  "arrow-json",
  "arrow-schema",
@@ -3682,7 +3679,6 @@ dependencies = [
  "chrono",
  "flate2",
  "futures-util",
- "getrandom 0.3.4",
  "hex",
  "hmac 0.12.1",
  "parquet",
@@ -3751,7 +3747,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "shardline-index",
  "shardline-protocol",
  "shardline-reliability",
  "shardline-server-core",
@@ -3815,7 +3810,6 @@ dependencies = [
  "shardline-storage",
  "shardline-xet-adapter",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -4008,7 +4002,6 @@ version = "1.13.0"
 dependencies = [
  "axum",
  "blake3",
- "futures-util",
  "serde",
  "sha2 0.10.9",
  "shardline-index",
@@ -4030,7 +4023,6 @@ dependencies = [
  "blake3",
  "bytes",
  "countio",
- "gearhash",
  "lz4_flex 0.13.1",
  "serde",
  "static_assertions",

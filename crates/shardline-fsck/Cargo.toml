@@ -22,7 +22,6 @@ shardline-xet-adapter.workspace = true
 shardline-xet-core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true
