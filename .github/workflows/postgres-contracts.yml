@@ -22,6 +22,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-nextest@0.9.123
 
       - name: Install clock fault injector
         shell: bash
@@ -41,7 +44,7 @@ jobs:
           echo "$client_env/bin" >> "$GITHUB_PATH"
 
       - name: Verify distributed integrity and mixed-version operation
-        run: cargo make test-distributed-integrity distributed-integrity-results
+        run: bash scripts/shardline/run_distributed_integrity_gate.sh distributed-integrity-results
 
       - name: Upload distributed integrity evidence
         if: always()
@@ -77,6 +80,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-nextest@0.9.123
 
       - name: Apply database schema
         run: cargo run --locked -p shardline -- db migrate up --database-url "$DATABASE_URL"
@@ -86,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p postgres-contract-results
-          cargo make test-postgres 2>&1 | tee postgres-contract-results/tests.log
+          bash scripts/test-postgres.sh 2>&1 | tee postgres-contract-results/tests.log
 
       - name: Upload configured PostgreSQL evidence
         if: always()
@@ -106,9 +112,12 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: ""
 
       - name: Verify released/current PostgreSQL process cuts
-        run: cargo make test-postgres-process-cuts postgres-process-cut-results
+        run: bash scripts/shardline/run_postgres_process_cut_gate.sh postgres-process-cut-results
 
       - name: Upload owned process-cut evidence
         if: always()

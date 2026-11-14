@@ -58,6 +58,7 @@ runs:
         shared-key: "shardline-shared-cache"
 
     - name: Install cargo tools
+      if: ${{ inputs.cargo-tools != '' }}
       uses: taiki-e/install-action@v2
       with:
         tool: ${{ inputs.cargo-tools }}
