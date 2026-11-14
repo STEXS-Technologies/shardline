@@ -3821,6 +3821,13 @@ from the specified commit, keeping the same target directory:
   cargo build --locked -p shardline --bin shardline -j4 --timings
 ```
 
+A later observation at `6869c27497334c0333846e30040260f30cba0ae8` used the same four-job,
+debug-disabled CLI command with an existing dependency cache. Rebuilding current
+artifacts took 25.662 s; the immediate unchanged-source repeat took 0.243 s.
+Both commands and the resulting executable's `--version` check passed. No artifacts
+were cleaned. This is a current-build observation, not a baseline comparison or
+evidence of a speedup; the earlier preparation sample used different cached inputs.
+
 ### Controlled local Cargo comparison
 
 On November 14, 2026, baseline `e53a33e00a3c2feae4ee8e2417927763663421c7` and cleanup
