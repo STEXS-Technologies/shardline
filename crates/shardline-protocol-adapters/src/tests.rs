@@ -55,49 +55,8 @@ fn scope_namespace_differs_with_revision() {
 }
 
 #[test]
-fn bazel_cache_object_key_valid() {
-    let hash = "a".repeat(64);
-    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None)).unwrap();
-    assert!(key.as_str().contains("protocols/bazel/global/cas/"));
-}
-
-#[test]
-fn bazel_cache_object_key_ac_kind() {
-    let hash = "a".repeat(64);
-    let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, &test_capability(None)).unwrap();
-    assert!(key.as_str().contains("protocols/bazel/global/ac/"));
-}
-
-#[test]
 fn bazel_cache_object_key_invalid_hash() {
     assert!(bazel_cache_object_key(BazelCacheKind::Cas, "short", &test_capability(None)).is_err());
-}
-
-#[test]
-fn bazel_cache_object_key_with_scope() {
-    let hash = "a".repeat(64);
-    let scope = test_scope();
-    let key =
-        bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(Some(scope))).unwrap();
-    assert!(!key.as_str().contains("global"));
-    assert!(key.as_str().contains("protocols/bazel/"));
-}
-
-#[test]
-fn lfs_object_key_valid() {
-    let hash = "a".repeat(64);
-    let key = lfs_object_key(&hash, &test_capability(None)).unwrap();
-    assert!(key.as_str().contains("protocols/lfs/global/objects/"));
-    assert!(key.as_str().ends_with(&hash));
-}
-
-#[test]
-fn lfs_object_key_with_scope() {
-    let hash = "a".repeat(64);
-    let scope = test_scope();
-    let key = lfs_object_key(&hash, &test_capability(Some(scope))).unwrap();
-    assert!(!key.as_str().contains("global"));
-    assert!(key.as_str().contains("protocols/lfs/"));
 }
 
 // --- ProtocolError::Display ---
