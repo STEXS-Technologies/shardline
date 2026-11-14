@@ -74,6 +74,48 @@ impl From<RepositoryProvider> for ProviderKind {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::collections::HashSet;
+
+    use hmac::Mac;
+
+    use crate::{
+        BuiltInProviderCatalog, BuiltInProviderError, ProviderKind, ProviderRepositoryPolicy,
+        ProviderSubject, RepositoryRef, RepositoryVisibility, configured_metadata,
+    };
+
+    pub(crate) fn catalog(
+        provider: ProviderKind,
+        integration_subject: &str,
+        clone_url: &str,
+    ) -> Result<BuiltInProviderCatalog, BuiltInProviderError> {
+        let mut catalog = BuiltInProviderCatalog::new(integration_subject)?;
+        let repository = RepositoryRef::new(provider, "team", "assets")
+            .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)?;
+        let subject = ProviderSubject::new(&format!("{}-user-1", provider.as_str()))
+            .map_err(|_error| BuiltInProviderError::InvalidIntegrationSubject)?;
+        let metadata =
+            configured_metadata(repository, RepositoryVisibility::Private, "main", clone_url)?;
+        catalog.register(ProviderRepositoryPolicy::new(
+            metadata,
+            HashSet::from([subject.clone()]),
+            HashSet::from([subject]),
+        ))?;
+        Ok(catalog)
+    }
+
+    pub(crate) fn signature(body: &[u8]) -> Option<String> {
+        let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret");
+        assert!(mac.is_ok());
+        let Ok(mut mac) = mac else {
+            return None;
+        };
+        mac.update(body);
+        Some(hex::encode(mac.finalize().into_bytes()))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::ProviderKind;
     use shardline_protocol::RepositoryProvider;

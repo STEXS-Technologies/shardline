@@ -155,7 +155,6 @@ fn github_previous_name(payload: &Value) -> Option<&str> {
 mod tests {
     use std::collections::HashSet;
 
-    use hmac::Mac;
     use shardline_protocol::SecretString;
 
     use super::GitHubAdapter;
@@ -167,22 +166,11 @@ mod tests {
     };
 
     fn adapter() -> Result<GitHubAdapter, BuiltInProviderError> {
-        let mut catalog = BuiltInProviderCatalog::new("github-app")?;
-        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets")
-            .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)?;
-        let subject = ProviderSubject::new("github-user-1")
-            .map_err(|_error| BuiltInProviderError::InvalidIntegrationSubject)?;
-        let metadata = configured_metadata(
-            repository,
-            RepositoryVisibility::Private,
-            "main",
+        let catalog = crate::provider::test_support::catalog(
+            ProviderKind::GitHub,
+            "github-app",
             "https://github.example/team/assets.git",
         )?;
-        catalog.register(ProviderRepositoryPolicy::new(
-            metadata,
-            HashSet::from([subject.clone()]),
-            HashSet::from([subject]),
-        ))?;
 
         Ok(GitHubAdapter::new(
             catalog,
@@ -191,16 +179,7 @@ mod tests {
     }
 
     fn signature(body: &[u8]) -> Option<String> {
-        let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret");
-        assert!(mac.is_ok());
-        let Ok(mut mac) = mac else {
-            return None;
-        };
-        mac.update(body);
-        Some(format!(
-            "sha256={}",
-            hex::encode(mac.finalize().into_bytes())
-        ))
+        crate::provider::test_support::signature(body).map(|hex| format!("sha256={hex}"))
     }
 
     #[test]

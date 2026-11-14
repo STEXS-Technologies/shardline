@@ -61,7 +61,7 @@ impl ProviderAdapter for CodebergAdapter {
 mod tests {
     use std::collections::HashSet;
 
-    use hmac::Mac;
+    use crate::provider::test_support::signature;
     use shardline_protocol::SecretString;
 
     use super::CodebergAdapter;
@@ -73,37 +73,16 @@ mod tests {
     };
 
     fn adapter() -> Result<CodebergAdapter, BuiltInProviderError> {
-        let mut catalog = BuiltInProviderCatalog::new("codeberg-system")?;
-        let repository = RepositoryRef::new(ProviderKind::Codeberg, "team", "assets")
-            .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)?;
-        let subject = ProviderSubject::new("codeberg-user-1")
-            .map_err(|_error| BuiltInProviderError::InvalidIntegrationSubject)?;
-        let metadata = configured_metadata(
-            repository,
-            RepositoryVisibility::Private,
-            "main",
+        let catalog = crate::provider::test_support::catalog(
+            ProviderKind::Codeberg,
+            "codeberg-system",
             "https://codeberg.org/team/assets.git",
         )?;
-        catalog.register(ProviderRepositoryPolicy::new(
-            metadata,
-            HashSet::from([subject.clone()]),
-            HashSet::from([subject]),
-        ))?;
 
         Ok(CodebergAdapter::new(
             catalog,
             Some(SecretString::from_secret("secret")),
         ))
-    }
-
-    fn signature(body: &[u8]) -> Option<String> {
-        let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret");
-        assert!(mac.is_ok());
-        let Ok(mut mac) = mac else {
-            return None;
-        };
-        mac.update(body);
-        Some(hex::encode(mac.finalize().into_bytes()))
     }
 
     #[test]
