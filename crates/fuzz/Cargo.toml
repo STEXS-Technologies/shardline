@@ -25,7 +25,6 @@ serde_json.workspace = true
 shardline.workspace = true
 shardline-auth.workspace = true
 shardline-cas.workspace = true
-shardline-fsck.workspace = true
 shardline-gc.workspace = true
 shardline-hub-api.workspace = true
 shardline-index.workspace = true
@@ -33,7 +32,6 @@ shardline-oci-adapter.workspace = true
 shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
 shardline-reliability.workspace = true
-shardline-rebuild.workspace = true
 shardline-s3-adapter.workspace = true
 shardline-server = { workspace = true, features = ["fuzzing"] }
 shardline-server-core.workspace = true
