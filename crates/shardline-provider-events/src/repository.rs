@@ -80,18 +80,15 @@ where
     migrate_provider_repository_state(index_store, event.repository(), new_repository).await?;
 
     Ok(ProviderWebhookOutcome {
-        provider: event.repository().provider(),
-        owner: event.repository().owner().to_owned(),
-        repo: event.repository().name().to_owned(),
-        delivery_id: event.delivery_id().as_str().to_owned(),
-        event_kind: ProviderWebhookOutcomeKind::RepositoryRenamed {
-            new_owner: new_repository.owner().to_owned(),
-            new_repo: new_repository.name().to_owned(),
-        },
         affected_file_versions: file_versions,
         affected_chunks: u64::try_from(chunk_hashes.len())?,
-        applied_holds: 0,
-        retention_seconds: None,
+        ..ProviderWebhookOutcome::for_event(
+            event,
+            ProviderWebhookOutcomeKind::RepositoryRenamed {
+                new_owner: new_repository.owner().to_owned(),
+                new_repo: new_repository.name().to_owned(),
+            },
+        )
     })
 }
 
@@ -154,18 +151,15 @@ pub(super) async fn plan_postgres_repository_renamed(
     }
 
     Ok(ProviderWebhookOutcome {
-        provider: event.repository().provider(),
-        owner: event.repository().owner().to_owned(),
-        repo: event.repository().name().to_owned(),
-        delivery_id: event.delivery_id().as_str().to_owned(),
-        event_kind: ProviderWebhookOutcomeKind::RepositoryRenamed {
-            new_owner: new_repository.owner().to_owned(),
-            new_repo: new_repository.name().to_owned(),
-        },
         affected_file_versions: file_versions,
         affected_chunks: u64::try_from(chunk_hashes.len())?,
-        applied_holds: 0,
-        retention_seconds: None,
+        ..ProviderWebhookOutcome::for_event(
+            event,
+            ProviderWebhookOutcomeKind::RepositoryRenamed {
+                new_owner: new_repository.owner().to_owned(),
+                new_repo: new_repository.name().to_owned(),
+            },
+        )
     })
 }
 
@@ -224,15 +218,11 @@ pub(super) async fn plan_postgres_repository_deleted(
     ));
 
     Ok(ProviderWebhookOutcome {
-        provider: event.repository().provider(),
-        owner: event.repository().owner().to_owned(),
-        repo: event.repository().name().to_owned(),
-        delivery_id: event.delivery_id().as_str().to_owned(),
-        event_kind: ProviderWebhookOutcomeKind::RepositoryDeleted,
         affected_file_versions: file_versions,
         affected_chunks: u64::try_from(chunk_hashes.len())?,
         applied_holds: u64::try_from(mutation.retention_holds_len())?,
         retention_seconds: Some(DEFAULT_LOCAL_GC_RETENTION_SECONDS),
+        ..ProviderWebhookOutcome::for_event(event, ProviderWebhookOutcomeKind::RepositoryDeleted)
     })
 }
 
@@ -309,15 +299,11 @@ where
         .map_err(Into::into)?;
 
     Ok(ProviderWebhookOutcome {
-        provider: event.repository().provider(),
-        owner: event.repository().owner().to_owned(),
-        repo: event.repository().name().to_owned(),
-        delivery_id: event.delivery_id().as_str().to_owned(),
-        event_kind: ProviderWebhookOutcomeKind::RepositoryDeleted,
         affected_file_versions: file_versions,
         affected_chunks: u64::try_from(chunk_hashes.len())?,
         applied_holds,
         retention_seconds: Some(DEFAULT_LOCAL_GC_RETENTION_SECONDS),
+        ..ProviderWebhookOutcome::for_event(event, ProviderWebhookOutcomeKind::RepositoryDeleted)
     })
 }
 

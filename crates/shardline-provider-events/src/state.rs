@@ -23,17 +23,10 @@ where
     )
     .await?;
 
-    Ok(ProviderWebhookOutcome {
-        provider: event.repository().provider(),
-        owner: event.repository().owner().to_owned(),
-        repo: event.repository().name().to_owned(),
-        delivery_id: event.delivery_id().as_str().to_owned(),
-        event_kind: ProviderWebhookOutcomeKind::AccessChanged,
-        affected_file_versions: 0,
-        affected_chunks: 0,
-        applied_holds: 0,
-        retention_seconds: None,
-    })
+    Ok(ProviderWebhookOutcome::for_event(
+        event,
+        ProviderWebhookOutcomeKind::AccessChanged,
+    ))
 }
 
 pub(super) async fn apply_revision_pushed<IndexAdapter>(
@@ -55,19 +48,12 @@ where
     )
     .await?;
 
-    Ok(ProviderWebhookOutcome {
-        provider: event.repository().provider(),
-        owner: event.repository().owner().to_owned(),
-        repo: event.repository().name().to_owned(),
-        delivery_id: event.delivery_id().as_str().to_owned(),
-        event_kind: ProviderWebhookOutcomeKind::RevisionPushed {
+    Ok(ProviderWebhookOutcome::for_event(
+        event,
+        ProviderWebhookOutcomeKind::RevisionPushed {
             revision: revision.to_owned(),
         },
-        affected_file_versions: 0,
-        affected_chunks: 0,
-        applied_holds: 0,
-        retention_seconds: None,
-    })
+    ))
 }
 
 pub(super) async fn migrate_provider_repository_state<IndexAdapter>(

@@ -151,17 +151,7 @@ pub enum ProviderEventsError {
 }
 
 pub(crate) fn duplicate_webhook_outcome(event: &RepositoryWebhookEvent) -> ProviderWebhookOutcome {
-    ProviderWebhookOutcome {
-        provider: event.repository().provider(),
-        owner: event.repository().owner().to_owned(),
-        repo: event.repository().name().to_owned(),
-        delivery_id: event.delivery_id().as_str().to_owned(),
-        event_kind: outcome::duplicate_webhook_event_kind(event.kind()),
-        affected_file_versions: 0,
-        affected_chunks: 0,
-        applied_holds: 0,
-        retention_seconds: None,
-    }
+    ProviderWebhookOutcome::for_event(event, outcome::duplicate_webhook_event_kind(event.kind()))
 }
 
 /// Planned atomic Postgres mutation and its applied/duplicate protocol outcomes.

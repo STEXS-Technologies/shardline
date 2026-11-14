@@ -1,6 +1,25 @@
-use shardline_vcs::RepositoryWebhookEventKind;
+use shardline_vcs::{RepositoryWebhookEvent, RepositoryWebhookEventKind};
 
-use super::ProviderWebhookOutcomeKind;
+use super::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind};
+
+impl ProviderWebhookOutcome {
+    pub(crate) fn for_event(
+        event: &RepositoryWebhookEvent,
+        event_kind: ProviderWebhookOutcomeKind,
+    ) -> Self {
+        Self {
+            provider: event.repository().provider(),
+            owner: event.repository().owner().to_owned(),
+            repo: event.repository().name().to_owned(),
+            delivery_id: event.delivery_id().as_str().to_owned(),
+            event_kind,
+            affected_file_versions: 0,
+            affected_chunks: 0,
+            applied_holds: 0,
+            retention_seconds: None,
+        }
+    }
+}
 
 pub(super) fn duplicate_webhook_event_kind(
     kind: &RepositoryWebhookEventKind,
