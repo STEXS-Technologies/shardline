@@ -10,9 +10,7 @@ readme = "README.md"
 description = "HuggingFace Hub API compatibility layer for Shardline."
 
 [dependencies]
-arrow-array.workspace = true
 arrow-json.workspace = true
-arrow-schema.workspace = true
 axum.workspace = true
 base64.workspace = true
 blake3.workspace = true
@@ -43,6 +41,8 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls"] }
 shardline-test-support = { workspace = true, features = ["docker"] }
 sqlx.workspace = true
