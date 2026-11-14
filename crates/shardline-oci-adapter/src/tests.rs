@@ -1336,10 +1336,7 @@ async fn s3_multipart_hash_mismatch_aborts() {
 
     // The mock should have recorded the abort on the multipart session.
     let s = read_session(root.path(), &session_id).await;
-    let upload_id = s.s3_multipart.as_ref().map(|m| m.upload_id.clone());
-    if let Some(upload_id) = upload_id {
-        backend.assert_aborted(&upload_id);
-    }
+    backend.assert_aborted(&s.s3_multipart.unwrap().upload_id);
 }
 
 #[allow(clippy::shadow_unrelated)]
@@ -2187,9 +2184,7 @@ async fn s3_finalize_part_upload_error_aborts() {
     assert!(result.is_err());
     // The upload should have been aborted
     let s = read_session(root.path(), &session_id).await;
-    if let Some(m) = s.s3_multipart {
-        backend.assert_aborted(&m.upload_id);
-    }
+    backend.assert_aborted(&s.s3_multipart.unwrap().upload_id);
 }
 
 #[tokio::test]
@@ -2227,9 +2222,7 @@ async fn s3_finalize_complete_error_aborts() {
     assert!(result.is_err());
     // The upload should have been aborted
     let s = read_session(root.path(), &session_id).await;
-    if let Some(m) = s.s3_multipart {
-        backend.assert_aborted(&m.upload_id);
-    }
+    backend.assert_aborted(&s.s3_multipart.unwrap().upload_id);
 }
 
 #[tokio::test]
