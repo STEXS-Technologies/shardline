@@ -8,11 +8,13 @@ use std::{
     sync::Arc,
     sync::atomic::{AtomicBool, Ordering},
     task::Poll,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use reqwest::{Client, StatusCode};
-use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+use shardline_protocol::TokenClaims;
+#[cfg(test)]
+use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenScope};
 use shardline_server_core::{AuthError, AuthProvider};
 use tokio::sync::RwLock;
 
@@ -25,9 +27,11 @@ const MAX_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
 /// Validates tokens against a JWKS endpoint, caching keys and refreshing
 /// them in the background using ETag-based conditional requests.
 pub struct JwksProvider {
+    pub(crate) claim_mapping: crate::external_jwt_claims::ExternalJwtClaims,
     client: Client,
     jwks_url: String,
     issuer: String,
+    audience: Option<String>,
     cached_keys: Arc<RwLock<Option<CachedJwks>>>,
     background_handle: Arc<RefreshTask>,
     shutdown: Arc<AtomicBool>,
@@ -39,6 +43,8 @@ impl Clone for JwksProvider {
             client: self.client.clone(),
             jwks_url: self.jwks_url.clone(),
             issuer: self.issuer.clone(),
+            audience: self.audience.clone(),
+            claim_mapping: self.claim_mapping.clone(),
             cached_keys: Arc::clone(&self.cached_keys),
             background_handle: Arc::clone(&self.background_handle),
             shutdown: Arc::clone(&self.shutdown),
@@ -109,9 +115,11 @@ impl JwksProvider {
             .map_err(JwksProviderError::JwksFetch)?;
 
         let provider = Self {
+            audience: None,
             client,
             jwks_url: jwks_url.to_owned(),
             issuer: issuer.to_owned(),
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             cached_keys: Arc::new(RwLock::new(Some(CachedJwks {
                 keys: Arc::new(jwks.keys),
                 etag,
@@ -122,6 +130,18 @@ impl JwksProvider {
         };
         provider.start_background_refresh();
         Ok(provider)
+    }
+
+    /// Pins the intended recipient of externally signed tokens.
+    ///
+    /// # Errors
+    /// Returns an error for an empty audience. Server startup requires this setting.
+    pub fn with_audience(mut self, audience: String) -> Result<Self, AuthError> {
+        if audience.trim().is_empty() {
+            return Err(AuthError::InvalidToken);
+        }
+        self.audience = Some(audience);
+        Ok(self)
     }
 
     fn start_background_refresh(&self) {
@@ -254,63 +274,10 @@ impl JwksProvider {
             signature_b64,
             &keys,
             &self.issuer,
-            None,
+            self.audience.as_deref(),
         )?;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or_else(|e| {
-                tracing::error!("SystemTime before UNIX_EPOCH: {e}");
-                0
-            });
-
-        // Reject tokens issued in the future (iat) or not yet valid (nbf).
-        if let Some(iat) = payload.get("iat").and_then(|v| v.as_u64())
-            && iat > now
-        {
-            return Err(AuthError::InvalidToken);
-        }
-        if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_u64())
-            && nbf > now
-        {
-            return Err(AuthError::InvalidToken);
-        }
-
-        let exp = payload
-            .get("exp")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| AuthError::ProviderError("missing exp claim".to_owned()))?;
-
-        if exp < now {
-            return Err(AuthError::ExpiredToken);
-        }
-
-        let sub = payload
-            .get("sub")
-            .and_then(|v| v.as_str())
-            .filter(|subject| !subject.trim().is_empty())
-            .ok_or(AuthError::InvalidToken)?
-            .to_owned();
-
-        let scope_str = payload
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                tracing::warn!("JWT payload missing 'scope' claim, defaulting to 'read'");
-                "read"
-            });
-        let scope = match scope_str {
-            "write" | "admin" => TokenScope::Write,
-            _ => TokenScope::Read,
-        };
-
-        let repository =
-            RepositoryScope::new(RepositoryProvider::Generic, "jwks", &sub, Some("main"))
-                .map_err(|e| AuthError::ProviderError(e.to_string()))?;
-
-        TokenClaims::new(&self.issuer, &sub, scope, repository, exp)
-            .map_err(|e| AuthError::ProviderError(e.to_string()))
+        self.claim_mapping.map(&payload, &self.issuer, "jwks")
     }
 }
 
@@ -545,6 +512,8 @@ mod tests {
 
     fn make_provider(cached: Option<CachedJwks>) -> JwksProvider {
         JwksProvider {
+            audience: None,
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             client: Client::new(),
             jwks_url: "https://example.com/.well-known/jwks".to_owned(),
             issuer: "https://example.com".to_owned(),
@@ -885,6 +854,8 @@ mod tests {
 
         let jwk = sample_rsa_jwk();
         let provider = JwksProvider {
+            audience: None,
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             client: Client::new(),
             jwks_url: url,
             issuer: "https://example.com".to_owned(),
@@ -932,6 +903,8 @@ mod tests {
 
         let jwk = sample_rsa_jwk();
         let provider = JwksProvider {
+            audience: None,
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             client: Client::new(),
             jwks_url: url,
             issuer: "https://example.com".to_owned(),
@@ -975,6 +948,8 @@ mod tests {
             .await;
 
         let provider = JwksProvider {
+            audience: None,
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             client: Client::new(),
             jwks_url: url,
             issuer: "https://example.com".to_owned(),
@@ -1042,6 +1017,8 @@ mod tests {
         let old_token = sign("old-key");
         let rotated_token = sign("rotated-key");
         let provider = JwksProvider {
+            audience: None,
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             client: Client::new(),
             jwks_url: mock_server.uri(),
             issuer: "https://example.com".to_owned(),
@@ -1462,6 +1439,8 @@ mod tests {
             .await;
 
         let provider = JwksProvider {
+            audience: None,
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             client: Client::new(),
             jwks_url: url,
             issuer: "https://example.com".to_owned(),
@@ -1532,6 +1511,7 @@ mod tests {
         // Issuer must match the provider's issuer (https://example.com from make_provider)
         claims.insert("iss", serde_json::json!("https://example.com"));
         claims.insert("sub", serde_json::json!("jwks-e2e-user"));
+        claims.insert("aud", serde_json::json!("shardline"));
         claims.insert("exp", serde_json::json!(9999999999u64));
         claims.insert("iat", serde_json::json!(1000000000u64));
 
@@ -1572,6 +1552,7 @@ mod tests {
         .unwrap()
         .with_auth_provider(crate::AuthProviderKind::Jwks)
         .with_auth_jwks_url(url)
+        .with_auth_jwks_audience("shardline".to_owned())
         .with_auth_jwks_issuer("https://example.com".to_owned())
         .with_token_signing_key(internal_key.to_vec())
         .unwrap();
@@ -1664,6 +1645,8 @@ mod tests {
             .await;
 
         let provider = JwksProvider {
+            audience: None,
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             client: Client::new(),
             jwks_url: url,
             issuer: "https://example.com".to_owned(),
@@ -1693,6 +1676,8 @@ mod tests {
             .await;
 
         let provider = JwksProvider {
+            audience: None,
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             client: Client::new(),
             jwks_url: url,
             issuer: "https://example.com".to_owned(),

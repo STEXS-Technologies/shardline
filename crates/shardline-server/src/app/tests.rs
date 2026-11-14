@@ -1,3 +1,4 @@
+mod external_jwt_claims;
 use std::{fmt::Write, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use axum::{
@@ -770,7 +771,8 @@ async fn auth_provider_jwks_with_unreachable_url_errors() {
     .with_auth_provider(AuthProviderKind::Jwks)
     .with_token_signing_key(vec![0u8; 32])
     .unwrap()
-    .with_auth_jwks_url("http://127.0.0.1:1/not-exist".to_owned());
+    .with_auth_jwks_url("http://127.0.0.1:1/not-exist".to_owned())
+    .with_auth_jwks_audience("shardline".to_owned());
     let app = router(config).await;
     assert!(
         app.is_err(),

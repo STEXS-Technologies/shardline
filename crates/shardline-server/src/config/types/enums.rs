@@ -135,6 +135,9 @@ pub struct AuthConfig {
     pub auth_oidc_jwks_host_allowlist: Option<Vec<String>>,
     pub auth_jwks_url: Option<String>,
     pub auth_jwks_issuer: Option<String>,
+    pub auth_jwks_audience: Option<String>,
+    pub auth_jwt_repository_claim: Option<String>,
+    pub auth_jwt_scope_claim: Option<String>,
     pub ed25519_private_key: Option<SecretBytes>,
     pub ed25519_public_key: Option<SecretBytes>,
 }

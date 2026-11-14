@@ -1242,6 +1242,20 @@ pub async fn acquire_chunk_transfer_permit(
     state.transfer_limiter.acquire_bytes(total_bytes).await
 }
 
+// Pin the intended service, rejecting absent/blank audiences before fetching keys.
+fn required_external_audience<'config>(
+    value: Option<&'config str>,
+    setting: &str,
+) -> Result<&'config str, ServerError> {
+    value
+        .filter(|audience| !audience.trim().is_empty())
+        .ok_or_else(|| {
+            ServerError::Config(ServerConfigError::ConfigFileError(format!(
+                "{setting} is required for external JWT authentication"
+            )))
+        })
+}
+
 async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>, ServerError> {
     match config.auth_provider() {
         AuthProviderKind::Local => {
@@ -1265,25 +1279,19 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let issuer = config
                 .auth_oidc_issuer()
                 .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
-            // Audience validation is mandatory: without a configured audience
-            // the verifier accepts ANY aud-bearing token minted by the issuer
-            // (including tokens for unrelated services at the same issuer),
-            // broadening token acceptance across service boundaries.
-            let audience = config.auth_oidc_audience().ok_or_else(|| {
-                ServerError::Config(ServerConfigError::ConfigFileError(
-                    "SHARDLINE_AUTH_OIDC_AUDIENCE is required when \
-                     SHARDLINE_AUTH_PROVIDER=oidc; without it any aud-bearing token \
-                     from the issuer is accepted"
-                        .into(),
-                ))
-            })?;
-            let provider = OidcProvider::new(
+            let audience = required_external_audience(
+                config.auth_oidc_audience(),
+                "SHARDLINE_AUTH_OIDC_AUDIENCE",
+            )?;
+            let mapping = crate::external_jwt_claims::ExternalJwtClaims::from_config(config)?;
+            let mut provider = OidcProvider::new(
                 issuer,
                 Some(audience.to_owned()),
                 config.auth_oidc_jwks_host_allowlist().unwrap_or(&[]),
             )
             .await
             .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
+            provider.claim_mapping = mapping;
             Ok(Some(ServerAuth::from_external_jwt_provider(
                 Box::new(provider),
                 config.token_signing_key(),
@@ -1294,9 +1302,18 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
                 .auth_jwks_url()
                 .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             let issuer = config.auth_jwks_issuer().unwrap_or("jwks");
-            let provider = JwksProvider::new(jwks_url, issuer)
+            let audience = required_external_audience(
+                config.auth_jwks_audience(),
+                "SHARDLINE_AUTH_JWKS_AUDIENCE",
+            )?;
+            let mapping = crate::external_jwt_claims::ExternalJwtClaims::from_config(config)?;
+            let mut provider = JwksProvider::new(jwks_url, issuer)
                 .await
                 .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
+            provider = provider
+                .with_audience(audience.to_owned())
+                .map_err(|_error| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
+            provider.claim_mapping = mapping;
             Ok(Some(ServerAuth::from_external_jwt_provider(
                 Box::new(provider),
                 config.token_signing_key(),

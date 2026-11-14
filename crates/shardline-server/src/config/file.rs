@@ -88,6 +88,8 @@ pub struct AuthSection {
     pub provider_api_key_path: Option<String>,
     pub provider_token_issuer: Option<String>,
     pub provider_token_ttl_seconds: Option<u64>,
+    pub jwt_repository_claim: Option<String>,
+    pub jwt_scope_claim: Option<String>,
     pub jwks: Option<JwksSection>,
     pub oidc: Option<OidcSection>,
     pub ed25519: Option<Ed25519Section>,
@@ -97,6 +99,8 @@ pub struct AuthSection {
 #[serde(deny_unknown_fields)]
 pub struct JwksSection {
     pub url: Option<String>,
+    pub issuer: Option<String>,
+    pub audience: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

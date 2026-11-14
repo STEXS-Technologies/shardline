@@ -1,6 +1,7 @@
 //! Shared external signing-key transport and JWT signature verification.
 //!
-//! Providers own discovery, cache freshness and repository claim mapping; the
+//! Providers own discovery and cache freshness; claim mapping is shared with the
+//! external JWT policy module. The
 //! cryptographic and bounded-document checks have one implementation.
 
 use crate::jwt_algorithm::JwtAlgorithm;

@@ -8,12 +8,14 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use reqwest::Client;
 use serde::Deserialize;
-use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+use shardline_protocol::TokenClaims;
+#[cfg(test)]
+use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenScope};
 use shardline_server_core::{AuthError, AuthProvider};
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
@@ -25,6 +27,7 @@ const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(1800);
 /// issuer's discovery endpoint.  Keys are refreshed in a background task to
 /// prevent auth outages when the cache TTL expires.
 pub struct OidcProvider {
+    pub(crate) claim_mapping: crate::external_jwt_claims::ExternalJwtClaims,
     client: Client,
     issuer: String,
     audience: Option<String>,
@@ -48,6 +51,7 @@ impl Clone for OidcProvider {
         Self {
             client: self.client.clone(),
             issuer: self.issuer.clone(),
+            claim_mapping: self.claim_mapping.clone(),
             audience: self.audience.clone(),
             cached_keys: Arc::clone(&self.cached_keys),
             jwks_url: self.jwks_url.clone(),
@@ -194,6 +198,7 @@ impl OidcProvider {
         let provider = Self {
             client: client.clone(),
             issuer: issuer.to_owned(),
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             audience,
             cached_keys,
             jwks_url,
@@ -281,54 +286,7 @@ impl OidcProvider {
             self.audience.as_deref(),
         )?;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        if let Some(iat) = payload.get("iat").and_then(|v| v.as_u64())
-            && iat > now
-        {
-            return Err(AuthError::InvalidToken);
-        }
-
-        if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_u64())
-            && nbf > now
-        {
-            return Err(AuthError::InvalidToken);
-        }
-
-        let exp = payload
-            .get("exp")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| AuthError::ProviderError("missing exp claim".to_owned()))?;
-
-        if exp < now {
-            return Err(AuthError::ExpiredToken);
-        }
-
-        let sub = payload
-            .get("sub")
-            .and_then(|v| v.as_str())
-            .filter(|subject| !subject.trim().is_empty())
-            .ok_or(AuthError::InvalidToken)?
-            .to_owned();
-
-        let scope_str = payload
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .unwrap_or("read");
-        let scope = match scope_str {
-            "write" | "admin" => TokenScope::Write,
-            _ => TokenScope::Read,
-        };
-
-        let repository =
-            RepositoryScope::new(RepositoryProvider::Generic, "oidc", &sub, Some("main"))
-                .map_err(|e| AuthError::ProviderError(e.to_string()))?;
-
-        TokenClaims::new(&self.issuer, &sub, scope, repository, exp)
-            .map_err(|e| AuthError::ProviderError(e.to_string()))
+        self.claim_mapping.map(&payload, &self.issuer, "oidc")
     }
 }
 
@@ -926,6 +884,7 @@ mod tests {
         OidcProvider {
             client: Client::new(),
             issuer: issuer.to_owned(),
+            claim_mapping: crate::external_jwt_claims::ExternalJwtClaims::default(),
             audience,
             cached_keys: Arc::new(Mutex::new(cached)),
             jwks_url: format!("{issuer}/.well-known/jwks"),

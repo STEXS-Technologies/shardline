@@ -251,6 +251,9 @@ impl ServerConfig {
                 auth_oidc_jwks_host_allowlist: None,
                 auth_jwks_url: None,
                 auth_jwks_issuer: None,
+                auth_jwks_audience: None,
+                auth_jwt_repository_claim: None,
+                auth_jwt_scope_claim: None,
                 ed25519_private_key: None,
                 ed25519_public_key: None,
             },
@@ -675,6 +678,24 @@ impl ServerConfig {
     #[must_use]
     pub fn auth_jwks_issuer(&self) -> Option<&str> {
         self.auth.auth_jwks_issuer.as_deref()
+    }
+
+    /// Returns the configured external JWT permission claim name.
+    #[must_use]
+    pub fn auth_jwt_scope_claim(&self) -> Option<&str> {
+        self.auth.auth_jwt_scope_claim.as_deref()
+    }
+
+    /// Returns the configured external JWT repository claim name.
+    #[must_use]
+    pub fn auth_jwt_repository_claim(&self) -> Option<&str> {
+        self.auth.auth_jwt_repository_claim.as_deref()
+    }
+
+    /// Returns the configured JWKS audience.
+    #[must_use]
+    pub fn auth_jwks_audience(&self) -> Option<&str> {
+        self.auth.auth_jwks_audience.as_deref()
     }
 
     /// Returns the optional token signing key.
@@ -1323,6 +1344,27 @@ impl ServerConfig {
     #[must_use]
     pub fn with_auth_jwks_issuer(mut self, issuer: String) -> Self {
         self.auth.auth_jwks_issuer = Some(issuer);
+        self
+    }
+
+    /// Configures the external JWT permission claim name.
+    #[must_use]
+    pub fn with_auth_jwt_scope_claim(mut self, value: String) -> Self {
+        self.auth.auth_jwt_scope_claim = Some(value);
+        self
+    }
+
+    /// Configures the external JWT repository claim name.
+    #[must_use]
+    pub fn with_auth_jwt_repository_claim(mut self, value: String) -> Self {
+        self.auth.auth_jwt_repository_claim = Some(value);
+        self
+    }
+
+    /// Configures the required audience for the JWKS provider.
+    #[must_use]
+    pub fn with_auth_jwks_audience(mut self, value: String) -> Self {
+        self.auth.auth_jwks_audience = Some(value);
         self
     }
 

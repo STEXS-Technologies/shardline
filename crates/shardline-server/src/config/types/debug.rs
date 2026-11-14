@@ -64,6 +64,9 @@ impl fmt::Debug for AuthConfig {
             )
             .field("auth_jwks_url", &self.auth_jwks_url)
             .field("auth_jwks_issuer", &self.auth_jwks_issuer)
+            .field("auth_jwks_audience", &self.auth_jwks_audience)
+            .field("auth_jwt_repository_claim", &self.auth_jwt_repository_claim)
+            .field("auth_jwt_scope_claim", &self.auth_jwt_scope_claim)
             .field(
                 "ed25519_private_key",
                 &self.ed25519_private_key.as_ref().map(|_key| "***"),

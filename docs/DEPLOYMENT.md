@@ -900,7 +900,8 @@ The discovery document's `jwks_uri` must be hosted on the issuer's own host and
 the discovery fetch never follows redirects. IdPs that serve keys from a
 different host (e.g. Google serves JWKS from `www.googleapis.com`) must list
 that host in `SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST` (comma-separated).
-`SHARDLINE_AUTH_OIDC_AUDIENCE` optionally requires a specific `aud` claim.
+`SHARDLINE_AUTH_OIDC_AUDIENCE` is required at startup and pins the token
+recipient; missing or mismatched `aud` claims are rejected.
 
 ### JWKS
 
@@ -909,7 +910,13 @@ Validate tokens against a JSON Web Key Set endpoint:
 ```text
 SHARDLINE_AUTH_PROVIDER=jwks
 SHARDLINE_AUTH_JWKS_URL=https://example.com/.well-known/jwks.json
+SHARDLINE_AUTH_JWKS_ISSUER=https://example.com
+SHARDLINE_AUTH_JWKS_AUDIENCE=storage
 ```
+
+JWKS also requires an audience at startup. For signed repository assignments
+independent of the identity subject, configure the shared
+[external resource claims mapping](AUTHENTICATION.md#external-resource-claims).
 
 ### Passthrough
 

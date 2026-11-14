@@ -81,6 +81,7 @@ mod config;
 mod database_migration;
 pub mod download_stream;
 mod error;
+mod external_jwt_claims;
 mod fsck;
 #[cfg(feature = "fuzzing")]
 mod fuzz;

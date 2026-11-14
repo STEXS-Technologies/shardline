@@ -503,6 +503,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .filter(|hosts| !hosts.is_empty());
     let auth_jwks_url = var("SHARDLINE_AUTH_JWKS_URL").ok();
     let auth_jwks_issuer = var("SHARDLINE_AUTH_JWKS_ISSUER").ok();
+    let auth_jwks_audience = var("SHARDLINE_AUTH_JWKS_AUDIENCE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let auth_jwt_repository_claim = var("SHARDLINE_AUTH_JWT_REPOSITORY_CLAIM").ok();
+    let auth_jwt_scope_claim = var("SHARDLINE_AUTH_JWT_SCOPE_CLAIM").ok();
     match auth_provider {
         AuthProviderKind::Oidc => match auth_oidc_issuer.as_deref() {
             None => return Err(ServerConfigError::MissingOidcIssuer),
@@ -551,6 +557,15 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     }
     if let Some(issuer) = auth_jwks_issuer {
         config = config.with_auth_jwks_issuer(issuer);
+    }
+    if let Some(value) = auth_jwks_audience {
+        config = config.with_auth_jwks_audience(value);
+    }
+    if let Some(value) = auth_jwt_repository_claim {
+        config = config.with_auth_jwt_repository_claim(value);
+    }
+    if let Some(value) = auth_jwt_scope_claim {
+        config = config.with_auth_jwt_scope_claim(value);
     }
     if let Some(key) = ed25519_private_key {
         config = config.with_ed25519_private_key(key)?;
@@ -950,8 +965,18 @@ pub fn load_server_config_from_env_with_toml(
             "SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS",
             auth.provider_token_ttl_seconds.map(|v| v.to_string()),
         );
+        set_if_unset(
+            "SHARDLINE_AUTH_JWT_REPOSITORY_CLAIM",
+            auth.jwt_repository_claim.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_AUTH_JWT_SCOPE_CLAIM",
+            auth.jwt_scope_claim.clone(),
+        );
         if let Some(jwks) = &auth.jwks {
             set_if_unset("SHARDLINE_AUTH_JWKS_URL", jwks.url.clone());
+            set_if_unset("SHARDLINE_AUTH_JWKS_ISSUER", jwks.issuer.clone());
+            set_if_unset("SHARDLINE_AUTH_JWKS_AUDIENCE", jwks.audience.clone());
         }
         if let Some(oidc) = &auth.oidc {
             set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER", oidc.issuer_url.clone());
@@ -1229,6 +1254,60 @@ mod tests {
 
     fn remove_env_var(key: &str) {
         super::super::environment::remove_test_var(key);
+    }
+
+    #[test]
+    fn external_jwt_claim_settings_load_from_toml_and_allow_environment_overrides() {
+        let keys = [
+            "SHARDLINE_AUTH_PROVIDER",
+            "SHARDLINE_AUTH_JWKS_URL",
+            "SHARDLINE_AUTH_JWKS_ISSUER",
+            "SHARDLINE_AUTH_JWKS_AUDIENCE",
+            "SHARDLINE_AUTH_JWT_REPOSITORY_CLAIM",
+            "SHARDLINE_AUTH_JWT_SCOPE_CLAIM",
+            "SHARDLINE_ROOT_DIR",
+            "SHARDLINE_PUBLIC_BASE_URL",
+        ];
+        for key in keys {
+            remove_env_var(key);
+        }
+        let document = toml::from_str::<super::ShardlineTomlConfig>(
+            r#"
+[server]
+root_dir = "/tmp/shardline-jwt-claims"
+public_base_url = "http://localhost:8080"
+[auth]
+provider = "jwks"
+jwt_repository_claim = "assigned_repository"
+jwt_scope_claim = "assigned_permission"
+[auth.jwks]
+url = "https://identity.example/jwks"
+issuer = "https://identity.example"
+audience = "storage"
+"#,
+        )
+        .unwrap();
+        let config = load_server_config_from_env_with_toml(&document).unwrap();
+        assert_eq!(config.auth_jwks_issuer(), Some("https://identity.example"));
+        assert_eq!(config.auth_jwks_audience(), Some("storage"));
+        assert_eq!(
+            config.auth_jwt_repository_claim(),
+            Some("assigned_repository")
+        );
+        assert_eq!(config.auth_jwt_scope_claim(), Some("assigned_permission"));
+        set_env_var("SHARDLINE_AUTH_JWKS_AUDIENCE", "override-service");
+        set_env_var("SHARDLINE_AUTH_JWT_REPOSITORY_CLAIM", "override_repository");
+        set_env_var("SHARDLINE_AUTH_JWT_SCOPE_CLAIM", "override_permission");
+        let config = load_server_config_from_env_with_toml(&document).unwrap();
+        assert_eq!(config.auth_jwks_audience(), Some("override-service"));
+        assert_eq!(
+            config.auth_jwt_repository_claim(),
+            Some("override_repository")
+        );
+        assert_eq!(config.auth_jwt_scope_claim(), Some("override_permission"));
+        for key in keys {
+            remove_env_var(key);
+        }
     }
 
     #[test]
