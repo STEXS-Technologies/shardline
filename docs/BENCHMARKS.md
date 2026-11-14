@@ -3750,30 +3750,31 @@ metadata.
 
 The November 14, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`9a89415b1ef21991b60d085b0f8ccf1a0d954d21`. It counts all tracked `.rs`
+`b0a9221b0a421ae39504721b683562010b737d38`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 587,497 | 16,152 (2.68%) |
-| Server | 220,570 | 213,092 | 7,478 (3.39%) |
+| Entire repository | 603,649 | 586,892 | 16,757 (2.78%) |
+| Server | 220,570 | 213,052 | 7,518 (3.41%) |
 | Server core | 6,454 | 5,627 | 827 (12.81%) |
-| Storage | 20,373 | 19,440 | 933 (4.58%) |
+| Hub API | 43,749 | 43,291 | 458 (1.05%) |
+| Storage | 20,373 | 19,433 | 940 (4.61%) |
 | S3 adapter | 10,954 | 10,323 | 631 (5.76%) |
-| OCI adapter | 7,700 | 7,471 | 229 (2.97%) |
+| OCI adapter | 7,700 | 7,422 | 278 (3.61%) |
 | Cache | 6,573 | 5,866 | 707 (10.76%) |
 | Index | 71,472 | 69,403 | 2,069 (2.89%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
-| GC | 10,954 | 10,621 | 333 (3.04%) |
-| Fsck | 8,989 | 8,457 | 532 (5.92%) |
+| GC | 10,954 | 10,615 | 339 (3.09%) |
+| Fsck | 8,989 | 8,456 | 533 (5.93%) |
 | Rebuild | 4,326 | 4,068 | 258 (5.96%) |
-| CLI | 37,677 | 37,318 | 359 (0.95%) |
+| CLI | 37,677 | 37,299 | 378 (1.00%) |
 | Protocol | 4,076 | 3,715 | 361 (8.86%) |
 | Protocol adapters | 1,670 | 1,372 | 298 (17.84%) |
 | Provider events | 5,283 | 5,090 | 193 (3.65%) |
-| VCS | 9,393 | 8,243 | 1,150 (12.24%) |
+| VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
 Component rows are selected examples; other components gained coverage, so their
@@ -3782,8 +3783,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 9a89415b1ef21991b60d085b0f8ccf1a0d954d21 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 9a89415b1ef21991b60d085b0f8ccf1a0d954d21 -- '*.rs' | wc -l
+git grep -I -n '^' b0a9221b0a421ae39504721b683562010b737d38 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' b0a9221b0a421ae39504721b683562010b737d38 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
