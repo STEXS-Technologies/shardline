@@ -29,11 +29,7 @@ pub(crate) fn parse_sha256_digest(value: &str) -> Result<String, OciAdapterError
     core_ps::parse_sha256_digest(value)
 }
 
-pub(crate) fn scope_namespace(
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
-) -> String {
-    core_ps::scope_namespace(repository_scope)
-}
+pub(crate) use core_ps::scope_namespace;
 
 pub(crate) fn stable_hex_id(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))

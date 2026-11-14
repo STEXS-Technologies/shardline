@@ -27,11 +27,7 @@ pub(crate) fn parse_sha256_digest(value: &str) -> Result<String, ServerError> {
     core_ps::parse_sha256_digest(value)
 }
 
-pub(crate) fn scope_namespace(
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
-) -> String {
-    core_ps::scope_namespace(repository_scope)
-}
+pub(crate) use core_ps::scope_namespace;
 
 /// Historical ambiguous spelling, retained for compatibility fixtures.
 #[cfg(test)]
