@@ -24,3 +24,7 @@ TODO_*.md
 # Documentation and CI workflows do not contribute to the runtime binary.
 docs
 .github
+
+# Developer tooling and the standalone E2E workspace are not binary inputs.
+scripts
+e2e
