@@ -859,27 +859,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn put_bytes_if_absent_creates_private_file_and_directory_modes() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
         let path = root.join("nested").join("chunk.bin");
 
         let wrote = put_bytes_if_absent(&root, &path, b"payload");
         assert!(matches!(wrote, Ok(PutBytesIfAbsentOutcome::Inserted)));
 
-        let file_metadata = metadata(&path);
-        assert!(file_metadata.is_ok());
-        let Ok(file_metadata) = file_metadata else {
-            return;
-        };
-        let directory_metadata = metadata(root.join("nested"));
-        assert!(directory_metadata.is_ok());
-        let Ok(directory_metadata) = directory_metadata else {
-            return;
-        };
+        let file_metadata = metadata(&path).unwrap();
+        let directory_metadata = metadata(root.join("nested")).unwrap();
 
         assert_eq!(file_metadata.permissions().mode() & 0o777, 0o600);
         assert_eq!(directory_metadata.permissions().mode() & 0o777, 0o700);

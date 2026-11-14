@@ -115,11 +115,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_symlinked_ancestor_component() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let target = sandbox.path().join("target");
         let create = create_dir_all(&target);
         assert!(create.is_ok());
@@ -137,11 +133,7 @@ mod tests {
 
     #[test]
     fn rejects_non_directory_ancestor_component() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let file_path = sandbox.path().join("file");
         let file = File::create(&file_path);
         assert!(file.is_ok());
@@ -156,11 +148,7 @@ mod tests {
 
     #[test]
     fn allows_missing_components() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
 
         let result =
             ensure_directory_path_components_are_not_symlinked(&sandbox.path().join("missing"));

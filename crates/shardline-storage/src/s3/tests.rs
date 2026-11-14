@@ -419,16 +419,9 @@ fn s3_location_applies_key_prefix() {
                 None,
             )
             .with_key_prefix(Some("tenant-a")),
-    );
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
-    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    )
+    .unwrap();
+    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb").unwrap();
     let location = store.location_for_key(&key);
 
     assert!(location.is_ok());
@@ -479,11 +472,8 @@ fn s3_store_debug_redacts_credentials() {
                 Some(SecretString::from_secret("session-token")),
             )
             .with_key_prefix(Some("tenant-a")),
-    );
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    )
+    .unwrap();
 
     let rendered = format!("{store:?}");
 
@@ -494,11 +484,7 @@ fn s3_store_debug_redacts_credentials() {
 
 #[test]
 fn validated_external_range_converts_inclusive_byte_range() {
-    let range = ByteRange::new(3, 8);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ByteRange::new(3, 8).unwrap();
 
     let external = validated_external_range(range);
 
@@ -518,11 +504,8 @@ async fn stream_payload_for_range_rejects_mismatched_result_range() {
     );
     let result = store
         .get_opts(&location, GetOptions::new().with_range(Some(0..4)))
-        .await;
-    assert!(result.is_ok());
-    let Ok(result) = result else {
-        return;
-    };
+        .await
+        .unwrap();
 
     let stream = stream_payload_for_range(result, 1..5);
 
@@ -544,17 +527,10 @@ async fn stream_payload_for_range_preserves_streamed_bytes() {
     );
     let result = store
         .get_opts(&location, GetOptions::new().with_range(Some(0..4)))
-        .await;
-    assert!(result.is_ok());
-    let Ok(result) = result else {
-        return;
-    };
+        .await
+        .unwrap();
 
-    let stream = stream_payload_for_range(result, 0..4);
-    assert!(stream.is_ok());
-    let Ok(mut stream) = stream else {
-        return;
-    };
+    let mut stream = stream_payload_for_range(result, 0..4).unwrap();
     let mut observed = Vec::new();
     while let Some(item) = stream.next().await {
         assert!(item.is_ok());
@@ -1184,11 +1160,7 @@ fn validated_external_range_rejects_len_overflow() {
 
 #[test]
 fn validated_external_range_single_byte() {
-    let range = ByteRange::new(5, 5);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ByteRange::new(5, 5).unwrap();
 
     let external = validated_external_range(range);
 
