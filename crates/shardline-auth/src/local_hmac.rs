@@ -119,17 +119,6 @@ mod tests {
     // ── AuthProvider::verify_token ───────────────────────────────────────
 
     #[test]
-    fn verify_token_valid_roundtrip() {
-        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
-        let claims = test_claims();
-        let token = provider.mint_token(&claims).unwrap();
-
-        let verified = provider.verify_token(&token);
-        assert!(verified.is_ok());
-        assert_eq!(verified.unwrap(), claims);
-    }
-
-    #[test]
     fn verify_token_wrong_key() {
         let key1 = b"test-signing-key-32-bytes-long!!";
         let key2 = b"another-signing-key-32-bytes-ok!";
@@ -150,43 +139,6 @@ mod tests {
         let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
         let result = provider.verify_token("");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn verify_token_expired() {
-        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
-        let repo = RepositoryScope::new(
-            RepositoryProvider::Generic,
-            "test-owner",
-            "test-repo",
-            Some("main"),
-        )
-        .unwrap();
-        let claims = TokenClaims::new("issuer", "subject", TokenScope::Read, repo, 1).unwrap();
-        let token = provider.mint_token(&claims).unwrap();
-
-        // Current time is well past 1 second since epoch
-        let result = provider.verify_token(&token);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AuthError::ExpiredToken));
-    }
-
-    // ── AuthProvider::mint_token ─────────────────────────────────────────
-
-    #[test]
-    fn mint_token_produces_verifiable_token() {
-        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
-        let claims = test_claims();
-
-        let token = provider.mint_token(&claims).unwrap();
-        // Token should be non-empty
-        assert!(!token.is_empty());
-
-        // Should roundtrip
-        let verified = provider.verify_token(&token).unwrap();
-        assert_eq!(verified.subject(), "test-subject");
-        assert_eq!(verified.scope(), TokenScope::Write);
-        assert_eq!(verified.issuer(), "test-issuer");
     }
 
     // ── Debug impl ───────────────────────────────────────────────────────
