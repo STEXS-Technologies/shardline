@@ -16,6 +16,8 @@ mod scale;
 mod short_circuit;
 #[cfg(test)]
 mod snapshot;
+#[cfg(test)]
+mod test_support;
 
 /// Discovery only: a nonempty candidate proves membership, not range access.
 pub(crate) async fn first_xorb_coverage<Store>(

@@ -1,9 +1,7 @@
 //! Explicit synthetic application-level PostgreSQL authorization diagnostic.
 
 use super::repository_covers_xorb_range;
-use shardline_index::{
-    FileChunkRecord, FileRecord, PostgresRecordStore, RecordTraversal, StorageRepresentation,
-};
+use shardline_index::{PostgresRecordStore, RecordTraversal};
 use shardline_protocol::{ByteRange, RepositoryProvider, RepositoryScope};
 use std::time::{Duration, Instant};
 
@@ -36,23 +34,7 @@ async fn verify_scale(include_late: bool, file_hint: bool) {
     let store = PostgresRecordStore::new(pool.clone());
     let scope = RepositoryScope::new(RepositoryProvider::Generic, "team", "range", None).unwrap();
     let hash = "a".repeat(64);
-    let record = FileRecord {
-        file_id: "scale-0000000".into(),
-        content_hash: "b".repeat(64),
-        total_bytes: 4,
-        chunk_size: 0,
-        storage_repr: StorageRepresentation::WholeFileV1,
-        repository_scope: Some(scope.clone()),
-        chunks: vec![FileChunkRecord {
-            hash: hash.clone(),
-            offset: 0,
-            length: 4,
-            range_start: 0,
-            range_end: 1,
-            packed_start: 0,
-            packed_end: 12,
-        }],
-    };
+    let record = super::test_support::record("scale-0000000", &hash, &scope);
     store.commit_file_version_metadata(&record).await.unwrap();
     let template = if file_hint {
         store.latest_record_locator(&record)
