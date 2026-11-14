@@ -146,18 +146,30 @@ mod tests {
     }
 
     #[test]
-    fn codeberg_adapter_parses_repository_access_change_webhook() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "action":"transferred",
-            "repository":{"full_name":"team/assets"}
-        }"#;
-        let signature = signature(body);
-        let request = WebhookRequest::new("repository", "delivery-4", signature.as_deref(), body);
-
-        let event = adapter.parse_webhook(request).unwrap();
-        let event = event.expect("expected webhook event");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    fn codeberg_adapter_repository_access_changes() {
+        for (action, delivery_id) in [
+            ("transferred", "delivery-4"),
+            ("edited", "delivery-edit"),
+            ("archived", "delivery-arch"),
+            ("unarchived", "delivery-unarch"),
+            ("privatized", "delivery-priv"),
+            ("publicized", "delivery-pub"),
+        ] {
+            let adapter = adapter().unwrap();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "action": action,
+                "repository": {"full_name": "team/assets"},
+            }))
+            .unwrap();
+            let signature = signature(&body);
+            let request =
+                WebhookRequest::new("repository", delivery_id, signature.as_deref(), &body);
+            let result = adapter.parse_webhook(request);
+            assert!(
+                matches!(&result, Ok(Some(event)) if event.kind() == &RepositoryWebhookEventKind::AccessChanged),
+                "action {action}: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -233,30 +245,6 @@ mod tests {
             event,
             Err(BuiltInProviderError::InvalidRevisionPayload)
         ));
-    }
-
-    #[test]
-    fn codeberg_adapter_repository_edited_as_access_change() {
-        let adapter = adapter().unwrap();
-        let body = br#"{"action":"edited","repository":{"full_name":"team/assets"}}"#;
-        let signature = signature(body);
-        let request =
-            WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let event = event.expect("expected webhook event");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
-    }
-
-    #[test]
-    fn codeberg_adapter_repository_archived_as_access_change() {
-        let adapter = adapter().unwrap();
-        let body = br#"{"action":"archived","repository":{"full_name":"team/assets"}}"#;
-        let signature = signature(body);
-        let request =
-            WebhookRequest::new("repository", "delivery-arch", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let event = event.expect("expected webhook event");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
     #[test]
@@ -397,50 +385,6 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::Codeberg, "unknown", "repo").unwrap();
         let result = adapter.repository_metadata(&repository);
         assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
-    }
-
-    #[test]
-    fn codeberg_adapter_repository_privatized_as_access_change() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "action":"privatized",
-            "repository":{"full_name":"team/assets"}
-        }"#;
-        let signature = signature(body);
-        let request =
-            WebhookRequest::new("repository", "delivery-priv", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let event = event.expect("expected webhook event");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
-    }
-
-    #[test]
-    fn codeberg_adapter_repository_publicized_as_access_change() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "action":"publicized",
-            "repository":{"full_name":"team/assets"}
-        }"#;
-        let signature = signature(body);
-        let request = WebhookRequest::new("repository", "delivery-pub", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let event = event.expect("expected webhook event");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
-    }
-
-    #[test]
-    fn codeberg_adapter_repository_unarchived_as_access_change() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "action":"unarchived",
-            "repository":{"full_name":"team/assets"}
-        }"#;
-        let signature = signature(body);
-        let request =
-            WebhookRequest::new("repository", "delivery-unarch", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let event = event.expect("expected webhook event");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
     #[test]
