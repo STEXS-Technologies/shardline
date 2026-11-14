@@ -52,27 +52,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn write_file_atomically_creates_private_file_and_directory_modes() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
         let path = root.join("nested").join("record.json");
 
         let wrote = write_file_atomically(&root, &path, br#"{"ok":true}"#);
         assert!(wrote.is_ok());
 
-        let file_metadata = metadata(&path);
-        assert!(file_metadata.is_ok());
-        let Ok(file_metadata) = file_metadata else {
-            return;
-        };
-        let directory_metadata = metadata(root.join("nested"));
-        assert!(directory_metadata.is_ok());
-        let Ok(directory_metadata) = directory_metadata else {
-            return;
-        };
+        let file_metadata = metadata(&path).unwrap();
+        let directory_metadata = metadata(root.join("nested")).unwrap();
 
         assert_eq!(file_metadata.permissions().mode() & 0o777, 0o600);
         assert_eq!(directory_metadata.permissions().mode() & 0o777, 0o700);
@@ -81,11 +69,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn write_file_atomically_creates_nested_directory_structure() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
         let path = root
             .join("deeply")
@@ -96,43 +80,14 @@ mod tests {
         let wrote = write_file_atomically(&root, &path, br#"{"ok":true}"#);
         assert!(wrote.is_ok());
 
-        let file_metadata = metadata(&path);
-        assert!(file_metadata.is_ok());
-        let Ok(file_metadata) = file_metadata else {
-            return;
-        };
+        let file_metadata = metadata(&path).unwrap();
         assert_eq!(file_metadata.permissions().mode() & 0o777, 0o600);
     }
 
     #[cfg(unix)]
     #[test]
-    fn write_file_atomically_handles_symlink_resolution() {
-        use std::os::unix::fs::symlink;
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
-        let root = sandbox.path().join("root");
-        let link = sandbox.path().join("link_to_root");
-        let _ = symlink(&root, &link);
-        let path = link.join("nested").join("record.json");
-
-        let wrote = write_file_atomically(&root, &path, br#"{"data":1}"#);
-        // This should succeed since the symlinked prefix resolves to root
-        // but open_anchored_target requires the path to be under root.
-        // The anchored path check rejects paths outside root.
-        assert!(wrote.is_ok() || wrote.is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn write_file_atomically_fails_when_path_outside_root() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
         let outside = sandbox.path().join("outside");
 

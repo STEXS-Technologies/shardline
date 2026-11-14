@@ -525,27 +525,13 @@ mod tests {
 
     #[test]
     fn storage_migration_copies_local_objects_idempotently() {
-        let source = tempfile::tempdir();
-        assert!(source.is_ok());
-        let Ok(source) = source else {
-            return;
-        };
-        let destination = tempfile::tempdir();
-        assert!(destination.is_ok());
-        let Ok(destination) = destination else {
-            return;
-        };
-        let source_store = ServerObjectStore::local(source.path().join("chunks"));
-        assert!(source_store.is_ok());
-        let Ok(source_store) = source_store else {
-            return;
-        };
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
         let body = b"payload";
-        let key = chunk_object_key_for_computed_hash(chunk_hash(body)).map(|(_hash, key)| key);
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = chunk_object_key_for_computed_hash(chunk_hash(body))
+            .map(|(_hash, key)| key)
+            .unwrap();
         let integrity = ObjectIntegrity::new(chunk_hash(body), 7);
         let put = source_store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
         assert!(put.is_ok());
@@ -761,16 +747,8 @@ mod tests {
 
     #[test]
     fn storage_migration_rejects_corrupt_source_chunk_key() {
-        let source = tempfile::tempdir();
-        assert!(source.is_ok());
-        let Ok(source) = source else {
-            return;
-        };
-        let destination = tempfile::tempdir();
-        assert!(destination.is_ok());
-        let Ok(destination) = destination else {
-            return;
-        };
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
         let key =
             ObjectKey::parse("aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert!(key.is_ok());
@@ -778,11 +756,7 @@ mod tests {
             return;
         };
         let source_path = source.path().join("chunks").join(key.as_str());
-        let parent = source_path.parent();
-        assert!(parent.is_some());
-        let Some(parent) = parent else {
-            return;
-        };
+        let parent = source_path.parent().unwrap();
         let created = fs::create_dir_all(parent);
         assert!(created.is_ok());
         let written = fs::write(&source_path, b"corrupt-source-bytes");

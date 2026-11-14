@@ -252,11 +252,7 @@ mod tests {
 
     #[test]
     fn server_auth_rejects_missing_header() {
-        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
-        assert!(auth.is_ok());
-        let Ok(auth) = auth else {
-            return;
-        };
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!").unwrap();
 
         assert!(matches!(
             auth.authorize(&HeaderMap::new(), TokenScope::Read),
@@ -266,16 +262,8 @@ mod tests {
 
     #[test]
     fn server_auth_rejects_insufficient_scope() {
-        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
-        assert!(auth.is_ok());
-        let Ok(auth) = auth else {
-            return;
-        };
-        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
         assert!(repository.is_ok());
@@ -288,22 +276,11 @@ mod tests {
             TokenScope::Read,
             repository,
             u64::MAX,
-        );
-        assert!(claims.is_ok());
-        let Ok(claims) = claims else {
-            return;
-        };
-        let token = signer.sign(&claims);
-        assert!(token.is_ok());
-        let Ok(token) = token else {
-            return;
-        };
+        )
+        .unwrap();
+        let token = signer.sign(&claims).unwrap();
         let mut headers = HeaderMap::new();
-        let header_value = HeaderValue::from_str(&format!("Bearer {token}"));
-        assert!(header_value.is_ok());
-        let Ok(header_value) = header_value else {
-            return;
-        };
+        let header_value = HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
         headers.insert(AUTHORIZATION, header_value);
 
         assert!(matches!(
@@ -314,18 +291,10 @@ mod tests {
 
     #[test]
     fn server_auth_rejects_oversized_bearer_token_before_decoding() {
-        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
-        assert!(auth.is_ok());
-        let Ok(auth) = auth else {
-            return;
-        };
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!").unwrap();
         let token = "a".repeat(MAX_TOKEN_STRING_BYTES + 1);
         let mut headers = HeaderMap::new();
-        let header_value = HeaderValue::from_str(&format!("Bearer {token}"));
-        assert!(header_value.is_ok());
-        let Ok(header_value) = header_value else {
-            return;
-        };
+        let header_value = HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
         headers.insert(AUTHORIZATION, header_value);
 
         assert!(matches!(
@@ -336,11 +305,7 @@ mod tests {
 
     #[test]
     fn server_auth_rejects_bearer_token_with_whitespace() {
-        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
-        assert!(auth.is_ok());
-        let Ok(auth) = auth else {
-            return;
-        };
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!").unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -355,16 +320,8 @@ mod tests {
 
     #[test]
     fn server_auth_accepts_valid_write_token() {
-        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
-        assert!(auth.is_ok());
-        let Ok(auth) = auth else {
-            return;
-        };
-        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
         assert!(repository.is_ok());
@@ -377,22 +334,11 @@ mod tests {
             TokenScope::Write,
             repository,
             u64::MAX,
-        );
-        assert!(claims.is_ok());
-        let Ok(claims) = claims else {
-            return;
-        };
-        let token = signer.sign(&claims);
-        assert!(token.is_ok());
-        let Ok(token) = token else {
-            return;
-        };
+        )
+        .unwrap();
+        let token = signer.sign(&claims).unwrap();
         let mut headers = HeaderMap::new();
-        let header_value = HeaderValue::from_str(&format!("Bearer {token}"));
-        assert!(header_value.is_ok());
-        let Ok(header_value) = header_value else {
-            return;
-        };
+        let header_value = HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
         headers.insert(AUTHORIZATION, header_value);
 
         let context = auth.authorize(&headers, TokenScope::Read);
