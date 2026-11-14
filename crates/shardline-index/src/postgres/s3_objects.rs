@@ -10,8 +10,7 @@ use crate::{S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, s3_prefix_succ
 use shardline_reliability::{
     OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
     S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
-    build_reliability_merkle_commit_with_previous, persisted_event_sequence,
-    verify_and_append_snapshot_transition, verify_persisted_merkle_commit_with_previous,
+    build_reliability_merkle_commit_with_previous, verify_and_append_snapshot_transition,
     verify_snapshot_event, verify_snapshot_evidence,
 };
 
@@ -357,74 +356,21 @@ async fn load_s3_object_evidence_head(
     object_key: &str,
 ) -> Result<S3ObjectEvidenceHead, PostgresMetadataStoreError> {
     let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
-    let row = query(
-        "SELECT evidence.sequence, evidence.event_json,
-                evidence.merkle_commit_json AS evidence_merkle_json,
-                previous_evidence.merkle_commit_json AS previous_evidence_merkle_json
-         FROM LATERAL (
-             SELECT sequence, event_json, merkle_commit_json
-             FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id = $2
-             ORDER BY sequence DESC
-             LIMIT 1
-         ) AS evidence
-         LEFT JOIN LATERAL (
-             SELECT CASE WHEN EXISTS (
-                 SELECT 1
-                 FROM shardline_reliability_events AS missing
-                 WHERE missing.operation_kind = $1 AND missing.operation_id = $2
-                   AND missing.sequence < evidence.sequence
-                   AND missing.merkle_commit_json IS NULL
-             ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE (
-                 SELECT previous.merkle_commit_json
-                 FROM shardline_reliability_events AS previous
-                 WHERE previous.operation_kind = $1 AND previous.operation_id = $2
-                   AND previous.sequence < evidence.sequence
-                 ORDER BY previous.sequence DESC LIMIT 1
-             ) END AS merkle_commit_json
-             FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id = $2
-               AND sequence < evidence.sequence
-             ORDER BY sequence DESC
-             LIMIT 1
-         ) AS previous_evidence ON TRUE",
+    let Some(head) = super::index_store::load_postgres_latest_evidence_head(
+        connection,
+        OperationKind::S3Object,
+        &operation.operation_id,
     )
-    .bind(OperationKind::S3Object.as_str())
-    .bind(&operation.operation_id)
-    .fetch_optional(&mut *connection)
-    .await?;
-    let Some(row) = row else {
+    .await?
+    else {
         return Ok(S3ObjectEvidenceHead {
             evidence: S3ObjectEvidenceLog::default(),
             commitment: None,
         });
     };
-    let sequence = i64_to_u64(row.try_get("sequence")?)?;
-    let event_json: serde_json::Value = row.try_get("event_json")?;
-    let event_sequence = persisted_event_sequence(OperationKind::S3Object, event_json.clone())?;
-    if sequence != event_sequence {
-        return Err(PostgresMetadataStoreError::Reliability(
-            shardline_reliability::ReliabilityError::Merkle(
-                "S3 evidence row sequence does not match its event".into(),
-            ),
-        ));
-    }
-    let event: S3ObjectLifecycleEvent = from_value(event_json.clone())?;
-    if event.operation.operation_id != operation.operation_id {
-        return Err(PostgresMetadataStoreError::Reliability(
-            shardline_reliability::ReliabilityError::OperationMismatch,
-        ));
-    }
-    let commitment_json: Option<serde_json::Value> = row.try_get("evidence_merkle_json")?;
-    verify_persisted_merkle_commit_with_previous(
-        OperationKind::S3Object,
-        event_json,
-        commitment_json.clone(),
-        row.try_get("previous_evidence_merkle_json")?,
-    )?;
     Ok(S3ObjectEvidenceHead {
-        evidence: S3ObjectEvidenceLog::from_head(event)?,
-        commitment: commitment_json,
+        evidence: S3ObjectEvidenceLog::from_head(from_value(head.event_json)?)?,
+        commitment: head.merkle_commit_json,
     })
 }
 

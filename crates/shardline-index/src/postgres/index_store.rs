@@ -39,6 +39,24 @@ pub(crate) async fn load_postgres_latest_evidence_event(
     operation_kind: OperationKind,
     operation_id: &str,
 ) -> Result<Option<serde_json::Value>, PostgresMetadataStoreError> {
+    Ok(
+        load_postgres_latest_evidence_head(executor, operation_kind, operation_id)
+            .await?
+            .map(|head| head.event_json),
+    )
+}
+
+pub(super) struct PostgresEvidenceHead {
+    pub(super) event_json: serde_json::Value,
+    pub(super) merkle_commit_json: Option<serde_json::Value>,
+}
+
+/// Loads the verified event and its commitment from the same database snapshot.
+pub(super) async fn load_postgres_latest_evidence_head(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<Option<PostgresEvidenceHead>, PostgresMetadataStoreError> {
     let row = query(
         "SELECT latest.sequence, latest.event_json, latest.merkle_commit_json,
                 CASE WHEN EXISTS (
@@ -89,13 +107,17 @@ pub(crate) async fn load_postgres_latest_evidence_event(
             shardline_reliability::ReliabilityError::OperationMismatch,
         ));
     }
+    let merkle_commit_json: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
     verify_persisted_merkle_commit_with_previous(
         operation_kind,
         event_json.clone(),
-        row.try_get("merkle_commit_json")?,
+        merkle_commit_json.clone(),
         row.try_get("previous_merkle_commit_json")?,
     )?;
-    Ok(Some(event_json))
+    Ok(Some(PostgresEvidenceHead {
+        event_json,
+        merkle_commit_json,
+    }))
 }
 
 /// Loads and verifies the current evidence boundary for many operations in a
