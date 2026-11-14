@@ -77,20 +77,26 @@ workspace = false
 command = "cargo"
 args = ["check", "--workspace", "--all-targets", "--all-features", "${@}"]
 
+# Check the executable and exact version before considering an installation.
+# Explicit metadata also works for tasks whose command is a Bash script.
+[tasks.setup-nextest]
+description = "Reuse or install the pinned Nextest test runner"
+workspace = false
+install_crate = { crate_name = "cargo-nextest", binary = "cargo-nextest", test_arg = "--version", version = "0.9.123" }
+command = "cargo"
+args = ["nextest", "--version"]
+
 [tasks.test]
 description = "Run workspace lib tests (fast, no external infrastructure needed)"
 workspace = false
-install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked", "--force"]
+dependencies = ["setup-nextest"]
 command = "cargo"
 args = ["nextest", "run", "--workspace", "--lib", "${@}"]
 
 [tasks.test-integration]
 description = "Run integration tests (requires Docker: Postgres, MinIO, Redis)"
 workspace = false
-dependencies = ["build-reliability-runtime-fixture"]
-install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked", "--force"]
+dependencies = ["setup-nextest", "build-reliability-runtime-fixture"]
 command = "cargo"
 # Nextest unions multiple -E expressions. Select all integration binaries once,
 # including Xet format contracts, without rerunning library tests in this gate.
@@ -115,8 +121,7 @@ args = ["rustc", "-p", "shardline-reliability", "--features", "process-runtime",
 [tasks.test-postgres]
 description = "Run Postgres-gated tests (requires DATABASE_URL env var)"
 workspace = false
-install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked", "--force"]
+dependencies = ["setup-nextest"]
 command = "bash"
 args = ["scripts/test-postgres.sh"]
 
@@ -141,8 +146,7 @@ args = ["scripts/shardline/verify_disk_pressure.py", "${@}"]
 [tasks.test-e2e]
 description = "Run e2e integration tests from the e2e/ folder"
 workspace = false
-install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked", "--force"]
+dependencies = ["setup-nextest"]
 command = "cargo"
 args = ["nextest", "run", "--locked", "--all-features", "${@}"]
 cwd = "e2e"
@@ -150,8 +154,7 @@ cwd = "e2e"
 [tasks.test-docker]
 description = "Run Docker-backed server integration and end-to-end tests"
 workspace = false
-install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked", "--force"]
+dependencies = ["setup-nextest"]
 command = "bash"
 args = ["-c", "docker version >/dev/null && cargo nextest run --locked -p shardline-server --features docker && (cd e2e && cargo nextest run --locked --all-features)"]
 
@@ -412,6 +415,7 @@ dependencies = ["ci-full", "test-overflow", "test-miri", "test-asan", "test-loom
 [tasks.test-loom]
 description = "Run Loom concurrency model-checking tests"
 workspace = false
+dependencies = ["setup-nextest"]
 command = "bash"
 args = ["-c", "RUSTFLAGS='--cfg loom' cargo nextest run -p shardline-loom-tests"]
 
@@ -451,16 +455,14 @@ args = ["${@}"]
 [tasks.chaos-test]
 description = "Run the deterministic chaos-testing orchestrator (fault injection + invariant checks)"
 workspace = false
-install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked", "--force"]
+dependencies = ["setup-nextest"]
 command = "cargo"
 args = ["nextest", "run", "-p", "shardline-server", "--test", "chaos_runner", "${@}"]
 
 [tasks.chaos-deployment]
 description = "Boot the shardline-chaos stack, migrate, and run real-deployment chaos drills"
 workspace = false
-install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked", "--force"]
+dependencies = ["setup-nextest"]
 command = "bash"
 args = [
   "-c",

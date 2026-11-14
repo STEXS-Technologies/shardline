@@ -56,6 +56,11 @@ explicitly clean server/CLI build is needed.
 `cargo clean` removes the shared build cache, so keep it out of routine edit,
 build and test cycles.
 
+Contributor test tasks share `cargo make setup-nextest`, which checks for
+Nextest 0.9.123 and installs it only when missing or at a different version.
+CI installs the same version before running the gates. A failed installation
+stops the task rather than skipping tests.
+
 ### PostgreSQL qualification
 
 Use a disposable database and export its connection string as `DATABASE_URL`.
