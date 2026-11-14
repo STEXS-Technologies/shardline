@@ -8,22 +8,8 @@ use tokio::fs;
 
 use crate::ServerError;
 
-const MAX_IDENTIFIER_BYTES: usize = 1024;
-
 pub(crate) fn validate_identifier(value: &str) -> Result<(), ServerError> {
-    if value.trim().is_empty()
-        || value == "."
-        || value.len() > MAX_IDENTIFIER_BYTES
-        || value.starts_with('/')
-        || value.contains("..")
-        || value.contains('\\')
-        || value.contains('/')
-        || value.chars().any(char::is_control)
-    {
-        return Err(ServerError::InvalidFileId);
-    }
-
-    Ok(())
+    shardline_server_core::validate_identifier(value).map_err(|_error| ServerError::InvalidFileId)
 }
 
 pub(crate) fn validate_content_hash(value: &str) -> Result<(), ServerError> {
@@ -84,7 +70,7 @@ mod tests {
 
     use tokio::fs::create_dir_all;
 
-    use super::{MAX_IDENTIFIER_BYTES, validate_content_hash, validate_identifier};
+    use super::{validate_content_hash, validate_identifier};
     use crate::ServerError;
 
     #[test]
@@ -103,7 +89,7 @@ mod tests {
 
     #[test]
     fn identifier_rejects_oversized_values() {
-        let oversized = "f".repeat(MAX_IDENTIFIER_BYTES + 1);
+        let oversized = "f".repeat(1025);
         let result = validate_identifier(&oversized);
 
         assert!(matches!(result, Err(ServerError::InvalidFileId)));
