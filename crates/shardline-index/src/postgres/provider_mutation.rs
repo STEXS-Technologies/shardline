@@ -597,18 +597,12 @@ async fn load_provider_evidence(
     snapshot: &ProviderLifecycleSnapshot,
 ) -> Result<ProviderEvidenceLog, PostgresMetadataStoreError> {
     let operation_id = snapshot.evidence_operation()?.operation_id;
-    let event = super::index_store::load_postgres_latest_evidence_event(
+    super::index_store::load_postgres_snapshot_evidence(
         &mut **transaction,
         OperationKind::ProviderEvent,
         &operation_id,
     )
-    .await?;
-    let Some(event) = event else {
-        return Ok(ProviderEvidenceLog::default());
-    };
-    Ok(ProviderEvidenceLog::from_head(serde_json::from_value(
-        event,
-    )?)?)
+    .await
 }
 
 pub(super) async fn verify_provider_repository_state_evidence(

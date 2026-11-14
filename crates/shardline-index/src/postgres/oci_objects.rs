@@ -37,18 +37,12 @@ pub(super) async fn load_oci_evidence(
         key.kind.as_str(),
         key.digest_hex.clone(),
     )?);
-    let event = super::index_store::load_postgres_latest_evidence_event(
+    super::index_store::load_postgres_snapshot_evidence(
         &mut *executor,
         OperationKind::Visibility,
         operation_id.as_str(),
     )
-    .await?;
-    let Some(event) = event else {
-        return Ok(OciObjectEvidenceLog::default());
-    };
-    Ok(OciObjectEvidenceLog::from_head(serde_json::from_value(
-        event,
-    )?)?)
+    .await
 }
 
 async fn record_oci_evidence(

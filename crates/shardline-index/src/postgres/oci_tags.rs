@@ -30,16 +30,12 @@ async fn load_tag_evidence(
 ) -> Result<OciTagEvidenceLog, PostgresMetadataStoreError> {
     let operation =
         OciTagSnapshot::new(scope_namespace, repository, tag, None)?.evidence_operation()?;
-    let event = super::index_store::load_postgres_latest_evidence_event(
+    super::index_store::load_postgres_snapshot_evidence(
         &mut *connection,
         OperationKind::OciTag,
         &operation.operation_id,
     )
-    .await?;
-    let Some(event) = event else {
-        return Ok(OciTagEvidenceLog::default());
-    };
-    Ok(OciTagEvidenceLog::from_head(from_value(event)?)?)
+    .await
 }
 
 async fn current_tag_evidence(

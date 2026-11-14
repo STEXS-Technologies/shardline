@@ -7,10 +7,10 @@ use shardline_reliability::{
     EvidenceEventMetadata, LifecycleEvent, OperationKind, ProviderLifecycleEvent,
     QuarantineEvidenceLog, QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot,
     ReliabilityMerkleCommit, RetentionEvidenceLog, RetentionHoldLifecycleState,
-    RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog,
-    WebhookDeliveryIdentity, WebhookDeliveryLifecycleState, WebhookDeliverySnapshot,
-    append_or_baseline_snapshot_evidence, baseline_upload_lifecycle_events,
-    persisted_event_identity, persisted_event_sequence,
+    RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence, SnapshotEvidenceLog,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
+    WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
+    baseline_upload_lifecycle_events, persisted_event_identity, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, upload_lifecycle_event,
     upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_and_reactivate_quarantine, verify_persisted_event_merkle_chain,
@@ -44,6 +44,23 @@ pub(crate) async fn load_postgres_latest_evidence_event(
             .await?
             .map(|head| head.event_json),
     )
+}
+
+/// Loads one verified snapshot head, or an empty log when no boundary exists.
+pub(super) async fn load_postgres_snapshot_evidence<S>(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<SnapshotEvidenceLog<S>, PostgresMetadataStoreError>
+where
+    S: SnapshotEvidence + serde::de::DeserializeOwned,
+{
+    match load_postgres_latest_evidence_event(executor, operation_kind, operation_id).await? {
+        Some(event) => Ok(SnapshotEvidenceLog::from_head(serde_json::from_value(
+            event,
+        )?)?),
+        None => Ok(SnapshotEvidenceLog::default()),
+    }
 }
 
 pub(super) struct PostgresEvidenceHead {
@@ -477,30 +494,14 @@ async fn load_postgres_quarantine_evidence(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     object_key: &str,
 ) -> Result<QuarantineEvidenceLog, PostgresMetadataStoreError> {
-    let event =
-        load_postgres_latest_evidence_event(executor, OperationKind::GarbageCollection, object_key)
-            .await?;
-    let Some(event) = event else {
-        return Ok(QuarantineEvidenceLog::default());
-    };
-    Ok(QuarantineEvidenceLog::from_head(serde_json::from_value(
-        event,
-    )?)?)
+    load_postgres_snapshot_evidence(executor, OperationKind::GarbageCollection, object_key).await
 }
 
 pub(super) async fn load_postgres_retention_evidence(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     object_key: &str,
 ) -> Result<RetentionEvidenceLog, PostgresMetadataStoreError> {
-    let event =
-        load_postgres_latest_evidence_event(executor, OperationKind::RetentionHold, object_key)
-            .await?;
-    let Some(event) = event else {
-        return Ok(RetentionEvidenceLog::default());
-    };
-    Ok(RetentionEvidenceLog::from_head(serde_json::from_value(
-        event,
-    )?)?)
+    load_postgres_snapshot_evidence(executor, OperationKind::RetentionHold, object_key).await
 }
 
 fn quarantine_snapshot(
