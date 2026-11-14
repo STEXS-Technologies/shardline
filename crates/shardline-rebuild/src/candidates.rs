@@ -182,12 +182,12 @@ where
         return Ok(());
     }
 
+    let key = rebuild_key(&record);
     let candidate = VersionCandidate {
-        record: record.clone(),
+        record,
         locator: path,
         modified_since_epoch,
     };
-    let key = rebuild_key(&record);
     match candidates.get_mut(&key) {
         Some(existing) if candidate_is_newer(&candidate, existing) => {
             *existing = candidate;
@@ -202,22 +202,14 @@ where
 }
 
 fn rebuild_key(record: &FileRecord) -> RebuildKey {
-    record.repository_scope.as_ref().map_or_else(
-        || RebuildKey {
-            provider: None,
-            owner: None,
-            name: None,
-            revision: None,
-            file_id: record.file_id.clone(),
-        },
-        |repository_scope| RebuildKey {
-            provider: Some(provider_directory(repository_scope.provider())),
-            owner: Some(repository_scope.owner().to_owned()),
-            name: Some(repository_scope.name().to_owned()),
-            revision: repository_scope.revision().map(ToOwned::to_owned),
-            file_id: record.file_id.clone(),
-        },
-    )
+    let scope = record.repository_scope.as_ref();
+    RebuildKey {
+        provider: scope.map(|scope| provider_directory(scope.provider())),
+        owner: scope.map(|scope| scope.owner().to_owned()),
+        name: scope.map(|scope| scope.name().to_owned()),
+        revision: scope.and_then(|scope| scope.revision().map(ToOwned::to_owned)),
+        file_id: record.file_id.clone(),
+    }
 }
 
 fn candidate_is_newer<Locator>(
