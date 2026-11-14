@@ -366,12 +366,7 @@ where
     RecordAdapter: RecordStore + Sync,
     RecordAdapter::Error: Into<ProviderEventsError>,
 {
-    for locator in old_latest_locators {
-        RecordMutation::delete_record_locator(record_store, &locator)
-            .await
-            .map_err(Into::into)?;
-    }
-    for locator in old_version_locators {
+    for locator in old_latest_locators.into_iter().chain(old_version_locators) {
         RecordMutation::delete_record_locator(record_store, &locator)
             .await
             .map_err(Into::into)?;
