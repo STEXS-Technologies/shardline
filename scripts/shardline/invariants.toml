@@ -134,3 +134,20 @@ tests = [
   { file = "crates/shardline-s3-adapter/src/multipart.rs", name = "uncommitted_evidence_journal_tail_is_ignored_after_metadata_crash", backend = "local-journal" },
   { file = "crates/shardline-s3-adapter/src/multipart.rs", name = "uncommitted_merkle_journal_tail_is_trimmed_after_metadata_crash", backend = "local-journal" },
 ]
+
+[[invariant]]
+id = "I-TASK-HISTORY"
+guarantee = "Paginated task inspection and oldest-first retention preserve unfinished or unreadable evidence and user payloads; deleted cursors must not reset pagination."
+owners = ["crates/shardline-server/src/task_tracking/status.rs", "crates/shardline-server/src/task_tracking/retention.rs"]
+failure_boundaries = ["multiple inspection pages", "multiple 64-run retention batches", "deleted cursor", "unfinished history", "unreadable manifest", "invalid key beyond the requested page", "conflicting legacy identity"]
+# Keep both automatic backlog sizes: the larger fixture checks scale across
+# more retention batches. The ignored capacity drill supplements these checks;
+# its script is an explicit qualification command, not an automatic CI gate.
+tests = [
+  { file = "crates/shardline-server/src/task_tracking/tests.rs", name = "metadata_backlog_paginates_and_drains_without_removing_unfinished_or_corrupt_history", backend = "sqlite" },
+  { file = "crates/shardline-server/src/task_tracking/tests.rs", name = "larger_metadata_backlog_preserves_pagination_and_safe_retention", backend = "sqlite" },
+  { file = "crates/shardline-server/src/task_tracking/tests.rs", name = "metadata_retention_uses_creation_time_instead_of_key_order", backend = "sqlite" },
+  { file = "crates/shardline-server/src/task_tracking/tests.rs", name = "unfinished_history_does_not_starve_finished_history_retention", backend = "sqlite" },
+  { file = "crates/shardline-server/src/task_tracking/tests.rs", name = "batched_local_retention_preserves_conflicting_legacy_identity", backend = "sqlite" },
+  { file = "crates/shardline-server/src/task_tracking/tests.rs", name = "full_automatic_metadata_capacity_preserves_inspection_and_cleanup", backend = "sqlite-scale", prerequisites = ["explicit ignored test in release mode", "scripts/shardline/verify_maintenance_history_capacity.sh"] },
+]
