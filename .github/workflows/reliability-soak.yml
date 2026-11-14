@@ -34,6 +34,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-nextest@0.9.123
 
       - name: Run replayable chaos soak
         env:
@@ -66,6 +69,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-make,cargo-nextest@0.9.123
 
       - name: Install independent wall-clock fault injector
         run: |
@@ -122,6 +128,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-nextest@0.9.123
 
       - name: Run repeated resource-pressure recovery campaign
         run: |
@@ -163,6 +172,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-nextest@0.9.123
 
       - name: Select adjacent released version
         id: adjacent
@@ -261,6 +273,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-nextest@0.9.123
 
       - name: Start PostgreSQL streaming pair
         run: docker compose -f docker-compose.postgres-failover.yml up -d --wait
@@ -309,6 +324,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-nextest@0.9.123
 
       - name: Repeat revoked-token existence and timing campaign
         run: |

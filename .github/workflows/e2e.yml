@@ -41,6 +41,9 @@ jobs:
 
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
+        with:
+          rust-components: ""
+          cargo-tools: cargo-nextest@0.9.123
 
       - name: Build shardline binary
         run: cargo build --locked --release -p shardline --bin shardline
@@ -162,7 +165,8 @@ jobs:
       - name: Run e2e tests
         env:
           USE_BAZEL_VERSION: "8.7.0"
-        run: cargo make test-e2e
+        working-directory: e2e
+        run: cargo nextest run --locked --all-features
 
       - name: Qualify repository creation races across PostgreSQL replicas
         run: >-
