@@ -45,18 +45,13 @@ where
     RecordAdapter::Error: Into<GcError>,
 {
     let mut records = HashMap::new();
-    for locator in record_store
-        .list_latest_record_locators()
-        .await
-        .map_err(Into::into)?
-    {
-        let bytes = record_store
-            .read_record_bytes(&locator)
-            .await
-            .map_err(Into::into)?;
-        let record = parse_stored_file_record_bytes(&bytes)?;
-        records.insert(record.file_id.clone(), record);
-    }
+    record_store
+        .visit_latest_records(|entry| {
+            let record = parse_stored_file_record_bytes(&entry.bytes)?;
+            records.insert(record.file_id.clone(), record);
+            Ok::<(), GcError>(())
+        })
+        .await?;
     Ok(records)
 }
 
