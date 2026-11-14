@@ -77,7 +77,6 @@ shardline-xet-core.workspace = true
 shardline-server-core.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 shardline-test-support = { workspace = true, features = ["docker"] }
-tempfile.workspace = true
 url.workspace = true
 
 [lints]
