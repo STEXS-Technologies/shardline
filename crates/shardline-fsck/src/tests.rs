@@ -455,78 +455,78 @@ async fn run_fsck_with_empty_stores_returns_clean_report() {
 
 #[test]
 fn fsck_issue_detail_display_all_variants() {
-    let cases: &[(FsckIssueDetail, &str)] = &[
+    let cases: &[(FsckIssueDetail, &[&str])] = &[
         (
             FsckIssueDetail::MissingVersionRecord {
                 version_locator: "loc".to_owned(),
             },
-            "version record",
+            &["version record"],
         ),
-        (FsckIssueDetail::OversizedRecordMetadata, "ceiling"),
-        (FsckIssueDetail::RecordJsonInvalid, "json"),
+        (FsckIssueDetail::OversizedRecordMetadata, &["ceiling"]),
+        (FsckIssueDetail::RecordJsonInvalid, &["json"]),
         (
             FsckIssueDetail::InvalidFileId {
                 file_id: "bad".to_owned(),
             },
-            "bad",
+            &["bad"],
         ),
         (
             FsckIssueDetail::InvalidContentHash {
                 content_hash: "badhash".to_owned(),
             },
-            "badhash",
+            &["badhash"],
         ),
         (
             FsckIssueDetail::RecordPathMismatch {
                 expected_locator: "expected".to_owned(),
             },
-            "expected",
+            &["expected"],
         ),
-        (FsckIssueDetail::RecordFileIdPathMismatch, "path"),
-        (FsckIssueDetail::RecordContentHashPathMismatch, "hash"),
+        (FsckIssueDetail::RecordFileIdPathMismatch, &["path"]),
+        (FsckIssueDetail::RecordContentHashPathMismatch, &["hash"]),
         (
             FsckIssueDetail::InvalidChunkHash {
                 chunk_hash: "chunk-hash".to_owned(),
             },
-            "chunk-hash",
+            &["chunk-hash"],
         ),
         (
             FsckIssueDetail::InvalidXorbHash {
                 xorb_hash: "xorb-hash".to_owned(),
             },
-            "xorb-hash",
+            &["xorb-hash"],
         ),
         (
             FsckIssueDetail::ReferencedByRecord {
                 record_location: "loc".to_owned(),
             },
-            "loc",
+            &["loc"],
         ),
         (
             FsckIssueDetail::ReferencedByNativeXetRecord {
                 record_location: "native-loc".to_owned(),
             },
-            "native-loc",
+            &["native-loc"],
         ),
         (
             FsckIssueDetail::ReferencedByNativeXetXorb {
                 xorb_location: "xorb-loc".to_owned(),
             },
-            "xorb-loc",
+            &["xorb-loc"],
         ),
         (
             FsckIssueDetail::HashMismatch {
                 expected_hash: "abc".to_owned(),
                 observed_hash: "def".to_owned(),
             },
-            "abc",
+            &["abc"],
         ),
         (
             FsckIssueDetail::LengthMismatch {
                 expected_length: 10,
                 observed_length: 5,
             },
-            "10",
+            &["10"],
         ),
         (
             FsckIssueDetail::XorbRangeExceededChunkCount {
@@ -534,51 +534,102 @@ fn fsck_issue_detail_display_all_variants() {
                 range_end: 5,
                 chunk_count: 3,
             },
-            "5",
+            &["5"],
         ),
         (
             FsckIssueDetail::MismatchedVersionRecord {
                 version_locator: "vloc".to_owned(),
             },
-            "vloc",
+            &["vloc"],
         ),
         (
             FsckIssueDetail::MappedChunkHash {
                 chunk_hash: "mapped-hash".to_owned(),
             },
-            "mapped-hash",
+            &["mapped-hash"],
         ),
         (
             FsckIssueDetail::MappedChunkHashAbsentFromRetainedShard {
                 chunk_hash: "absent-hash".to_owned(),
             },
-            "absent-hash",
+            &["absent-hash"],
         ),
-        (FsckIssueDetail::ReconstructionListedUnreadableRow, "row"),
-        (FsckIssueDetail::ReconstructionContainedNoTerms, "terms"),
+        (FsckIssueDetail::ReconstructionListedUnreadableRow, &["row"]),
+        (FsckIssueDetail::ReconstructionContainedNoTerms, &["terms"]),
         (
             FsckIssueDetail::MissingReconstructionXorb {
                 xorb_hash: "missing-xorb".to_owned(),
             },
-            "missing-xorb",
+            &["missing-xorb"],
+        ),
+        (
+            FsckIssueDetail::InvalidRetainedShard(
+                InvalidSerializedShardError::ParserRejectedMetadata,
+            ),
+            &[],
+        ),
+        (
+            FsckIssueDetail::InvalidReconstructionPlan(
+                FsckReconstructionPlanDetail::ChunkHashInvalid,
+            ),
+            &[],
+        ),
+        (
+            FsckIssueDetail::InvalidQuarantineTimeline {
+                delete_after_unix_seconds: 10,
+                first_seen_unreachable_at_unix_seconds: 100,
+            },
+            &["10", "100"],
+        ),
+        (
+            FsckIssueDetail::InvalidRetentionTimeline {
+                release_after_unix_seconds: 50,
+                held_at_unix_seconds: 100,
+            },
+            &["50", "100"],
+        ),
+        (
+            FsckIssueDetail::ActiveRetentionHoldReason {
+                reason: "legal hold".to_owned(),
+            },
+            &["legal hold"],
+        ),
+        (FsckIssueDetail::ActiveRetentionHoldQuarantined, &[]),
+        (
+            FsckIssueDetail::WebhookDeliveryTimestampExceeded {
+                processed_at_unix_seconds: 2000,
+                max_allowed_unix_seconds: 1000,
+            },
+            &["2000"],
+        ),
+        (FsckIssueDetail::ProviderRepositoryIdentityInvalid, &[]),
+        (
+            FsckIssueDetail::ProviderRepositoryStateTimestampExceeded {
+                field: ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
+                timestamp: 2000,
+                max_allowed_unix_seconds: 1000,
+            },
+            &["2000", "last_access_changed_at_unix_seconds"],
+        ),
+        (
+            FsckIssueDetail::QuarantineReferencedMissingObject,
+            &["missing object"],
+        ),
+        (
+            FsckIssueDetail::QuarantineTargetedReachableObject,
+            &["reachable"],
         ),
     ];
-    for (detail, substring) in cases {
+    for (detail, substrings) in cases {
         let msg = detail.to_string();
         assert!(!msg.is_empty(), "empty display for {detail:?}");
-        assert!(
-            msg.contains(substring),
-            "expected '{substring}' in '{msg}' from {detail:?}"
-        );
+        for substring in *substrings {
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {detail:?}"
+            );
+        }
     }
-}
-
-#[test]
-fn fsck_issue_detail_invalid_retained_shard_display() {
-    let detail =
-        FsckIssueDetail::InvalidRetainedShard(InvalidSerializedShardError::ParserRejectedMetadata);
-    let msg = detail.to_string();
-    assert!(!msg.is_empty(), "empty display for {detail:?}");
 }
 
 #[test]
@@ -605,46 +656,62 @@ fn fsck_reconstruction_plan_detail_display_all_variants() {
     }
 }
 
-// ── FsckReconstructionPlanDetail Display ──────────────────────────
-
-#[test]
-fn fsck_reconstruction_plan_detail_invalid_reconstruction_plan_display() {
-    let detail =
-        FsckIssueDetail::InvalidReconstructionPlan(FsckReconstructionPlanDetail::ChunkHashInvalid);
-    let msg = detail.to_string();
-    assert!(!msg.is_empty());
-}
-
 // ── FsckError display ──────────────────────────────────────────────
 
 #[test]
 fn fsck_error_display_all_variants() {
-    let cases: &[(FsckError, &str)] = &[
-        (FsckError::Io(std::io::Error::other("test")), "storage"),
+    let cases: &[(FsckError, &[&str])] = &[
+        (FsckError::Io(std::io::Error::other("test")), &["storage"]),
         (
             FsckError::Json(serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err()),
-            "json",
+            &["json"],
         ),
         (
             FsckError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
-            "bounds",
+            &["bounds", "numeric conversion"],
         ),
-        (FsckError::Overflow, "overflow"),
+        (FsckError::Overflow, &["overflow"]),
         (
             FsckError::StoredFileMetadataTooLarge {
                 observed_bytes: 999,
                 maximum_bytes: 100,
             },
-            "ceiling",
+            &["ceiling"],
+        ),
+        (
+            FsckError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
+                std::io::Error::other("disk error"),
+            )),
+            &["local storage"],
+        ),
+        (
+            FsckError::S3ObjectStore(shardline_storage::S3ObjectStoreError::IncompleteCredentials),
+            &["s3 object"],
+        ),
+        (
+            FsckError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound),
+            &["xet adapter"],
+        ),
+        (
+            FsckError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned(
+                "test".to_owned(),
+            )),
+            &["memory index"],
+        ),
+        (
+            FsckError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::RecordNotFound),
+            &["memory record"],
         ),
     ];
-    for (error, substring) in cases {
+    for (error, substrings) in cases {
         let msg = error.to_string();
         assert!(!msg.is_empty(), "empty display for {error:?}");
-        assert!(
-            msg.contains(substring),
-            "expected '{substring}' in '{msg}' from {error:?}"
-        );
+        for substring in *substrings {
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {error:?}"
+            );
+        }
     }
 }
 
@@ -1034,143 +1101,6 @@ fn fsck_issue_debug_with_detailed_variant() {
     let debug = format!("{issue:?}");
     assert!(debug.contains("ChunkHashMismatch"), "debug: {debug}");
     assert!(debug.contains("abc"), "debug: {debug}");
-}
-
-// ── Additional FsckIssueDetail Display variants ─────────────────
-
-#[test]
-fn fsck_issue_detail_display_invalid_quarantine_timeline() {
-    let detail = FsckIssueDetail::InvalidQuarantineTimeline {
-        delete_after_unix_seconds: 10,
-        first_seen_unreachable_at_unix_seconds: 100,
-    };
-    let msg = detail.to_string();
-    assert!(msg.contains("10"), "msg: {msg}");
-    assert!(msg.contains("100"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_issue_detail_display_invalid_retention_timeline() {
-    let detail = FsckIssueDetail::InvalidRetentionTimeline {
-        release_after_unix_seconds: 50,
-        held_at_unix_seconds: 100,
-    };
-    let msg = detail.to_string();
-    assert!(msg.contains("50"), "msg: {msg}");
-    assert!(msg.contains("100"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_issue_detail_display_active_retention_hold_reason() {
-    let detail = FsckIssueDetail::ActiveRetentionHoldReason {
-        reason: "legal hold".to_owned(),
-    };
-    let msg = detail.to_string();
-    assert!(msg.contains("legal hold"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_issue_detail_display_active_retention_hold_quarantined() {
-    let detail = FsckIssueDetail::ActiveRetentionHoldQuarantined;
-    let msg = detail.to_string();
-    assert!(!msg.is_empty());
-}
-
-#[test]
-fn fsck_issue_detail_display_webhook_delivery_timestamp_exceeded() {
-    let detail = FsckIssueDetail::WebhookDeliveryTimestampExceeded {
-        processed_at_unix_seconds: 2000,
-        max_allowed_unix_seconds: 1000,
-    };
-    let msg = detail.to_string();
-    assert!(msg.contains("2000"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_issue_detail_display_provider_repository_identity_invalid() {
-    let detail = FsckIssueDetail::ProviderRepositoryIdentityInvalid;
-    let msg = detail.to_string();
-    assert!(!msg.is_empty());
-}
-
-#[test]
-fn fsck_issue_detail_display_provider_state_timestamp_exceeded() {
-    let detail = FsckIssueDetail::ProviderRepositoryStateTimestampExceeded {
-        field: ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
-        timestamp: 2000,
-        max_allowed_unix_seconds: 1000,
-    };
-    let msg = detail.to_string();
-    assert!(msg.contains("2000"), "msg: {msg}");
-    assert!(
-        msg.contains("last_access_changed_at_unix_seconds"),
-        "msg: {msg}"
-    );
-}
-
-#[test]
-fn fsck_issue_detail_display_quarantine_referenced_missing_object() {
-    let detail = FsckIssueDetail::QuarantineReferencedMissingObject;
-    let msg = detail.to_string();
-    assert!(msg.contains("missing object"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_issue_detail_display_quarantine_targeted_reachable_object() {
-    let detail = FsckIssueDetail::QuarantineTargetedReachableObject;
-    let msg = detail.to_string();
-    assert!(msg.contains("reachable"), "msg: {msg}");
-}
-
-// ── Extra FsckError Display coverage ─────────────────────────────
-
-#[test]
-fn fsck_error_display_numeric_conversion() {
-    let err = FsckError::NumericConversion(u64::try_from(-1i32).unwrap_err());
-    let msg = err.to_string();
-    assert!(msg.contains("numeric conversion"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_error_display_local_object_store() {
-    use shardline_storage::LocalObjectStoreError;
-    let err = FsckError::LocalObjectStore(LocalObjectStoreError::Io(std::io::Error::other(
-        "disk error",
-    )));
-    let msg = err.to_string();
-    assert!(msg.contains("local storage"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_error_display_s3_object_store() {
-    use shardline_storage::S3ObjectStoreError;
-    let err = FsckError::S3ObjectStore(S3ObjectStoreError::IncompleteCredentials);
-    let msg = err.to_string();
-    assert!(msg.contains("s3 object"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_error_display_xet_adapter() {
-    use shardline_xet_adapter::XetAdapterError;
-    let err = FsckError::XetAdapter(XetAdapterError::NotFound);
-    let msg = err.to_string();
-    assert!(msg.contains("xet adapter"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_error_display_memory_index_store() {
-    use shardline_index::MemoryIndexStoreError;
-    let err = FsckError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned("test".to_owned()));
-    let msg = err.to_string();
-    assert!(msg.contains("memory index"), "msg: {msg}");
-}
-
-#[test]
-fn fsck_error_display_memory_record_store() {
-    use shardline_index::MemoryRecordStoreError;
-    let err = FsckError::MemoryRecordStore(MemoryRecordStoreError::RecordNotFound);
-    let msg = err.to_string();
-    assert!(msg.contains("memory record"), "msg: {msg}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
