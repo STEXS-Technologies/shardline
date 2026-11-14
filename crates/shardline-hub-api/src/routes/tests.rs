@@ -1204,19 +1204,11 @@ fn make_scoped_alice_auth_state_with_creation(
     store
         .create_repo(HubRepoType::Model, "alice/other", true)
         .expect("create alice other private repo");
-    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: Some(HubAuth::new(Box::new(AliceProvider {
-            scope,
-            namespace_creation,
-        }))),
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let mut state = state_with_store(td.path(), store);
+    state.auth = Some(HubAuth::new(Box::new(AliceProvider {
+        scope,
+        namespace_creation,
+    })));
     (td, state)
 }
 
@@ -1526,16 +1518,8 @@ async fn repo_list_hides_oidc_owner_same_namespace_private_repos() {
     store
         .create_repo(HubRepoType::Model, "oidc/shared", false)
         .expect("create oidc public repo");
-    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: Some(HubAuth::new(Box::new(OidcUser1Provider))),
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let mut state = state_with_store(td.path(), store);
+    state.auth = Some(HubAuth::new(Box::new(OidcUser1Provider)));
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::AUTHORIZATION,
@@ -2443,16 +2427,8 @@ async fn handler_resolve_large_lfs_file_returns_absolute_redirect_and_metadata()
         }],
     );
     store_test_content(&_td, &oid, &content);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "https://hub.example.test/".to_owned(),
-    };
+    let mut state = state_with_store(_td.path(), store);
+    state.public_base_url = "https://hub.example.test/".to_owned();
 
     let response = resolve_file(
         State(state.clone()),
@@ -2812,16 +2788,8 @@ async fn handler_lfs_batch_prefers_xet_when_offered_with_write_auth() {
     }
 
     let (td, store) = make_delete_test_store();
-    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: Some(HubAuth::new(Box::new(XetProvider))),
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let mut state = state_with_store(td.path(), store);
+    state.auth = Some(HubAuth::new(Box::new(XetProvider)));
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -3042,16 +3010,8 @@ async fn handler_lfs_batch_xet_upload_missing_reconstruction_requires_upload_act
     }
 
     let (td, store) = make_delete_test_store();
-    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: Some(HubAuth::new(Box::new(XetProvider))),
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let mut state = state_with_store(td.path(), store);
+    state.auth = Some(HubAuth::new(Box::new(XetProvider)));
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -4412,16 +4372,7 @@ async fn handler_repo_revision_info_missing_repo() {
 #[tokio::test]
 async fn handler_repo_delete_compat_success() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/compat-del");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store: store.clone(),
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store.clone());
     let result = repo_delete_compat(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4439,16 +4390,7 @@ async fn handler_repo_delete_compat_success() {
 #[tokio::test]
 async fn handler_repo_delete_compat_with_organization() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/compat-org");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store: store.clone(),
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store.clone());
     let result = repo_delete_compat(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -5184,16 +5126,7 @@ async fn handler_lfs_upload_and_download_roundtrip() {
     let data = b"lfs file content";
     let oid = hex::encode(sha2::Sha256::digest(data));
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/lfs-io");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store: store.clone(),
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store.clone());
     // Upload
     let result = lfs_upload(
         State(state.clone()),
