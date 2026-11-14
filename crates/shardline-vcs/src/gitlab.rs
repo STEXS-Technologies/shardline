@@ -360,22 +360,35 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_adapter_parses_project_update_system_hook_as_access_change() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_update",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-4", Some("token"), body);
-
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        assert_eq!(event.delivery_id().as_str(), "delivery-4");
-        assert_eq!(event.repository().owner(), "group");
-        assert_eq!(event.repository().name(), "assets");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    fn gitlab_access_change_hooks_require_matching_events() {
+        for (hook, event_name, delivery) in [
+            ("System Hook", "project_update", "delivery-4"),
+            ("Project Hook", "project_create", "delivery-create"),
+            ("System Hook", "project_create", "delivery-sys-create"),
+            ("System Hook", "project_create", "delivery-sys2"),
+            ("Some Unknown Hook", "project_create", "delivery-create"),
+            ("Some Unknown Hook", "project_update", "delivery-upd"),
+            ("System Hook", "project_update", "delivery-upd2"),
+        ] {
+            let adapter = adapter().unwrap();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "event_name": event_name,
+                "path_with_namespace": "group/assets",
+            }))
+            .unwrap();
+            let request = WebhookRequest::new(hook, delivery, Some("token"), &body);
+            let result = adapter.parse_webhook(request);
+            assert!(
+                matches!(&result, Ok(Some(_))),
+                "hook {hook}, event {event_name}, delivery {delivery}: {result:?}"
+            );
+            let event = result.unwrap().unwrap();
+            assert_eq!(event.delivery_id().as_str(), delivery);
+            assert_eq!(event.repository().provider(), ProviderKind::GitLab);
+            assert_eq!(event.repository().owner(), "group");
+            assert_eq!(event.repository().name(), "assets");
+            assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+        }
     }
 
     #[test]
@@ -484,37 +497,6 @@ mod tests {
         let request = WebhookRequest::new("Push Hook", "delivery-1", None, body);
         let event = adapter.parse_webhook(request).unwrap();
         assert!(event.is_some());
-    }
-
-    #[test]
-    fn gitlab_adapter_project_create_returns_access_changed() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_create",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("Project Hook", "delivery-create", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
-    }
-
-    #[test]
-    fn gitlab_adapter_system_hook_project_create_returns_access_changed() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_create",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request =
-            WebhookRequest::new("System Hook", "delivery-sys-create", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
     #[test]
@@ -851,19 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_adapter_parses_system_hook_project_create_as_access_changed() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_create",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-sys2", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
-    }
-
-    #[test]
     fn gitlab_adapter_parses_system_hook_project_destroy_as_deleted() {
         let adapter = adapter().unwrap();
         let body = br#"{
@@ -908,20 +877,6 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_adapter_parses_unknown_hook_with_project_create_inline() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_create",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request =
-            WebhookRequest::new("Some Unknown Hook", "delivery-create", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
-    }
-
-    #[test]
     fn gitlab_adapter_parses_unknown_hook_with_project_rename_inline() {
         let adapter = adapter().unwrap();
         let body = br#"{
@@ -954,19 +909,6 @@ mod tests {
             event.kind(),
             RepositoryWebhookEventKind::RepositoryRenamed { .. }
         ));
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_unknown_hook_with_project_update_inline() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_update",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("Some Unknown Hook", "delivery-upd", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
     #[test]
@@ -1143,19 +1085,6 @@ mod tests {
         let request = WebhookRequest::new("System Hook", "delivery-unk", Some("token"), body);
         let event = adapter.parse_webhook(request).unwrap();
         assert!(event.is_none());
-    }
-
-    #[test]
-    fn gitlab_adapter_system_hook_project_update_event() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_update",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-upd2", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
     #[test]
