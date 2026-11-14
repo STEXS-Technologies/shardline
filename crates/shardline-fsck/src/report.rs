@@ -24,7 +24,7 @@ use crate::FsckIssue;
 /// assert!(report.is_clean());
 /// assert_eq!(report.issue_count(), 0);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FsckReport {
     /// Number of latest records scanned through the configured record store.
     pub latest_records: u64,

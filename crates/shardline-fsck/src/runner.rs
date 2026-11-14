@@ -56,16 +56,7 @@ where
     IndexAdapter::Error: std::error::Error + Into<FsckError>,
 {
     let start = std::time::Instant::now();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
     let mut reachability = FsckReachability::default();
 
     scan_record_tree(

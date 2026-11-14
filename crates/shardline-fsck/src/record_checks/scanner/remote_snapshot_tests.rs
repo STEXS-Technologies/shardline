@@ -73,16 +73,7 @@ fn remote_native_snapshot_uses_bounded_gets_and_still_detects_corruption() {
         packed_start: 0,
         packed_end: length,
     };
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
     let mut reachability = FsckReachability::default();
     let member_key = chunk_object_key(&member.hex()).unwrap();
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

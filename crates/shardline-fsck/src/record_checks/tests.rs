@@ -10,16 +10,7 @@ async fn scan_record_tree_empty_store_latest_returns_ok() {
     let object_root = root.join("chunks");
     let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -48,16 +39,7 @@ async fn scan_record_tree_empty_store_version_returns_ok() {
     let object_root = root.join("chunks");
     let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -103,16 +85,7 @@ async fn scan_record_tree_latest_reports_orphan_missing_version() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -164,16 +137,7 @@ async fn scan_record_tree_latest_with_matching_version_is_clean() {
     record_store.write_version_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -217,16 +181,7 @@ async fn scan_record_tree_version_with_valid_record_is_clean() {
     record_store.write_version_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -299,16 +254,7 @@ async fn scan_record_tree_mismatched_version_record_reported() {
         .unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -360,16 +306,7 @@ async fn scan_record_tree_latest_invalid_file_id_reported() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -427,16 +364,7 @@ async fn scan_record_tree_latest_invalid_content_hash_reported() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -486,16 +414,7 @@ async fn scan_record_tree_version_invalid_content_hash_reported() {
     record_store.write_version_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -583,16 +502,7 @@ async fn scan_record_tree_version_unparseable_in_matching_check() {
         .unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -649,16 +559,7 @@ async fn scan_record_tree_latest_with_missing_chunk_reported() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -730,16 +631,7 @@ async fn scan_record_tree_latest_record_hash_mismatch_reported() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -799,16 +691,7 @@ async fn scan_record_tree_latest_non_contiguous_chunks_reported() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -873,16 +756,7 @@ async fn scan_record_tree_latest_native_xet_missing_reported() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -977,16 +851,7 @@ async fn scan_record_tree_latest_chunk_hash_mismatch_reported() {
     std::fs::write(&chunk_path, b"content with a different hash").unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1065,16 +930,7 @@ async fn scan_record_tree_latest_chunk_length_mismatch_reported() {
     std::fs::write(&chunk_path, b"short content").unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1173,16 +1029,7 @@ async fn scan_record_tree_latest_xorb_key_added_to_reachability() {
     let mut reachability = FsckReachability::default();
     let initial_keys = reachability.referenced_object_keys.len();
 
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1263,16 +1110,7 @@ async fn scan_record_tree_version_matching_check_unparseable_json_skipped() {
     drop(conn);
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1334,16 +1172,7 @@ async fn scan_record_tree_version_invalid_json_bytes_reported() {
     drop(conn);
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1404,16 +1233,7 @@ async fn scan_record_tree_latest_invalid_json_bytes_reported() {
     drop(conn);
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1480,16 +1300,7 @@ async fn scan_record_tree_latest_record_path_mismatch_reported() {
     drop(conn);
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1639,16 +1450,7 @@ async fn scan_record_tree_latest_native_xet_valid_xorb_clean() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1758,16 +1560,7 @@ async fn scan_record_tree_latest_native_xet_range_exceeds_chunks() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1864,16 +1657,7 @@ async fn scan_record_tree_latest_native_xet_missing_inner_chunk() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -1942,16 +1726,7 @@ async fn scan_record_tree_version_content_hash_path_mismatch_reported() {
     drop(conn);
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -2014,16 +1789,7 @@ async fn scan_record_tree_latest_native_xet_invalid_hash_rejected_by_validation(
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -2131,16 +1897,7 @@ async fn scan_record_tree_latest_native_xet_with_inner_chunks_tracks_reachabilit
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -2283,16 +2040,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_clean_with_container_only() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -2427,16 +2175,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_corrupted_container_reported() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -2537,16 +2276,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_missing_container_reported() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -2626,16 +2356,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_single_chunk_compressed_clean() {
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -2723,16 +2444,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_single_chunk_corrupt_blob_reported(
     record_store.write_latest_record(&record).await.unwrap();
 
     let mut reachability = FsckReachability::default();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
 
     let result = scan_record_tree(
         &record_store,
@@ -2809,16 +2521,7 @@ fn store_single_chunk_xorb(object_store: &ServerObjectStore, data: &[u8]) -> (St
 }
 
 fn new_report() -> FsckReport {
-    FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    }
+    FsckReport::default()
 }
 
 /// A single-chunk XorbCdcV1 record repointed to a stored xorb must be scanned via

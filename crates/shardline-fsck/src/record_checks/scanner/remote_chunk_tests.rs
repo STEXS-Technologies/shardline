@@ -33,16 +33,7 @@ fn remote_ordinary_chunks_use_bounded_gets_without_losing_integrity_findings() {
     let length = body.len() as u64;
     let hash = xet_hash_hex_string(chunk_hash(body));
     let key = chunk_object_key(&hash).unwrap();
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Case {
         Missing,

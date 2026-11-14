@@ -76,10 +76,7 @@ fn report_is_clean_when_no_issues() {
         unchanged_reconstructions: 3,
         removed_stale_reconstructions: 2,
         rebuilt_dedupe_shard_mappings: 1,
-        unchanged_dedupe_shard_mappings: 0,
-        removed_stale_dedupe_shard_mappings: 0,
-        preserved_latest_records_unreadable_version: Vec::new(),
-        issues: Vec::new(),
+        ..IndexRebuildReport::default()
     };
     assert!(report.is_clean());
     assert_eq!(report.issue_count(), 0);
@@ -123,18 +120,8 @@ fn report_counts_multiple_issues() {
         .collect();
     let report = IndexRebuildReport {
         scanned_version_records: 5,
-        scanned_retained_shards: 0,
-        rebuilt_latest_records: 0,
-        unchanged_latest_records: 0,
-        removed_stale_latest_records: 0,
-        scanned_reconstructions: 0,
-        unchanged_reconstructions: 0,
-        removed_stale_reconstructions: 0,
-        rebuilt_dedupe_shard_mappings: 0,
-        unchanged_dedupe_shard_mappings: 0,
-        removed_stale_dedupe_shard_mappings: 0,
-        preserved_latest_records_unreadable_version: Vec::new(),
         issues,
+        ..IndexRebuildReport::default()
     };
     assert_eq!(report.issue_count(), 5);
     assert!(!report.is_clean());

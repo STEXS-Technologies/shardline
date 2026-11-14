@@ -42,16 +42,7 @@ fn snapshot_reuses_bytes_but_preserves_term_checks_and_record_freshness() {
         packed_start: 0,
         packed_end: length,
     };
-    let mut report = FsckReport {
-        latest_records: 0,
-        version_records: 0,
-        inspected_chunk_references: 0,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
-        issues: Vec::new(),
-    };
+    let mut report = FsckReport::default();
     let mut reachability = FsckReachability::default();
     let mut snapshot = None;
     inspect_native_xet_term(

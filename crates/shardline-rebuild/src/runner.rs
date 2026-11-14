@@ -39,21 +39,7 @@ where
     IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<RebuildError>,
 {
-    let mut report = IndexRebuildReport {
-        scanned_version_records: 0,
-        scanned_retained_shards: 0,
-        rebuilt_latest_records: 0,
-        unchanged_latest_records: 0,
-        removed_stale_latest_records: 0,
-        scanned_reconstructions: 0,
-        unchanged_reconstructions: 0,
-        removed_stale_reconstructions: 0,
-        rebuilt_dedupe_shard_mappings: 0,
-        unchanged_dedupe_shard_mappings: 0,
-        removed_stale_dedupe_shard_mappings: 0,
-        preserved_latest_records_unreadable_version: Vec::new(),
-        issues: Vec::new(),
-    };
+    let mut report = IndexRebuildReport::default();
     let mut candidates = HashMap::new();
     let mut native_xorbs = HashSet::new();
     RecordTraversal::visit_version_records(record_store, |entry| {

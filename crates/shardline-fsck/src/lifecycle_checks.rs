@@ -240,16 +240,7 @@ mod tests {
     use super::*;
 
     fn clean_report() -> FsckReport {
-        FsckReport {
-            latest_records: 0,
-            version_records: 0,
-            inspected_chunk_references: 0,
-            inspected_dedupe_shard_mappings: 0,
-            inspected_reconstructions: 0,
-            inspected_webhook_deliveries: 0,
-            inspected_provider_repository_states: 0,
-            issues: Vec::new(),
-        }
+        FsckReport::default()
     }
 
     fn empty_reachability() -> FsckReachability {

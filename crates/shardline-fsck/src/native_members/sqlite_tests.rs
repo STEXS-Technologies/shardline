@@ -159,13 +159,9 @@ fn missing(member: &str, source: &str) -> FsckIssue {
 fn report(issues: Vec<FsckIssue>) -> FsckReport {
     FsckReport {
         latest_records: 1,
-        version_records: 0,
         inspected_chunk_references: 2,
-        inspected_dedupe_shard_mappings: 0,
-        inspected_reconstructions: 0,
-        inspected_webhook_deliveries: 0,
-        inspected_provider_repository_states: 0,
         issues,
+        ..FsckReport::default()
     }
 }
 
