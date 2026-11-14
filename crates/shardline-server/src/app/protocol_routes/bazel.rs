@@ -17,34 +17,9 @@ use crate::{
     upload_ingest::{RequestBodyReader, stage_bounded_body},
 };
 
-use super::{AppState, authorize, direct_object_response, direct_object_response_from_snapshot};
-
-/// Runs the shared authorize chain and mints a typed [`AuthorizedRepository`]
-/// capability for Bazel requests.
-///
-/// Bazel URLs carry no repository segment, so the repository identity comes
-/// exclusively from the verified token claims (isolated via the token's
-/// `RepositoryScope` namespace). This reproduces today's chain in the same
-/// order: [`authorize`] (permissive `Ok(None)` when no auth provider is
-/// configured) → mint: verified context → `from_verified_context`,
-/// `None` → `anonymous_full_access()`.
-fn authorize_repository(
-    state: &AppState,
-    headers: &HeaderMap,
-    required_scope: TokenScope,
-) -> Result<AuthorizedRepository, ServerError> {
-    authorize(state, headers, required_scope)?.map_or_else(
-        || Ok(AuthorizedRepository::anonymous_full_access()),
-        |ctx| {
-            // The verified context (minted by the auth layer's
-            // `verify_verified`) flows straight into the capability seam;
-            // `from_verified_context` only re-applies the scope gate
-            // idempotently — no token is re-verified here.
-            AuthorizedRepository::from_verified_context(ctx, required_scope)
-                .map_err(ServerError::from)
-        },
-    )
-}
+use super::{
+    AppState, authorize_repository, direct_object_response, direct_object_response_from_snapshot,
+};
 
 /// Read-scoped Bazel authorization capability, extracted from the request.
 ///

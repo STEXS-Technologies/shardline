@@ -39,8 +39,8 @@ use futures_util::StreamExt;
 use shardline_storage::{DeleteOutcome, ObjectKey};
 
 use super::lfs_patch_evidence;
-use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
-use crate::app::{AppState, MAX_LFS_PATCH_CHUNK_BYTES, authorize};
+use super::{MAX_LFS_BATCH_OBJECTS, authorize_repository, direct_object_response};
+use crate::app::{AppState, MAX_LFS_PATCH_CHUNK_BYTES};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     LfsOperation, ServerError, TransferAdapter,
@@ -88,33 +88,6 @@ fn durable_lfs_session_id(scope_namespace: &str, oid: &str) -> String {
     hasher.update(b"\0");
     hasher.update(oid.as_bytes());
     format!("lfs-{}", hex::encode(hasher.finalize().as_bytes()))
-}
-
-/// Runs the shared authorize chain and mints a typed [`AuthorizedRepository`]
-/// capability for LFS requests.
-///
-/// LFS URLs carry no repository segment, so the repository identity comes
-/// exclusively from the verified token claims (isolated via the token's
-/// `RepositoryScope` namespace). This reproduces today's chain in the same
-/// order: [`authorize`](crate::app::authorize) (permissive `Ok(None)` when no
-/// auth provider is configured) → mint: verified context → `from_verified_context`,
-/// `None` → `anonymous_full_access()`.
-fn authorize_repository(
-    state: &AppState,
-    headers: &HeaderMap,
-    required_scope: TokenScope,
-) -> Result<AuthorizedRepository, ServerError> {
-    authorize(state, headers, required_scope)?.map_or_else(
-        || Ok(AuthorizedRepository::anonymous_full_access()),
-        |ctx| {
-            // The verified context (minted by the auth layer's
-            // `verify_verified`) flows straight into the capability seam;
-            // `from_verified_context` only re-applies the scope gate
-            // idempotently — no token is re-verified here.
-            AuthorizedRepository::from_verified_context(ctx, required_scope)
-                .map_err(ServerError::from)
-        },
-    )
 }
 
 /// Read-scoped LFS authorization capability, extracted from the request.

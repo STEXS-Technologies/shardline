@@ -1,3 +1,9 @@
+use axum::http::HeaderMap;
+use shardline_protocol::TokenScope;
+use shardline_server_core::AuthorizedRepository;
+
+use crate::ServerError;
+
 mod bazel;
 mod helpers;
 mod lfs;
@@ -41,3 +47,23 @@ use super::{
 
 #[cfg(test)]
 mod tests;
+
+/// Authorize repository-less protocol routes using the verified token namespace.
+/// Without an auth provider, preserve the configured anonymous-access behavior.
+fn authorize_repository(
+    state: &AppState,
+    headers: &HeaderMap,
+    required_scope: TokenScope,
+) -> Result<AuthorizedRepository, ServerError> {
+    authorize(state, headers, required_scope)?.map_or_else(
+        || Ok(AuthorizedRepository::anonymous_full_access()),
+        |ctx| {
+            // The verified context (minted by the auth layer's
+            // `verify_verified`) flows straight into the capability seam;
+            // `from_verified_context` only re-applies the scope gate
+            // idempotently — no token is re-verified here.
+            AuthorizedRepository::from_verified_context(ctx, required_scope)
+                .map_err(ServerError::from)
+        },
+    )
+}
