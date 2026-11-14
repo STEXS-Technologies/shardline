@@ -2,7 +2,7 @@ use axum::body::Bytes;
 use shardline_cas::{CasCoordinator, CasLimits};
 use shardline_index::FileRecord;
 use shardline_index::{UploadIntent, UploadIntentState};
-use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
+use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::ObjectStore;
 use std::num::NonZeroU64;
 
@@ -376,25 +376,6 @@ impl LocalBackend {
             self.public_base_url(),
             &record,
             requested_range,
-        )?)
-    }
-
-    pub(crate) async fn reconstruction_http_range(
-        &self,
-        file_id: &str,
-        content_hash: Option<&str>,
-        range_header: &str,
-        repository_scope: Option<&RepositoryScope>,
-    ) -> Result<FileReconstructionResponse, ServerError> {
-        let record = self
-            .read_record(file_id, content_hash, repository_scope)
-            .await?;
-        let requested_range =
-            parse_http_byte_range(range_header, record.total_bytes).map_err(ServerError::from)?;
-        Ok(build_reconstruction_response(
-            self.public_base_url(),
-            &record,
-            Some(requested_range),
         )?)
     }
 

@@ -14,7 +14,7 @@ use shardline_index::{
     ResumableSession, ResumableSessionPart, ResumableSessionState, S3ObjectEntry,
     S3PublishCondition,
 };
-use shardline_protocol::{ByteRange, RepositoryScope};
+use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
 use shardline_server_core::protocol_support::protocol_object_file_id;
 use shardline_storage::{
     AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
@@ -33,7 +33,10 @@ use crate::{
         ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache_with_loader,
     },
     upload_ingest::RequestBodyReader,
-    xet_adapter::{FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse},
+    xet_adapter::{
+        FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse,
+        build_reconstruction_response,
+    },
 };
 
 mod dedup;
@@ -1080,28 +1083,27 @@ impl ServerBackend {
         range_header: &str,
         repository_scope: Option<&RepositoryScope>,
     ) -> Result<FileReconstructionResponse, ServerError> {
-        match self {
-            Self::Local(backend) => {
+        let (record, public_base_url) = match self {
+            Self::Local(backend) => (
                 backend
-                    .reconstruction_http_range(
-                        file_id,
-                        content_hash,
-                        range_header,
-                        repository_scope,
-                    )
-                    .await
-            }
-            Self::Postgres(backend) => {
+                    .read_record(file_id, content_hash, repository_scope)
+                    .await?,
+                backend.public_base_url(),
+            ),
+            Self::Postgres(backend) => (
                 backend
-                    .reconstruction_http_range(
-                        file_id,
-                        content_hash,
-                        range_header,
-                        repository_scope,
-                    )
-                    .await
-            }
-        }
+                    .read_record(file_id, content_hash, repository_scope)
+                    .await?,
+                backend.public_base_url(),
+            ),
+        };
+        let requested_range =
+            parse_http_byte_range(range_header, record.total_bytes).map_err(ServerError::from)?;
+        Ok(build_reconstruction_response(
+            public_base_url,
+            &record,
+            Some(requested_range),
+        )?)
     }
 
     pub(crate) async fn file_total_bytes(
