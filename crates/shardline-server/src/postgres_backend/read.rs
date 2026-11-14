@@ -331,11 +331,6 @@ impl super::PostgresBackend {
         Ok(metadata.length())
     }
 
-    pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
-        let object_store = self.object_store();
-        crate::object_store::read_small_object(object_store, object_key.clone()).await
-    }
-
     pub(crate) async fn read_object_stream(
         &self,
         object_key: &ObjectKey,
@@ -964,7 +959,9 @@ mod tests {
         let key = ObjectKey::parse("test/read-obj").unwrap();
         let data = b"read object test content";
         store_object(&backend.object_store(), &key, data);
-        let read_data = backend.read_object(&key).await.expect("read_object");
+        let read_data = crate::object_store::read_small_object(backend.object_store(), key)
+            .await
+            .expect("read_object");
         assert_eq!(read_data, data);
     }
 
@@ -972,7 +969,7 @@ mod tests {
     async fn read_object_not_found_for_missing_key() {
         let (backend, _root) = make_backend().await;
         let key = ObjectKey::parse("test/never-stored").unwrap();
-        let result = backend.read_object(&key).await;
+        let result = crate::object_store::read_small_object(backend.object_store(), key).await;
         assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
@@ -982,7 +979,9 @@ mod tests {
         let key = ObjectKey::parse("test/large-blob").unwrap();
         let data = vec![0x42u8; 131072]; // 128 KB
         store_object(&backend.object_store(), &key, &data);
-        let read_data = backend.read_object(&key).await.expect("read_object large");
+        let read_data = crate::object_store::read_small_object(backend.object_store(), key)
+            .await
+            .expect("read_object large");
         assert_eq!(read_data.len(), 131072);
         assert_eq!(read_data, data);
     }
@@ -1143,7 +1142,9 @@ mod tests {
         let key = ObjectKey::parse("test/special_chars/file-v1.0.bin").unwrap();
         let data = b"special key data";
         store_object(&backend.object_store(), &key, data);
-        let read_data = backend.read_object(&key).await.expect("read special key");
+        let read_data = crate::object_store::read_small_object(backend.object_store(), key)
+            .await
+            .expect("read special key");
         assert_eq!(read_data, data);
     }
 

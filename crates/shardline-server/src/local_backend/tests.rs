@@ -879,8 +879,7 @@ async fn xorb_read_returns_correct_bytes() {
 
     // Read back via the xorb object key and object store.
     let object_key = crate::xet_adapter::xorb_object_key(&hash).expect("xorb object key");
-    let read_back = backend
-        .read_object(&object_key)
+    let read_back = crate::object_store::read_small_object(backend.object_store(), object_key)
         .await
         .expect("read xorb object");
     assert_eq!(

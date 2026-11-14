@@ -1482,10 +1482,8 @@ impl ServerBackend {
     }
 
     pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
-        let direct = match self {
-            Self::Local(backend) => backend.read_object(object_key).await,
-            Self::Postgres(backend) => backend.read_object(object_key).await,
-        };
+        let direct =
+            crate::object_store::read_small_object(self.object_store(), object_key.clone()).await;
         match direct {
             Ok(bytes) => Ok(bytes),
             Err(ServerError::NotFound) => match self {

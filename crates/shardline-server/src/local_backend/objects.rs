@@ -5,7 +5,6 @@ use super::LocalBackend;
 use crate::{
     ServerError,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
-    object_store::read_small_object,
 };
 
 impl LocalBackend {
@@ -21,10 +20,6 @@ impl LocalBackend {
         })
         .await
         .map_err(ServerError::BlockingTask)?
-    }
-
-    pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
-        read_small_object(self.object_store(), object_key.clone()).await
     }
 
     pub(crate) async fn read_object_stream(
@@ -253,7 +248,9 @@ mod tests {
         let key = ObjectKey::parse("read-test-key").unwrap();
         let data = b"readable-content";
         backend.put_fixture(&key, data.to_vec()).unwrap();
-        let result = backend.read_object(&key).await.unwrap();
+        let result = crate::object_store::read_small_object(backend.object_store(), key)
+            .await
+            .unwrap();
         assert_eq!(result.as_slice(), data);
     }
 
@@ -261,7 +258,7 @@ mod tests {
     async fn read_object_returns_not_found_for_missing() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("missing-read-key").unwrap();
-        let result = backend.read_object(&key).await;
+        let result = crate::object_store::read_small_object(backend.object_store(), key).await;
         assert!(matches!(result, Err(crate::ServerError::NotFound)));
     }
 
