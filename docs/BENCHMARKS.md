@@ -3750,19 +3750,23 @@ metadata.
 
 The November 14, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`207236fb3c7502a072826362087f9a1dc79b212a`. It counts all tracked `.rs`
+`c21ac9cd8a5df982401e0cfcc708323b8b035c3a`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 594,732 | 8,917 (1.48%) |
-| Server | 220,570 | 213,089 | 7,481 (3.39%) |
-| Storage | 20,373 | 19,475 | 898 (4.41%) |
-| S3 adapter | 10,954 | 10,366 | 588 (5.37%) |
-| Cache | 6,573 | 6,000 | 573 (8.72%) |
-| Index | 71,472 | 71,298 | 174 (0.24%) |
+| Entire repository | 603,649 | 592,967 | 10,682 (1.77%) |
+| Server | 220,570 | 212,872 | 7,698 (3.49%) |
+| Storage | 20,373 | 19,469 | 904 (4.44%) |
+| S3 adapter | 10,954 | 10,365 | 589 (5.38%) |
+| Cache | 6,573 | 5,933 | 640 (9.74%) |
+| Index | 71,472 | 71,175 | 297 (0.42%) |
+| CAS | 3,447 | 2,977 | 470 (13.64%) |
+| GC | 10,954 | 10,764 | 190 (1.73%) |
+| Fsck | 8,989 | 8,821 | 168 (1.87%) |
+| Rebuild | 4,326 | 4,245 | 81 (1.87%) |
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
@@ -3770,7 +3774,7 @@ using the corresponding commit and path, or omit the path for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 207236fb3c7502a072826362087f9a1dc79b212a -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' c21ac9cd8a5df982401e0cfcc708323b8b035c3a -- 'crates/shardline-server/*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
@@ -3780,6 +3784,32 @@ structural reductions in work. Comparable cold/warm Cargo, Docker and CI
 critical-path timings have not been established; no percentage build-time
 improvement is claimed. A source reduction also does not establish a throughput,
 latency, memory or I/O improvement.
+
+### Current Cargo build sample
+
+At the cleanup commit above, an x86_64 Linux shared-host sample used Rust
+1.99.0 (`b940084d7`) and Cargo 1.99.0 (`5f94df478`), four build jobs, no Rust
+compiler wrapper, and `CARGO_PROFILE_DEV_DEBUG=0`. This overrides the repository's
+default debug information setting. The target directory already contained
+compiled dependencies; no artifacts were cleaned between the three commands.
+
+| Sample | Wall time | Result |
+| --- | ---: | --- |
+| Populate current CLI artifacts using existing dependency cache | 29.139 s | Passed |
+| Unchanged-source build 1 | 0.244 s | Passed |
+| Unchanged-source build 2 | 0.234 s | Passed |
+
+The resulting executable passed `shardline --version`. The first sample is not
+a cold build, and the other two measure Cargo's unchanged-source path rather
+than recompilation after an edit. These observations do not compare the baseline
+or establish a build-time speedup. Default-profile, cold, edited-source, Docker
+and hosted-CI comparisons remain outstanding. Reproduce the command three times
+from the specified commit, keeping the same target directory:
+
+```bash
+/usr/bin/time -v env RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo build --locked -p shardline --bin shardline -j4 --timings
+```
 
 The focused [invariant ledger](../scripts/shardline/invariants.toml) maps retained
 storage, recovery and evidence checks. It is an index of the changed guarantees,
