@@ -72,42 +72,31 @@ mod tests {
     // --- bazel_cache_object_key ---
 
     #[test]
-    fn bazel_cache_object_key_ac_valid_hash() {
+    fn bazel_cache_object_keys_cover_both_kinds_and_scopes() {
         let hash = valid_hash();
-        let key =
-            bazel_cache_object_key(BazelCacheKind::Ac, &hash, &test_capability(None)).unwrap();
-        assert!(key.as_str().contains("protocols/bazel/global/ac/"));
-        assert!(key.as_str().ends_with(&hash));
-    }
-
-    #[test]
-    fn bazel_cache_object_key_cas_valid_hash() {
-        let hash = valid_hash();
-        let key =
-            bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None)).unwrap();
-        assert!(key.as_str().contains("protocols/bazel/global/cas/"));
-        assert!(key.as_str().ends_with(&hash));
-    }
-
-    #[test]
-    fn bazel_cache_object_key_with_scope() {
-        let hash = valid_hash();
-        let scope = test_scope();
-        let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(Some(scope)))
-            .unwrap();
-        assert!(!key.as_str().contains("global"));
-        assert!(key.as_str().contains("protocols/bazel/"));
-        assert!(key.as_str().contains("/cas/"));
-        assert!(key.as_str().ends_with(&hash));
-    }
-
-    #[test]
-    fn bazel_cache_object_key_ac_with_scope() {
-        let hash = valid_hash();
-        let scope = test_scope();
-        let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, &test_capability(Some(scope)))
-            .unwrap();
-        assert!(!key.as_str().contains("global"));
-        assert!(key.as_str().contains("/ac/"));
+        for (kind, segment) in [(BazelCacheKind::Ac, "ac"), (BazelCacheKind::Cas, "cas")] {
+            for scope in [None, Some(test_scope())] {
+                let scoped = scope.is_some();
+                let key = bazel_cache_object_key(kind, &hash, &test_capability(scope)).unwrap();
+                assert!(
+                    key.as_str().contains("protocols/bazel/"),
+                    "{kind:?}, {scoped}"
+                );
+                assert!(
+                    key.as_str().contains(&format!("/{segment}/")),
+                    "{kind:?}, {scoped}"
+                );
+                assert!(key.as_str().ends_with(&hash), "{kind:?}, {scoped}");
+                if scoped {
+                    assert!(!key.as_str().contains("global"), "{kind:?}");
+                } else {
+                    assert!(
+                        key.as_str()
+                            .contains(&format!("protocols/bazel/global/{segment}/")),
+                        "{kind:?}"
+                    );
+                }
+            }
+        }
     }
 }
