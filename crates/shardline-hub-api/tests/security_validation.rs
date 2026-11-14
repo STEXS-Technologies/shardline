@@ -19,35 +19,9 @@
 // ============================================================================
 
 // JWT signature, issuer and algorithm rejection are exercised through both
-// real providers in shardline-server's oidc_provider/jwks_provider tests.
+// real providers in shardline-server's oidc_provider/jwks_provider tests,
+// including signed tokens with a missing expiry claim.
 // Shared algorithm guards live in jwt_keys::tests; source layout is not a contract.
-
-/// Verifies missing exp is now rejected instead of defaulting to u64::MAX.
-///
-/// **[FIXED]**: Both providers now use `ok_or_else` to require the `exp` claim
-/// instead of `unwrap_or(u64::MAX)`.
-#[test]
-fn validate_missing_exp_now_rejected() {
-    let oidc_source = include_str!("../../shardline-server/src/oidc_provider.rs");
-    let jwks_source = include_str!("../../shardline-server/src/jwks_provider.rs");
-
-    assert!(
-        !oidc_source.contains("unwrap_or(u64::MAX)"),
-        "OIDC: no longer defaults missing exp to u64::MAX"
-    );
-    assert!(
-        !jwks_source.contains("unwrap_or(u64::MAX)"),
-        "JWKS: no longer defaults missing exp to u64::MAX"
-    );
-    assert!(
-        oidc_source.contains("missing exp claim"),
-        "OIDC: returns error when exp is missing"
-    );
-    assert!(
-        jwks_source.contains("missing exp claim"),
-        "JWKS: returns error when exp is missing"
-    );
-}
 
 // ============================================================================
 // FINDING 2: Webhook SSRF — PARTIALLY FIXED (URL validation at creation)
@@ -74,28 +48,6 @@ fn validate_deliver_one_webhook_has_url_validation() {
     );
 }
 
-/// Validates that webhook URL validation exists at creation time.
-///
-/// **[FIXED]**: `validate_webhook_url` now checks scheme (http/https only),
-/// host presence, URL length, and rejects private/internal IPs.
-#[test]
-fn validate_webhook_url_validation_exists() {
-    let routes_source = include_str!("../src/routes/webhooks.rs");
-
-    assert!(
-        routes_source.contains("fn validate_webhook_url("),
-        "validate_webhook_url function exists"
-    );
-    assert!(
-        routes_source.contains("WebhookScheme::from_str(scheme).is_err()"),
-        "validate_webhook_url checks scheme is http or https"
-    );
-    assert!(
-        routes_source.contains("MAX_WEBHOOK_URL_LEN"),
-        "validate_webhook_url enforces URL length limit"
-    );
-}
-
 /// Validates that webhook URLs accept arbitrary schemes at the store level.
 ///
 /// **[STILL OPEN]**: The store itself does not validate URLs — validation
@@ -108,48 +60,7 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
 
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
-    let db_path = root.join("metadata.sqlite3");
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
-            repo_id TEXT PRIMARY KEY,
-            repo_type TEXT NOT NULL CHECK (repo_type IN ('model', 'dataset', 'space')),
-            private INTEGER NOT NULL DEFAULT 0 CHECK (private IN (0, 1)),
-            default_branch TEXT NOT NULL,
-            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-            updated_at_unix_seconds INTEGER NOT NULL CHECK (updated_at_unix_seconds >= 0)
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
-            repo_id TEXT NOT NULL,
-            ref_name TEXT NOT NULL,
-            sha TEXT NOT NULL,
-            parent_sha TEXT,
-            message TEXT,
-            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-            PRIMARY KEY (repo_id, sha),
-            FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_refs (
-            repo_id TEXT NOT NULL,
-            ref_name TEXT NOT NULL,
-            sha TEXT NOT NULL,
-            PRIMARY KEY (repo_id, ref_name)
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
-            id TEXT PRIMARY KEY,
-            repo_id TEXT NOT NULL,
-            url TEXT NOT NULL,
-            events TEXT NOT NULL DEFAULT 'push',
-            secret TEXT,
-            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-            FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-        );",
-    )
-    .unwrap();
-    shardline_index::hub::ensure_hub_tables(&root).unwrap();
-
-    let store = LocalIndexStore::open(root);
+    let store = LocalIndexStore::new(root).unwrap();
     let boxed = BoxedHubStore::from_store(store);
     boxed
         .create_repo(HubRepoType::Model, "team/ssrf-test", false)
