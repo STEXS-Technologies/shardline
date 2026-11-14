@@ -2322,6 +2322,21 @@ mod tests {
         tempfile::TempDir::new().unwrap()
     }
 
+    async fn create_default_session(root: &Path, key: &str) -> String {
+        create_session(
+            root,
+            "acme.models",
+            key,
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap()
+    }
+
     fn session_at(root: &Path, upload_id: &str) -> MultipartUploadSession {
         // Reads the session json directly for assertions.
         let bytes = std::fs::read(session_metadata_path(root, upload_id).unwrap()).unwrap();
@@ -2334,18 +2349,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn session_part_file_lock_excludes_independent_openers() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "large.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "large.bin").await;
         let first = lock_session_parts(root.path(), &upload_id).await.unwrap();
 
         let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
@@ -2418,18 +2422,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn legacy_session_read_does_not_write_canonical_evidence() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "large.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "large.bin").await;
         let path = session_metadata_path(root.path(), &upload_id).unwrap();
         let legacy = session_at(root.path(), &upload_id);
         fs::write(&path, serde_json::to_vec(&legacy).unwrap())
@@ -2447,18 +2440,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_reliability_envelope_is_not_downgraded_to_legacy() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "corrupt.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "corrupt.bin").await;
         let path = session_metadata_path(root.path(), &upload_id).unwrap();
         let mut metadata: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
@@ -2474,18 +2456,7 @@ mod tests {
     #[tokio::test]
     async fn tampered_merkle_journal_is_rejected() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "merkle-corrupt.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "merkle-corrupt.bin").await;
         let path = session_dir(root.path(), &upload_id)
             .unwrap()
             .join(SESSION_MERKLE_JOURNAL);
@@ -2518,18 +2489,7 @@ mod tests {
     #[tokio::test]
     async fn bounded_session_read_rejects_tampered_durable_head() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "head-corrupt.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "head-corrupt.bin").await;
         store_part(
             root.path(),
             &upload_id,
@@ -2560,18 +2520,7 @@ mod tests {
     #[tokio::test]
     async fn bounded_session_read_rejects_missing_committed_journal() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "missing-journal.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "missing-journal.bin").await;
         let dir = session_dir(root.path(), &upload_id).unwrap();
         fs::remove_file(dir.join(SESSION_EVIDENCE_JOURNAL))
             .await
@@ -2587,18 +2536,7 @@ mod tests {
     #[tokio::test]
     async fn uncommitted_evidence_journal_tail_is_ignored_after_metadata_crash() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "crash.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "crash.bin").await;
         let dir = session_dir(root.path(), &upload_id).unwrap();
         let (_session, evidence, snapshot_evidence) =
             load_session_with_snapshot(&dir).await.unwrap();
@@ -2640,18 +2578,7 @@ mod tests {
     #[tokio::test]
     async fn uncommitted_merkle_journal_tail_is_trimmed_after_metadata_crash() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "merkle-crash.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "merkle-crash.bin").await;
         let dir = session_dir(root.path(), &upload_id).unwrap();
         let mut records = read_merkle_journal(&dir).await.unwrap();
         let record = records.pop().expect("committed Merkle record");
@@ -2710,18 +2637,7 @@ mod tests {
     #[tokio::test]
     async fn create_store_read_part_sizes_roundtrip() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "data/model.pt",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "data/model.pt").await;
         assert_eq!(upload_id.len(), 32);
         let merkle_records =
             read_merkle_journal(session_dir(root.path(), &upload_id).unwrap().as_path())
@@ -2815,18 +2731,7 @@ mod tests {
     #[tokio::test]
     async fn versioned_part_failure_preserves_acknowledged_bytes_and_metadata() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "large.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "large.bin").await;
         let _global = lock_upload_sessions(root.path()).await.unwrap();
         let _parts = lock_session_parts(root.path(), &upload_id).await.unwrap();
         let old = MultipartPart {
@@ -2922,18 +2827,7 @@ mod tests {
     #[tokio::test]
     async fn versioned_part_revalidates_binding_and_content_metadata() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "large.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "large.bin").await;
         let _global = lock_upload_sessions(root.path()).await.unwrap();
         let part = MultipartPart {
             size_bytes: 3,
@@ -3003,18 +2897,7 @@ mod tests {
     #[tokio::test]
     async fn multipart_mutations_append_snapshot_evidence_instead_of_resetting_it() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "history.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "history.bin").await;
         let part_path = part_file_path(root.path(), &upload_id, 1).unwrap();
         fs::write(&part_path, vec![0_u8; 4]).await.unwrap();
         store_part(
@@ -3065,18 +2948,7 @@ mod tests {
     #[tokio::test]
     async fn store_part_overwrites_existing_part_size() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
         store_part(
             root.path(),
             &upload_id,
@@ -3124,18 +2996,7 @@ mod tests {
     #[tokio::test]
     async fn delete_session_removes_parts_and_is_idempotent() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
         store_part(
             root.path(),
             &upload_id,
@@ -3164,18 +3025,7 @@ mod tests {
     #[tokio::test]
     async fn delete_session_rejects_tampered_evidence() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
         let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
         let mut metadata: serde_json::Value =
             serde_json::from_slice(&fs::read(&metadata_path).await.unwrap()).unwrap();
@@ -3194,18 +3044,7 @@ mod tests {
     #[tokio::test]
     async fn persist_session_rejects_malformed_metadata_without_overwriting_it() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "malformed.bin",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "malformed.bin").await;
         let dir = session_dir(root.path(), &upload_id).unwrap();
         let (session, evidence, snapshot_evidence) =
             load_session_with_snapshot(&dir).await.unwrap();
@@ -3230,18 +3069,7 @@ mod tests {
     #[tokio::test]
     async fn delete_session_rejects_tampered_session_snapshot() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
         let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
         let mut metadata: serde_json::Value =
             serde_json::from_slice(&fs::read(&metadata_path).await.unwrap()).unwrap();
@@ -3260,18 +3088,7 @@ mod tests {
     #[tokio::test]
     async fn expired_session_is_not_found_and_swept() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
         // Rewrite the session with a last_touched in the past.
         let mut session = session_at(root.path(), &upload_id);
         session.created_at_unix_seconds = 1;
@@ -3403,18 +3220,7 @@ mod tests {
     #[tokio::test]
     async fn store_part_enforces_session_byte_quota() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
         store_part(
             root.path(),
             &upload_id,
@@ -3548,18 +3354,7 @@ mod tests {
     #[tokio::test]
     async fn expiry_is_anchored_to_creation_not_keep_alive() {
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
         // A keep-alive part refreshes last_touched but NOT the creation-based
         // expiry anchor; backdating created_at makes the session expire even
         // though last_touched is fresh.
@@ -3592,18 +3387,7 @@ mod tests {
         // WITHOUT touching the session (the server uses it before streaming a
         // part body, so no write-then-delete), and accepts an in-quota one.
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
         store_part(
             root.path(),
             &upload_id,
@@ -3707,18 +3491,7 @@ mod tests {
         // number consumes one slot while overwriting an existing number does
         // not, and a rejected part leaves no file on disk.
         let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let upload_id = create_default_session(root.path(), "k").await;
 
         // A cap of 1: the first part file consumes the only slot.
         store_part(
@@ -3788,18 +3561,7 @@ mod tests {
         // Deleting the session frees the slot: a fresh session can store a
         // part again (the count is derived from live session metadata).
         delete_session(root.path(), &upload_id).await.unwrap();
-        let fresh = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let fresh = create_default_session(root.path(), "k").await;
         store_part(
             root.path(),
             &fresh,
