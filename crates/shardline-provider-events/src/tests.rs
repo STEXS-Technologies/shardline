@@ -67,104 +67,78 @@ async fn local_latest_record_bytes(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repository_deleted_removes_stale_latest_without_version_record() {
+async fn repository_deleted_removes_stale_latest_without_version_record()
+-> Result<(), Box<dyn Error>> {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
-        let result =
-            exercise_repository_deleted_removes_stale_latest_without_version_record(chunk_size)
-                .await;
-        let error = result.as_ref().err().map(ToString::to_string);
-        assert!(
-            result.is_ok(),
-            "provider webhook repository deletion stale latest cleanup failed: {error:?}"
-        );
+        exercise_repository_deleted_removes_stale_latest_without_version_record(chunk_size).await?;
     }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn access_changed_records_provider_repository_state_without_mutating_file_metadata() {
+async fn access_changed_records_provider_repository_state_without_mutating_file_metadata()
+-> Result<(), Box<dyn Error>> {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
-        let result =
-            exercise_access_changed_records_provider_repository_state_without_mutating_file_metadata(chunk_size)
-                .await;
-        let error = result.as_ref().err().map(ToString::to_string);
-        assert!(
-            result.is_ok(),
-            "provider webhook access-changed state update contract failed: {error:?}"
-        );
+        exercise_access_changed_records_provider_repository_state_without_mutating_file_metadata(
+            chunk_size,
+        )
+        .await?;
     }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn revision_pushed_records_provider_repository_state_without_mutating_file_metadata() {
+async fn revision_pushed_records_provider_repository_state_without_mutating_file_metadata()
+-> Result<(), Box<dyn Error>> {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
-        let result =
-            exercise_revision_pushed_records_provider_repository_state_without_mutating_file_metadata(chunk_size)
-                .await;
-        let error = result.as_ref().err().map(ToString::to_string);
-        assert!(
-            result.is_ok(),
-            "provider webhook revision-pushed state update contract failed: {error:?}"
-        );
+        exercise_revision_pushed_records_provider_repository_state_without_mutating_file_metadata(
+            chunk_size,
+        )
+        .await?;
     }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn duplicate_webhook_delivery_is_ignored_after_first_application() {
+async fn duplicate_webhook_delivery_is_ignored_after_first_application()
+-> Result<(), Box<dyn Error>> {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
-        let result =
-            exercise_duplicate_webhook_delivery_is_ignored_after_first_application(chunk_size)
-                .await;
-        let error = result.as_ref().err().map(ToString::to_string);
-        assert!(
-            result.is_ok(),
-            "duplicate webhook delivery no-op flow failed: {error:?}"
-        );
+        exercise_duplicate_webhook_delivery_is_ignored_after_first_application(chunk_size).await?;
     }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repository_rename_migrates_records_to_new_scope() {
+async fn repository_rename_migrates_records_to_new_scope() -> Result<(), Box<dyn Error>> {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
-        let result = exercise_repository_rename_migrates_records_to_new_scope(chunk_size).await;
-        let error = result.as_ref().err().map(ToString::to_string);
-        assert!(
-            result.is_ok(),
-            "provider webhook repository rename migration failed: {error:?}"
-        );
+        exercise_repository_rename_migrates_records_to_new_scope(chunk_size).await?;
     }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repository_rename_removes_old_scope_latest_without_version_record() {
+async fn repository_rename_removes_old_scope_latest_without_version_record()
+-> Result<(), Box<dyn Error>> {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
-        let result =
-            exercise_repository_rename_removes_old_scope_latest_without_version_record(chunk_size)
-                .await;
-        let error = result.as_ref().err().map(ToString::to_string);
-        assert!(
-            result.is_ok(),
-            "provider webhook repository rename stale latest cleanup failed: {error:?}"
-        );
+        exercise_repository_rename_removes_old_scope_latest_without_version_record(chunk_size)
+            .await?;
     }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn previously_recorded_webhook_delivery_is_a_no_op() {
+async fn previously_recorded_webhook_delivery_is_a_no_op() -> Result<(), Box<dyn Error>> {
     // Preserve both the core and former server fixture layouts.
     for chunk_size in [4, 128] {
-        let result = exercise_previously_recorded_webhook_delivery_is_a_no_op(chunk_size).await;
-        let error = result.as_ref().err().map(ToString::to_string);
-        assert!(
-            result.is_ok(),
-            "pre-recorded webhook delivery no-op flow failed: {error:?}"
-        );
+        exercise_previously_recorded_webhook_delivery_is_a_no_op(chunk_size).await?;
     }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
