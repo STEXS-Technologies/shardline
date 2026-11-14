@@ -3750,25 +3750,27 @@ metadata.
 
 The November 14, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`1ecacfbbf1040af98ba7f98b31a890af0c37d1cf`. It counts all tracked `.rs`
+`2d98161f61e14589327732790bfb9a56af687cb9`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 591,992 | 11,657 (1.93%) |
+| Entire repository | 603,649 | 591,511 | 12,138 (2.01%) |
 | Server | 220,570 | 212,841 | 7,729 (3.50%) |
 | Storage | 20,373 | 19,469 | 904 (4.44%) |
 | S3 adapter | 10,954 | 10,365 | 589 (5.38%) |
 | Cache | 6,573 | 5,933 | 640 (9.74%) |
-| Index | 71,472 | 71,165 | 307 (0.43%) |
+| Index | 71,472 | 71,003 | 469 (0.66%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
 | GC | 10,954 | 10,621 | 333 (3.04%) |
 | Fsck | 8,989 | 8,457 | 532 (5.92%) |
 | Rebuild | 4,326 | 4,068 | 258 (5.96%) |
 | CLI | 37,677 | 37,578 | 99 (0.26%) |
 | Protocol adapters | 1,670 | 1,519 | 151 (9.04%) |
+| Provider events | 5,283 | 5,188 | 95 (1.80%) |
+| Validation | 977 | 789 | 188 (19.24%) |
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
@@ -3776,7 +3778,7 @@ using the corresponding commit and path, or omit the path for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 1ecacfbbf1040af98ba7f98b31a890af0c37d1cf -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 2d98161f61e14589327732790bfb9a56af687cb9 -- 'crates/shardline-server/*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
