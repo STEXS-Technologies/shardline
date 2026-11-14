@@ -859,113 +859,25 @@ async fn test_oci_blob_head() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_batch_upload_existing() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-    let content = b"pg-s3-batch-test";
-    let oid = sha256_hex(content);
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    let batch_resp = client.post(server.url("/v1/lfs/objects/batch"))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/vnd.git-lfs+json")
-        .json(&serde_json::json!({"operation":"upload","objects":[{"oid":oid,"size":content.len() as u64}]}))
-        .send().await.unwrap();
-    assert_eq!(batch_resp.status(), 200);
-    let j: serde_json::Value = batch_resp.json().await.unwrap();
-    assert_eq!(j["objects"][0]["oid"], oid);
+    http_contracts::lfs::batch_upload_existing(&server, b"pg-s3-batch-test").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_batch_download_missing() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-    let batch_resp = client.post(server.url("/v1/lfs/objects/batch"))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/vnd.git-lfs+json")
-        .json(&serde_json::json!({"operation":"download","objects":[{"oid":"f".repeat(64),"size":42}]}))
-        .send().await.unwrap();
-    assert_eq!(batch_resp.status(), 200);
-    let j: serde_json::Value = batch_resp.json().await.unwrap();
-    assert!(j["objects"][0].get("error").is_some());
+    http_contracts::lfs::batch_download_missing(&server, &"f".repeat(64), 42).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_head_object() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-    let content = b"pg-s3-head-lfs";
-    let oid = sha256_hex(content);
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    let head = client
-        .head(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(head.status(), 200);
-    let cl: u64 = head
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    assert_eq!(cl, content.len() as u64);
+    http_contracts::lfs::head_object(&server, b"pg-s3-head-lfs").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_patch_object() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-    let c1 = b"pg-s3-patch-";
-    let c2 = b"final";
-    let full = [c1.to_vec(), c2.to_vec()].concat();
-    let oid = sha256_hex(&full);
-    let total = full.len() as u64;
-
-    client
-        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .header(
-            "Content-Range",
-            &format!("bytes 0-{}/{}", c1.len() as u64 - 1, total),
-        )
-        .body(c1.to_vec())
-        .send()
-        .await
-        .unwrap();
-    client
-        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .header(
-            "Content-Range",
-            &format!("bytes {}-{}/{}", c1.len(), total - 1, total),
-        )
-        .body(c2.to_vec())
-        .send()
-        .await
-        .unwrap();
-    let get = client
-        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get.status(), 200);
-    assert_eq!(get.bytes().await.unwrap().as_ref(), full.as_slice());
+    http_contracts::lfs::patch_object(&server, b"pg-s3-patch-", b"final").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

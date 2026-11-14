@@ -680,144 +680,25 @@ async fn test_oci_blob_head() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_batch_upload_existing() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"lfs-batch-existing-test";
-    let oid = sha256_hex(content);
-
-    let put_resp = client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert!(put_resp.status().is_success());
-
-    let batch_req = serde_json::json!({
-        "operation": "upload",
-        "objects": [{"oid": oid, "size": content.len() as u64}]
-    });
-    let batch_resp = client
-        .post(server.url("/v1/lfs/objects/batch"))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/vnd.git-lfs+json")
-        .json(&batch_req)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(batch_resp.status(), 200);
-    let j: serde_json::Value = batch_resp.json().await.unwrap();
-    let obj = &j["objects"][0];
-    assert_eq!(obj["oid"], oid);
-    assert!(
-        obj.get("actions").is_none() || obj["actions"].as_object().map_or(true, |m| m.is_empty())
-    );
+    http_contracts::lfs::batch_upload_existing(&server, b"lfs-batch-existing-test").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_batch_download_missing() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let fake_oid = "f".repeat(64);
-    let batch_req = serde_json::json!({
-        "operation": "download",
-        "objects": [{"oid": fake_oid, "size": 42}]
-    });
-    let batch_resp = client
-        .post(server.url("/v1/lfs/objects/batch"))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/vnd.git-lfs+json")
-        .json(&batch_req)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(batch_resp.status(), 200);
-    let j: serde_json::Value = batch_resp.json().await.unwrap();
-    assert!(
-        j["objects"][0].get("error").is_some(),
-        "missing object should have error"
-    );
+    http_contracts::lfs::batch_download_missing(&server, &"f".repeat(64), 42).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_head_object() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"lfs-head-test";
-    let oid = sha256_hex(content);
-
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    let head_resp = client
-        .head(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(head_resp.status(), 200);
-    let cl: u64 = head_resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    assert_eq!(cl, content.len() as u64);
+    http_contracts::lfs::head_object(&server, b"lfs-head-test").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_patch_object() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let chunk1 = b"lfs-patch-initial-";
-    let chunk2 = b"content";
-    let full_content = [chunk1.to_vec(), chunk2.to_vec()].concat();
-    let oid = sha256_hex(&full_content);
-    let total = full_content.len() as u64;
-
-    let range1 = format!("bytes 0-{}/{}", chunk1.len() as u64 - 1, total);
-    let p1 = client
-        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .header("Content-Range", &range1)
-        .body(chunk1.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(p1.status(), 200);
-
-    let range2 = format!("bytes {}-{}/{}", chunk1.len(), total - 1, total);
-    let p2 = client
-        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .header("Content-Range", &range2)
-        .body(chunk2.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(p2.status(), 200);
-
-    let get = client
-        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get.status(), 200);
-    assert_eq!(get.bytes().await.unwrap().as_ref(), full_content.as_slice());
+    http_contracts::lfs::patch_object(&server, b"lfs-patch-initial-", b"content").await;
 }
 
 // ===========================================================================

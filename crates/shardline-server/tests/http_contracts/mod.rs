@@ -1,6 +1,7 @@
 //! HTTP contracts exercised independently by every Docker deployment suite.
 //! Each parent supplies its own backend-specific server and token lifecycle.
 
+pub(crate) mod lfs;
 pub(crate) mod oci;
 
 use super::{ServerFrontend, TestServer, sha256_hex};
