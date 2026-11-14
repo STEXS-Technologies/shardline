@@ -35,7 +35,6 @@ impl ProtocolChunkReuse {
                 .iter()
                 .any(|members| members.contains_key(&hash))
             {
-                let objects = self.backend.object_store();
                 let wanted = hash.clone();
                 let found = self
                     .backend
@@ -53,17 +52,7 @@ impl ProtocolChunkReuse {
                                 {
                                     continue;
                                 }
-                                // The native lookup establishes authorization and identity;
-                                // existing source verification authenticates actual storage
-                                // offsets before a raw-protocol record can reuse them.
-                                let verified = shardline_xet_adapter::recover_xorb_descriptor(
-                                    &objects,
-                                    &descriptor.hash,
-                                )?;
-                                if verified != descriptor {
-                                    return Err(ServerError::InvalidContentHash);
-                                }
-                                return Ok(Some((verified, visible)));
+                                return Ok(Some((descriptor, visible)));
                             }
                             Ok(None)
                         },
@@ -71,6 +60,27 @@ impl ProtocolChunkReuse {
                     .await;
                 match found {
                     Ok(Some((descriptor, visible))) => {
+                        // Candidate admission has committed. Full container reads must
+                        // not retain its database connection or deletion locks.
+                        // Final publication rechecks availability under reference locks.
+                        let objects = self.backend.object_store();
+                        let container_hash = descriptor.hash.clone();
+                        let verified =
+                            match blocking_work(self.backend.stream_work_pool(), move || {
+                                Ok(shardline_xet_adapter::recover_xorb_descriptor(
+                                    &objects,
+                                    &container_hash,
+                                )?)
+                            })
+                            .await
+                            {
+                                Ok(verified) => verified,
+                                Err(ServerError::NotFound) => return Ok(None),
+                                Err(error) => return Err(error),
+                            };
+                        if verified != descriptor {
+                            return Err(ServerError::InvalidContentHash);
+                        }
                         let mut members = HashMap::new();
                         for (index, (member, allowed)) in
                             descriptor.chunks.iter().zip(visible).enumerate()

@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use axum::{
@@ -23,8 +26,16 @@ struct ProviderState {
     requests: Vec<(Method, String)>,
 }
 
+#[derive(Default)]
+struct ReadGate {
+    armed: AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
 struct Provider {
     state: Arc<Mutex<ProviderState>>,
+    reads: Arc<ReadGate>,
     objects: ServerObjectStore,
     task: tokio::task::JoinHandle<()>,
 }
@@ -36,11 +47,21 @@ impl Provider {
     async fn new(mode: u8) -> Self {
         let state = Arc::new(Mutex::new(ProviderState::default()));
         let observed = state.clone();
+        let reads = Arc::new(ReadGate::default());
+        let read_gate = reads.clone();
         let app = Router::new()
             .fallback(
                 move |method: Method, uri: Uri, headers: HeaderMap, bytes: Bytes| {
                     let observed = observed.clone();
+                    let gate = read_gate.clone();
                     async move {
+                        if method == Method::GET
+                            && uri.path().contains("/xorbs/")
+                            && gate.armed.load(Ordering::SeqCst)
+                        {
+                            gate.entered.notify_one();
+                            gate.resume.notified().await;
+                        }
                         let mut state = observed.lock().unwrap();
                         let path = uri.path().to_owned();
                         state.requests.push((method.clone(), path.clone()));
@@ -136,6 +157,7 @@ impl Provider {
         .unwrap();
         Self {
             state,
+            reads,
             objects,
             task,
         }
@@ -179,6 +201,7 @@ mod digest;
 mod encoding_ranges;
 mod local;
 mod lost_ack;
+mod verification_transaction;
 
 #[tokio::test]
 async fn equivalent_native_encoding_reuses_retained_container() {

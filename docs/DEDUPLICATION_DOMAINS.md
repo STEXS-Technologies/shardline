@@ -29,7 +29,17 @@ garbage-collection reachability and durable-content-before-publication behavior.
 Deleting a source record does not delete content referenced by another record.
 
 Verified members are cached per ingestion with bounds on both container count
-and total member count. Initial container verification still uses the existing
-PostgreSQL remote-delete admission transaction. Its object-store reads and lock
-duration need separate performance qualification; domain isolation does not
-resolve that remaining cost.
+and total member count. Full-container integrity verification runs after the
+PostgreSQL discovery transaction commits, releasing its connection and deletion
+admission locks before payload reads. Final publication reacquires reference
+locks and rejects pending deletion or missing content before publishing metadata.
+Candidate HEAD requests still occur inside discovery admission; backend read
+amplification, transaction duration, and upload latency need performance
+qualification on representative remote storage.
+
+The PostgreSQL regression
+`postgres_slow_reuse_verification_releases_discovery_and_rechecks_publication`
+pauses a remote container GET, checks that the sole metadata connection and
+deletion admission are available, and verifies that a deletion admitted during
+the read prevents target publication. It fails against verification performed
+inside the discovery transaction.
