@@ -3,14 +3,17 @@ use std::collections::HashMap;
 use serde_json::{from_value, to_value};
 use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
 
-use super::{PostgresIndexStore, PostgresMetadataStoreError, u64_to_i64};
+use super::{
+    PostgresIndexStore, PostgresMetadataStoreError,
+    index_store::{insert_reliability_event_value, load_previous_reliability_commit},
+    u64_to_i64,
+};
 use crate::{OciTagEntry, OciTagStore};
 use shardline_reliability::{
-    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind,
-    ReliabilityMerkleCommit, SnapshotEvidence, persisted_event_sequence,
-    reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit_with_previous,
-    verify_snapshot_event, verify_snapshot_evidence,
+    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind, SnapshotEvidence,
+    persisted_event_sequence, reliability_merkle_commit_json_with_previous,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_persisted_merkle_commit_with_previous, verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -223,28 +226,10 @@ async fn persist_tag_event(
 ) -> Result<(), PostgresMetadataStoreError> {
     event.verify_integrity()?;
     let sequence = u64_to_i64(event.sequence)?;
-    let previous_json: Option<serde_json::Value> = query_scalar(
-        "SELECT CASE WHEN EXISTS (
-             SELECT 1 FROM shardline_reliability_events AS missing
-             WHERE missing.operation_kind = $1 AND missing.operation_id = $2
-               AND missing.sequence < $3
-               AND missing.merkle_commit_json IS NULL
-         ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
-         FROM shardline_reliability_events
-         WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
-         ORDER BY sequence DESC LIMIT 1",
-    )
-    .bind(event.operation.kind.as_str())
-    .bind(&event.operation.operation_id)
-    .bind(sequence)
-    .fetch_optional(&mut *connection)
-    .await?;
-    let previous = previous_json
-        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
-        .transpose()?;
+    let previous = load_previous_reliability_commit(connection, &event.operation, sequence).await?;
     let merkle_commit_json =
         reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
-    super::index_store::insert_reliability_event_value(
+    insert_reliability_event_value(
         connection,
         &event.operation,
         event.sequence,

@@ -2669,25 +2669,8 @@ where
     let sequence = i64::try_from(event.sequence_number()).map_err(|_error| {
         PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
     })?;
-    let previous_json: Option<serde_json::Value> = query_scalar(
-        "SELECT CASE WHEN EXISTS (
-             SELECT 1 FROM shardline_reliability_events AS missing
-             WHERE missing.operation_kind = $1 AND missing.operation_id = $2
-               AND missing.sequence < $3
-               AND missing.merkle_commit_json IS NULL
-         ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
-         FROM shardline_reliability_events
-         WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
-         ORDER BY sequence DESC LIMIT 1",
-    )
-    .bind(event.operation_identity().kind.as_str())
-    .bind(&event.operation_identity().operation_id)
-    .bind(sequence)
-    .fetch_optional(&mut *connection)
-    .await?;
-    let previous = previous_json
-        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
-        .transpose()?;
+    let previous =
+        load_previous_reliability_commit(connection, event.operation_identity(), sequence).await?;
     let merkle_commit_json =
         reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
     insert_reliability_event_value(
@@ -2783,6 +2766,33 @@ async fn verify_existing_reliability_boundary(
         }
     }
     Ok(())
+}
+
+/// Loads the previous commitment, rejecting earlier rows without a commitment.
+pub(super) async fn load_previous_reliability_commit(
+    connection: &mut PgConnection,
+    operation: &shardline_reliability::OperationIdentity,
+    sequence: i64,
+) -> Result<Option<ReliabilityMerkleCommit>, PostgresMetadataStoreError> {
+    let previous_json: Option<serde_json::Value> = query_scalar(
+        "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS missing
+             WHERE missing.operation_kind = $1 AND missing.operation_id = $2
+               AND missing.sequence < $3
+               AND missing.merkle_commit_json IS NULL
+         ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
+         ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(operation.kind.as_str())
+    .bind(&operation.operation_id)
+    .bind(sequence)
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(previous_json
+        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+        .transpose()?)
 }
 
 pub(super) async fn insert_reliability_event_value(
