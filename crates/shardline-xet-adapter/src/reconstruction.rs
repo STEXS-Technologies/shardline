@@ -268,11 +268,8 @@ mod tests {
 
     #[test]
     fn response_contains_xet_terms_and_fetch_info() {
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
         let record = FileRecord {
             file_id: "asset.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
@@ -374,11 +371,7 @@ mod tests {
                 },
             ],
         };
-        let range = ByteRange::new(2, 9);
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = ByteRange::new(2, 9).unwrap();
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, Some(range));
 
@@ -409,11 +402,7 @@ mod tests {
                 packed_end: 4,
             }],
         };
-        let range = ByteRange::new(4, 4);
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = ByteRange::new(4, 4).unwrap();
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, Some(range));
 
@@ -434,11 +423,7 @@ mod tests {
             repository_scope: None,
             chunks: Vec::new(),
         };
-        let range = ByteRange::new(0, 0);
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = ByteRange::new(0, 0).unwrap();
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, Some(range));
 
@@ -479,11 +464,7 @@ mod tests {
             ],
         };
 
-        let v1 = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
-        assert!(v1.is_ok());
-        let Ok(v1) = v1 else {
-            return;
-        };
+        let v1 = build_reconstruction_response("http://127.0.0.1:8080", &record, None).unwrap();
         let v2 = reconstruction_v2_from_v1(v1);
 
         assert_eq!(v2.terms.len(), 2);
@@ -709,11 +690,7 @@ mod tests {
             ],
         };
         // Range covering only the middle chunk (byte 4-7).
-        let range = ByteRange::new(4, 7);
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = ByteRange::new(4, 7).unwrap();
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, Some(range));
 
@@ -733,7 +710,7 @@ mod tests {
     fn batch_reconstruction_response_merges_fetch_info_across_files() {
         let first = build_batch_reconstruction_response([
             ("a".repeat(64), {
-                let response = build_reconstruction_response(
+                build_reconstruction_response(
                     "http://127.0.0.1:8080",
                     &FileRecord {
                         file_id: "asset-a".to_owned(),
@@ -753,15 +730,11 @@ mod tests {
                         }],
                     },
                     None,
-                );
-                assert!(response.is_ok());
-                let Ok(response) = response else {
-                    return;
-                };
-                response
+                )
+                .unwrap()
             }),
             ("b".repeat(64), {
-                let response = build_reconstruction_response(
+                build_reconstruction_response(
                     "http://127.0.0.1:8080",
                     &FileRecord {
                         file_id: "asset-b".to_owned(),
@@ -781,12 +754,8 @@ mod tests {
                         }],
                     },
                     None,
-                );
-                assert!(response.is_ok());
-                let Ok(response) = response else {
-                    return;
-                };
-                response
+                )
+                .unwrap()
             }),
         ]);
 

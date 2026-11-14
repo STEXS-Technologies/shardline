@@ -1423,16 +1423,8 @@ mod tests {
 
     #[test]
     fn shard_upload_rejects_excessive_reconstruction_terms_before_xorb_lookup() {
-        let temp = tempfile::tempdir();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
-        let object_store = ServerObjectStore::local(temp.path().join("objects"));
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
         let shard = shard_with_reconstruction_terms(
             DEFAULT_SHARD_METADATA_LIMITS
@@ -1448,16 +1440,8 @@ mod tests {
 
     #[test]
     fn shard_upload_rejects_excessive_xorb_chunks_before_materializing_upload() {
-        let temp = tempfile::tempdir();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
-        let object_store = ServerObjectStore::local(temp.path().join("objects"));
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
         let shard =
             shard_with_xorb_chunks(DEFAULT_SHARD_METADATA_LIMITS.max_xorb_chunks().get() + 1);
@@ -1469,22 +1453,10 @@ mod tests {
 
     #[test]
     fn shard_upload_rejects_excessive_unique_referenced_xorbs_before_lookup() {
-        let temp = tempfile::tempdir();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
-        let object_store = ServerObjectStore::local(temp.path().join("objects"));
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
-        let max_one = NonZeroUsize::new(1);
-        assert!(max_one.is_some());
-        let Some(max_one) = max_one else {
-            return;
-        };
+        let max_one = NonZeroUsize::new(1).unwrap();
         let limits = ShardMetadataLimits::new(
             max_one,
             max_one,

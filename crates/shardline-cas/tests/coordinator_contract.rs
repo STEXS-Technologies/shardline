@@ -469,11 +469,7 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
     let coordinator = CasCoordinator::new(index, object_store, (), limits);
 
     let hash = ShardlineHash::from_bytes([5; 32]);
-    let key = ObjectKey::parse("xorbs/default/05/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
 
     let body = [10, 20, 30, 40];
     let integrity = ObjectIntegrity::new(hash, 4);
@@ -497,16 +493,8 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
         Ok(Some(4))
     );
 
-    let prefix = ObjectPrefix::parse("xorbs/default/");
-    assert!(prefix.is_ok());
-    let Ok(prefix) = prefix else {
-        return;
-    };
-    let listed = coordinator.object_store().list_prefix(&prefix);
-    assert!(listed.is_ok());
-    let Ok(listed) = listed else {
-        return;
-    };
+    let prefix = ObjectPrefix::parse("xorbs/default/").unwrap();
+    let listed = coordinator.object_store().list_prefix(&prefix).unwrap();
     assert_eq!(listed.len(), 1);
     let first_listed = listed.first();
     assert!(first_listed.is_some());
@@ -514,11 +502,7 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
         assert_eq!(first_listed.key().as_str(), key.as_str());
     }
 
-    let range = ByteRange::new(1, 2);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ByteRange::new(1, 2).unwrap();
     assert_eq!(
         coordinator.object_store().read_range(&key, range),
         Ok(vec![20, 30])
@@ -526,11 +510,7 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
 
     let file_id = FileId::new(hash);
     let object_id = StoredObjectId::new(hash);
-    let chunk_range = ChunkRange::new(0, 1);
-    assert!(chunk_range.is_ok());
-    let Ok(chunk_range) = chunk_range else {
-        return;
-    };
+    let chunk_range = ChunkRange::new(0, 1).unwrap();
     let term = ReconstructionTerm::new(object_id, chunk_range, 4);
     let reconstruction = FileReconstruction::new(vec![term]);
 
@@ -539,11 +519,7 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
         .index()
         .insert_reconstruction(file_id, reconstruction.clone());
 
-    let candidate = QuarantineCandidate::new(key.clone(), 4, 10, 20);
-    assert!(candidate.is_ok());
-    let Ok(candidate) = candidate else {
-        return;
-    };
+    let candidate = QuarantineCandidate::new(key.clone(), 4, 10, 20).unwrap();
     assert_eq!(
         coordinator.index().upsert_quarantine_candidate(&candidate),
         Ok(())
@@ -584,11 +560,8 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
         "provider deletion grace".to_owned(),
         30,
         Some(90),
-    );
-    assert!(hold.is_ok());
-    let Ok(hold) = hold else {
-        return;
-    };
+    )
+    .unwrap();
     assert_eq!(coordinator.index().upsert_retention_hold(&hold), Ok(()));
     assert_eq!(
         coordinator.index().retention_hold(&key),
@@ -601,31 +574,15 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
 
 #[test]
 fn coordinator_local_filesystem_adapters_support_lifecycle_and_reconstruction_contracts() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let object_store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(object_store.is_ok());
-    let Ok(object_store) = object_store else {
-        return;
-    };
-    let index = LocalIndexStore::new(storage.path().join("index"));
-    assert!(index.is_ok());
-    let Ok(index) = index else {
-        return;
-    };
+    let storage = tempfile::tempdir().unwrap();
+    let object_store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
 
     let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
     let coordinator = CasCoordinator::new(index, object_store, (), limits);
 
     let hash = ShardlineHash::from_bytes([8; 32]);
-    let key = ObjectKey::parse("xorbs/default/08/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/08/hash.xorb").unwrap();
     let body = [1, 2, 3, 4];
     let integrity = ObjectIntegrity::new(blake3_hash(&body), 4);
     let inserted =
@@ -640,25 +597,13 @@ fn coordinator_local_filesystem_adapters_support_lifecycle_and_reconstruction_co
         Ok(PutOutcome::AlreadyExists)
     ));
 
-    let prefix = ObjectPrefix::parse("xorbs/default/");
-    assert!(prefix.is_ok());
-    let Ok(prefix) = prefix else {
-        return;
-    };
-    let listed = coordinator.object_store().list_prefix(&prefix);
-    assert!(listed.is_ok());
-    let Ok(listed) = listed else {
-        return;
-    };
+    let prefix = ObjectPrefix::parse("xorbs/default/").unwrap();
+    let listed = coordinator.object_store().list_prefix(&prefix).unwrap();
     assert_eq!(listed.len(), 1);
 
     let file_id = FileId::new(hash);
     let object_id = StoredObjectId::new(hash);
-    let range = ChunkRange::new(0, 1);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ChunkRange::new(0, 1).unwrap();
     let reconstruction =
         FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 4)]);
     let inserted_reconstruction = coordinator
@@ -668,11 +613,7 @@ fn coordinator_local_filesystem_adapters_support_lifecycle_and_reconstruction_co
     let inserted_object = coordinator.index().insert_object(&object_id);
     assert!(inserted_object.is_ok());
 
-    let candidate = QuarantineCandidate::new(key.clone(), 4, 11, 22);
-    assert!(candidate.is_ok());
-    let Ok(candidate) = candidate else {
-        return;
-    };
+    let candidate = QuarantineCandidate::new(key.clone(), 4, 11, 22).unwrap();
     assert!(matches!(
         coordinator.index().upsert_quarantine_candidate(&candidate),
         Ok(())
