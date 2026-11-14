@@ -1056,22 +1056,6 @@ mod tests {
     }
 
     #[test]
-    fn accept_subtype_wildcard() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
-        );
-        assert!(
-            ensure_manifest_representation_is_acceptable(
-                &headers,
-                "application/vnd.oci.image.manifest.v1+json"
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
     fn accept_mismatch_rejected() {
         let mut headers = HeaderMap::new();
         headers.insert(

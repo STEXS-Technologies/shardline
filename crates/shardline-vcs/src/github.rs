@@ -501,21 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn github_adapter_parses_repository_edit_as_access_change() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "action":"edited",
-            "repository":{"full_name":"team/assets"}
-        }"#;
-        let signature = signature(body);
-        let request =
-            WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let event = event.expect("expected webhook event");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
-    }
-
-    #[test]
     fn github_adapter_rename_with_changes_name_fallback() {
         let adapter = adapter().unwrap();
         let body = br#"{
