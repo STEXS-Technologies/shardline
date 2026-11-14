@@ -3745,3 +3745,44 @@ no recovery result is treated as a successful measurement.
 These measurements are baselines for a fixed host and deployment shape. Compare runs
 only with matching fixture, service, database, object-store, CPU, and toolchain
 metadata.
+
+## Maintenance cleanup source inventory
+
+The November 14, 2026 inventory compares baseline
+`e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
+`207236fb3c7502a072826362087f9a1dc79b212a`. It counts all tracked `.rs`
+lines, including tests, comments and blank lines. Uncommitted work and generated
+untracked files are excluded. These counts measure source size, not runtime cost
+or the amount of additional code that can safely be removed.
+
+| Scope | Baseline lines | Cleanup lines | Net reduction |
+| --- | ---: | ---: | ---: |
+| Entire repository | 603,649 | 594,732 | 8,917 (1.48%) |
+| Server | 220,570 | 213,089 | 7,481 (3.39%) |
+| Storage | 20,373 | 19,475 | 898 (4.41%) |
+| S3 adapter | 10,954 | 10,366 | 588 (5.37%) |
+| Cache | 6,573 | 6,000 | 573 (8.72%) |
+| Index | 71,472 | 71,298 | 174 (0.24%) |
+
+Component rows are selected examples; other components gained coverage, so their
+reductions must not be summed to obtain the repository total. Reproduce a row
+using the corresponding commit and path, or omit the path for the total:
+
+```bash
+set -o pipefail
+git grep -I -n '^' 207236fb3c7502a072826362087f9a1dc79b212a -- 'crates/shardline-server/*.rs' | wc -l
+```
+
+The cleanup preserves incremental build artifacts, narrows ordinary binary and
+integration-test targets, reuses the pinned Nextest installer, removes unused
+dependencies/features and avoids unnecessary CI tool installation. These are
+structural reductions in work. Comparable cold/warm Cargo, Docker and CI
+critical-path timings have not been established; no percentage build-time
+improvement is claimed. A source reduction also does not establish a throughput,
+latency, memory or I/O improvement.
+
+The focused [invariant ledger](../scripts/shardline/invariants.toml) maps retained
+storage, recovery and evidence checks. It is an index of the changed guarantees,
+not a substitute for the existing integration and release gates. Further source
+cuts require evidence of duplicated inputs, failure boundaries and assertions;
+the inventory does not justify removing an arbitrary percentage of tests.
