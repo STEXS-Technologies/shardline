@@ -1157,21 +1157,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_stream_rejects_zero_length_with_nonempty_file() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/not-empty").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"data").await;
+    async fn zero_length_object_streams_exhaust_existing_empty_files() {
+        for key in ["ab/existing-empty", "ab/store-empty", "ab/zero-stream"] {
+            let storage = shardline_test_support::TempStorage::new();
+            let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+            let object_key = ObjectKey::parse(key).unwrap();
+            let path = object_store.path_for_key(&object_key);
+            write_fixture_file(&path, b"").await;
+            let mut stream =
+                super::object_byte_stream(ServerObjectStore::Local(object_store), object_key, 0)
+                    .await
+                    .unwrap();
+            assert!(stream.next().await.is_none(), "{key}");
+        }
+    }
 
-        let store = ServerObjectStore::Local(object_store);
-        let result = super::object_byte_stream(store, object_key, 0).await;
-        assert!(matches!(
-            result,
-            Err(ServerError::ObjectStore(
-                ObjectStoreError::StoredLengthMismatch
-            ))
-        ));
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_length_object_streams_reject_nonempty_files() {
+        for (key, bytes) in [
+            ("ab/not-empty", b"data".as_slice()),
+            ("ab/nonempty-claimed-zero-v2", b"data".as_slice()),
+            ("ab/zero-claim-nonzero", b"content".as_slice()),
+        ] {
+            let storage = shardline_test_support::TempStorage::new();
+            let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+            let object_key = ObjectKey::parse(key).unwrap();
+            let path = object_store.path_for_key(&object_key);
+            write_fixture_file(&path, bytes).await;
+            let result =
+                super::object_byte_stream(ServerObjectStore::Local(object_store), object_key, 0)
+                    .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(ServerError::ObjectStore(
+                        ObjectStoreError::StoredLengthMismatch
+                    ))
+                ),
+                "{key}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1273,40 +1298,6 @@ mod tests {
     }
 
     // ── object_byte_stream — zero-length metadata scenarios ──────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_stream_zero_length_with_existing_empty_file() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/existing-empty").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"").await;
-
-        let store = ServerObjectStore::Local(object_store);
-        let result = super::object_byte_stream(store, object_key, 0).await;
-        assert!(result.is_ok());
-        let mut stream = result.unwrap();
-        use futures_util::StreamExt;
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_stream_zero_length_nonempty_file_errors() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/nonempty-claimed-zero-v2").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"data").await;
-
-        let store = ServerObjectStore::Local(object_store);
-        let result = super::object_byte_stream(store, object_key, 0).await;
-        assert!(matches!(
-            result,
-            Err(ServerError::ObjectStore(
-                ObjectStoreError::StoredLengthMismatch
-            ))
-        ));
-    }
 
     // ── local_store_byte_range_stream — truncated file during read ───────
 
@@ -1415,21 +1406,6 @@ mod tests {
 
     // ── object_byte_stream via ServerObjectStore::Local ──────────────────
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_stream_via_local_store_empty_file() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/store-empty").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"").await;
-
-        let store = ServerObjectStore::Local(object_store);
-        let result = super::object_byte_stream(store, object_key, 0).await;
-        assert!(result.is_ok());
-        let mut stream = result.unwrap();
-        assert!(stream.next().await.is_none());
-    }
-
     // ── object_byte_range_stream with length mismatch ────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1485,22 +1461,6 @@ mod tests {
     // ── object_byte_stream — 404 via blackhole metadata check ────────────
 
     // ── overflow edge cases ──────────────────────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_stream_overflow_on_zero_length_sub_one() {
-        // The function uses checked_sub(1) for end_inclusive range when length == 0
-        // should go through the metadata path, not the range path.
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/zero-stream").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"").await;
-
-        let store = ServerObjectStore::Local(object_store);
-        let result = super::object_byte_stream(store, object_key, 0).await;
-        // Zero-length existing empty file → empty stream
-        assert!(result.is_ok());
-    }
 
     // ── file_record_byte_stream decompression round-trip ─────────────────
 
@@ -1726,25 +1686,6 @@ mod tests {
             observed.extend_from_slice(&item.unwrap());
         }
         assert_eq!(observed, b"f");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_stream_zero_length_with_nonzero_metadata_returns_stored_length_mismatch() {
-        // Create a file with content but claim length 0
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/zero-claim-nonzero").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"content").await;
-
-        let store = ServerObjectStore::Local(object_store);
-        let result = super::object_byte_stream(store, object_key, 0).await;
-        assert!(matches!(
-            result,
-            Err(ServerError::ObjectStore(
-                ObjectStoreError::StoredLengthMismatch
-            ))
-        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
