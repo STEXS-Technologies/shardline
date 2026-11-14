@@ -1311,31 +1311,18 @@ fn streaming_large_copy_rejects_empty_region_config() {
 // ── Incomplete credentials rejection ──────────────────────────────────
 
 #[test]
-fn s3_store_rejects_incomplete_credentials_key_without_secret() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        Some(SecretString::from_secret("key")),
-        None,
-        None,
-    );
-    let store = S3ObjectStore::new(config);
-    assert!(matches!(
-        store,
-        Err(S3ObjectStoreError::IncompleteCredentials)
-    ));
-}
-
-#[test]
-fn s3_store_rejects_incomplete_credentials_secret_without_key() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        None,
-        Some(SecretString::from_secret("secret")),
-        None,
-    );
-    let store = S3ObjectStore::new(config);
-    assert!(matches!(
-        store,
-        Err(S3ObjectStoreError::IncompleteCredentials)
-    ));
+fn s3_store_rejects_incomplete_credentials() {
+    for (access_key, secret_key) in [(Some("key"), None), (None, Some("secret"))] {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
+            access_key.map(SecretString::from_secret),
+            secret_key.map(SecretString::from_secret),
+            None,
+        );
+        assert!(matches!(
+            S3ObjectStore::new(config),
+            Err(S3ObjectStoreError::IncompleteCredentials)
+        ));
+    }
 }
 
 // ── MinIO-backed integration tests ───────────────────────────────────
@@ -2070,35 +2057,6 @@ fn s3_config_clone_and_eq() {
         .with_allow_http(true);
     let b = a.clone();
     assert_eq!(a, b);
-}
-
-#[test]
-fn s3_config_with_credentials_only_key() {
-    // Only access_key_id without secret_access_key should fail
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        Some(SecretString::from_secret("key")),
-        None,
-        None,
-    );
-    let store = S3ObjectStore::new(config);
-    assert!(matches!(
-        store,
-        Err(S3ObjectStoreError::IncompleteCredentials)
-    ));
-}
-
-#[test]
-fn s3_config_with_credentials_only_secret() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        None,
-        Some(SecretString::from_secret("secret")),
-        None,
-    );
-    let store = S3ObjectStore::new(config);
-    assert!(matches!(
-        store,
-        Err(S3ObjectStoreError::IncompleteCredentials)
-    ));
 }
 
 // ── S3ObjectStoreConfig Debug without endpoint ────────────────────────
