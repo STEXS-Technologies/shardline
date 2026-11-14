@@ -1,8 +1,8 @@
 //! Server configuration end-to-end tests.
 //!
 //! These tests do NOT require Docker or a Postgres instance. They validate
-//! server-level configuration handling: body-limit enforcement, invalid
-//! bind addresses, and empty frontend lists.
+//! server-level configuration handling: body limits, bind failures, empty
+//! frontend lists, durable-session limits, and resource capacities.
 
 #![allow(
     clippy::unwrap_used,
@@ -26,6 +26,11 @@ use shardline_server_core::{
 };
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+#[path = "configuration/resource_capacities.rs"]
+mod resource_capacities;
+#[path = "configuration/session_ttl_validation.rs"]
+mod session_ttl_validation;
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
@@ -233,24 +238,17 @@ async fn test_ed25519_rotation_accepts_old_and_new_tokens_on_authenticated_route
     }
 }
 
-// ---------------------------------------------------------------------------
-// 2. Startup: invalid bind address
-// ---------------------------------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_server_startup_invalid_bind() {
+async fn test_server_startup_rejects_occupied_bind_address() {
     let tmp = TempDir::new().unwrap();
-    let chunk_size = NonZeroUsize::new(65536).unwrap();
-
-    // Try binding to port 0 on an invalid/unbindable address.
-    // "1.2.3.4:9999" should fail because it's not a local address.
-    let bind_addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
-
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bind_addr = occupied.local_addr().unwrap();
+    let root = tmp.path().join("uninitialized");
     let config = ServerConfig::new(
         bind_addr,
-        "http://127.0.0.1:8080".to_owned(),
-        tmp.path().to_path_buf(),
-        chunk_size,
+        format!("http://{bind_addr}"),
+        root.clone(),
+        NonZeroUsize::new(65536).unwrap(),
     )
     .with_server_role(ServerRole::All)
     .with_server_frontends([ServerFrontend::Xet])
@@ -260,12 +258,22 @@ async fn test_server_startup_invalid_bind() {
     .with_reconstruction_cache_disabled();
     config.validate_runtime_requirements().unwrap();
 
-    // Binding to port 1 requires root on most systems → should fail.
-    let result = tokio::net::TcpListener::bind(bind_addr).await;
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        shardline_server::serve(config),
+    )
+    .await
+    .expect("occupied listener must reject startup promptly")
+    .unwrap_err();
     assert!(
-        result.is_err(),
-        "binding to port 1 should fail with EACCES (permission denied)"
+        matches!(error, shardline_server::ServerError::Io(ref source)
+        if source.kind() == std::io::ErrorKind::AddrInUse)
     );
+    assert!(
+        !root.exists(),
+        "bind failure must precede backend initialization"
+    );
+    drop(occupied);
 }
 
 // ---------------------------------------------------------------------------
