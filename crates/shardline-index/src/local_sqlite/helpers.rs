@@ -22,15 +22,13 @@ use rusqlite::{
 use serde_json::{Value, from_slice, from_str, from_value, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
-    EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot,
-    OciTagEvidenceLog, OciTagSnapshot, OperationKind, ProviderEvidenceLog,
-    ProviderLifecycleSnapshot, QuarantineEvidenceLog, QuarantineLifecycleState,
-    QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
+    EvidenceEventMetadata, HubRefEvidenceLog, HubRefSnapshot, OciTagEvidenceLog, OciTagSnapshot,
+    OperationKind, ProviderEvidenceLog, ProviderLifecycleSnapshot, QuarantineEvidenceLog,
+    QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
     S3ObjectEvidenceLog, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence, SnapshotEvidenceLog,
-    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
-    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, verify_or_repair_snapshot_evidence,
-    verify_snapshot_evidence,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
+    WebhookDeliverySnapshot, verify_or_repair_snapshot_evidence, verify_snapshot_evidence,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -837,27 +835,14 @@ pub(crate) fn load_webhook_evidence_batch(
                 .map(|operation| operation.operation_id)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let heads = load_latest_verified_event_json_batch(
-        transaction,
-        OperationKind::WebhookDelivery,
-        &operation_ids,
-    )?;
-    operation_ids
-        .into_iter()
-        .map(|operation_id| {
-            let event = heads
-                .get(&operation_id)
-                .ok_or(LocalIndexStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::OperationMismatch,
-                ))?;
-            Ok((
-                operation_id,
-                WebhookDeliveryEvidenceLog::from_head(
-                    from_value::<WebhookDeliveryLifecycleEvent>(event.clone())?,
-                )?,
-            ))
-        })
-        .collect()
+    let evidence =
+        load_snapshot_evidence_batch(transaction, OperationKind::WebhookDelivery, &operation_ids)?;
+    if operation_ids.iter().any(|id| !evidence.contains_key(id)) {
+        return Err(LocalIndexStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
+        ));
+    }
+    Ok(evidence)
 }
 
 pub(crate) fn hub_ref_snapshot(
@@ -906,11 +891,8 @@ pub(crate) fn verify_hub_ref_evidence_batch(
                 .operation_id,
         );
     }
-    let heads = load_latest_verified_event_json_batch(
-        transaction,
-        OperationKind::MetadataCommit,
-        &operation_ids,
-    )?;
+    let heads =
+        load_snapshot_evidence_batch(transaction, OperationKind::MetadataCommit, &operation_ids)?;
     for ((repository, ref_name, head_sha), operation_id) in refs.iter().zip(operation_ids) {
         let snapshot = hub_ref_snapshot(repository, ref_name, head_sha.clone())?;
         let head = heads
@@ -918,9 +900,7 @@ pub(crate) fn verify_hub_ref_evidence_batch(
             .ok_or(LocalIndexStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ))?;
-        let evidence =
-            HubRefEvidenceLog::from_head(from_value::<HubRefLifecycleEvent>(head.clone())?)?;
-        verify_snapshot_evidence(&evidence, &snapshot)?;
+        verify_snapshot_evidence(head, &snapshot)?;
     }
     Ok(())
 }

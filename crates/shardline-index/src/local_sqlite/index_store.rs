@@ -3397,6 +3397,12 @@ mod tests {
             .evidence_operation()
             .unwrap();
         let connection = store.open_connection().unwrap();
+        assert_eq!(
+            load_webhook_evidence_batch(&connection, &[last.clone(), last.clone()])
+                .unwrap()
+                .len(),
+            1
+        );
         let original: String = connection.query_row("SELECT merkle_commit_json FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=2", [&operation.operation_id], |row| row.get(0)).unwrap();
         let baseline: String = connection.query_row("SELECT merkle_commit_json FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1 AND sequence=0", [&operation.operation_id], |row| row.get(0)).unwrap();
         for sql in [
@@ -3429,6 +3435,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows, i64::try_from(INVENTORY_BATCH_SIZE * 2 + 1).unwrap());
+        connection.execute("DELETE FROM shardline_reliability_events WHERE operation_kind='WebhookDelivery' AND operation_id=?1", [&operation.operation_id]).unwrap();
+        assert!(load_webhook_evidence_batch(&connection, &[last]).is_err());
     }
 
     #[test]
