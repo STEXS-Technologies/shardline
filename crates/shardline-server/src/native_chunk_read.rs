@@ -1,4 +1,4 @@
-//! Bounded reads of indexed native members when no legacy chunk copy exists.
+//! Direct chunk reads with bounded, authenticated native-member fallback.
 
 use crate::{
     ServerError,
@@ -13,7 +13,7 @@ mod remote_tests;
 use shardline_index::XetXorbDescriptor;
 use std::future::Future;
 
-pub(crate) async fn read_indexed_member<F, Page>(
+pub(crate) async fn read_chunk<F, Page>(
     objects: ServerObjectStore,
     hash: &str,
     pool: &BoundedPool,
@@ -23,6 +23,12 @@ where
     F: FnMut(Option<String>) -> Page,
     Page: Future<Output = Result<Vec<XetXorbDescriptor>, ServerError>>,
 {
+    let object_key = crate::chunk_store::chunk_object_key(hash)?;
+    match crate::object_store::read_small_object(objects.clone(), object_key).await {
+        Ok(bytes) => return Ok(bytes),
+        Err(ServerError::NotFound) => {}
+        Err(error) => return Err(error),
+    }
     let mut after = None;
     loop {
         let candidates = page(after.clone()).await?;

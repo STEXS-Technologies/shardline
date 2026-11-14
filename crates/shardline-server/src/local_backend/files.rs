@@ -442,13 +442,7 @@ impl LocalBackend {
     ///
     /// Returns [`ServerError`] when the hash is invalid or the chunk is missing.
     pub async fn read_chunk(&self, hash_hex: &str) -> Result<Vec<u8>, ServerError> {
-        let object_key = chunk_object_key(hash_hex)?;
-        match crate::object_store::read_small_object(self.object_store(), object_key).await {
-            Ok(bytes) => return Ok(bytes),
-            Err(ServerError::NotFound) => {}
-            Err(error) => return Err(error),
-        }
-        crate::native_chunk_read::read_indexed_member(
+        crate::native_chunk_read::read_chunk(
             self.object_store(),
             hash_hex,
             &self.stream_work_pool,
