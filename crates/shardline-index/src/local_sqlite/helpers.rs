@@ -29,9 +29,9 @@ use shardline_reliability::{
     QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
     S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
-    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
-    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, verify_or_repair_snapshot_evidence,
-    verify_snapshot_evidence,
+    SnapshotEvidenceLog, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
+    WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState, WebhookDeliverySnapshot,
+    verify_or_repair_snapshot_evidence, verify_snapshot_evidence,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -700,21 +700,30 @@ pub(crate) fn quarantine_snapshot(
     )?)
 }
 
+/// Loads an integrity-checked snapshot boundary, preserving absent-log semantics.
+pub(crate) fn load_snapshot_evidence<S>(
+    connection: &Connection,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<SnapshotEvidenceLog<S>, LocalIndexStoreError>
+where
+    S: SnapshotEvidence + serde::de::DeserializeOwned,
+{
+    match load_latest_verified_event_json(connection, operation_kind, operation_id)? {
+        Some(event) => Ok(SnapshotEvidenceLog::from_head(from_value(event)?)?),
+        None => Ok(SnapshotEvidenceLog::default()),
+    }
+}
+
 pub(crate) fn load_quarantine_evidence(
     transaction: &Connection,
     object_key: &str,
 ) -> Result<QuarantineEvidenceLog, LocalIndexStoreError> {
-    let rows = load_latest_verified_event_json(
+    load_snapshot_evidence(
         transaction,
         OperationKind::GarbageCollection,
         &quarantine_evidence_operation_id(object_key),
-    )?;
-    let Some(row) = rows else {
-        return Ok(QuarantineEvidenceLog::default());
-    };
-    Ok(QuarantineEvidenceLog::from_head(from_value::<
-        QuarantineLifecycleEvent,
-    >(row)?)?)
+    )
 }
 
 pub(crate) fn load_quarantine_evidence_batch(
@@ -765,17 +774,11 @@ pub(crate) fn load_retention_evidence(
     transaction: &Connection,
     object_key: &str,
 ) -> Result<RetentionEvidenceLog, LocalIndexStoreError> {
-    let rows = load_latest_verified_event_json(
+    load_snapshot_evidence(
         transaction,
         OperationKind::RetentionHold,
         &retention_evidence_operation_id(object_key),
-    )?;
-    let Some(row) = rows else {
-        return Ok(RetentionEvidenceLog::default());
-    };
-    Ok(RetentionEvidenceLog::from_head(from_value::<
-        RetentionHoldLifecycleEvent,
-    >(row)?)?)
+    )
 }
 
 pub(crate) fn load_retention_evidence_batch(
@@ -828,17 +831,11 @@ pub(crate) fn load_webhook_evidence(
     let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
         .evidence_operation()
         .map_err(LocalIndexStoreError::from)?;
-    let rows = load_latest_verified_event_json(
+    load_snapshot_evidence(
         transaction,
         OperationKind::WebhookDelivery,
         &operation.operation_id,
-    )?;
-    let Some(row) = rows else {
-        return Ok(WebhookDeliveryEvidenceLog::default());
-    };
-    Ok(WebhookDeliveryEvidenceLog::from_head(from_value::<
-        WebhookDeliveryLifecycleEvent,
-    >(row)?)?)
+    )
 }
 
 pub(crate) fn load_webhook_evidence_batch(
@@ -897,17 +894,11 @@ pub(crate) fn load_hub_ref_evidence(
     ref_name: &str,
 ) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
     let operation = hub_ref_snapshot(repository, ref_name, None)?.evidence_operation()?;
-    let rows = load_latest_verified_event_json(
+    load_snapshot_evidence(
         transaction,
         OperationKind::MetadataCommit,
         &operation.operation_id,
-    )?;
-    let Some(row) = rows else {
-        return Ok(HubRefEvidenceLog::default());
-    };
-    Ok(HubRefEvidenceLog::from_head(from_value::<
-        HubRefLifecycleEvent,
-    >(row)?)?)
+    )
 }
 
 pub(crate) fn persist_hub_ref_evidence(
@@ -996,17 +987,7 @@ pub(crate) fn load_oci_tag_evidence(
 ) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
     let operation =
         oci_tag_snapshot(scope_namespace, repository, tag, None)?.evidence_operation()?;
-    let rows = load_latest_verified_event_json(
-        transaction,
-        OperationKind::OciTag,
-        &operation.operation_id,
-    )?;
-    let Some(row) = rows else {
-        return Ok(OciTagEvidenceLog::default());
-    };
-    Ok(OciTagEvidenceLog::from_head(from_value::<
-        OciTagLifecycleEvent,
-    >(row)?)?)
+    load_snapshot_evidence(transaction, OperationKind::OciTag, &operation.operation_id)
 }
 
 pub(crate) fn current_oci_tag_evidence(
@@ -1070,17 +1051,11 @@ pub(crate) fn load_s3_object_evidence(
     object_key: &str,
 ) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
     let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
-    let event = load_latest_verified_event_json(
+    load_snapshot_evidence(
         transaction,
         OperationKind::S3Object,
         &operation.operation_id,
-    )?;
-    let Some(event) = event else {
-        return Ok(S3ObjectEvidenceLog::default());
-    };
-    Ok(S3ObjectEvidenceLog::from_head(from_value::<
-        S3ObjectLifecycleEvent,
-    >(event)?)?)
+    )
 }
 
 pub(crate) fn current_s3_object_evidence(
@@ -1139,14 +1114,7 @@ pub(crate) fn load_provider_evidence(
     snapshot: &ProviderLifecycleSnapshot,
 ) -> Result<ProviderEvidenceLog, LocalIndexStoreError> {
     let operation_id = provider_evidence_operation_id(snapshot);
-    let Some(row) =
-        load_latest_verified_event_json(transaction, OperationKind::ProviderEvent, &operation_id)?
-    else {
-        return Ok(ProviderEvidenceLog::default());
-    };
-    Ok(ProviderEvidenceLog::from_head(from_value::<
-        ProviderLifecycleEvent,
-    >(row)?)?)
+    load_snapshot_evidence(transaction, OperationKind::ProviderEvent, &operation_id)
 }
 
 pub(crate) fn load_provider_evidence_batch(

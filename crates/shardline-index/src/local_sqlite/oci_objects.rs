@@ -35,17 +35,11 @@ pub(super) fn load_oci_evidence(
     key: &OciObjectKey,
 ) -> Result<OciObjectEvidenceLog, LocalIndexStoreError> {
     let operation_id = OciObjectOperationId::new(&oci_identity(key)?);
-    let rows = super::helpers::load_latest_verified_event_json(
+    super::helpers::load_snapshot_evidence(
         transaction,
         OperationKind::Visibility,
         operation_id.as_str(),
-    )?;
-    let Some(row) = rows else {
-        return Ok(OciObjectEvidenceLog::default());
-    };
-    Ok(OciObjectEvidenceLog::from_head(serde_json::from_value(
-        row,
-    )?)?)
+    )
 }
 
 fn persist_oci_evidence(
