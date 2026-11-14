@@ -1,3 +1,5 @@
+use crate::store::escape_like;
+
 use std::collections::HashMap;
 
 mod creation;
@@ -36,14 +38,6 @@ const fn repo_type_to_str(t: HubRepoType) -> &'static str {
 
 fn repo_type_from_str(s: &str) -> Result<HubRepoType, PostgresMetadataStoreError> {
     HubRepoType::parse_str(s).ok_or(PostgresMetadataStoreError::InvalidRepoType(s.to_owned()))
-}
-
-/// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
-fn escape_like(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('_', "\\_")
-        .replace('%', "\\%")
 }
 
 async fn load_hub_ref_evidence_head(

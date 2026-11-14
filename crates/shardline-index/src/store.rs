@@ -9,6 +9,14 @@ use crate::{
     record::RecordStore,
 };
 
+/// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
+pub(crate) fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('_', "\\_")
+        .replace('%', "\\%")
+}
+
 macro_rules! visit_items {
     ($visit:ident, $list:ident, $item:ty) => {
         /// Visits every item of this type in the store.

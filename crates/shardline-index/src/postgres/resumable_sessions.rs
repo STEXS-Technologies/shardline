@@ -1,3 +1,5 @@
+use crate::store::escape_like;
+
 use std::{collections::HashMap, num::NonZeroU64, time::Duration};
 
 use shardline_reliability::{
@@ -18,14 +20,6 @@ use crate::{
 const SESSION_ACCOUNTING_LOCK_ID: i64 = 0x5348_5244_5345_5353;
 
 mod listing_snapshot;
-
-/// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
-fn escape_like(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
 
 fn session_from_row(
     row: &sqlx::postgres::PgRow,

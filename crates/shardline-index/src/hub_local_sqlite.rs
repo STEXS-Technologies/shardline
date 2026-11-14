@@ -1,3 +1,5 @@
+use crate::store::escape_like;
+
 use std::path::Path;
 
 mod creation;
@@ -1002,14 +1004,6 @@ impl HubStore for LocalIndexStore {
 }
 
 use rusqlite::OptionalExtension;
-
-/// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
-fn escape_like(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('_', "\\_")
-        .replace('%', "\\%")
-}
 
 fn insert_hub_webhook(
     conn: &Connection,
