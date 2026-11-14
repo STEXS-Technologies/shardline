@@ -492,75 +492,32 @@ mod tests {
     }
 
     #[test]
-    fn classify_recognizes_multipart_uploads() {
-        assert_eq!(
-            classify(&query(&[("uploads", "")])),
-            vec![S3SubResource::Uploads]
-        );
-    }
-
-    #[test]
-    fn classify_recognizes_upload_id() {
-        assert_eq!(
-            classify(&query(&[("uploadId", "session-42")])),
-            vec![S3SubResource::UploadId("session-42".to_owned())]
-        );
-    }
-
-    #[test]
-    fn classify_recognizes_part_number() {
-        assert_eq!(
-            classify(&query(&[("partNumber", "3")])),
-            vec![S3SubResource::PartNumber(3)]
-        );
-    }
-
-    #[test]
-    fn classify_maps_malformed_part_number_to_other() {
-        assert_eq!(
-            classify(&query(&[("partNumber", "not-a-number")])),
-            vec![S3SubResource::Other]
-        );
-    }
-
-    #[test]
-    fn classify_recognizes_list_type_two() {
-        assert_eq!(
-            classify(&query(&[("list-type", "2")])),
-            vec![S3SubResource::ListObjects]
-        );
-        // `list-type=1` (ListObjectsV1) is out of scope.
-        assert_eq!(
-            classify(&query(&[("list-type", "1")])),
-            vec![S3SubResource::Other]
-        );
-    }
-
-    #[test]
-    fn classify_recognizes_location() {
-        assert_eq!(
-            classify(&query(&[("location", "")])),
-            vec![S3SubResource::Location]
-        );
-    }
-
-    #[test]
-    fn classify_recognizes_out_of_scope_sub_resources() {
-        let cases = [
-            ("acl", S3SubResource::Acl),
-            ("policy", S3SubResource::Policy),
-            ("lifecycle", S3SubResource::Lifecycle),
-            ("versioning", S3SubResource::Versioning),
-            ("cors", S3SubResource::Cors),
-            ("notification", S3SubResource::Notification),
-            ("tagging", S3SubResource::Tagging),
-            ("encryption", S3SubResource::Encryption),
-        ];
-        for (name, expected) in cases {
+    fn classify_recognizes_typed_sub_resources() {
+        for (name, value, expected) in [
+            ("uploads", "", S3SubResource::Uploads),
+            (
+                "uploadId",
+                "session-42",
+                S3SubResource::UploadId("session-42".to_owned()),
+            ),
+            ("partNumber", "3", S3SubResource::PartNumber(3)),
+            ("partNumber", "not-a-number", S3SubResource::Other),
+            ("list-type", "2", S3SubResource::ListObjects),
+            ("list-type", "1", S3SubResource::Other),
+            ("location", "", S3SubResource::Location),
+            ("acl", "", S3SubResource::Acl),
+            ("policy", "", S3SubResource::Policy),
+            ("lifecycle", "", S3SubResource::Lifecycle),
+            ("versioning", "", S3SubResource::Versioning),
+            ("cors", "", S3SubResource::Cors),
+            ("notification", "", S3SubResource::Notification),
+            ("tagging", "", S3SubResource::Tagging),
+            ("encryption", "", S3SubResource::Encryption),
+        ] {
             assert_eq!(
-                classify(&query(&[(name, "")])),
+                classify(&query(&[(name, value)])),
                 vec![expected],
-                "{name} must classify as its sub-resource"
+                "{name}={value}"
             );
         }
     }
