@@ -285,20 +285,6 @@ fn rebuild_error_from_rebuild_overflow_error() {
     assert!(matches!(error, RebuildError::Overflow));
 }
 
-#[test]
-fn rebuild_error_stored_file_metadata_too_large_display_includes_sizes() {
-    let error = RebuildError::StoredFileMetadataTooLarge {
-        observed_bytes: 2048,
-        maximum_bytes: 1024,
-    };
-    let msg = error.to_string();
-    assert!(!msg.is_empty());
-    assert!(
-        msg.contains("stored file metadata"),
-        "expected metadata mention in display, got: {msg}"
-    );
-}
-
 // ---- prune_stale_reconstructions early-return on dirty state ----
 
 #[tokio::test]
@@ -644,123 +630,118 @@ fn rebuild_error_from_server_object_store_error_numeric_conversion() {
 // ---- RebuildError Display for ALL variants ----
 
 #[test]
-fn rebuild_error_display_all_variants_non_empty() {
-    let errors: Vec<RebuildError> = vec![
-        RebuildError::Io(std::io::Error::other("test")),
-        RebuildError::Json(serde_json::from_str::<serde_json::Value>("bad json}}").unwrap_err()),
-        RebuildError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
-        RebuildError::InvalidContentHash,
-        RebuildError::InvalidFileId,
-        RebuildError::Overflow,
-        RebuildError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath),
-        RebuildError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
-            std::io::Error::other("test"),
-        )),
-        RebuildError::S3ObjectStore(shardline_storage::S3ObjectStoreError::Io(
-            std::io::Error::other("test"),
-        )),
-        RebuildError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound),
-        RebuildError::IndexStore(shardline_index::LocalIndexStoreError::Io(
-            std::io::Error::other("test"),
-        )),
-        RebuildError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned(
-            "test".to_owned(),
-        )),
-        RebuildError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned(
-            "test".to_owned(),
-        )),
-        RebuildError::HashParse(shardline_protocol::HashParseError::InvalidLength),
-        RebuildError::StoredFileMetadataTooLarge {
-            observed_bytes: 1,
-            maximum_bytes: 0,
-        },
-    ];
-
-    for error in &errors {
-        let msg = error.to_string();
-        assert!(!msg.is_empty(), "display message was empty for: {error:?}");
+fn rebuild_error_display_messages() {
+    for (error, expected) in [
+        (
+            RebuildError::Io(std::io::Error::other("test")),
+            "local storage operation failed",
+        ),
+        (
+            RebuildError::Json(
+                serde_json::from_str::<serde_json::Value>("bad json}}").unwrap_err(),
+            ),
+            "json operation failed",
+        ),
+        (
+            RebuildError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+            "numeric conversion exceeded supported bounds",
+        ),
+        (
+            RebuildError::InvalidContentHash,
+            "content hash must be 64 hexadecimal characters",
+        ),
+        (
+            RebuildError::InvalidFileId,
+            "file identifier must be relative and must not contain traversal or control characters",
+        ),
+        (RebuildError::Overflow, "arithmetic overflow"),
+        (
+            RebuildError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath),
+            "object storage prefix validation failed",
+        ),
+        (
+            RebuildError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
+                std::io::Error::other("test"),
+            )),
+            "local storage adapter operation failed",
+        ),
+        (
+            RebuildError::S3ObjectStore(shardline_storage::S3ObjectStoreError::Io(
+                std::io::Error::other("test"),
+            )),
+            "s3 object storage adapter operation failed",
+        ),
+        (
+            RebuildError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound),
+            "xet adapter operation failed",
+        ),
+        (
+            RebuildError::IndexStore(shardline_index::LocalIndexStoreError::Io(
+                std::io::Error::other("test"),
+            )),
+            "index adapter operation failed",
+        ),
+        (
+            RebuildError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned(
+                "test".to_owned(),
+            )),
+            "memory index adapter operation failed",
+        ),
+        (
+            RebuildError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned(
+                "test".to_owned(),
+            )),
+            "memory record adapter operation failed",
+        ),
+        (
+            RebuildError::HashParse(shardline_protocol::HashParseError::InvalidLength),
+            "hash parsing failed",
+        ),
+        (
+            RebuildError::StoredFileMetadataTooLarge {
+                observed_bytes: 1,
+                maximum_bytes: 0,
+            },
+            "stored file metadata exceeded the bounded parser ceiling",
+        ),
+        (
+            RebuildError::Io(std::io::Error::other("disk full")),
+            "local storage operation failed",
+        ),
+        (
+            RebuildError::Json(serde_json::from_str::<serde_json::Value>("{broken}").unwrap_err()),
+            "json operation failed",
+        ),
+        (
+            RebuildError::PostgresMetadata(
+                shardline_index::PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned()),
+            ),
+            "postgres metadata adapter operation failed",
+        ),
+        (
+            RebuildError::StoredFileMetadataTooLarge {
+                observed_bytes: 2048,
+                maximum_bytes: 1024,
+            },
+            "stored file metadata exceeded the bounded parser ceiling",
+        ),
+        (
+            RebuildError::StoredFileMetadataTooLarge {
+                observed_bytes: 999,
+                maximum_bytes: 100,
+            },
+            "stored file metadata exceeded the bounded parser ceiling",
+        ),
+        (
+            RebuildError::StoredFileMetadataTooLarge {
+                observed_bytes: 1_073_741_825,
+                maximum_bytes: 1_073_741_824,
+            },
+            "stored file metadata exceeded the bounded parser ceiling",
+        ),
+    ] {
+        assert_eq!(error.to_string(), expected, "{error:?}");
     }
-}
-
-#[test]
-fn rebuild_error_display_postgres_metadata() {
-    let err = RebuildError::PostgresMetadata(
-        shardline_index::PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned()),
-    );
-    let msg = err.to_string();
-    assert_eq!(msg, "postgres metadata adapter operation failed");
-}
-
-#[test]
-fn rebuild_error_display_io_contains_detail() {
-    let err = RebuildError::Io(std::io::Error::other("disk full"));
-    let msg = err.to_string();
-    assert_eq!(msg, "local storage operation failed");
-}
-
-#[test]
-fn rebuild_error_display_json_contains_detail() {
-    let json_err = serde_json::from_str::<serde_json::Value>("{broken}").unwrap_err();
-    let err = RebuildError::Json(json_err);
-    let msg = err.to_string();
-    assert_eq!(msg, "json operation failed");
-}
-
-#[test]
-fn rebuild_error_display_numeric_conversion() {
-    let int_err = u64::try_from(-1i32).unwrap_err();
-    let err = RebuildError::NumericConversion(int_err);
-    let msg = err.to_string();
-    assert_eq!(msg, "numeric conversion exceeded supported bounds");
-}
-
-#[test]
-fn rebuild_error_display_invalid_content_hash() {
-    let msg = RebuildError::InvalidContentHash.to_string();
-    assert_eq!(msg, "content hash must be 64 hexadecimal characters");
-}
-
-#[test]
-fn rebuild_error_display_invalid_file_id() {
-    let msg = RebuildError::InvalidFileId.to_string();
-    assert_eq!(
-        msg,
-        "file identifier must be relative and must not contain traversal or control characters"
-    );
-}
-
-#[test]
-fn rebuild_error_display_overflow() {
-    let msg = RebuildError::Overflow.to_string();
-    assert_eq!(msg, "arithmetic overflow");
-}
-
-#[test]
-fn rebuild_error_display_object_prefix() {
-    let err = RebuildError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath);
-    assert_eq!(err.to_string(), "object storage prefix validation failed");
-}
-
-#[test]
-fn rebuild_error_display_hash_parse() {
-    let err = RebuildError::HashParse(shardline_protocol::HashParseError::InvalidLength);
-    assert_eq!(err.to_string(), "hash parsing failed");
-}
-
-#[test]
-fn rebuild_error_display_xet_adapter() {
-    let err = RebuildError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
-    assert_eq!(err.to_string(), "xet adapter operation failed");
-}
-
-#[test]
-fn rebuild_error_display_stored_file_metadata_too_large() {
-    let err = RebuildError::StoredFileMetadataTooLarge {
-        observed_bytes: 999,
-        maximum_bytes: 100,
-    };
-    let msg = err.to_string();
-    assert!(msg.contains("stored file metadata exceeded the bounded parser ceiling"));
 }
 
 // ---- IndexRebuildReconstructionPlanDetail Display tests ----
@@ -1139,24 +1120,6 @@ async fn prune_stale_reconstructions_preserves_desired() {
     // Verify the reconstruction is still present
     let remaining = index_store.list_reconstruction_file_ids().await.unwrap();
     assert_eq!(remaining.len(), 1);
-}
-
-// ---- StoredFileMetadataTooLarge display ----
-
-#[test]
-fn rebuild_error_stored_file_metadata_too_large_display() {
-    let err = RebuildError::StoredFileMetadataTooLarge {
-        observed_bytes: 1_073_741_825,
-        maximum_bytes: 1_073_741_824,
-    };
-    let msg = err.to_string();
-    // The #[error] attribute uses a static string without field interpolation.
-    assert!(
-        msg.contains("stored file metadata exceeded the bounded parser ceiling"),
-        "display should mention stored file metadata: {msg}"
-    );
-    // The large byte values are not included in the static display string.
-    // Field inclusion would require an explicit format string change.
 }
 
 // ---- rebuild_dedupe_shard_mappings paths ----
