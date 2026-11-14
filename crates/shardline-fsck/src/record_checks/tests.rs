@@ -72,6 +72,7 @@ async fn scan_record_tree_latest_reports_orphan_missing_version() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -123,6 +124,7 @@ async fn scan_record_tree_latest_with_matching_version_is_clean() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -169,6 +171,7 @@ async fn scan_record_tree_version_with_valid_record_is_clean() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -214,6 +217,7 @@ async fn scan_record_tree_mismatched_version_record_reported() {
     let shared_hash = "ab".repeat(32); // 64-char valid hex hash
 
     let latest_record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash: shared_hash.clone(),
         total_bytes: 100,
@@ -235,6 +239,7 @@ async fn scan_record_tree_mismatched_version_record_reported() {
     // with different content (different total_bytes/chunks so the full
     // struct comparison fails).
     let version_record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash: shared_hash,
         total_bytes: 200,
@@ -294,6 +299,7 @@ async fn scan_record_tree_latest_invalid_file_id_reported() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: String::new(),
         content_hash,
         total_bytes: 0,
@@ -352,6 +358,7 @@ async fn scan_record_tree_latest_invalid_content_hash_reported() {
     // Invalid content_hash (too short, not 64 hex chars)
     let chunks = Vec::new();
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash: "invalid-hash".to_owned(),
         total_bytes: 0,
@@ -402,6 +409,7 @@ async fn scan_record_tree_version_invalid_content_hash_reported() {
     // Invalid content_hash (not 64 hex chars)
     let chunks = Vec::new();
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash: "too-short".to_owned(),
         total_bytes: 0,
@@ -453,6 +461,7 @@ async fn scan_record_tree_version_unparseable_in_matching_check() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let latest_record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash: content_hash.clone(),
         total_bytes: 0,
@@ -547,6 +556,7 @@ async fn scan_record_tree_latest_with_missing_chunk_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -619,6 +629,7 @@ async fn scan_record_tree_latest_record_hash_mismatch_reported() {
     let wrong_content_hash = "dd".repeat(32);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash: wrong_content_hash,
@@ -679,6 +690,7 @@ async fn scan_record_tree_latest_non_contiguous_chunks_reported() {
         packed_end: 100,
     }];
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash: "bb".repeat(32),
         total_bytes: 100,
@@ -744,6 +756,7 @@ async fn scan_record_tree_latest_native_xet_missing_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -832,6 +845,7 @@ async fn scan_record_tree_latest_chunk_hash_mismatch_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -910,6 +924,7 @@ async fn scan_record_tree_latest_chunk_length_mismatch_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -999,6 +1014,7 @@ async fn scan_record_tree_latest_xorb_key_added_to_reachability() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -1077,6 +1093,7 @@ async fn scan_record_tree_version_matching_check_unparseable_json_skipped() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let latest_record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash: content_hash.clone(),
         total_bytes: 0,
@@ -1151,6 +1168,7 @@ async fn scan_record_tree_version_invalid_json_bytes_reported() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -1212,6 +1230,7 @@ async fn scan_record_tree_latest_invalid_json_bytes_reported() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -1274,6 +1293,7 @@ async fn scan_record_tree_latest_record_path_mismatch_reported() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "original-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -1438,6 +1458,7 @@ async fn scan_record_tree_latest_native_xet_valid_xorb_clean() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -1549,6 +1570,7 @@ async fn scan_record_tree_latest_native_xet_range_exceeds_chunks() {
     let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -1646,6 +1668,7 @@ async fn scan_record_tree_latest_native_xet_missing_inner_chunk() {
     let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -1698,6 +1721,7 @@ async fn scan_record_tree_version_content_hash_path_mismatch_reported() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "original-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -1778,6 +1802,7 @@ async fn scan_record_tree_latest_native_xet_invalid_hash_rejected_by_validation(
     let chunk_size = 0_u64;
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-bad-hash".to_owned(),
         content_hash,
@@ -1886,6 +1911,7 @@ async fn scan_record_tree_latest_native_xet_with_inner_chunks_tracks_reachabilit
     let chunk_size = 0_u64;
     let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-native-xet-reach".to_owned(),
         content_hash,
@@ -2029,6 +2055,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_clean_with_container_only() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
         file_id: "test-xorb-cdc-v1-clean".to_owned(),
         content_hash,
@@ -2164,6 +2191,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_corrupted_container_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
         file_id: "test-xorb-cdc-v1-corrupt".to_owned(),
         content_hash,
@@ -2265,6 +2293,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_missing_container_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
         file_id: "test-xorb-cdc-v1-missing".to_owned(),
         content_hash,
@@ -2345,6 +2374,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_single_chunk_compressed_clean() {
     let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
         file_id: "test-xorb-cdc-v1-single-chunk".to_owned(),
         content_hash,
@@ -2433,6 +2463,7 @@ async fn scan_record_tree_latest_xorb_cdc_v1_single_chunk_corrupt_blob_reported(
     let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
         file_id: "test-xorb-cdc-v1-single-chunk-corrupt".to_owned(),
         content_hash,
@@ -2553,6 +2584,7 @@ async fn scan_record_tree_single_chunk_xorb_backed_is_clean() {
     }];
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -2649,6 +2681,7 @@ async fn scan_record_tree_legacy_single_chunk_raw_is_clean() {
     }];
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
@@ -2708,6 +2741,7 @@ async fn inspect_chunks_repointed_single_chunk_xorb_backed_no_missing_chunk() {
     }];
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
         file_id: "test-file-id".to_owned(),
         content_hash,

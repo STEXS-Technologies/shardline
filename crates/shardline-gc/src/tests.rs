@@ -2399,6 +2399,7 @@ async fn run_local_gc_with_prepopulated_store() {
 
     // Commit a file record that references this chunk.
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "local-test-file".to_owned(),
         content_hash: hash.to_owned(),
         total_bytes: 25,
@@ -2462,6 +2463,7 @@ fn run_gc_with_stores_record_referencing_existing_chunk_no_orphan() {
 
         // Create a single record that references this chunk.
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "test-file".to_owned(),
             content_hash: hash.to_owned(),
             total_bytes: 21,
@@ -2522,6 +2524,7 @@ fn run_gc_with_stores_dangling_record_reference_handled_gracefully() {
         // Create a record referencing a chunk that does NOT exist on disk.
         let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "dangling-file".to_owned(),
             content_hash: hash.to_owned(),
             total_bytes: 100,
@@ -2586,6 +2589,7 @@ fn run_gc_with_stores_multiple_records_sharing_a_chunk_no_orphan() {
         // Two records sharing the same chunk hash.
         let make_record = |file_id: &str| -> FileRecord {
             FileRecord {
+                deduplication_domain: None,
                 file_id: file_id.to_owned(),
                 content_hash: hash.to_owned(),
                 total_bytes: 12,

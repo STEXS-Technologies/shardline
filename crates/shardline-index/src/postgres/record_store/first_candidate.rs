@@ -27,7 +27,7 @@ pub(super) fn read<'operation>(
                     FLOOR(EXTRACT(EPOCH FROM r.updated_at))::BIGINT AS modified_since_epoch
              FROM shardline_record_membership m
              JOIN shardline_file_records r ON r.record_key=m.record_key
-             WHERE m.scope_key=$1 AND m.member_hash=$2 AND r.scope_key=$1
+             WHERE m.scope_key=$1 AND m.member_hash=$2 AND COALESCE(r.record->>'deduplication_domain', r.scope_key)=$1
              ORDER BY m.record_key LIMIT 1",
         )
         .bind(shared_repository_scope_key(Some(repository)))

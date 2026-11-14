@@ -18,6 +18,7 @@ async fn indexed_membership_million_record_candidate_lookups() {
     let late = "b".repeat(64);
     let absent = "f".repeat(64);
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "template".into(),
         content_hash: "c".repeat(64),
         total_bytes: 4,
@@ -207,6 +208,7 @@ async fn membership_pages_keep_one_snapshot_during_committed_replacement() {
     let scope = RepositoryScope::new(RepositoryProvider::Generic, "team", "pages", None).unwrap();
     let hash = "a".repeat(64);
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "template".into(),
         content_hash: "b".repeat(64),
         total_bytes: 4,
@@ -320,6 +322,7 @@ async fn indexed_membership_backfills_and_tracks_legacy_sql_writes_atomically() 
     let other =
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", Some("other")).unwrap();
     let mut record = FileRecord {
+        deduplication_domain: None,
         file_id: "file".into(),
         content_hash: "c".repeat(64),
         total_bytes: 4,

@@ -466,6 +466,7 @@ async fn repository_references_xorb_ignores_non_authoritative_legacy_scope_metad
     };
     let xorb_hash = "a".repeat(64);
     let misplaced_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "b".repeat(64),
         total_bytes: 4,

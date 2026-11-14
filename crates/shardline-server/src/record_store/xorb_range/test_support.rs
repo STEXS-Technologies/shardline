@@ -3,6 +3,7 @@ use shardline_protocol::RepositoryScope;
 
 pub(super) fn record(file_id: &str, hash: &str, scope: &RepositoryScope) -> FileRecord {
     FileRecord {
+        deduplication_domain: None,
         file_id: file_id.into(),
         content_hash: "b".repeat(64),
         total_bytes: 4,

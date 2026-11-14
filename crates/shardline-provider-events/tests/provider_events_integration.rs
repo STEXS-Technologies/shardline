@@ -36,6 +36,7 @@ use shardline_provider_events::{
 /// object-key derivation works without touching the object store.
 fn test_record(scope: RepositoryScope) -> FileRecord {
     FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 8,
@@ -58,6 +59,7 @@ fn test_record_with_seed(scope: RepositoryScope, seed: &str) -> FileRecord {
     let content_hash = test_hash("content", seed);
     let chunk_hash = test_hash("chunk", seed);
     FileRecord {
+        deduplication_domain: None,
         file_id: format!("asset-{seed}.bin"),
         content_hash,
         total_bytes: 8,

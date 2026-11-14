@@ -64,6 +64,7 @@ pub(super) async fn assert_ranges(store: &ServerObjectStore) {
         .flat_map(|(data, _)| data.iter().copied())
         .collect();
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "multi-member-encoding".to_owned(),
         content_hash: incoming.xorb_hash_hex,
         total_bytes: u64::try_from(bytes.len()).unwrap(),

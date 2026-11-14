@@ -42,6 +42,7 @@
 //!     chunk_size: 1024,
 //!     storage_repr: StorageRepresentation::FixedChunkV1,
 //!     repository_scope: None,
+//!     deduplication_domain: None,
 //!     chunks: vec![FileChunkRecord {
 //!         hash,
 //!         offset: 0,
@@ -60,6 +61,7 @@
 mod store;
 
 mod dedupe;
+mod deduplication_domain;
 pub mod hub;
 mod hub_local_sqlite;
 mod hub_postgres;
@@ -94,6 +96,7 @@ mod xet_xorb;
 pub use xet_xorb::{MAX_XET_DESCRIPTOR_CHUNKS, XetXorbChunk, XetXorbDescriptor};
 
 pub use dedupe::DedupeShardMapping;
+pub use deduplication_domain::DeduplicationDomain;
 pub use ids::{FileId, StoredObjectId, XorbId};
 pub use lifecycle::{
     ProviderRepositoryState, QuarantineCandidate, QuarantineCandidateError, RetentionHold,

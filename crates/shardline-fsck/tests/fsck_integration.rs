@@ -143,6 +143,7 @@ fn make_record(
     let ch = content_hash(total_bytes, chunk_size, &chunks);
 
     FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: file_id.to_owned(),
         content_hash: ch,
@@ -331,6 +332,7 @@ async fn mismatched_version_record_detected() {
 
     // Version record uses 1 chunk with the correct total_bytes.
     let version_record = FileRecord {
+        deduplication_domain: None,
         file_id: "mismatch-file".to_owned(),
         content_hash: "b".repeat(64), // will be overridden below
         total_bytes: chunk_data.len() as u64,
@@ -364,6 +366,7 @@ async fn mismatched_version_record_detected() {
 
     // Latest record has the SAME file_id and content_hash but DIFFERENT total_bytes
     let latest_record = FileRecord {
+        deduplication_domain: None,
         file_id: "mismatch-file".to_owned(),
         content_hash: content_hash_val.clone(), // same as version
         total_bytes: 9999,                      // different from version
@@ -422,6 +425,7 @@ async fn non_contiguous_chunks_detected_via_reconstruction_plan() {
     ];
     let total_bytes: u64 = chunks.iter().map(|c| c.length).sum();
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "non-contiguous-file".to_owned(),
         content_hash: "b".repeat(64),
         total_bytes,
@@ -465,6 +469,7 @@ async fn store_with_invalid_chunk_hash_detected() {
 
     // Record has an invalid (non-hex) chunk hash
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "invalid-hash-file".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 10,

@@ -80,6 +80,7 @@ fn remote_ordinary_chunks_use_bounded_gets_without_losing_integrity_findings() {
         };
         let chunks = vec![chunk];
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "ordinary-fsck".to_owned(),
             content_hash: content_hash(length, length, &chunks),
             total_bytes: length,

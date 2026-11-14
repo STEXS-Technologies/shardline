@@ -181,9 +181,36 @@ impl LocalRecordStore {
         scope: Option<&RepositoryScope>,
         after: Option<&str>,
     ) -> Result<Vec<XetXorbDescriptor>, LocalIndexStoreError> {
+        self.chunk_candidates_with_scope_key(
+            hash,
+            scope.map(|scope| repository_scope_key(Some(scope))),
+            after,
+        )
+        .await
+    }
+
+    /// Returns bounded candidates in one explicit reuse domain, including global.
+    ///
+    /// # Errors
+    /// Returns an error when candidate metadata cannot be read.
+    pub async fn xet_domain_chunk_candidates_after(
+        &self,
+        hash: &str,
+        domain: &crate::DeduplicationDomain,
+        after: Option<&str>,
+    ) -> Result<Vec<XetXorbDescriptor>, LocalIndexStoreError> {
+        self.chunk_candidates_with_scope_key(hash, Some(domain.as_str().to_owned()), after)
+            .await
+    }
+
+    async fn chunk_candidates_with_scope_key(
+        &self,
+        hash: &str,
+        scope: Option<String>,
+        after: Option<&str>,
+    ) -> Result<Vec<XetXorbDescriptor>, LocalIndexStoreError> {
         let store = self.clone();
         let hash = hash.to_owned();
-        let scope = scope.map(|scope| repository_scope_key(Some(scope)));
         let after = after.map(str::to_owned);
         run_blocking_store(move || {
             let connection = store.open_connection()?;

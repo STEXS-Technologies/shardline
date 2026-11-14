@@ -132,7 +132,12 @@ pub(crate) async fn oci_post_blob_upload(
         let object_key = oci_blob_key(repository, &digest_hex, auth)?;
         let _stored = state
             .backend
-            .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body)
+            .put_sha256_addressed_object_stream_if_absent(
+                &object_key,
+                &digest_hex,
+                body,
+                auth.namespace(),
+            )
             .await?;
         publish_oci_blob(state, repository, auth, &digest_hex).await?;
         metrics().protocol.record_oci_upload();
@@ -551,7 +556,13 @@ pub(crate) async fn oci_put_blob_upload(
     let upload_path = upload_body_path_for_session(state.config.root_dir(), session_id)?;
     let _stored = state
         .backend
-        .put_sha256_addressed_object_file(&object_key, &digest_hex, &upload_path, &integrity)
+        .put_sha256_addressed_object_file(
+            &object_key,
+            &digest_hex,
+            &upload_path,
+            &integrity,
+            auth.namespace(),
+        )
         .await?;
     publish_oci_blob(state, repository, auth, &digest_hex).await?;
     delete_upload_session(state.config.root_dir(), session_id).await?;
@@ -654,7 +665,12 @@ async fn durable_oci_put_blob_upload(
     {
         state
             .backend
-            .put_sha256_addressed_object_stream_if_absent(&object_key, digest_hex, reader)
+            .put_sha256_addressed_object_stream_if_absent(
+                &object_key,
+                digest_hex,
+                reader,
+                auth.namespace(),
+            )
             .await?
     } else {
         let temporary = tempfile::tempdir()?;
@@ -705,7 +721,13 @@ async fn durable_oci_put_blob_upload(
         );
         state
             .backend
-            .put_sha256_addressed_object_file(&object_key, digest_hex, &assembled_path, &integrity)
+            .put_sha256_addressed_object_file(
+                &object_key,
+                digest_hex,
+                &assembled_path,
+                &integrity,
+                auth.namespace(),
+            )
             .await?
     };
 

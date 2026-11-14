@@ -74,6 +74,7 @@ async fn file_hint_observes_postgres_authoritative_replacement_and_revocation() 
 
 fn file_record(scope: &RepositoryScope, hash: &str) -> FileRecord {
     FileRecord {
+        deduplication_domain: None,
         file_id: "hinted-file".into(),
         content_hash: "b".repeat(64),
         total_bytes: 4,

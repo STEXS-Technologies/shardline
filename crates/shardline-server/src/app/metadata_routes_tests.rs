@@ -177,6 +177,7 @@ async fn build_app_with_caps(
 async fn write_record(root: &std::path::Path, id: &str, size: u64, scope: Option<RepositoryScope>) {
     let store = LocalRecordStore::open(root.to_path_buf());
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: id.to_owned(),
         content_hash: String::new(),
         total_bytes: size,

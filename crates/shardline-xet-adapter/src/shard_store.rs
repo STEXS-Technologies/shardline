@@ -917,6 +917,7 @@ fn build_file_records_with_cache(
 
         let sha256 = digest.finish()?;
         records.push(FileRecord {
+            deduplication_domain: None,
             file_id: file_id.clone(),
             content_hash: content_hash(offset, 0, &chunks),
             total_bytes: offset,

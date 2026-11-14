@@ -167,6 +167,7 @@ fn synthetic_large_inventory_record(index: usize) -> Result<FileRecord, Box<dyn 
     let chunk_hash = format!("{:064x}", checked_inventory_value(index_u64, 1_000)?);
 
     Ok(FileRecord {
+        deduplication_domain: None,
         file_id: format!("asset-{index:04}.bin"),
         content_hash,
         total_bytes: 16,
@@ -233,6 +234,7 @@ async fn index_rebuild_reaches_a_fixed_point_on_second_run() {
     let storage = storage.unwrap();
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([71; 32])),
         total_bytes: 4,
@@ -342,6 +344,7 @@ async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records()
     let file_hash = ShardlineHash::from_bytes([33; 32]);
     let file_id = FileId::new(file_hash);
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: xet_hash_hex_string(file_hash),
         content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([34; 32])),
         total_bytes: 0,
@@ -491,6 +494,7 @@ async fn index_rebuild_reports_invalid_version_record_json() {
     let storage = storage.unwrap();
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 12,

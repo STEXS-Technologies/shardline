@@ -153,8 +153,22 @@ pub struct FileRecord {
     pub storage_repr: StorageRepresentation,
     /// Optional repository namespace for provider-backed storage.
     pub repository_scope: Option<RepositoryScope>,
+    /// Optional reuse boundary independent of the record's storage namespace.
+    /// Old records inherit their repository scope, or the public global domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduplication_domain: Option<crate::DeduplicationDomain>,
     /// Ordered chunks needed to reconstruct the file.
     pub chunks: Vec<FileChunkRecord>,
+}
+
+impl FileRecord {
+    /// Returns the authoritative reuse boundary without changing record locators.
+    #[must_use]
+    pub fn reuse_domain(&self) -> crate::DeduplicationDomain {
+        self.deduplication_domain.clone().unwrap_or_else(|| {
+            crate::DeduplicationDomain::from_scope(self.repository_scope.as_ref())
+        })
+    }
 }
 
 /// Maps a Hub/LFS SHA-256 identity to its native Xet file identity.
@@ -272,6 +286,7 @@ impl FileRecord {
     ///     chunk_size: 1024,
     ///     storage_repr: StorageRepresentation::FixedChunkV1,
     ///     repository_scope: None,
+    ///     deduplication_domain: None,
     ///     chunks: vec![FileChunkRecord {
     ///         hash,
     ///         offset: 0,
@@ -479,6 +494,27 @@ pub trait RecordTraversal {
         })
     }
 
+    /// Visits candidate records in an explicit reuse domain. Callers must still
+    /// validate authoritative metadata and member ranges. The compatibility
+    /// implementation scans records; indexed adapters use bounded hash queries.
+    fn visit_deduplication_hash_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        _domain: &'operation crate::DeduplicationDomain,
+        _hash_hex: &'operation str,
+        mut visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move {
+            self.visit_latest_records(&mut visitor).await?;
+            self.visit_version_records(&mut visitor).await
+        })
+    }
+
     /// Reads at most the first candidate for a repository/member lookup.
     /// Indexed adapters narrow scope and hash; the compatibility default may
     /// return other revisions or members, like the candidate traversal itself.
@@ -671,6 +707,7 @@ mod tests {
 
     fn whole_file_record(total_bytes: u64, chunks: Vec<FileChunkRecord>) -> FileRecord {
         FileRecord {
+            deduplication_domain: None,
             file_id: "a".repeat(64),
             content_hash: "c".repeat(64),
             total_bytes,
@@ -693,6 +730,7 @@ mod tests {
     #[test]
     fn file_record_storage_layout_stored_chunks_when_chunk_size_nonzero() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "a".repeat(64),
             content_hash: "c".repeat(64),
             total_bytes: 8,
@@ -812,6 +850,7 @@ mod tests {
         };
 
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "c".repeat(64),
             total_bytes: 8,

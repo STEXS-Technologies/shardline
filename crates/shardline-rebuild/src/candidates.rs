@@ -279,6 +279,7 @@ mod tests {
 
     fn make_file_record(file_id: &str, content_hash: &str) -> FileRecord {
         FileRecord {
+            deduplication_domain: None,
             file_id: file_id.to_owned(),
             content_hash: content_hash.to_owned(),
             total_bytes: 0,
@@ -295,6 +296,7 @@ mod tests {
         scope: RepositoryScope,
     ) -> FileRecord {
         FileRecord {
+            deduplication_domain: None,
             file_id: file_id.to_owned(),
             content_hash: content_hash.to_owned(),
             total_bytes: 0,
@@ -577,6 +579,7 @@ mod tests {
         // EmptyChunk in the plan fails validate_reconstruction_plan
         use shardline_index::FileChunkRecord;
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "test.txt".to_owned(),
             content_hash: valid_hex_hash(),
             total_bytes: 100,

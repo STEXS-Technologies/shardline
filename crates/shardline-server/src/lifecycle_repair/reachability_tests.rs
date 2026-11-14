@@ -71,6 +71,7 @@ async fn qualify_shared_xorb_repair(frontends: &[ServerFrontend]) {
     let records = MemoryRecordStore::new();
     for index in 0..4 {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: format!("shared-source-{index}"),
             content_hash: hash.clone(),
             total_bytes: 128 * 1024,
@@ -143,6 +144,7 @@ async fn qualify_shared_xorb_repair(frontends: &[ServerFrontend]) {
         .unwrap();
     let legacy = MemoryRecordStore::new();
     let mut record = FileRecord {
+        deduplication_domain: None,
         file_id: "repeated-legacy-raw".to_owned(),
         content_hash: hash.clone(),
         total_bytes: 256 * 1024,

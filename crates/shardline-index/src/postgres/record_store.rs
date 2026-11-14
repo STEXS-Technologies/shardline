@@ -1105,9 +1105,25 @@ impl RecordTraversal for super::PostgresRecordStore {
         Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(
-            async move { repository_candidates::visit(self, repository, hash_hex, visitor).await },
-        )
+        Box::pin(async move {
+            let domain = crate::DeduplicationDomain::from_scope(Some(repository));
+            self.visit_deduplication_hash_records(&domain, hash_hex, visitor)
+                .await
+        })
+    }
+    fn visit_deduplication_hash_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        domain: &'operation crate::DeduplicationDomain,
+        hash_hex: &'operation str,
+        visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move { repository_candidates::visit(self, domain, hash_hex, visitor).await })
     }
     fn first_repository_hash_record<'operation>(
         &'operation self,
@@ -1510,6 +1526,7 @@ mod tests {
 
     fn sample_record(repo_scope: Option<RepositoryScope>) -> FileRecord {
         FileRecord {
+            deduplication_domain: None,
             file_id: "test.bin".to_owned(),
             content_hash: "a".repeat(64),
             total_bytes: 100,

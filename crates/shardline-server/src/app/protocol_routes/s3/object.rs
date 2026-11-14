@@ -1083,7 +1083,7 @@ pub(super) async fn s3_upload_object_body(
     let (uploaded, prepared) = if resource_guard.is_some() {
         match state
             .backend
-            .prepare_s3_object_stream(&context.object_key, body)
+            .prepare_s3_object_stream(&context.object_key, body, context.auth.namespace())
             .await
         {
             Ok(prepared) => (prepared.response.clone(), Some(prepared)),
@@ -1100,7 +1100,7 @@ pub(super) async fn s3_upload_object_body(
     } else {
         match state
             .backend
-            .put_s3_object_stream(&context.object_key, body)
+            .put_s3_object_stream(&context.object_key, body, context.auth.namespace())
             .await
         {
             Ok(uploaded) => (uploaded, None),

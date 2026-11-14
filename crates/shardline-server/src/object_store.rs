@@ -1460,6 +1460,7 @@ mod tests {
         assert_eq!(file_len, data.len() as u64, "written file length mismatch");
 
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "test.bin".to_owned(),
             content_hash: "aa".repeat(32),
             total_bytes: data.len() as u64,
@@ -1493,6 +1494,7 @@ mod tests {
 
         // chunk_size == 0 => ReferencedObjectTerms layout
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "ref.bin".to_owned(),
             content_hash: "bb".repeat(32),
             total_bytes: 4,
@@ -1739,6 +1741,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ServerObjectStore::local(dir.path()).unwrap();
         let record = shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: "ref.bin".to_owned(),
             content_hash: "aa".repeat(32),
             total_bytes: 10,
@@ -1951,6 +1954,7 @@ mod tests {
         // With empty frontends, append_referenced_term_bytes will fail with
         // NotFound because no frontend can serve the reference.
         let record = shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: "cap.bin".to_owned(),
             content_hash: "cc".repeat(32),
             total_bytes: 99, // capacity doesn't match actual output
@@ -2220,6 +2224,7 @@ mod tests {
         // chunk_size=0 triggers ReferencedObjectTerms layout.
         // Empty frontends cause append_referenced_term_bytes to fail with NotFound.
         let record = shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: "cap-ref.bin".to_owned(),
             content_hash: "dd".repeat(32),
             total_bytes: 99,

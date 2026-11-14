@@ -56,6 +56,7 @@ fn file(mut chunks: Vec<FileChunkRecord>) -> FileRecord {
         total_bytes = total_bytes.checked_add(chunk.length).unwrap();
     }
     FileRecord {
+        deduplication_domain: None,
         file_id: "multi-container".to_owned(),
         content_hash: chunks.first().unwrap().hash.clone(),
         total_bytes,

@@ -184,7 +184,34 @@ impl PostgresRecordStore {
         scope: Option<&RepositoryScope>,
         after: Option<&str>,
     ) -> Result<Vec<XetXorbDescriptor>, PostgresMetadataStoreError> {
-        let scope = scope.map(|scope| repository_scope_key(Some(scope)));
+        self.chunk_candidates_with_scope_key(
+            hash,
+            scope.map(|scope| repository_scope_key(Some(scope))),
+            after,
+        )
+        .await
+    }
+
+    /// Returns bounded candidates in one explicit reuse domain, including global.
+    ///
+    /// # Errors
+    /// Returns an error when candidate metadata cannot be read.
+    pub async fn xet_domain_chunk_candidates_after(
+        &self,
+        hash: &str,
+        domain: &crate::DeduplicationDomain,
+        after: Option<&str>,
+    ) -> Result<Vec<XetXorbDescriptor>, PostgresMetadataStoreError> {
+        self.chunk_candidates_with_scope_key(hash, Some(domain.as_str().to_owned()), after)
+            .await
+    }
+
+    async fn chunk_candidates_with_scope_key(
+        &self,
+        hash: &str,
+        scope: Option<String>,
+        after: Option<&str>,
+    ) -> Result<Vec<XetXorbDescriptor>, PostgresMetadataStoreError> {
         let rows = query("SELECT xorb_hash,CASE WHEN octet_length(descriptor::text)<=4194304 THEN descriptor END AS descriptor FROM shardline_xet_xorbs d WHERE d.xorb_hash IN (
             SELECT DISTINCT c.xorb_hash FROM shardline_xet_chunks c WHERE c.chunk_hash=$1
             AND ($3::text IS NULL OR c.xorb_hash>$3)

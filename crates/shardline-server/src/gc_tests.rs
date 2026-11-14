@@ -370,6 +370,7 @@ async fn gc_releases_quarantine_candidates_when_chunk_becomes_reachable()
     // already exists on disk at the hash path written above.
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: hash.clone(),
         total_bytes: orphan_payload.len() as u64,

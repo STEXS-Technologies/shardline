@@ -381,6 +381,7 @@ mod tests {
                 .unwrap();
 
         let matching = shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: "matching.bin".to_owned(),
             content_hash: "b".repeat(64),
             total_bytes: 4,
@@ -390,6 +391,7 @@ mod tests {
             chunks: vec![test_record()],
         };
         let non_matching = shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: "non_matching.bin".to_owned(),
             content_hash: "c".repeat(64),
             total_bytes: 4,
@@ -430,6 +432,7 @@ mod tests {
     async fn delete_repository_records_removes_specified_locators() {
         let store = MemoryRecordStore::new();
         let record = shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: "delete-me.bin".to_owned(),
             content_hash: "d".repeat(64),
             total_bytes: 4,
@@ -479,6 +482,7 @@ mod tests {
     async fn delete_repository_records_only_latest() {
         let store = MemoryRecordStore::new();
         let record = shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: "only-latest.bin".to_owned(),
             content_hash: "e".repeat(64),
             total_bytes: 4,
@@ -505,6 +509,7 @@ mod tests {
     async fn delete_repository_records_only_version() {
         let store = MemoryRecordStore::new();
         let record = shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: "only-version.bin".to_owned(),
             content_hash: "f".repeat(64),
             total_bytes: 4,

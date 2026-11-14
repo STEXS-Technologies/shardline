@@ -71,6 +71,7 @@ async fn adjacent_native_terms_reuse_one_source_and_eviction_rechecks_it() {
         hashes.push((packed.xorb_hash_hex, packed.serialized));
     }
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "a".repeat(64),
         content_hash: "c".repeat(64),
         total_bytes: 4 * 65536,
@@ -173,6 +174,7 @@ async fn qualify_read_pressure(objects: ServerObjectStore) {
         )
         .unwrap();
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "a".repeat(64),
         content_hash: "c".repeat(64),
         total_bytes: 262144,

@@ -1549,6 +1549,7 @@ mod tests {
             // would be produced by a concurrent re-upload landing between
             // `collect_referenced_object_keys` and `scan_orphan_objects`).
             let record = FileRecord {
+                deduplication_domain: None,
                 file_id: "live-file".to_owned(),
                 content_hash: hash.to_owned(),
                 total_bytes: 100,

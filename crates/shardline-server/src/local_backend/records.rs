@@ -61,6 +61,7 @@ mod tests {
 
     fn make_record(scope: &RepositoryScope, chunk_hash: &str) -> FileRecord {
         FileRecord {
+            deduplication_domain: None,
             file_id: "test.txt".to_owned(),
             content_hash: "deadbeef".to_owned(),
             total_bytes: 100,

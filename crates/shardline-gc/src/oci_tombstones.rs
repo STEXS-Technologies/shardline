@@ -527,6 +527,7 @@ mod tests {
         put(&object_store, &chunk_key, chunk_bytes);
 
         let record = |file_id: String, content_hash: char| FileRecord {
+            deduplication_domain: None,
             file_id,
             content_hash: content_hash.to_string().repeat(64),
             total_bytes: u64::try_from(chunk_bytes.len()).unwrap(),

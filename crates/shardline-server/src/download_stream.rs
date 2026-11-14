@@ -1487,6 +1487,7 @@ mod tests {
 
         // Build a FileRecord pointing to this chunk (compressed storage)
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "test-lz4".to_owned(),
             content_hash: hash_hex.clone(),
             total_bytes: payload.len() as u64,
@@ -1585,6 +1586,7 @@ mod tests {
         // storage-repr-based discriminator must still decompress.
         let stored_len = stored.len() as u64;
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "test-eq-size".to_owned(),
             content_hash: hash_hex.clone(),
             total_bytes: stored_len,
@@ -1786,6 +1788,7 @@ mod tests {
 
         let total_bytes: u64 = chunks.iter().map(|(d, _)| d.len() as u64).sum();
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "xorb-test-file.bin".to_owned(),
             content_hash: packed.xorb_hash_hex.clone(),
             total_bytes,
@@ -1862,6 +1865,7 @@ mod tests {
 
         let total_bytes: u64 = chunks.iter().map(|(d, _)| d.len() as u64).sum();
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "xorb-range-test.bin".to_owned(),
             content_hash: packed.xorb_hash_hex.clone(),
             total_bytes,
@@ -1935,6 +1939,7 @@ mod tests {
             .checked_add(entry.packed_length)
             .unwrap();
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "single-chunk-xorb-range-test.bin".to_owned(),
             content_hash: packed.xorb_hash_hex.clone(),
             total_bytes: raw_len,
@@ -2028,6 +2033,7 @@ mod tests {
             })
             .collect();
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "pull-stream.bin".to_owned(),
             content_hash: packed.xorb_hash_hex,
             total_bytes: offset,

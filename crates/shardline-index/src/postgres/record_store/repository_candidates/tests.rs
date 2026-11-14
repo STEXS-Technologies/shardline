@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::postgres::test_support::connect_isolated_postgres;
-use shardline_protocol::RepositoryProvider;
+use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -21,9 +21,12 @@ async fn aborted_blocked_page_releases_its_transaction() {
     let pending_store = store.clone();
     let pending_scope = scope.clone();
     let pending = tokio::spawn(async move {
-        visit(&pending_store, &pending_scope, &"a".repeat(64), |_| {
-            Ok::<(), PostgresMetadataStoreError>(())
-        })
+        visit(
+            &pending_store,
+            &crate::DeduplicationDomain::from_scope(Some(&pending_scope)),
+            &"a".repeat(64),
+            |_| Ok::<(), PostgresMetadataStoreError>(()),
+        )
         .await
     });
     let reader_pid: i32 = tokio::time::timeout(Duration::from_secs(5), async {
@@ -64,10 +67,15 @@ async fn aborted_blocked_page_releases_its_transaction() {
     .await
     .expect("aborted candidate page retained its database transaction");
     let mut count = 0_usize;
-    visit(&store, &scope, &"a".repeat(64), |_| {
-        count = count.saturating_add(1);
-        Ok::<(), PostgresMetadataStoreError>(())
-    })
+    visit(
+        &store,
+        &crate::DeduplicationDomain::from_scope(Some(&scope)),
+        &"a".repeat(64),
+        |_| {
+            count = count.saturating_add(1);
+            Ok::<(), PostgresMetadataStoreError>(())
+        },
+    )
     .await
     .unwrap();
     assert_eq!(count, 0);

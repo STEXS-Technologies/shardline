@@ -30,6 +30,7 @@ fn valid_hash() -> String {
 /// Returns a [`FileRecord`] with valid default fields.
 fn test_record() -> FileRecord {
     FileRecord {
+        deduplication_domain: None,
         file_id: "readme.md".to_owned(),
         content_hash: valid_hash(),
         total_bytes: 8,

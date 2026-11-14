@@ -1,8 +1,8 @@
 //! Stop database production after a proof, retaining one traversal snapshot.
 
-use super::{candidate_batch, shared_repository_scope_key};
+use super::candidate_batch;
+use crate::DeduplicationDomain;
 use crate::{PostgresMetadataStoreError, PostgresRecordLocator, PostgresRecordStore, StoredRecord};
-use shardline_protocol::RepositoryScope;
 
 const FIRST_PAGE: i64 = 16;
 const MAX_PAGE: i64 = 1_024;
@@ -12,7 +12,7 @@ mod tests;
 
 pub(super) async fn visit<Visitor, Error>(
     store: &PostgresRecordStore,
-    repository: &RepositoryScope,
+    domain: &DeduplicationDomain,
     hash: &str,
     mut visitor: Visitor,
 ) -> Result<(), Error>
@@ -26,7 +26,7 @@ where
         .execute(&mut *transaction)
         .await
         .map_err(database_error::<Error>)?;
-    let scope = shared_repository_scope_key(Some(repository));
+    let scope = domain.as_str();
     let mut after: Option<String> = None;
     let mut page_size = FIRST_PAGE;
     loop {
@@ -38,12 +38,12 @@ where
                         FLOOR(EXTRACT(EPOCH FROM r.updated_at))::BIGINT AS modified_since_epoch
                  FROM shardline_record_membership m
                  JOIN shardline_file_records r ON r.record_key=m.record_key
-                 WHERE m.scope_key=$1 AND m.member_hash=$2 AND r.scope_key=$1
+                 WHERE m.scope_key=$1 AND m.member_hash=$2 AND COALESCE(r.record->>'deduplication_domain', r.scope_key)=$1
                    AND ($3::TEXT IS NULL OR m.record_key>$3)
                    AND ($3::TEXT IS NULL OR r.record_key>$3)
                  ORDER BY m.record_key LIMIT $4",
             )
-            .bind(&scope)
+            .bind(scope)
             .bind(hash)
             .bind(after.clone())
             .bind(page_size)

@@ -30,6 +30,7 @@ fuzz_target!(|data: (u64, Vec<RawChunk>)| {
         .collect::<Vec<_>>();
 
     let record = FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "a".repeat(64),
         content_hash: "b".repeat(64),

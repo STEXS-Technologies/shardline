@@ -250,6 +250,7 @@ async fn drill_concurrent_ordinary_rebuilds_keep_shared_ownership() {
     let records = PostgresRecordStore::new(pool.clone());
     records
         .write_latest_record(&FileRecord {
+            deduplication_domain: None,
             file_id: "stale.bin".to_owned(),
             content_hash: "00".repeat(32),
             total_bytes: 0,

@@ -232,6 +232,7 @@ fn local_gc_with_valid_record_no_orphans() {
     put_object(&object_store, &key, b"referenced chunk");
 
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "test-file".to_owned(),
         content_hash: hash.clone(),
         total_bytes: 17,
@@ -408,6 +409,7 @@ fn gc_with_stores_referenced_chunks_not_orphaned() {
 
     // Create a record that references this chunk.
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "file-1".to_owned(),
         content_hash: hash.clone(),
         total_bytes: 10,
@@ -460,6 +462,7 @@ fn gc_with_stores_multiple_chunks_some_orphaned() {
 
     // Create a record referencing only the first chunk.
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "file-with-chunks".to_owned(),
         content_hash: ref_hash.clone(),
         total_bytes: 21,

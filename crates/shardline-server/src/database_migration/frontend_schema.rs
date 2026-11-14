@@ -495,7 +495,7 @@ async fn check_on_connection(connection: &mut PgConnection) -> Result<(), Databa
     }
     let membership_function = FRONTEND_MIGRATIONS
         .iter()
-        .find(|migration| migration.name == "record_membership")
+        .find(|migration| migration.name == "deduplication_domains")
         .and_then(|migration| migration.up_sql.split_once("AS $$"))
         .and_then(|(_, tail)| tail.split_once("$$;"))
         .map(|(body, _)| body)

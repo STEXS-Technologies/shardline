@@ -367,6 +367,7 @@ mod tests {
             .unwrap();
         }
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "a".repeat(64),
             total_bytes: 4,

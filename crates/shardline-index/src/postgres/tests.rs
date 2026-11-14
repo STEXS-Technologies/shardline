@@ -213,6 +213,7 @@ fn file_record(scope: RepositoryScope, content_seed: &str) -> FileRecord {
     let hash = ShardlineHash::from_bytes([12; 32]);
     let file_id = xet_hash_hex_string(FileId::new(hash).hash());
     FileRecord {
+        deduplication_domain: None,
         file_id,
         content_hash: content_seed.repeat(64),
         total_bytes: 0,

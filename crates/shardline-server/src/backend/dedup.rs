@@ -84,6 +84,7 @@ impl ServerBackend {
         + Send
         + 'static,
     ) -> Result<Output, ServerError> {
+        let domain = shardline_index::DeduplicationDomain::from_scope(scope);
         let mut after = None::<String>;
         let mut legacy_attempted = false;
         loop {
@@ -91,13 +92,13 @@ impl ServerBackend {
                 Self::Local(backend) => {
                     backend
                         .record_store()
-                        .xet_chunk_candidates_after(chunk_hash, scope, after.as_deref())
+                        .xet_domain_chunk_candidates_after(chunk_hash, &domain, after.as_deref())
                         .await?
                 }
                 Self::Postgres(backend) => {
                     backend
                         .record_store()
-                        .xet_chunk_candidates_after(chunk_hash, scope, after.as_deref())
+                        .xet_domain_chunk_candidates_after(chunk_hash, &domain, after.as_deref())
                         .await?
                 }
             };
@@ -140,7 +141,7 @@ impl ServerBackend {
                 let mut authorized = Vec::new();
                 for claimed in claims {
                     let allowed = match (self, scope) {
-                        (Self::Local(backend), Some(scope)) => {
+                        (Self::Local(backend), scope) => {
                             legacy_member_visible(
                                 backend.record_store(),
                                 &claimed,
@@ -149,7 +150,7 @@ impl ServerBackend {
                             )
                             .await?
                         }
-                        (Self::Postgres(backend), Some(scope)) => {
+                        (Self::Postgres(backend), scope) => {
                             legacy_member_visible(
                                 backend.record_store(),
                                 &claimed,
@@ -158,7 +159,6 @@ impl ServerBackend {
                             )
                             .await?
                         }
-                        (_, None) => true,
                     };
                     if allowed {
                         authorized.push(claimed);
@@ -192,13 +192,12 @@ impl ServerBackend {
                 // root verification authenticates the chunk identities and lengths.
                 let info = descriptor_info(&descriptor)?;
                 let visible = match (self, scope) {
-                    (Self::Local(backend), Some(scope)) => {
+                    (Self::Local(backend), scope) => {
                         visibility(backend.record_store(), &descriptor, scope).await?
                     }
-                    (Self::Postgres(backend), Some(scope)) => {
+                    (Self::Postgres(backend), scope) => {
                         visibility(backend.record_store(), &descriptor, scope).await?
                     }
-                    (_, None) => vec![true; descriptor.chunks.len()],
                 };
                 if !descriptor
                     .chunks
@@ -216,13 +215,12 @@ impl ServerBackend {
                 {
                     let sibling_info = descriptor_info(&sibling)?;
                     let sibling_visible = match (self, scope) {
-                        (Self::Local(backend), Some(scope)) => {
+                        (Self::Local(backend), scope) => {
                             visibility(backend.record_store(), &sibling, scope).await?
                         }
-                        (Self::Postgres(backend), Some(scope)) => {
+                        (Self::Postgres(backend), scope) => {
                             visibility(backend.record_store(), &sibling, scope).await?
                         }
-                        (_, None) => continue,
                     };
                     if sibling_visible.iter().any(|allowed| *allowed) {
                         prepared.push((sibling, sibling_info, sibling_visible));
@@ -316,11 +314,12 @@ async fn legacy_member_visible<Store: RecordTraversal + Sync>(
     store: &Store,
     claimed: &MDBXorbInfo,
     chunk_hash: &str,
-    scope: &RepositoryScope,
+    scope: Option<&RepositoryScope>,
 ) -> Result<bool, ServerError>
 where
     ServerError: From<Store::Error>,
 {
+    let domain = shardline_index::DeduplicationDomain::from_scope(scope);
     let expected = MerkleHash::from(*parse_xet_hash_hex(chunk_hash)?.as_bytes());
     let positions = claimed
         .chunks
@@ -332,9 +331,9 @@ where
     let hash = claimed.metadata.xorb_hash.hex();
     let mut visible = false;
     store
-        .visit_repository_hash_records(scope, &hash, |entry| {
+        .visit_deduplication_hash_records(&domain, &hash, |entry| {
             let record = parse_stored_file_record_bytes(&entry.bytes)?;
-            if record.repository_scope.as_ref() == Some(scope) {
+            if record.reuse_domain() == domain {
                 visible |= record.chunks.iter().any(|term| {
                     term.hash == hash
                         && positions.iter().any(|position| {
@@ -395,16 +394,17 @@ pub(super) fn descriptor_info(descriptor: &XetXorbDescriptor) -> Result<MDBXorbI
 async fn visibility<Store: RecordTraversal + Sync>(
     store: &Store,
     descriptor: &XetXorbDescriptor,
-    scope: &RepositoryScope,
+    scope: Option<&RepositoryScope>,
 ) -> Result<Vec<bool>, ServerError>
 where
     ServerError: From<Store::Error>,
 {
+    let domain = shardline_index::DeduplicationDomain::from_scope(scope);
     let mut visible = vec![false; descriptor.chunks.len()];
     store
-        .visit_repository_hash_records(scope, &descriptor.hash, |entry| {
+        .visit_deduplication_hash_records(&domain, &descriptor.hash, |entry| {
             let record = parse_stored_file_record_bytes(&entry.bytes)?;
-            if record.repository_scope.as_ref() != Some(scope) {
+            if record.reuse_domain() != domain {
                 return Ok::<_, ServerError>(());
             }
             for term in record

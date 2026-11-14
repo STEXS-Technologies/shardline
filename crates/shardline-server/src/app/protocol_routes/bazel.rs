@@ -206,7 +206,12 @@ pub(crate) async fn bazel_put_cas(
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
-        .put_sha256_addressed_object_stream_if_absent(&object_key, &hash, body)
+        .put_sha256_addressed_object_stream_if_absent(
+            &object_key,
+            &hash,
+            body,
+            repo.capability().namespace(),
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -293,7 +298,12 @@ pub(crate) async fn bazel_put(
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
-        .put_sha256_addressed_object_stream_if_absent(&object_key, &hash, body)
+        .put_sha256_addressed_object_stream_if_absent(
+            &object_key,
+            &hash,
+            body,
+            repo.capability().namespace(),
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

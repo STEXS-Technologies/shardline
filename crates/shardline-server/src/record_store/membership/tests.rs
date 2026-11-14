@@ -17,6 +17,7 @@ async fn seed(store: &LocalRecordStore, count: usize) {
     for index in 0..count {
         store
             .commit_file_version_metadata(&FileRecord {
+                deduplication_domain: None,
                 file_id: "shared-file".into(),
                 content_hash: format!("{index:064x}"),
                 total_bytes: 4,
@@ -218,6 +219,7 @@ fn stored_record_membership_requires_matching_scope_and_chunk() {
     let other_scope =
         RepositoryScope::new(RepositoryProvider::GitHub, "other", "other-repo", None).unwrap();
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "test/file.bin".into(),
         content_hash: "f".repeat(64),
         total_bytes: 1024,

@@ -280,6 +280,7 @@ mod tests {
             .unwrap();
         let hash = "a".repeat(64);
         let mut record = FileRecord {
+            deduplication_domain: None,
             file_id: "first".into(),
             content_hash: "b".repeat(64),
             total_bytes: 4,

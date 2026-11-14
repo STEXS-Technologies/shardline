@@ -232,6 +232,7 @@ mod tests {
             )
             .collect();
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "repeated".to_owned(),
             content_hash: "b".repeat(64),
             total_bytes: offset,
@@ -271,6 +272,7 @@ mod tests {
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 8,
@@ -332,6 +334,7 @@ mod tests {
     #[test]
     fn response_applies_requested_logical_range() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 12,
@@ -380,6 +383,7 @@ mod tests {
     #[test]
     fn response_rejects_requested_range_past_file_length() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 4,
@@ -409,6 +413,7 @@ mod tests {
     #[test]
     fn zero_byte_record_rejects_requested_range() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 0,
@@ -430,6 +435,7 @@ mod tests {
     #[test]
     fn v2_conversion_preserves_terms_and_emits_range_descriptors() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 8,
@@ -481,6 +487,7 @@ mod tests {
     #[test]
     fn zero_byte_record_without_range_returns_empty_response() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "empty.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 0,
@@ -501,6 +508,7 @@ mod tests {
     #[test]
     fn response_with_metrics_delegates_to_build_reconstruction_response() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "metrics-test.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 4,
@@ -531,6 +539,7 @@ mod tests {
     #[test]
     fn response_rejects_invalid_reconstruction_plan() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "bad.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 4,
@@ -559,6 +568,7 @@ mod tests {
     #[test]
     fn response_deduplicates_fetch_entries_for_same_hash() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "dedup.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 8,
@@ -602,6 +612,7 @@ mod tests {
     #[test]
     fn response_with_metrics_propagates_validation_error() {
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "bad-metrics.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 4,
@@ -638,6 +649,7 @@ mod tests {
         // Actually, the range must be contiguous in FileRecord validation.
         // Instead, test a range that covers only some chunks.
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "partial.bin".to_owned(),
             content_hash: "deadbeef".repeat(8),
             total_bytes: 12,
@@ -695,6 +707,7 @@ mod tests {
                 build_reconstruction_response(
                     "http://127.0.0.1:8080",
                     &FileRecord {
+                        deduplication_domain: None,
                         file_id: "asset-a".to_owned(),
                         content_hash: "a".repeat(64),
                         total_bytes: 4,
@@ -719,6 +732,7 @@ mod tests {
                 build_reconstruction_response(
                     "http://127.0.0.1:8080",
                     &FileRecord {
+                        deduplication_domain: None,
                         file_id: "asset-b".to_owned(),
                         content_hash: "b".repeat(64),
                         total_bytes: 4,

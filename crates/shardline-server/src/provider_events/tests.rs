@@ -94,6 +94,7 @@ async fn repository_deleted_creates_holds_for_matching_repository_versions()
     let other_scope =
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "other", Some("main"))?;
     let matching_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 8,
@@ -122,6 +123,7 @@ async fn repository_deleted_creates_holds_for_matching_repository_versions()
         ],
     };
     let matching_release_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset-release.bin".to_owned(),
         content_hash: "f".repeat(64),
         total_bytes: 4,
@@ -139,6 +141,7 @@ async fn repository_deleted_creates_holds_for_matching_repository_versions()
         }],
     };
     let other_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "d".repeat(64),
         total_bytes: 4,
@@ -256,6 +259,7 @@ async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() -> Resul
 
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: validated.unpacked_length(),
@@ -324,6 +328,7 @@ async fn failed_webhook_application_can_retry_same_delivery() -> Result<(), Box<
     let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -401,6 +406,7 @@ async fn repository_rename_rejects_conflicting_target_metadata() -> Result<(), B
         Some("main"),
     )?;
     let source_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -418,6 +424,7 @@ async fn repository_rename_rejects_conflicting_target_metadata() -> Result<(), B
         }],
     };
     let conflicting_target_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "c".repeat(64),
         total_bytes: 4,

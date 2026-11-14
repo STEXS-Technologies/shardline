@@ -1031,6 +1031,7 @@ fn record_path_latest_returns_latest_record_locator() {
     let root = storage.path_buf();
     let record_store = shardline_index::LocalRecordStore::open(root);
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "test-file".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 0,
@@ -1051,6 +1052,7 @@ fn record_path_version_returns_version_record_locator() {
     let root = storage.path_buf();
     let record_store = shardline_index::LocalRecordStore::open(root);
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "test-file".to_owned(),
         content_hash: "b".repeat(64),
         total_bytes: 0,
@@ -1312,6 +1314,7 @@ async fn run_fsck_with_dedupe_shard_added_to_reachability() {
     let chunk_size = 4096_u64;
     let content_hash_val = content_hash(total_bytes, chunk_size, &chunks);
     let record = FileRecord {
+        deduplication_domain: None,
         storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "reachable-file".to_owned(),
         content_hash: content_hash_val,
@@ -1390,6 +1393,7 @@ async fn run_fsck_with_seeded_valid_records_returns_clean() {
     std::fs::write(&chunk_path, chunk_data).unwrap();
 
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "seeded-valid-file".to_owned(),
         content_hash: content_hash(
             chunk_data.len() as u64,
@@ -1482,6 +1486,7 @@ async fn run_fsck_with_corrupted_chunk_data_detects_hash_mismatch() {
     std::fs::write(&chunk_path, b"corrupted data that doesn't match the hash").unwrap();
 
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "corrupted-chunk-file".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: chunk_data.len() as u64,

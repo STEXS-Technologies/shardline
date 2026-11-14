@@ -10,6 +10,7 @@ use std::time::Duration;
 
 async fn rows(pool: &PgPool, size: usize, count: i32) -> Vec<PgRow> {
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "a".repeat(size),
         content_hash: "b".repeat(64),
         total_bytes: 0,

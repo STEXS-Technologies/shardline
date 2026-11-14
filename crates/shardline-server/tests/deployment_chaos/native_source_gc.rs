@@ -116,6 +116,7 @@ async fn native_source_gc_sigkill_preserves_live_bytes_and_expired_orphan_recove
     let records = PostgresRecordStore::new(pool.clone());
     records
         .write_version_record(&FileRecord {
+            deduplication_domain: None,
             file_id: "protected-historical-member".to_owned(),
             content_hash: member.clone(),
             total_bytes: body.len() as u64,

@@ -1191,6 +1191,7 @@ mod tests {
     fn fuzz_reconstruction_response_summary_handles_empty_record_without_panic() {
         use shardline_index::FileRecord;
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "test".to_owned(),
             content_hash: "abc".to_owned(),
             total_bytes: 0,
@@ -1242,6 +1243,7 @@ mod tests {
     fn fuzz_reconstruction_response_summary_with_requested_range() {
         use shardline_index::{FileChunkRecord, FileRecord};
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "test.bin".to_owned(),
             content_hash: "aa".repeat(32),
             total_bytes: 10,
@@ -1269,6 +1271,7 @@ mod tests {
         // ByteRange covering the entire record
         use shardline_index::{FileChunkRecord, FileRecord};
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "full.bin".to_owned(),
             content_hash: "aa".repeat(32),
             total_bytes: 10,
@@ -1296,6 +1299,7 @@ mod tests {
         // No range constraint
         use shardline_index::{FileChunkRecord, FileRecord};
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "norange.bin".to_owned(),
             content_hash: "aa".repeat(32),
             total_bytes: 10,

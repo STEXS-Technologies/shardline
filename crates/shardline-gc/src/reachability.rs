@@ -838,6 +838,7 @@ mod tests {
             .await
             .unwrap();
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "retained-history".to_owned(),
             content_hash: member.clone(),
             total_bytes: 4,
@@ -908,6 +909,7 @@ mod tests {
 
             let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
             let record = FileRecord {
+                deduplication_domain: None,
                 file_id: "test-file".to_owned(),
                 content_hash: hash.to_owned(),
                 total_bytes: 100,
@@ -991,6 +993,7 @@ mod tests {
 
             let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
             let record = FileRecord {
+                deduplication_domain: None,
                 file_id: "version-file".to_owned(),
                 content_hash: hash.to_owned(),
                 total_bytes: 200,
@@ -1048,6 +1051,7 @@ mod tests {
             // live_dedupe_chunk_hashes.
             let chunk_hash_hex = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
             let record = FileRecord {
+                deduplication_domain: None,
                 file_id: "dedupe-file".to_owned(),
                 content_hash: chunk_hash_hex.to_owned(),
                 total_bytes: 100,
@@ -1118,6 +1122,7 @@ mod tests {
             // chunk_size = 0 → ReferencedObjectTerms storage layout.
             let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let record = FileRecord {
+                deduplication_domain: None,
                 file_id: "terms-file".to_owned(),
                 content_hash: hash.to_owned(),
                 total_bytes: 100,
@@ -1174,6 +1179,7 @@ mod tests {
 
             // Latest record with hash1
             let latest = FileRecord {
+                deduplication_domain: None,
                 file_id: "latest-file".to_owned(),
                 content_hash: hash1.to_owned(),
                 total_bytes: 50,
@@ -1194,6 +1200,7 @@ mod tests {
 
             // Version record with hash2
             let version = FileRecord {
+                deduplication_domain: None,
                 file_id: "version-file".to_owned(),
                 content_hash: hash2.to_owned(),
                 total_bytes: 75,

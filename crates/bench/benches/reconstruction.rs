@@ -37,6 +37,7 @@ fn make_record(chunk_count: usize) -> FileRecord {
     }
 
     FileRecord {
+        deduplication_domain: None,
         file_id: "bench.txt".to_owned(),
         content_hash: "b".repeat(64),
         total_bytes: offset,

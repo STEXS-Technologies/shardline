@@ -283,6 +283,7 @@ impl RecordMutation for GuardedScopeRecordStore {
 
 fn file_record(scope: &RepositoryScope, chunk_hash: &str) -> FileRecord {
     FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "c".repeat(64),
         total_bytes: 4,

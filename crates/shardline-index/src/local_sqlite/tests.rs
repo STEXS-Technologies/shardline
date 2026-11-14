@@ -376,6 +376,7 @@ fn sample_repository_scope() -> Result<RepositoryScope, Box<dyn Error>> {
 
 fn sample_record(repository_scope: Option<RepositoryScope>) -> FileRecord {
     FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -1265,6 +1266,7 @@ fn sample_state_machine_records() -> Result<Vec<FileRecord>, Box<dyn Error>> {
     )?;
     Ok(vec![
         FileRecord {
+            deduplication_domain: None,
             file_id: "alpha.bin".to_owned(),
             content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([11; 32])),
             total_bytes: 4,
@@ -1282,6 +1284,7 @@ fn sample_state_machine_records() -> Result<Vec<FileRecord>, Box<dyn Error>> {
             }],
         },
         FileRecord {
+            deduplication_domain: None,
             file_id: "beta.bin".to_owned(),
             content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([12; 32])),
             total_bytes: 8,
@@ -1310,6 +1313,7 @@ fn sample_state_machine_records() -> Result<Vec<FileRecord>, Box<dyn Error>> {
             ],
         },
         FileRecord {
+            deduplication_domain: None,
             file_id: "gamma.bin".to_owned(),
             content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([13; 32])),
             total_bytes: 6,

@@ -198,6 +198,7 @@ mod tests {
 
     fn test_record() -> super::FileRecord {
         super::FileRecord {
+            deduplication_domain: None,
             file_id: "file.bin".to_owned(),
             content_hash: "a".repeat(64),
             total_bytes: 8,

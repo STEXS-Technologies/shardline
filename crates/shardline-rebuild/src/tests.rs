@@ -147,6 +147,7 @@ fn push_issue_increments_count() {
 fn make_candidate_with_file_id(file_id: &str) -> VersionCandidate<&'static str> {
     VersionCandidate {
         record: shardline_index::FileRecord {
+            deduplication_domain: None,
             file_id: file_id.to_owned(),
             content_hash: "a".repeat(64),
             total_bytes: 0,
@@ -345,6 +346,7 @@ async fn run_index_rebuild_with_single_version_record_produces_latest() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -384,6 +386,7 @@ async fn run_index_rebuild_with_existing_latest_unchanged() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -785,6 +788,7 @@ async fn run_index_rebuild_removes_stale_latest_records() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -797,6 +801,7 @@ async fn run_index_rebuild_removes_stale_latest_records() {
 
     // Write a latest record for a different file that has NO version record
     let stale_record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "stale-file".to_owned(),
         content_hash: "b".repeat(64),
         total_bytes: 0,
@@ -844,6 +849,7 @@ async fn run_index_rebuild_keeps_latest_record_when_version_record_unreadable() 
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let good_record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "good.txt".to_owned(),
         content_hash,
         total_bytes: 0,
@@ -860,6 +866,7 @@ async fn run_index_rebuild_keeps_latest_record_when_version_record_unreadable() 
     // The authoritative, fully intact latest record for the file whose version
     // record is about to be corrupted. It must survive the rebuild.
     let intact_record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "bad.json".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 0,
@@ -937,6 +944,7 @@ async fn rebuild_does_not_roll_back_latest_when_newest_version_is_corrupt() {
     let record_store = LocalRecordStore::open(dir.path().to_path_buf());
     let index_store = MemoryIndexStore::new();
     let older = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "acknowledged.txt".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 0,
@@ -1916,6 +1924,7 @@ async fn run_index_rebuild_reconstruction_preserved_when_file_id_is_hash() {
     let chunks = Vec::new();
     let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: file_id_hex,
         content_hash,
         total_bytes: 0,

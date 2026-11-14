@@ -30,8 +30,8 @@ pub(crate) use native_xorb::store_admitted_xorb;
 pub(crate) use upload_attempt::upload_attempt_id;
 
 /// Public chunk responses require standalone objects; protocol responses do not.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum UploadStorage {
     IndividualChunks,
-    ProtocolContainers,
+    ProtocolContainers(Option<shardline_protocol::RepositoryScope>),
 }

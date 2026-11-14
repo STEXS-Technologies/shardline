@@ -58,6 +58,7 @@ pub(crate) struct FileUploadIngestor {
     local_packing: Option<super::packed_protocol::PackedProtocolUpload>,
     verified_chunks: SharedReadCache,
     packed_protocol: Option<super::packed_protocol::PackedProtocolUpload>,
+    reuse_domain: Option<shardline_index::DeduplicationDomain>,
 }
 
 impl FileUploadIngestor {
@@ -100,6 +101,7 @@ impl FileUploadIngestor {
             local_packing: None,
             verified_chunks: SharedReadCache::default(),
             packed_protocol: None,
+            reuse_domain: None,
         }
     }
 
@@ -124,6 +126,9 @@ impl FileUploadIngestor {
         backend: crate::ServerBackend,
         scope: Option<RepositoryScope>,
     ) -> Self {
+        self.reuse_domain = Some(shardline_index::DeduplicationDomain::from_scope(
+            scope.as_ref(),
+        ));
         if let Some(packed) = &mut self.packed_protocol {
             packed.reuse = Some(super::protocol_reuse::ProtocolChunkReuse::new(
                 backend, scope,
@@ -267,6 +272,7 @@ impl FileUploadIngestor {
 
         let content_hash = content_hash(total_bytes, chunk_size, &self.records);
         let record = FileRecord {
+            deduplication_domain: self.reuse_domain,
             file_id: file_id.to_owned(),
             content_hash: content_hash.clone(),
             total_bytes,

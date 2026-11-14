@@ -2277,6 +2277,7 @@ async fn backward_compatibility_all_formats_readable() {
     let record_store = LocalRecordStore::open(tmp.path().to_path_buf());
     record_store
         .commit_file_version_metadata(&FileRecord {
+            deduplication_domain: None,
             file_id: fixed_file_id,
             content_hash: fixed_hash.clone(),
             total_bytes: fixed_content.len() as u64,
@@ -2300,6 +2301,7 @@ async fn backward_compatibility_all_formats_readable() {
         shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(whole_content));
     record_store
         .commit_file_version_metadata(&FileRecord {
+            deduplication_domain: None,
             file_id: whole_file_id,
             content_hash: whole_hash.clone(),
             total_bytes: whole_content.len() as u64,
@@ -2533,6 +2535,7 @@ async fn gc_preserves_old_and_new_formats() {
     let record_store = LocalRecordStore::open(tmp.path().to_path_buf());
     record_store
         .commit_file_version_metadata(&FileRecord {
+            deduplication_domain: None,
             file_id: fixed_file_id,
             content_hash: fixed_hash.clone(),
             total_bytes: fixed_content.len() as u64,
@@ -2555,6 +2558,7 @@ async fn gc_preserves_old_and_new_formats() {
         shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(whole_content));
     record_store
         .commit_file_version_metadata(&FileRecord {
+            deduplication_domain: None,
             file_id: whole_file_id,
             content_hash: whole_hash.clone(),
             total_bytes: whole_content.len() as u64,
@@ -2600,6 +2604,7 @@ async fn gc_preserves_old_and_new_formats() {
             crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from_static(
                 new_content,
             )),
+            None,
         )
         .await
         .expect("new upload");
@@ -11477,6 +11482,7 @@ async fn mixed_format_dedup_same_content() {
     let record_store = LocalRecordStore::open(tmp.path().to_path_buf());
     record_store
         .commit_file_version_metadata(&FileRecord {
+            deduplication_domain: None,
             file_id: file_id.clone(),
             content_hash: hash.clone(),
             total_bytes: content.len() as u64,
@@ -11522,6 +11528,7 @@ async fn mixed_format_dedup_same_content() {
             crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from_static(
                 content,
             )),
+            None,
         )
         .await
         .expect("cas upload");

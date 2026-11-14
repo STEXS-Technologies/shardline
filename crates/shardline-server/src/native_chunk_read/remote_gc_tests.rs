@@ -120,6 +120,7 @@ async fn qualify_retention(retention_seconds: u64) {
     let records = PostgresRecordStore::new(pool.clone());
     records
         .write_version_record(&FileRecord {
+            deduplication_domain: None,
             file_id: "historical-native-member".to_owned(),
             content_hash: member.clone(),
             total_bytes: content.len() as u64,

@@ -1693,6 +1693,7 @@ async fn an_old_transaction_snapshot_cannot_hide_a_pending_delete() {
                     b"pending deletion after snapshot",
                 )),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2037,7 +2038,7 @@ async fn s3_publication_rejects_a_chunk_deleted_after_staging() {
     let bytes = Bytes::from_static(b"orphan bytes prepared before the delete completed");
     let seed = fixture
         .backend
-        .prepare_s3_object_stream(&logical, RequestBodyReader::from_bytes(bytes.clone()))
+        .prepare_s3_object_stream(&logical, RequestBodyReader::from_bytes(bytes.clone()), None)
         .await
         .unwrap();
     let hash = &seed.record.chunks[0].hash;
@@ -2063,7 +2064,7 @@ async fn s3_publication_rejects_a_chunk_deleted_after_staging() {
         .unwrap();
     let retry = fixture
         .backend
-        .prepare_s3_object_stream(&logical, RequestBodyReader::from_bytes(bytes))
+        .prepare_s3_object_stream(&logical, RequestBodyReader::from_bytes(bytes), None)
         .await;
     assert!(matches!(retry, Err(error) if error.is_remote_delete_pending()));
     let prepared = seed;
@@ -2149,6 +2150,7 @@ async fn s3_publication_rejects_a_chunk_deleted_after_staging() {
             RequestBodyReader::from_bytes(Bytes::from_static(
                 b"orphan bytes prepared before the delete completed",
             )),
+            None,
         )
         .await
         .unwrap();
@@ -2222,6 +2224,7 @@ async fn staged_content_locks_last_until_the_publication_transaction_ends() {
             "locked-file",
             RequestBodyReader::from_bytes(Bytes::from_static(b"locked backing bytes")),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2269,6 +2272,7 @@ async fn protocol_preparation_reuses_members_and_publication_rejects_missing_sou
             "reuse-source",
             RequestBodyReader::from_bytes(original.clone()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2284,6 +2288,7 @@ async fn protocol_preparation_reuses_members_and_publication_rejects_missing_sou
         .prepare_file_stream(
             "reuse-copy",
             RequestBodyReader::from_bytes(Bytes::from(edited.clone())),
+            None,
             None,
         )
         .await
@@ -2309,7 +2314,12 @@ async fn protocol_preparation_reuses_members_and_publication_rejects_missing_sou
         edited
     );
     let (lost, _) = backend
-        .prepare_file_stream("reuse-lost", RequestBodyReader::from_bytes(original), None)
+        .prepare_file_stream(
+            "reuse-lost",
+            RequestBodyReader::from_bytes(original),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let source = first.chunks.first().unwrap();

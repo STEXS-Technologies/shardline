@@ -48,6 +48,7 @@ fn assert_verified_reachability(num_chunks: u32, chunk_size: u32) {
     let info =
         XorbObject::deserialize(&mut std::io::Cursor::new(&serialized.serialized_data)).unwrap();
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "packed-file".to_owned(),
         content_hash: hash.clone(),
         total_bytes: serialized.raw_num_bytes,

@@ -117,6 +117,7 @@ async fn postgres_metadata_revision_register_delete_never_leaves_dangling_path()
     RecordMutation::write_latest_record(
         &record_store,
         &FileRecord {
+            deduplication_domain: None,
             file_id: id.clone(),
             content_hash: String::new(),
             total_bytes: 100,

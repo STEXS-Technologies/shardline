@@ -160,35 +160,20 @@ impl LocalBackend {
         .await
     }
 
-    /// Internal S3 responses expose no independently downloadable chunk list.
-    pub(crate) async fn upload_s3_protocol_stream(
+    /// Internal protocols publish packed records without public chunk responses.
+    pub(crate) async fn upload_protocol_stream(
         &self,
         file_id: &str,
         body: RequestBodyReader,
+        expected_sha256: Option<&str>,
+        reuse_scope: Option<&RepositoryScope>,
     ) -> Result<UploadFileResponse, ServerError> {
         self.upload_file_stream_with_storage(
             file_id,
             body,
             None,
-            None,
-            UploadStorage::ProtocolContainers,
-        )
-        .await
-    }
-
-    /// Internal digest protocols return no independently downloadable chunk list.
-    pub(crate) async fn upload_digest_protocol_stream(
-        &self,
-        file_id: &str,
-        body: RequestBodyReader,
-        expected_sha256: &str,
-    ) -> Result<UploadFileResponse, ServerError> {
-        self.upload_file_stream_with_storage(
-            file_id,
-            body,
-            None,
-            Some(expected_sha256),
-            UploadStorage::ProtocolContainers,
+            expected_sha256,
+            UploadStorage::ProtocolContainers(reuse_scope.cloned()),
         )
         .await
     }
@@ -240,13 +225,10 @@ impl LocalBackend {
             self.upload_max_in_flight_chunks,
             &self.packing_work_pool,
         );
-        if matches!(storage, UploadStorage::ProtocolContainers) {
+        if let UploadStorage::ProtocolContainers(reuse_scope) = storage {
             ingestor = ingestor
                 .with_packed_protocol_storage(&object_store, &self.packing_work_pool)
-                .with_protocol_chunk_reuse(
-                    crate::ServerBackend::Local(self.clone()),
-                    repository_scope.cloned(),
-                );
+                .with_protocol_chunk_reuse(crate::ServerBackend::Local(self.clone()), reuse_scope);
         }
         ingestor.ingest_body(&object_store, &mut body).await?;
 
@@ -757,9 +739,11 @@ mod tests {
             .await
             .unwrap();
         let protocol = backends[1]
-            .upload_s3_protocol_stream(
+            .upload_protocol_stream(
                 "protocol.bin",
                 RequestBodyReader::from_bytes(content.clone()),
+                None,
+                None,
             )
             .await
             .unwrap();

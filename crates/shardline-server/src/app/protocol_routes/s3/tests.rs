@@ -35,6 +35,7 @@ use md5::{Digest, Md5};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenScope};
 use tempfile::TempDir;
 use tower::ServiceExt;
+mod deduplication_domains;
 mod range_checksums;
 
 use crate::{

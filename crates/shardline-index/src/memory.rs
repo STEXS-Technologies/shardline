@@ -3067,6 +3067,7 @@ mod tests {
         };
 
         Some(FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "a".repeat(64),
             total_bytes: 8,
@@ -3098,6 +3099,7 @@ mod tests {
 
     fn file_record_with_scope(scope: RepositoryScope, content_seed: &str) -> FileRecord {
         FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: content_seed.repeat(64),
             total_bytes: 0,

@@ -220,6 +220,7 @@ async fn sqlite_verified_descriptor_replay_repairs_missing_and_stale_member_rows
 
 fn record(scope: &RepositoryScope, hash: &str) -> FileRecord {
     FileRecord {
+        deduplication_domain: None,
         file_id: "file".into(),
         content_hash: "c".repeat(64),
         total_bytes: 4,

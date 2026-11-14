@@ -118,6 +118,7 @@ async fn native_candidate_requires_exact_repository_and_authoritative_commit_mem
     let other = RepositoryScope::new(RepositoryProvider::GitHub, "bob", "model", None)?;
     let records = LocalRecordStore::new(root.path().to_owned())?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "b".repeat(64),
         content_hash: "b".repeat(64),
         total_bytes: 0,

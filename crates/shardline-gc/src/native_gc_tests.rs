@@ -6,6 +6,7 @@ use crate::{LocalGcOptions, ServerFrontend, run_gc_with_stores};
 fn generic_record(content: &[u8]) -> FileRecord {
     let member = compute_data_hash(content).hex();
     FileRecord {
+        deduplication_domain: None,
         file_id: "historical-file".to_owned(),
         content_hash: member.clone(),
         total_bytes: content.len() as u64,
@@ -138,6 +139,7 @@ async fn physical_sweep(frontends: &[ServerFrontend]) {
     // derived metadata loss. Only this immutable generic version protects bytes.
     records
         .write_version_record(&FileRecord {
+            deduplication_domain: None,
             file_id: "historical-file".to_owned(),
             content_hash: member.clone(),
             total_bytes: content.len() as u64,

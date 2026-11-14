@@ -301,6 +301,7 @@ async fn assert_equivalent_encoding_reuse(store: &ServerObjectStore) -> Bytes {
         )
     );
     let record = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "equivalent-native-encoding".to_owned(),
         content_hash: hash,
         total_bytes: u64::try_from(bytes.len()).unwrap(),

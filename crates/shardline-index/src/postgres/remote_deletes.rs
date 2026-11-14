@@ -1086,6 +1086,7 @@ mod tests {
         let index = PostgresIndexStore::new(pool.clone());
         let records = super::super::PostgresRecordStore::new(pool.clone());
         let mut record = crate::FileRecord {
+            deduplication_domain: None,
             file_id: "publication.bin".to_owned(),
             content_hash: "cc".repeat(32),
             total_bytes: 1,

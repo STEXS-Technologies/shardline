@@ -3114,6 +3114,7 @@ mod tests {
 
     fn sample_record(scope: Option<RepositoryScope>) -> crate::FileRecord {
         crate::FileRecord {
+            deduplication_domain: None,
             file_id: "test.bin".into(),
             content_hash: "c".repeat(64),
             total_bytes: 4,

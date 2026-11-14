@@ -20,6 +20,7 @@ pub(crate) fn file_record_locator<Store: shardline_index::RecordTraversal>(
         crate::validation::validate_content_hash(hash)?;
     }
     let probe = shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: file_id.to_owned(),
         content_hash: content_hash.unwrap_or_default().to_owned(),
         total_bytes: 0,

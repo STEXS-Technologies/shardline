@@ -881,6 +881,7 @@ fn backend_name_blackhole() {
 
 fn sample_file_record() -> shardline_index::FileRecord {
     shardline_index::FileRecord {
+        deduplication_domain: None,
         file_id: "test-file-id".to_owned(),
         content_hash: "aabbccdd".repeat(8),
         total_bytes: 100,

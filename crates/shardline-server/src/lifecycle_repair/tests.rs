@@ -397,6 +397,7 @@ fn valid_hash() -> String {
 
 fn make_stored_chunks_record(chunks: Vec<FileChunkRecord>) -> Vec<u8> {
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "test-file".to_owned(),
         content_hash: valid_hash(),
         total_bytes: 1024,
@@ -497,6 +498,7 @@ fn collect_references_empty_chunks_does_not_increment_records() {
     // A record with no chunks should still increment scanned_records (the record
     // itself is scanned) but produce no keys or hashes.
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "empty".to_owned(),
         content_hash: valid_hash(),
         total_bytes: 0,
@@ -619,6 +621,7 @@ fn collect_references_deduplicates_keys() {
 fn make_referenced_terms_record(chunks: Vec<FileChunkRecord>) -> Vec<u8> {
     // chunk_size = 0 triggers ReferencedObjectTerms layout
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "test-term-file".to_owned(),
         content_hash: valid_hash(),
         total_bytes: 1024,
@@ -760,6 +763,7 @@ fn seed_object(store: &ServerObjectStore, key: &ObjectKey) {
 /// Helper: build a [`FileRecord`] with a single chunk for the given hash.
 fn single_chunk_record(file_id: &str, hash: &str, chunk_size: u64) -> FileRecord {
     FileRecord {
+        deduplication_domain: None,
         file_id: file_id.to_owned(),
         content_hash: valid_hash(),
         total_bytes: 256,
@@ -1925,6 +1929,7 @@ async fn repair_removes_reachable_quarantine_for_repointed_single_chunk_xorb() {
     seed_object(&object_store, &member_key);
 
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "repointed-file".to_owned(),
         content_hash: valid_hash(),
         total_bytes: data.len() as u64,
@@ -1985,6 +1990,7 @@ async fn repair_multi_chunk_xorb_members_all_reachable() {
     seed_object(&object_store, &member2);
 
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "repointed-multi".to_owned(),
         content_hash: valid_hash(),
         total_bytes: (data1.len() + data2.len()) as u64,

@@ -199,6 +199,13 @@ async fn protocol_ingest_reuses_physical_members_across_s3_and_basic_lfs() {
         )
         .await
         .unwrap();
+        let scope = shardline_protocol::RepositoryScope::new(
+            shardline_protocol::RepositoryProvider::Generic,
+            "alice",
+            "repo",
+            Some("main"),
+        )
+        .unwrap();
         let mut state = 0x1234_5678_90ab_cdef_u64;
         let original: Vec<u8> = (0..4 * 1024 * 1024)
             .map(|_| {
@@ -209,11 +216,13 @@ async fn protocol_ingest_reuses_physical_members_across_s3_and_basic_lfs() {
             })
             .collect();
         let first = backend
-            .upload_s3_protocol_stream(
+            .upload_protocol_stream(
                 "s3-source",
                 crate::upload_ingest::RequestBodyReader::from_bytes(Bytes::copy_from_slice(
                     &original,
                 )),
+                None,
+                Some(&scope),
             )
             .await
             .unwrap();
@@ -240,12 +249,13 @@ async fn protocol_ingest_reuses_physical_members_across_s3_and_basic_lfs() {
         };
         let before = physical_bytes();
         let exact = backend
-            .upload_digest_protocol_stream(
+            .upload_protocol_stream(
                 "lfs-exact",
                 crate::upload_ingest::RequestBodyReader::from_bytes(Bytes::copy_from_slice(
                     &original,
                 )),
-                &hex::encode(Sha256::digest(&original)),
+                Some(&hex::encode(Sha256::digest(&original))),
+                Some(&scope),
             )
             .await
             .unwrap();
@@ -259,12 +269,13 @@ async fn protocol_ingest_reuses_physical_members_across_s3_and_basic_lfs() {
         let mut edited = original.clone();
         edited[2 * 1024 * 1024..2 * 1024 * 1024 + 4096].fill(0x5a);
         let changed = backend
-            .upload_digest_protocol_stream(
+            .upload_protocol_stream(
                 "lfs-edited",
                 crate::upload_ingest::RequestBodyReader::from_bytes(Bytes::copy_from_slice(
                     &edited,
                 )),
-                &hex::encode(Sha256::digest(&edited)),
+                Some(&hex::encode(Sha256::digest(&edited))),
+                Some(&scope),
             )
             .await
             .unwrap();
@@ -287,6 +298,14 @@ async fn protocol_ingest_reuses_physical_members_across_s3_and_basic_lfs() {
                 .unwrap(),
             edited
         );
+        let protected = backend
+            .file_record("s3-source", Some(&first.content_hash), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            protected.reuse_domain(),
+            shardline_index::DeduplicationDomain::from_scope(Some(&scope))
+        );
         assert!(backend.delete_file_reference("s3-source").await.unwrap());
         assert!(backend.delete_file_reference("lfs-exact").await.unwrap());
         assert_eq!(
@@ -296,5 +315,73 @@ async fn protocol_ingest_reuses_physical_members_across_s3_and_basic_lfs() {
                 .unwrap(),
             edited
         );
+        let mut survivors = Vec::new();
+        for (index, (label, other)) in [
+            (
+                "other-repository",
+                Some(
+                    shardline_protocol::RepositoryScope::new(
+                        shardline_protocol::RepositoryProvider::Generic,
+                        "alice",
+                        "other",
+                        Some("main"),
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                "other-tenant",
+                Some(
+                    shardline_protocol::RepositoryScope::new(
+                        shardline_protocol::RepositoryProvider::Generic,
+                        "bob",
+                        "repo",
+                        Some("main"),
+                    )
+                    .unwrap(),
+                ),
+            ),
+            ("public", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut independent = original.clone();
+            independent[1024 * 1024..1024 * 1024 + 4096].fill(u8::try_from(index + 1).unwrap());
+            let uploaded = backend
+                .upload_protocol_stream(
+                    label,
+                    crate::upload_ingest::RequestBodyReader::from_bytes(Bytes::copy_from_slice(
+                        &independent,
+                    )),
+                    None,
+                    other.as_ref(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(uploaded.reused_chunks, 0, "{label} reused a foreign domain");
+            let record = backend
+                .file_record(label, Some(&uploaded.content_hash), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                record.reuse_domain(),
+                shardline_index::DeduplicationDomain::from_scope(other.as_ref())
+            );
+            assert!(record.chunks.iter().all(|term| {
+                protected
+                    .chunks
+                    .iter()
+                    .all(|source| term.hash != source.hash)
+            }));
+            survivors.push((label, independent));
+        }
+        assert!(backend.delete_file_reference("lfs-edited").await.unwrap());
+        for (label, expected) in survivors {
+            assert_eq!(
+                backend.download_file(label, None, None).await.unwrap(),
+                expected
+            );
+        }
     }
 }

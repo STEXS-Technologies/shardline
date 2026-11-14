@@ -46,6 +46,7 @@ impl Mutation {
             Self::Heads => {
                 PostgresRecordStore::new(admin.clone())
                     .write_version_record(&FileRecord {
+                        deduplication_domain: None,
                         file_id: format!("owned-rebuild-{ordinal}"),
                         content_hash: hex::encode(Digest::of(b"").0),
                         total_bytes: 0,

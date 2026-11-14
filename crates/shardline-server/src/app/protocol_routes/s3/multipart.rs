@@ -1354,7 +1354,7 @@ async fn durable_s3_complete_multipart_upload(
         let start = Instant::now();
         let prepared = state
             .backend
-            .prepare_s3_object_stream(&context.object_key, reader)
+            .prepare_s3_object_stream(&context.object_key, reader, context.auth.namespace())
             .await?;
         if let Some(full_object_checksum) = &full_object_checksum {
             let value = full_object_checksum.value()?;

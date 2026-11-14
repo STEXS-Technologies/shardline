@@ -551,7 +551,7 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 35] = [
 
 // These tables extend frontend capabilities without changing the released
 // storage schema. Their installation history must not prevent old restarts.
-const FRONTEND_MIGRATIONS: [DatabaseMigration; 8] = [
+const FRONTEND_MIGRATIONS: [DatabaseMigration; 9] = [
     DatabaseMigration {
         version: "20261021000000",
         name: "xet_file_identities",
@@ -599,6 +599,12 @@ const FRONTEND_MIGRATIONS: [DatabaseMigration; 8] = [
         name: "hub_creation_policy",
         up_sql: include_str!("../migrations/20261024000000_hub_creation_policy.up.sql"),
         down_sql: include_str!("../migrations/20261024000000_hub_creation_policy.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261115000000",
+        name: "deduplication_domains",
+        up_sql: include_str!("../migrations/20261115000000_deduplication_domains.up.sql"),
+        down_sql: include_str!("../migrations/20261115000000_deduplication_domains.down.sql"),
     },
 ];
 
@@ -2970,7 +2976,7 @@ mod tests {
     #[test]
     fn bundled_migrations_have_expected_count() {
         assert_eq!(bundled_database_migrations().len(), 35);
-        assert_eq!(super::FRONTEND_MIGRATIONS.len(), 8);
+        assert_eq!(super::FRONTEND_MIGRATIONS.len(), 9);
     }
 
     #[test]

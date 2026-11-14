@@ -97,7 +97,7 @@ impl RecordScan {
                 format!(
                     "SELECT {columns} FROM shardline_record_membership m
                  JOIN shardline_file_records r ON r.record_key=m.record_key
-                 WHERE m.scope_key=?1 AND m.member_hash=?2 AND r.scope_key=?1
+                 WHERE m.scope_key=?1 AND m.member_hash=?2 AND COALESCE(json_extract(CASE WHEN json_valid(r.record) THEN r.record ELSE '{{}}' END, '$.deduplication_domain'), r.scope_key)=?1
                    AND m.record_key > ?3 ORDER BY m.record_key LIMIT {}",
                     super::index_store::INVENTORY_BATCH_SIZE,
                 ),
@@ -277,11 +277,29 @@ impl RecordTraversal for LocalRecordStore {
             + 'operation,
         VisitorError: Send + 'operation,
     {
+        Box::pin(async move {
+            let domain = crate::DeduplicationDomain::from_scope(Some(repository));
+            self.visit_deduplication_hash_records(&domain, hash_hex, visitor)
+                .await
+        })
+    }
+
+    fn visit_deduplication_hash_records<'operation, Visitor, VisitorError>(
+        &'operation self,
+        domain: &'operation crate::DeduplicationDomain,
+        hash_hex: &'operation str,
+        visitor: Visitor,
+    ) -> RecordStoreFuture<'operation, (), VisitorError>
+    where
+        Self: Sync,
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(crate::StoredRecord<Self::Locator>) -> Result<(), VisitorError>
+            + Send
+            + 'operation,
+        VisitorError: Send + 'operation,
+    {
         let store = self.clone();
-        let filter = (
-            crate::record_key::repository_scope_key(Some(repository)),
-            hash_hex.to_owned(),
-        );
+        let filter = (domain.as_str().to_owned(), hash_hex.to_owned());
         Box::pin(async move {
             let reservation = super::index_store::reserve_async_cursor().map_err(Into::into)?;
             let scan = tokio::task::spawn_blocking(move || {
@@ -584,6 +602,7 @@ mod tests {
 
     fn sample_record() -> FileRecord {
         FileRecord {
+            deduplication_domain: None,
             file_id: "test.bin".to_owned(),
             content_hash: "a".repeat(64),
             total_bytes: 4,

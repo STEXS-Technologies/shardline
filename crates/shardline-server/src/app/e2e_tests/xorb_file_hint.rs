@@ -131,6 +131,7 @@ async fn signed_transfer_uses_file_proof_and_retains_historical_fallback() {
     let scope = RepositoryScope::new(RepositoryProvider::Generic, "team", "hint", None).unwrap();
     let store = LocalRecordStore::new(root.path().to_owned()).unwrap();
     let mut record = FileRecord {
+        deduplication_domain: None,
         file_id: "b".repeat(64),
         content_hash: "c".repeat(64),
         total_bytes: content.len() as u64,

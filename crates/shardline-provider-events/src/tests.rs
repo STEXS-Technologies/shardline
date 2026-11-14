@@ -161,6 +161,7 @@ async fn repository_deleted_creates_holds_for_matching_repository_versions()
     let other_scope =
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "other", Some("main"))?;
     let matching_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 8,
@@ -189,6 +190,7 @@ async fn repository_deleted_creates_holds_for_matching_repository_versions()
         ],
     };
     let matching_release_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset-release.bin".to_owned(),
         content_hash: "f".repeat(64),
         total_bytes: 4,
@@ -206,6 +208,7 @@ async fn repository_deleted_creates_holds_for_matching_repository_versions()
         }],
     };
     let other_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "d".repeat(64),
         total_bytes: 4,
@@ -301,6 +304,7 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
     let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let stale_record = FileRecord {
+        deduplication_domain: None,
         file_id: "stale.bin".to_owned(),
         content_hash: "e".repeat(64),
         total_bytes: 4,
@@ -318,6 +322,7 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
         }],
     };
     let healthy_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -398,6 +403,7 @@ async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() -> Resul
 
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: validated.unpacked_length(),
@@ -460,6 +466,7 @@ async fn exercise_access_changed_records_provider_repository_state_without_mutat
     let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -536,6 +543,7 @@ async fn exercise_revision_pushed_records_provider_repository_state_without_muta
     let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -686,6 +694,7 @@ async fn exercise_duplicate_webhook_delivery_is_ignored_after_first_application(
     let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -813,6 +822,7 @@ async fn failed_webhook_application_can_retry_same_delivery() -> Result<(), Box<
     let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -890,6 +900,7 @@ async fn exercise_repository_rename_migrates_records_to_new_scope(
         Some("release"),
     )?;
     let main_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -907,6 +918,7 @@ async fn exercise_repository_rename_migrates_records_to_new_scope(
         }],
     };
     let release_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "c".repeat(64),
         total_bytes: 4,
@@ -992,6 +1004,7 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op(
     let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -1064,6 +1077,7 @@ async fn webhook_failure_with_failed_cleanup_logs_warning() -> Result<(), Box<dy
     let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -1120,6 +1134,7 @@ async fn exercise_repository_rename_removes_old_scope_latest_without_version_rec
     let main_scope =
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
     let stale_record = FileRecord {
+        deduplication_domain: None,
         file_id: "stale.bin".to_owned(),
         content_hash: "e".repeat(64),
         total_bytes: 4,
@@ -1137,6 +1152,7 @@ async fn exercise_repository_rename_removes_old_scope_latest_without_version_rec
         }],
     };
     let healthy_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -1209,6 +1225,7 @@ async fn repository_rename_rejects_conflicting_target_metadata() -> Result<(), B
         Some("main"),
     )?;
     let source_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
@@ -1226,6 +1243,7 @@ async fn repository_rename_rejects_conflicting_target_metadata() -> Result<(), B
         }],
     };
     let conflicting_target_record = FileRecord {
+        deduplication_domain: None,
         file_id: "asset.bin".to_owned(),
         content_hash: "c".repeat(64),
         total_bytes: 4,
@@ -1831,6 +1849,7 @@ async fn apply_webhook_with_generic_provider_revision_pushed() {
     let scope =
         RepositoryScope::new(RepositoryProvider::Generic, "myorg", "myrepo", Some("main")).unwrap();
     let record = FileRecord {
+        deduplication_domain: None,
         file_id: "data.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,

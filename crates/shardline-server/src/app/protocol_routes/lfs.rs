@@ -808,6 +808,7 @@ fn promote_lfs_patch_session(
     stream_chunk_size: usize,
     scope_namespace: &str,
     session_id: &str,
+    reuse_scope: Option<&shardline_protocol::RepositoryScope>,
 ) -> Result<(), ServerError> {
     lfs_patch_evidence::transition(
         tmp_dir,
@@ -826,6 +827,7 @@ fn promote_lfs_patch_session(
                 object_key,
                 oid,
                 promotion_body,
+                reuse_scope,
             ),
         )
     })();
@@ -1178,7 +1180,12 @@ pub(crate) async fn lfs_put_object(
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
-        .put_sha256_addressed_object_stream_if_absent(&object_key, &oid, body)
+        .put_sha256_addressed_object_stream_if_absent(
+            &object_key,
+            &oid,
+            body,
+            repo.capability().namespace(),
+        )
         .await?;
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("lfs", content_length, elapsed, true);
@@ -1361,6 +1368,7 @@ pub(crate) async fn lfs_patch_object(
     let oid_for_closure = oid.clone();
     let object_key_for_closure = object_key.clone();
     let scope_namespace_for_closure = scope_namespace(repo.capability().namespace());
+    let reuse_scope_for_closure = repo.capability().namespace().cloned();
     let session_id_for_closure = durable_lfs_session_id(&scope_namespace_for_closure, &oid);
 
     let max_active_sessions = state.config.lfs_patch_max_active_sessions();
@@ -1511,6 +1519,7 @@ pub(crate) async fn lfs_patch_object(
                     stream_chunk_size,
                     &scope_namespace_for_closure,
                     &session_id_for_closure,
+                    reuse_scope_for_closure.as_ref(),
                 )?;
             }
             return Ok(());
@@ -1602,6 +1611,7 @@ pub(crate) async fn lfs_patch_object(
                 stream_chunk_size,
                 &scope_namespace_for_closure,
                 &session_id_for_closure,
+                reuse_scope_for_closure.as_ref(),
             )?;
         }
 
@@ -1755,7 +1765,12 @@ async fn durable_lfs_patch_object(
     let reader = lfs_parts_reader(&state.backend.object_store(), &claimed_parts, total).await?;
     let _stored = match state
         .backend
-        .put_sha256_addressed_object_stream_if_absent(object_key, oid, reader)
+        .put_sha256_addressed_object_stream_if_absent(
+            object_key,
+            oid,
+            reader,
+            repository.namespace(),
+        )
         .await
     {
         Ok(stored) => stored,

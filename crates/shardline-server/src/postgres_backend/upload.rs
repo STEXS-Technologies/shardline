@@ -27,6 +27,7 @@ impl super::PostgresBackend {
         file_id: &str,
         mut body: RequestBodyReader,
         repository_scope: Option<&RepositoryScope>,
+        reuse_scope: Option<&RepositoryScope>,
     ) -> Result<(FileRecord, UploadFileResponse), ServerError> {
         validate_identifier(file_id)?;
         let object_store = self.object_store();
@@ -39,7 +40,7 @@ impl super::PostgresBackend {
         .with_packed_protocol_storage(&object_store, &self.packing_work_pool)
         .with_protocol_chunk_reuse(
             crate::ServerBackend::Postgres(self.clone()),
-            repository_scope.cloned(),
+            reuse_scope.cloned(),
         );
         ingestor.ingest_body(&object_store, &mut body).await?;
         ingestor
@@ -80,6 +81,7 @@ impl super::PostgresBackend {
     ///
     /// Returns [`ServerError`] when request streaming, file identifier validation,
     /// chunk persistence, source digest validation, or metadata persistence fails.
+    #[cfg(test)]
     pub(crate) async fn upload_file_stream(
         &self,
         file_id: &str,
@@ -97,19 +99,20 @@ impl super::PostgresBackend {
         .await
     }
 
-    /// Internal digest protocols return no independently downloadable chunk list.
-    pub(crate) async fn upload_digest_protocol_stream(
+    /// Internal protocols publish packed records without public chunk responses.
+    pub(crate) async fn upload_protocol_stream(
         &self,
         file_id: &str,
         body: RequestBodyReader,
-        expected_sha256: &str,
+        expected_sha256: Option<&str>,
+        reuse_scope: Option<&RepositoryScope>,
     ) -> Result<UploadFileResponse, ServerError> {
         self.upload_file_stream_with_storage(
             file_id,
             body,
             None,
-            Some(expected_sha256),
-            UploadStorage::ProtocolContainers,
+            expected_sha256,
+            UploadStorage::ProtocolContainers(reuse_scope.cloned()),
         )
         .await
     }
@@ -166,12 +169,12 @@ impl super::PostgresBackend {
                 self.upload_max_in_flight_chunks,
                 &self.packing_work_pool,
             );
-            if matches!(storage, UploadStorage::ProtocolContainers) {
+            if let UploadStorage::ProtocolContainers(reuse_scope) = storage {
                 ingestor = ingestor
                     .with_packed_protocol_storage(&object_store, &self.packing_work_pool)
                     .with_protocol_chunk_reuse(
                         crate::ServerBackend::Postgres(self.clone()),
-                        repository_scope.cloned(),
+                        reuse_scope,
                     );
             }
             ingestor.ingest_body(&object_store, &mut body).await?;

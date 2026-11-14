@@ -16,6 +16,7 @@ mod tests {
         let scope = scope.expect("expected valid scope");
         let store = LocalRecordStore::open("/var/lib/shardline".into());
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "asset.bin".to_owned(),
             content_hash: "a".repeat(64),
             total_bytes: 0,

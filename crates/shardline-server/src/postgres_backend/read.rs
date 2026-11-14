@@ -1015,6 +1015,7 @@ mod tests {
 
     fn test_file_record(file_id: &str, content_hash: &str, scope: &RepositoryScope) -> FileRecord {
         FileRecord {
+            deduplication_domain: None,
             file_id: file_id.to_owned(),
             content_hash: content_hash.to_owned(),
             total_bytes: 1024,
@@ -1361,6 +1362,7 @@ mod tests {
         let (store, _storage) = local_record_store();
         let scope = test_scope();
         let record = FileRecord {
+            deduplication_domain: None,
             file_id: "test/empty-chunks.bin".into(),
             content_hash: make_hash('e'),
             total_bytes: 0,

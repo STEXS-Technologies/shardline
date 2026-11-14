@@ -384,6 +384,7 @@ impl ServerBackend {
         object_key: &ObjectKey,
         digest_hex: &str,
         body: RequestBodyReader,
+        reuse_scope: Option<&RepositoryScope>,
     ) -> Result<PutOutcome, ServerError> {
         // Local metadata is SQLite-backed. Keep the existence probe, intent
         // transitions, and atomic record commit in one serialized operation so
@@ -419,12 +420,12 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => {
                 backend
-                    .upload_digest_protocol_stream(&file_id, body, digest_hex)
+                    .upload_protocol_stream(&file_id, body, Some(digest_hex), reuse_scope)
                     .await?;
             }
             Self::Postgres(backend) => {
                 backend
-                    .upload_digest_protocol_stream(&file_id, body, digest_hex)
+                    .upload_protocol_stream(&file_id, body, Some(digest_hex), reuse_scope)
                     .await?;
             }
         }
@@ -447,6 +448,7 @@ impl ServerBackend {
         &self,
         object_key: &ObjectKey,
         body: RequestBodyReader,
+        reuse_scope: Option<&RepositoryScope>,
     ) -> Result<UploadFileResponse, ServerError> {
         // Local metadata is SQLite-backed. Keep the record commit in one
         // serialized operation so concurrent S3 uploads cannot race independent
@@ -457,8 +459,16 @@ impl ServerBackend {
         };
         let file_id = protocol_object_file_id(object_key);
         match self {
-            Self::Local(backend) => backend.upload_s3_protocol_stream(&file_id, body).await,
-            Self::Postgres(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
+            Self::Local(backend) => {
+                backend
+                    .upload_protocol_stream(&file_id, body, None, reuse_scope)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .upload_protocol_stream(&file_id, body, None, reuse_scope)
+                    .await
+            }
         }
     }
 
@@ -471,12 +481,15 @@ impl ServerBackend {
         &self,
         object_key: &ObjectKey,
         body: RequestBodyReader,
+        reuse_scope: Option<&RepositoryScope>,
     ) -> Result<PreparedS3Object, ServerError> {
         let file_id = protocol_object_file_id(object_key);
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
         };
-        let (record, response) = backend.prepare_file_stream(&file_id, body, None).await?;
+        let (record, response) = backend
+            .prepare_file_stream(&file_id, body, None, reuse_scope)
+            .await?;
         Ok(PreparedS3Object { record, response })
     }
 
@@ -1334,6 +1347,7 @@ impl ServerBackend {
             object_key,
             digest_hex,
             RequestBodyReader::from_bytes(bytes.into()),
+            None,
         )
         .await
     }
@@ -1363,6 +1377,7 @@ impl ServerBackend {
                         destination,
                         digest_hex,
                         RequestBodyReader::from_stream(source_stream),
+                        None,
                     )
                     .await;
             }
@@ -1424,6 +1439,7 @@ impl ServerBackend {
         digest_hex: &str,
         path: &Path,
         _integrity: &shardline_storage::ObjectIntegrity,
+        reuse_scope: Option<&RepositoryScope>,
     ) -> Result<PutOutcome, ServerError> {
         use tokio::io::AsyncReadExt as _;
 
@@ -1443,6 +1459,7 @@ impl ServerBackend {
             object_key,
             digest_hex,
             RequestBodyReader::from_stream(stream),
+            reuse_scope,
         )
         .await
     }
@@ -2703,6 +2720,7 @@ mod tests {
                 &first_key,
                 &first_digest,
                 RequestBodyReader::from_bytes(first.clone().into()),
+                None,
             )
             .await
             .unwrap();
@@ -2711,6 +2729,7 @@ mod tests {
                 &second_key,
                 &second_digest,
                 RequestBodyReader::from_bytes(second.clone().into()),
+                None,
             )
             .await
             .unwrap();
@@ -2792,6 +2811,7 @@ mod tests {
                         &key,
                         &digest,
                         RequestBodyReader::from_bytes(body.into()),
+                        None,
                     )
                     .await
             }

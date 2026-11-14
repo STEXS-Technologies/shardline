@@ -26,6 +26,7 @@ async fn digest_protocol_uses_containers_and_preserves_digest_rejection() {
                 &key,
                 &digest,
                 RequestBodyReader::from_bytes(Bytes::copy_from_slice(&bytes)),
+                None,
             )
             .await
             .unwrap(),
@@ -47,6 +48,7 @@ async fn digest_protocol_uses_containers_and_preserves_digest_rejection() {
                 &key,
                 &digest,
                 RequestBodyReader::from_bytes(Bytes::copy_from_slice(&bytes)),
+                None,
             )
             .await
             .unwrap(),
@@ -59,6 +61,7 @@ async fn digest_protocol_uses_containers_and_preserves_digest_rejection() {
                 &key,
                 &digest,
                 RequestBodyReader::from_bytes(Bytes::from_static(b"wrong")),
+                None,
             )
             .await
             .is_err()
@@ -71,6 +74,7 @@ async fn digest_protocol_uses_containers_and_preserves_digest_rejection() {
                 &wrong_key,
                 &wrong_digest,
                 RequestBodyReader::from_bytes(Bytes::copy_from_slice(&bytes)),
+                None,
             )
             .await
             .is_err()
