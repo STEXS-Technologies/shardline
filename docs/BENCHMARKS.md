@@ -3750,20 +3750,20 @@ metadata.
 
 The November 14, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`d7004fa5e16bc3c83658fc6349c68b0e0ac868f5`. It counts all tracked `.rs`
+`0a25688a2b42112ef18339d232829b7b639453d3`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 589,727 | 13,922 (2.31%) |
+| Entire repository | 603,649 | 589,138 | 14,511 (2.40%) |
 | Server | 220,570 | 213,196 | 7,374 (3.34%) |
 | Server core | 6,454 | 5,630 | 824 (12.77%) |
 | Storage | 20,373 | 19,469 | 904 (4.44%) |
 | S3 adapter | 10,954 | 10,365 | 589 (5.38%) |
 | Cache | 6,573 | 5,933 | 640 (9.74%) |
-| Index | 71,472 | 70,033 | 1,439 (2.01%) |
+| Index | 71,472 | 69,470 | 2,002 (2.80%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
 | GC | 10,954 | 10,621 | 333 (3.04%) |
 | Fsck | 8,989 | 8,457 | 532 (5.92%) |
@@ -3771,7 +3771,7 @@ or the amount of additional code that can safely be removed.
 | CLI | 37,677 | 37,375 | 302 (0.80%) |
 | Protocol | 4,076 | 3,824 | 252 (6.18%) |
 | Protocol adapters | 1,670 | 1,503 | 167 (10.00%) |
-| Provider events | 5,283 | 5,116 | 167 (3.16%) |
+| Provider events | 5,283 | 5,090 | 193 (3.65%) |
 | VCS | 9,393 | 9,033 | 360 (3.83%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
@@ -3781,15 +3781,15 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' d7004fa5e16bc3c83658fc6349c68b0e0ac868f5 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' d7004fa5e16bc3c83658fc6349c68b0e0ac868f5 -- '*.rs' | wc -l
+git grep -I -n '^' 0a25688a2b42112ef18339d232829b7b639453d3 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 0a25688a2b42112ef18339d232829b7b639453d3 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
 integration-test targets, reuses the pinned Nextest installer, removes unused
-dependencies/features and avoids unnecessary CI tool installation. These are
-structural reductions in work. Controlled fresh-artifact, warm and edited-source
-Cargo observations appear below. Default-profile Cargo, Docker and hosted-CI
+dependencies/features, shares root/E2E Cargo artifacts in the E2E CI job and
+avoids unnecessary CI tool installation. These are structural reductions in work.
+Controlled fresh-artifact, warm and edited-source Cargo observations appear below. Default-profile Cargo, Docker and hosted-CI
 critical-path comparisons remain outstanding; no general percentage build-time
 improvement is claimed. A source reduction also does not establish a throughput,
 latency, memory or I/O improvement.
