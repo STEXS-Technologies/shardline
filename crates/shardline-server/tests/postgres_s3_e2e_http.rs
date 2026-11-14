@@ -1176,47 +1176,14 @@ async fn test_pgs3_provider_issue_token_with_valid_key() {
     let mut builder =
         TestServerBuilder::new(&[ServerFrontend::Xet, ServerFrontend::Oci]).with_provider();
     let server = builder.start().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .post(server.url("/v1/providers/generic/tokens"))
-        .header("x-shardline-provider-key", "test-api-key-16bytes")
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "subject": "test-user",
-            "owner": "test",
-            "repo": "test",
-            "revision": null,
-            "scope": "Read"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(!json["token"].as_str().unwrap().is_empty());
+    http_contracts::provider::issue_token(&server).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_provider_issue_token_without_api_key_returns_401() {
     let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet]).with_provider();
     let server = builder.start().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .post(server.url("/v1/providers/generic/tokens"))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "subject": "test-user",
-            "owner": "test",
-            "repo": "test",
-            "revision": null,
-            "scope": "Read"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
+    http_contracts::provider::deny_token(&server, None, 401).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1224,59 +1191,21 @@ async fn test_pgs3_provider_git_lfs_authenticate() {
     let mut builder =
         TestServerBuilder::new(&[ServerFrontend::Xet, ServerFrontend::Oci]).with_provider();
     let server = builder.start().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .post(server.url("/v1/providers/generic/git-lfs-authenticate"))
-        .header("x-shardline-provider-key", "test-api-key-16bytes")
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "subject": "test-user",
-            "owner": "test",
-            "repo": "test",
-            "revision": null,
-            "scope": "Read"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(!json["href"].as_str().unwrap().is_empty());
+    http_contracts::provider::git_lfs_authenticate(&server).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_provider_xet_read_token() {
     let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet]).with_provider();
     let server = builder.start().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(server.url("/api/generic/test/test/xet-read-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key-16bytes")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(!json["accessToken"].as_str().unwrap().is_empty());
+    http_contracts::provider::xet_token(&server, "read").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pgs3_provider_xet_write_token() {
     let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet]).with_provider();
     let server = builder.start().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(server.url("/api/generic/test/test/xet-write-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key-16bytes")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(!json["accessToken"].as_str().unwrap().is_empty());
+    http_contracts::provider::xet_token(&server, "write").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

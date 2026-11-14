@@ -4,6 +4,7 @@
 pub(crate) mod bazel;
 pub(crate) mod lfs;
 pub(crate) mod oci;
+pub(crate) mod provider;
 
 use super::{ServerFrontend, TestServer, sha256_hex};
 
