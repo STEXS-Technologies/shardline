@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde_json::{from_value, to_value};
 use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
 
@@ -11,9 +9,8 @@ use super::{
 use crate::{OciTagEntry, OciTagStore};
 use shardline_reliability::{
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind, SnapshotEvidence,
-    persisted_event_sequence, reliability_merkle_commit_json_with_previous,
-    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_persisted_merkle_commit_with_previous, verify_snapshot_event, verify_snapshot_evidence,
+    reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
+    verify_or_repair_snapshot_evidence, verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -96,81 +93,19 @@ async fn verify_tag_listing_evidence(
         .iter()
         .map(|operation| operation.operation_id.clone())
         .collect::<Vec<_>>();
-    let rows = query(
-        "WITH requested AS (
-             SELECT operation_id
-             FROM unnest($2::text[]) AS values(operation_id)
-         )
-         SELECT requested.operation_id,
-                latest.sequence,
-                latest.event_json,
-                latest.merkle_commit_json,
-                CASE WHEN EXISTS (
-                    SELECT 1
-                    FROM shardline_reliability_events AS missing
-                    WHERE missing.operation_kind = $1
-                      AND missing.operation_id = requested.operation_id
-                      AND missing.sequence < latest.sequence
-                      AND missing.merkle_commit_json IS NULL
-                ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE (
-                    SELECT previous.merkle_commit_json
-                    FROM shardline_reliability_events AS previous
-                    WHERE previous.operation_kind = $1
-                      AND previous.operation_id = requested.operation_id
-                      AND previous.sequence < latest.sequence
-                    ORDER BY previous.sequence DESC
-                    LIMIT 1
-                ) END AS previous_merkle_commit_json
-         FROM requested
-         LEFT JOIN LATERAL (
-             SELECT sequence, event_json, merkle_commit_json
-             FROM shardline_reliability_events
-             WHERE operation_kind = $1
-               AND operation_id = requested.operation_id
-             ORDER BY sequence DESC
-             LIMIT 1
-         ) AS latest ON TRUE",
+    let mut latest = super::load_postgres_latest_evidence_heads(
+        connection,
+        OperationKind::OciTag,
+        &operation_ids,
     )
-    .bind(OperationKind::OciTag.as_str())
-    .bind(&operation_ids)
-    .fetch_all(&mut *connection)
     .await?;
-    let mut latest = HashMap::with_capacity(rows.len());
-    for row in rows {
-        let operation_id: String = row.try_get("operation_id")?;
-        latest.insert(
-            operation_id,
-            (
-                row.try_get::<i64, _>("sequence")?,
-                row.try_get::<serde_json::Value, _>("event_json")?,
-                row.try_get::<Option<serde_json::Value>, _>("merkle_commit_json")?,
-                row.try_get::<Option<serde_json::Value>, _>("previous_merkle_commit_json")?,
-            ),
-        );
-    }
     for (snapshot, operation) in snapshots.into_iter().zip(operations) {
         let operation_id = &operation.operation_id;
-        let Some((row_sequence, event_json, merkle_json, previous_merkle_json)) =
-            latest.remove(operation_id)
-        else {
+        let Some(event_json) = latest.remove(operation_id) else {
             return Err(PostgresMetadataStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         };
-        let event_sequence = persisted_event_sequence(OperationKind::OciTag, event_json.clone())?;
-        if row_sequence != u64_to_i64(event_sequence)? {
-            return Err(PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::Merkle(
-                    "OCI tag listing evidence sequence mismatch".into(),
-                ),
-            ));
-        }
-        verify_persisted_merkle_commit_with_previous(
-            OperationKind::OciTag,
-            event_json.clone(),
-            merkle_json,
-            previous_merkle_json,
-        )?;
         let event: OciTagLifecycleEvent = from_value(event_json)?;
         verify_snapshot_event(&event, &snapshot)?;
         if event.operation != operation {
@@ -822,32 +757,73 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_tags(&pool, "oci-pg-tamper").await;
         let store = PostgresIndexStore::new(pool.clone());
-        let value = OciTagEntry {
-            scope_namespace: "oci-pg-tamper".to_owned(),
-            repository: "team/assets".to_owned(),
-            tag: "latest".to_owned(),
-            digest_hex: "a".repeat(64),
-        };
-        store.upsert_oci_tag(&value).await.unwrap();
-        query(
-            "UPDATE shardline_reliability_events
-             SET event_json = '{\"tampered\":true}'
-             WHERE operation_kind = 'OciTag'
-               AND event_json->'operation'->>'tenant' = $1",
-        )
-        .bind(&value.scope_namespace)
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert!(
-            store
-                .oci_tag(&value.scope_namespace, &value.repository, &value.tag)
+        for mutation in [
+            "UPDATE shardline_reliability_events SET event_json = '{\"tampered\":true}' WHERE operation_kind = 'OciTag'",
+            "UPDATE shardline_reliability_events SET sequence = sequence + 100 WHERE operation_kind = 'OciTag'",
+            "UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_kind = 'OciTag' AND sequence = 2",
+            "UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_kind = 'OciTag' AND sequence = 0",
+            "UPDATE shardline_reliability_events SET merkle_commit_json = '{}'::jsonb WHERE operation_kind = 'OciTag'",
+            "DELETE FROM shardline_reliability_events WHERE operation_kind = 'OciTag'",
+        ] {
+            cleanup_tags(&pool, "oci-pg-tamper").await;
+            let value = OciTagEntry {
+                scope_namespace: "oci-pg-tamper".to_owned(),
+                repository: "team/assets".to_owned(),
+                tag: "latest".to_owned(),
+                digest_hex: "a".repeat(64),
+            };
+            for _ in 0..3 {
+                store.upsert_oci_tag(&value).await.unwrap();
+            }
+            assert_eq!(
+                store
+                    .list_oci_tags(&value.scope_namespace, &value.repository, None, 10)
+                    .await
+                    .unwrap(),
+                vec![value.clone()]
+            );
+            assert_eq!(
+                store
+                    .list_oci_tags_by_digest(
+                        &value.scope_namespace,
+                        &value.repository,
+                        &value.digest_hex
+                    )
+                    .await
+                    .unwrap(),
+                vec![value.clone()]
+            );
+            query(sqlx::AssertSqlSafe(mutation))
+                .execute(&pool)
                 .await
-                .is_err()
-        );
-        cleanup_tags(&pool, &value.scope_namespace).await;
+                .unwrap();
+            assert!(
+                store
+                    .oci_tag(&value.scope_namespace, &value.repository, &value.tag)
+                    .await
+                    .is_err(),
+                "{mutation}"
+            );
+            for result in [
+                store
+                    .list_oci_tags(&value.scope_namespace, &value.repository, None, 10)
+                    .await,
+                store
+                    .list_oci_tags_by_digest(
+                        &value.scope_namespace,
+                        &value.repository,
+                        &value.digest_hex,
+                    )
+                    .await,
+            ] {
+                assert!(
+                    result.is_err(),
+                    "listing accepted corrupted evidence: {mutation}"
+                );
+            }
+            cleanup_tags(&pool, &value.scope_namespace).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
