@@ -29,11 +29,11 @@ fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
     assert!(matches!(inserted, Ok(PutOutcome::Inserted)));
     assert!(matches!(duplicate, Ok(PutOutcome::AlreadyExists)));
     assert!(matches!(store.contains(&key), Ok(true)));
-    let metadata = store.metadata(&key);
-    assert!(matches!(metadata, Ok(Some(_))));
-    if let Ok(Some(metadata)) = metadata {
-        assert_eq!(metadata.length(), 8);
-    }
+    let metadata = store
+        .metadata(&key)
+        .expect("expected metadata lookup to succeed")
+        .expect("expected stored object metadata");
+    assert_eq!(metadata.length(), 8);
 
     let range = ByteRange::new(2, 5).unwrap();
     let read = store.read_range(&key, range);
@@ -43,11 +43,8 @@ fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
     let prefix = ObjectPrefix::parse("xorbs/default/").unwrap();
     let listed = store.list_prefix(&prefix).unwrap();
     assert_eq!(listed.len(), 1);
-    let first = listed.first();
-    assert!(first.is_some());
-    if let Some(first) = first {
-        assert_eq!(first.key(), &key);
-    }
+    let first = listed.first().expect("expected stored object in inventory");
+    assert_eq!(first.key(), &key);
     let mut visited = Vec::new();
     let visit = store.visit_prefix(&prefix, |visited_metadata| {
         visited.push(visited_metadata.key().clone());
