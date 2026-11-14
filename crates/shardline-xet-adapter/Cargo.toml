@@ -11,7 +11,6 @@ description = "Xet xorb and shard adapter for the Shardline server ecosystem."
 
 [dependencies]
 tempfile.workspace = true
-axum.workspace = true
 blake3.workspace = true
 sha2.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -25,6 +24,8 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 shardline-xet-core.workspace = true
 
+[dev-dependencies]
+axum.workspace = true
 
 [lints]
 workspace = true

@@ -75,7 +75,7 @@ shardline-fsck = { version = "1.13.0", path = "crates/shardline-fsck" }
 shardline-gc = { version = "1.13.0", path = "crates/shardline-gc" }
 shardline-hub-api = { version = "1.13.0", path = "crates/shardline-hub-api" }
 shardline-index = { version = "1.13.0", path = "crates/shardline-index" }
-shardline-metrics = { version = "1.13.0", path = "crates/shardline-metrics" }
+shardline-metrics = { version = "1.13.0", path = "crates/shardline-metrics", default-features = false }
 shardline-protocol = { version = "1.13.0", path = "crates/shardline-protocol" }
 shardline-protocol-adapters = { version = "1.13.0", path = "crates/shardline-protocol-adapters" }
 shardline-rebuild = { version = "1.13.0", path = "crates/shardline-rebuild" }

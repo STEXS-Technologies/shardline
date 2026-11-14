@@ -43,7 +43,7 @@ shardline-hub-api.workspace = true
 shardline-provider-events.workspace = true
 shardline-oci-adapter.workspace = true
 shardline-s3-adapter.workspace = true
-shardline-metrics.workspace = true
+shardline-metrics = { workspace = true, features = ["http"] }
 shardline-server-core.workspace = true
 chrono.workspace = true
 httpdate.workspace = true

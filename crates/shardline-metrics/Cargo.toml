@@ -8,12 +8,16 @@ homepage.workspace = true
 description = "Shared Prometheus metrics for the Shardline server ecosystem."
 readme = "README.md"
 
+[features]
+default = ["http"]
+http = ["dep:axum", "dep:tower", "dep:futures-util"]
+
 [dependencies]
 prometheus = { workspace = true }
-axum = { workspace = true }
-tower = { workspace = true }
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
 tracing = { workspace = true }
-futures-util.workspace = true
+futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

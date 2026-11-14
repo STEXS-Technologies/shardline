@@ -27,7 +27,7 @@ serde-saphyr = { version = "2.0", default-features = false, features = ["deseria
 sha1.workspace = true
 sha2.workspace = true
 shardline-index.workspace = true
-shardline-metrics.workspace = true
+shardline-metrics = { workspace = true, features = ["http"] }
 shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
 shardline-server-core.workspace = true

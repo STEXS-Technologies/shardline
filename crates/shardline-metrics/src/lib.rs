@@ -45,6 +45,7 @@
 pub mod backend;
 pub mod fsck;
 pub mod gc;
+#[cfg(feature = "http")]
 pub mod middleware;
 pub mod protocol;
 pub mod provider;
