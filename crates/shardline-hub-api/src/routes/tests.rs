@@ -1076,7 +1076,6 @@ async fn handler_repo_search_short_query_rejected() {
         }),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("at least 2")),
@@ -1100,7 +1099,6 @@ async fn handler_repo_search_invalid_type() {
         }),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("invalid repo type")),
@@ -1584,7 +1582,6 @@ async fn handler_repo_info_missing_repo() {
         Path(("models".into(), "missing".into(), "nope".into())),
     )
     .await;
-    assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
 }
 
@@ -1670,7 +1667,6 @@ async fn handler_repo_modelcard_missing_repo() {
         Path(("models".into(), "no".into(), "such".into())),
     )
     .await;
-    assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
 }
 
@@ -1693,7 +1689,6 @@ async fn handler_repo_modelcard_no_readme() {
         Path(("models".into(), "org".into(), "no-readme".into())),
     )
     .await;
-    assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), HubApiError::NotFound));
 }
 
@@ -1819,7 +1814,6 @@ async fn handler_repo_create_type_invalid_type() {
         Json(serde_json::json!({})),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(_)),
@@ -1932,7 +1926,6 @@ async fn handler_preupload_too_many_files() {
         }),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("exceeds maximum")),
@@ -2021,7 +2014,6 @@ async fn handler_commit_wrong_content_type() {
         axum::body::Body::from("{}"),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("Content-Type")),
@@ -2191,7 +2183,6 @@ async fn handler_commit_parent_mismatch() {
         axum::body::Body::from(body),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::Conflict(msg) if msg.contains("parentCommit mismatch")),
@@ -2361,7 +2352,6 @@ async fn handler_apply_commit_parent_mismatch() {
         repo.capability(),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::Conflict(msg) if msg.contains("parentCommit mismatch")),
@@ -2715,7 +2705,6 @@ async fn handler_resolve_file_not_found() {
         HeaderMap::new(),
     )
     .await;
-    assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), HubApiError::NotFound));
 }
 
@@ -3335,7 +3324,6 @@ async fn handler_lfs_upload_invalid_oid() {
         axum::body::Body::from(bytes::Bytes::from_static(b"data")),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(_)),
@@ -3555,7 +3543,6 @@ async fn handler_lfs_download_missing() {
         HeaderMap::new(),
     )
     .await;
-    assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), HubApiError::NotFound));
 }
 
@@ -3823,7 +3810,6 @@ async fn handler_commit_no_revision() {
         axum::body::Body::from(r#"{"header":{"message":"x"}}"#),
     )
     .await;
-    assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), HubApiError::RevisionNotFound));
 }
 
@@ -4153,7 +4139,6 @@ async fn handler_webhook_create_invalid_url() {
         }),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("scheme")),
@@ -4186,7 +4171,6 @@ async fn handler_webhook_create_too_many_events() {
         }),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("exceeds maximum")),
@@ -4340,7 +4324,6 @@ fn route_authorize_with_auth_and_no_header_is_err() {
     };
     let headers = HeaderMap::new();
     let result = authorize(&state, &headers, TokenScope::Read);
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::Unauthorized),
@@ -4408,7 +4391,6 @@ async fn handler_dataset_parquet_non_dataset_repo_errors() {
         Path(("org".into(), "model-repo".into())),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("not a dataset")),
@@ -4445,7 +4427,6 @@ async fn handler_dataset_first_rows_non_dataset_errors() {
         }),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("not a dataset")),
@@ -4482,7 +4463,6 @@ async fn handler_dataset_viewer_non_dataset_errors() {
         }),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("not a dataset")),
@@ -4645,7 +4625,6 @@ async fn handler_repo_info_invalid_type() {
         Path(("invalid_type".into(), "ns".into(), "repo".into())),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("invalid repo type")),
@@ -4723,7 +4702,6 @@ async fn handler_dataset_viewer_split_not_found() {
         }),
     )
     .await;
-    assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
         matches!(&err, HubApiError::PathValidation(msg) if msg.contains("no data file")),
@@ -4749,7 +4727,6 @@ async fn handler_webhook_create_repo_not_found() {
         }),
     )
     .await;
-    assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
 }
 
@@ -4802,7 +4779,6 @@ async fn handler_repo_revisions_missing_repo() {
         Path(("models".into(), "no".into(), "such_repo".into())),
     )
     .await;
-    assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
 }
 

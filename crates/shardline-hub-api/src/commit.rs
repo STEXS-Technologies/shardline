@@ -567,7 +567,6 @@ mod tests {
              {{\"file\":{{\"path\":\"big.bin\",\"content\":\"{content_b64}\"}}}}"
         );
         let result = parse_ndjson_commit(&body);
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("exceeds maximum"),
@@ -582,7 +581,6 @@ mod tests {
         let body = "{\"header\":{\"message\":\"test\",\"parentCommit\":\"\"}}\n\
                      {\"unknownType\":{\"path\":\"x.txt\"}}";
         let result = parse_ndjson_commit(body);
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("unknown commit instruction"),
@@ -625,7 +623,6 @@ mod tests {
             ));
         }
         let result = parse_ndjson_commit(&body);
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("too many instructions"),

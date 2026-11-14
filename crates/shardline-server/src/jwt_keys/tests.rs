@@ -414,3 +414,24 @@ fn secure_url_policy() {
         assert_eq!(is_secure_url(url), allowed, "URL {url:?}");
     }
 }
+
+#[test]
+fn jwt_payload_rejects_unsigned_and_symmetric_algorithms_before_key_lookup() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    for algorithm in ["none", "HS256", "HS384", "HS512"] {
+        let header = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({"alg": algorithm, "kid": "test"})).unwrap());
+        let result = verify_jwt_payload(&header, "payload", "signature", &[], "issuer", None);
+        if algorithm == "none" {
+            assert!(matches!(result, Err(AuthError::InvalidToken)));
+        } else {
+            assert!(matches!(
+                result,
+                Err(AuthError::ProviderError(message))
+                    if message == format!("unsupported or insecure algorithm: {algorithm}")
+            ));
+        }
+    }
+}
