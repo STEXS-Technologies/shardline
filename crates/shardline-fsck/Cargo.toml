@@ -21,9 +21,9 @@ shardline-storage.workspace = true
 shardline-xet-adapter.workspace = true
 shardline-xet-core.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 
 [dev-dependencies]
+tokio.workspace = true
 rusqlite.workspace = true
 shardline-test-support = { workspace = true, features = ["docker"] }
 tempfile.workspace = true

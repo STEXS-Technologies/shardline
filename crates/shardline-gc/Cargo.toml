@@ -21,10 +21,10 @@ shardline-server-core.workspace = true
 shardline-storage.workspace = true
 shardline-xet-adapter.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }
 shardline-xet-core.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
