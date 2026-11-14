@@ -3909,6 +3909,11 @@ negotiates the basic adapter. S3 uses its HTTP frontend with bearer auth.
 | S3 | 6,984,691 | 6,984,810 | 32 |
 | Basic Git LFS | 6,984,691 | 6,984,810 | 32 |
 
+Revalidated on 2026-11-15 at `df18558f` after enforcing explicit repository
+reuse domains. The same repository-scoped HTTP benchmark reproduced every byte
+count in the table and all 96 post-GC downloads. S3 and basic LFS also retained
+a readable final version after deleting its source versions and running GC.
+
 All object bytes include a 119-byte GC control object; native Xet additionally
 retains 40,832 bytes of shard metadata. They exclude the metadata database,
 filesystem allocation overhead and client caches. Native verification uses a
