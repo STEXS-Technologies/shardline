@@ -66,18 +66,24 @@ async fn redis_cache_put_get_roundtrip() {
         return;
     };
 
-    let key = ReconstructionCacheKey::latest("test-file", None);
-    let payload = b"Hello, Redis!";
-
-    // Initially empty
-    assert!(cache.get(&key).await.unwrap().is_none());
-
-    // Put
-    cache.put(&key, payload).await.unwrap();
-
-    // Get
-    let result = cache.get(&key).await.unwrap();
-    assert_eq!(result, Some(payload.to_vec()));
+    for (key, payload) in [
+        (
+            ReconstructionCacheKey::latest("test-file", None),
+            b"Hello, Redis!".as_slice(),
+        ),
+        (
+            ReconstructionCacheKey::version("insert-get-test", "hash123", None),
+            b"insert and get immediately".as_slice(),
+        ),
+    ] {
+        assert!(cache.get(&key).await.unwrap().is_none(), "{key:?}");
+        cache.put(&key, payload).await.unwrap();
+        assert_eq!(
+            cache.get(&key).await.unwrap(),
+            Some(payload.to_vec()),
+            "{key:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -195,13 +201,16 @@ async fn redis_cache_delete_removes_entry() {
         return;
     };
 
-    let key = ReconstructionCacheKey::latest("del-test", None);
-    cache.put(&key, b"delete me").await.unwrap();
-    assert!(cache.get(&key).await.unwrap().is_some());
-
-    let deleted = cache.delete(&key).await.unwrap();
-    assert!(deleted);
-    assert!(cache.get(&key).await.unwrap().is_none());
+    for (file_id, payload) in [
+        ("del-test", b"delete me".as_slice()),
+        ("delete-me-existing", b"to be deleted".as_slice()),
+    ] {
+        let key = ReconstructionCacheKey::latest(file_id, None);
+        cache.put(&key, payload).await.unwrap();
+        assert!(cache.get(&key).await.unwrap().is_some(), "{file_id}");
+        assert!(cache.delete(&key).await.unwrap(), "{file_id}");
+        assert!(cache.get(&key).await.unwrap().is_none(), "{file_id}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -210,8 +219,10 @@ async fn redis_cache_delete_missing_returns_false() {
         return;
     };
 
-    let key = ReconstructionCacheKey::latest("missing", None);
-    assert!(!cache.delete(&key).await.unwrap());
+    for file_id in ["missing", "never-inserted-key"] {
+        let key = ReconstructionCacheKey::latest(file_id, None);
+        assert!(!cache.delete(&key).await.unwrap(), "{file_id}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -220,12 +231,23 @@ async fn redis_cache_overwrite_updates_value() {
         return;
     };
 
-    let key = ReconstructionCacheKey::latest("overwrite-test", None);
-    cache.put(&key, b"first").await.unwrap();
-    cache.put(&key, b"second").await.unwrap();
-
-    let result = cache.get(&key).await.unwrap();
-    assert_eq!(result, Some(b"second".to_vec()));
+    for (file_id, first, second) in [
+        ("overwrite-test", b"first".as_slice(), b"second".as_slice()),
+        (
+            "overwrite-test-2",
+            b"first write".as_slice(),
+            b"second write".as_slice(),
+        ),
+    ] {
+        let key = ReconstructionCacheKey::latest(file_id, None);
+        cache.put(&key, first).await.unwrap();
+        cache.put(&key, second).await.unwrap();
+        assert_eq!(
+            cache.get(&key).await.unwrap(),
+            Some(second.to_vec()),
+            "{file_id}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -275,24 +297,18 @@ async fn redis_cache_multiple_keys_are_independent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn redis_cache_version_key_latest_not_found() {
-    let Some((_stack, cache)) = redis_fixture(3600) else {
-        return;
-    };
-
-    // Version key uses a content_hash
-    let key = ReconstructionCacheKey::version("file-v", "abcdef0123456789", None);
-    assert!(cache.get(&key).await.unwrap().is_none());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redis_cache_get_returns_none_for_missing_key() {
     let Some((_stack, cache)) = redis_fixture(3600) else {
         return;
     };
 
-    let key = ReconstructionCacheKey::latest("nonexistent", None);
-    assert!(cache.get(&key).await.unwrap().is_none());
+    for key in [
+        ReconstructionCacheKey::latest("nonexistent", None),
+        ReconstructionCacheKey::latest("definitely-not-cached", None),
+        ReconstructionCacheKey::version("file-v", "abcdef0123456789", None),
+    ] {
+        assert!(cache.get(&key).await.unwrap().is_none(), "{key:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -371,78 +387,6 @@ async fn redis_cache_large_payload_roundtrip() {
         cache.put(&key, &large).await.unwrap();
         assert_eq!(cache.get(&key).await.unwrap(), Some(large), "{file_id}");
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_redis_cache_insert_and_get() {
-    let Some((_stack, cache)) = redis_fixture(3600) else {
-        return;
-    };
-
-    // Use a version key for variation
-    let key = ReconstructionCacheKey::version("insert-get-test", "hash123", None);
-    let payload = b"insert and get immediately";
-
-    // Initially empty
-    assert!(cache.get(&key).await.unwrap().is_none());
-
-    // Insert
-    cache.put(&key, payload).await.unwrap();
-
-    // Retrieve
-    let result = cache.get(&key).await.unwrap();
-    assert_eq!(result, Some(payload.to_vec()));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_redis_cache_get_missing_key_returns_none() {
-    let Some((_stack, cache)) = redis_fixture(3600) else {
-        return;
-    };
-
-    let key = ReconstructionCacheKey::latest("definitely-not-cached", None);
-    let result = cache.get(&key).await.unwrap();
-    assert!(result.is_none());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_redis_cache_insert_overwrite() {
-    let Some((_stack, cache)) = redis_fixture(3600) else {
-        return;
-    };
-
-    let key = ReconstructionCacheKey::latest("overwrite-test-2", None);
-    cache.put(&key, b"first write").await.unwrap();
-    cache.put(&key, b"second write").await.unwrap();
-
-    let result = cache.get(&key).await.unwrap();
-    assert_eq!(result, Some(b"second write".to_vec()));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_redis_cache_delete_existing() {
-    let Some((_stack, cache)) = redis_fixture(3600) else {
-        return;
-    };
-
-    let key = ReconstructionCacheKey::latest("delete-me-existing", None);
-    cache.put(&key, b"to be deleted").await.unwrap();
-    assert!(cache.get(&key).await.unwrap().is_some());
-
-    let deleted = cache.delete(&key).await.unwrap();
-    assert!(deleted);
-    assert!(cache.get(&key).await.unwrap().is_none());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_redis_cache_delete_non_existent() {
-    let Some((_stack, cache)) = redis_fixture(3600) else {
-        return;
-    };
-
-    let key = ReconstructionCacheKey::latest("never-inserted-key", None);
-    let deleted = cache.delete(&key).await.unwrap();
-    assert!(!deleted);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
