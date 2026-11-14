@@ -98,9 +98,9 @@ description = "Run integration tests (requires Docker: Postgres, MinIO, Redis)"
 workspace = false
 dependencies = ["setup-nextest", "build-reliability-runtime-fixture"]
 command = "cargo"
-# Nextest unions multiple -E expressions. Select all integration binaries once,
-# including Xet format contracts, without rerunning library tests in this gate.
-args = ["nextest", "run", "--locked", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "-E", "kind(test)", "${@}"]
+# Select integration targets before compilation so this gate also avoids building
+# library test harnesses. The literal glob includes newly added integration tests.
+args = ["nextest", "run", "--locked", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "--test", "*", "-E", "kind(test)", "${@}"]
 
 [tasks.test-reliability-contracts]
 description = "Verify historical evidence, native profiles and durable task recovery without external services"
