@@ -44,41 +44,11 @@ pub fn parse_xet_hash_hex(value: &str) -> Result<ShardlineHash, HashParseError> 
 /// Returns the reordered lowercase hash text used by Xet API paths and persisted Xet metadata.
 #[must_use]
 pub fn xet_hash_hex_string(hash: impl Borrow<ShardlineHash>) -> String {
-    let hash = hash.borrow();
-    let mut encoded = Vec::with_capacity(HASH_HEX_LENGTH);
-    for chunk in hash.as_bytes().as_chunks::<XET_HASH_GROUP_BYTES>().0 {
-        for byte in chunk.iter().rev() {
-            append_lower_hex_byte(&mut encoded, *byte);
-        }
+    let mut bytes = *hash.borrow().as_bytes();
+    for chunk in bytes.as_chunks_mut::<XET_HASH_GROUP_BYTES>().0 {
+        chunk.reverse();
     }
-
-    String::from_utf8(encoded).unwrap_or_default()
-}
-
-fn append_lower_hex_byte(output: &mut Vec<u8>, byte: u8) {
-    output.push(lower_hex_digit(byte >> 4));
-    output.push(lower_hex_digit(byte & 0x0f));
-}
-
-const fn lower_hex_digit(nibble: u8) -> u8 {
-    match nibble {
-        0 => b'0',
-        1 => b'1',
-        2 => b'2',
-        3 => b'3',
-        4 => b'4',
-        5 => b'5',
-        6 => b'6',
-        7 => b'7',
-        8 => b'8',
-        9 => b'9',
-        10 => b'a',
-        11 => b'b',
-        12 => b'c',
-        13 => b'd',
-        14 => b'e',
-        _ => b'f',
-    }
+    hex::encode(bytes)
 }
 
 #[cfg(test)]

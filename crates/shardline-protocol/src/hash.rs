@@ -85,38 +85,7 @@ impl ShardlineHash {
     /// Returns canonical lowercase hexadecimal text.
     #[must_use]
     pub fn hex_string(&self) -> String {
-        let mut encoded = Vec::with_capacity(HASH_HEX_LENGTH);
-        for byte in self.bytes {
-            append_lower_hex_byte(&mut encoded, byte);
-        }
-
-        String::from_utf8(encoded).unwrap_or_default()
-    }
-}
-
-fn append_lower_hex_byte(output: &mut Vec<u8>, byte: u8) {
-    output.push(lower_hex_digit(byte >> 4));
-    output.push(lower_hex_digit(byte & 0x0f));
-}
-
-const fn lower_hex_digit(nibble: u8) -> u8 {
-    match nibble {
-        0 => b'0',
-        1 => b'1',
-        2 => b'2',
-        3 => b'3',
-        4 => b'4',
-        5 => b'5',
-        6 => b'6',
-        7 => b'7',
-        8 => b'8',
-        9 => b'9',
-        10 => b'a',
-        11 => b'b',
-        12 => b'c',
-        13 => b'd',
-        14 => b'e',
-        _ => b'f',
+        hex::encode(self.bytes)
     }
 }
 
