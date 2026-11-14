@@ -3784,8 +3784,9 @@ git grep -I -n '^' 2d98161f61e14589327732790bfb9a56af687cb9 -- 'crates/shardline
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
 integration-test targets, reuses the pinned Nextest installer, removes unused
 dependencies/features and avoids unnecessary CI tool installation. These are
-structural reductions in work. Comparable cold/warm Cargo, Docker and CI
-critical-path timings have not been established; no percentage build-time
+structural reductions in work. Controlled fresh-artifact, warm and edited-source
+Cargo observations appear below. Default-profile Cargo, Docker and hosted-CI
+critical-path comparisons remain outstanding; no general percentage build-time
 improvement is claimed. A source reduction also does not establish a throughput,
 latency, memory or I/O improvement.
 
@@ -3807,13 +3808,53 @@ compiled dependencies; no artifacts were cleaned between the three commands.
 The resulting executable passed `shardline --version`. The first sample is not
 a cold build, and the other two measure Cargo's unchanged-source path rather
 than recompilation after an edit. These observations do not compare the baseline
-or establish a build-time speedup. Default-profile, cold, edited-source, Docker
-and hosted-CI comparisons remain outstanding. Reproduce the command three times
+or establish a build-time speedup. The separate comparison below adds controlled
+fresh-artifact and edited-source samples. Reproduce this historical command three times
 from the specified commit, keeping the same target directory:
 
 ```bash
 /usr/bin/time -v env RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 \
   cargo build --locked -p shardline --bin shardline -j4 --timings
+```
+
+### Controlled local Cargo comparison
+
+On November 14, 2026, baseline `e53a33e00a3c2feae4ee8e2417927763663421c7` and cleanup
+`2b96abf61e07c621a661196eb06c022339b941da` used the same direct CLI build command below,
+Rust 1.99.0, Cargo 1.99.0 and four jobs on an x86_64 Linux host with an
+AMD Ryzen 9 7950X (32 logical CPUs). Debug information was disabled explicitly;
+Rust incremental compilation remained disabled by the repository profile.
+Each revision had its own initially absent target directory on `/tmp` tmpfs.
+Registry/source caches and OS page caches were retained; these are fresh-artifact
+builds, not measurements with cold filesystem caches or dependency downloads.
+
+| Workload | Baseline | Cleanup |
+| --- | ---: | ---: |
+| Fresh artifacts, one sample | 72.130 s | 68.995 s |
+| Unchanged source, range of two samples | 0.219–0.233 s | 0.226–0.235 s |
+| CLI entrypoint comment edit, one sample | 1.179 s | 1.187 s |
+| Server library comment edit, median of three (range) | 14.717 s (14.649–14.786 s) | 14.510 s (14.284–14.780 s) |
+
+The entrypoint edit appended a comment to `crates/shardline/src/main.rs`.
+The server edits changed a numbered comment in `crates/shardline-server/src/lib.rs`;
+all six logs confirmed recompilation of both the server and CLI. Source files
+were restored afterward. Server-edit order was baseline, cleanup, cleanup,
+baseline, baseline, cleanup. Two preparation builds restored entrypoint artifacts
+before that series and are excluded from the table. All 16 builds and executable version checks passed.
+A one-second process sampler observed no competing Cargo or Rust compiler process;
+other shared-host activity and sample-order effects remain uncontrolled.
+
+Warm and server-edit ranges overlap, so these observations do not establish a
+repeatable build-time speedup. A direct CLI build excludes unit/integration test
+code, so the source inventory, which includes tests, cannot predict its timings.
+These samples do not measure the task runner, release profile, Docker build,
+test compilation or hosted CI. Reproduce each revision with a separate target
+directory; preserve it for unchanged-source and controlled comment-edit samples:
+
+```bash
+RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_TARGET_DIR=/tmp/shardline-build-REVISION \
+  cargo build --offline --locked -p shardline --bin shardline -j4 --timings
 ```
 
 The focused [invariant ledger](../scripts/shardline/invariants.toml) maps retained
