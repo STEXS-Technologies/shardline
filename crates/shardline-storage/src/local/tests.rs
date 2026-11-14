@@ -1089,66 +1089,39 @@ fn local_store_error_display_io() {
 }
 
 #[test]
-fn local_store_error_display_integrity_length_mismatch() {
-    let err = LocalObjectStoreError::IntegrityLengthMismatch;
-    assert_eq!(
-        err.to_string(),
-        "object body length did not match expected integrity"
-    );
-}
-
-#[test]
-fn local_store_error_display_integrity_hash_mismatch() {
-    let err = LocalObjectStoreError::IntegrityHashMismatch;
-    assert_eq!(
-        err.to_string(),
-        "object body hash did not match expected integrity"
-    );
-}
-
-#[test]
-fn local_store_error_display_existing_object_conflict() {
-    let err = LocalObjectStoreError::ExistingObjectConflict;
-    assert_eq!(
-        err.to_string(),
-        "object key already exists with conflicting bytes"
-    );
-}
-
-#[test]
-fn local_store_error_display_range_out_of_bounds() {
-    let err = LocalObjectStoreError::RangeOutOfBounds;
-    assert_eq!(
-        err.to_string(),
-        "requested byte range exceeded stored object length"
-    );
-}
-
-#[test]
-fn local_store_error_display_invalid_stored_key() {
-    let err = LocalObjectStoreError::InvalidStoredKey;
-    assert_eq!(
-        err.to_string(),
-        "stored object path could not be represented as a valid object key"
-    );
-}
-
-#[test]
-fn local_store_error_display_invalid_object_path() {
-    let err = LocalObjectStoreError::InvalidObjectPath;
-    assert_eq!(
-        err.to_string(),
-        "validated object key could not be mapped to a local path"
-    );
-}
-
-#[test]
-fn local_store_error_display_invalid_start_after() {
-    let err = LocalObjectStoreError::InvalidStartAfter;
-    assert_eq!(
-        err.to_string(),
-        "start_after key is outside the requested prefix"
-    );
+fn local_store_error_display_messages() {
+    for (error, message) in [
+        (
+            LocalObjectStoreError::IntegrityLengthMismatch,
+            "object body length did not match expected integrity",
+        ),
+        (
+            LocalObjectStoreError::IntegrityHashMismatch,
+            "object body hash did not match expected integrity",
+        ),
+        (
+            LocalObjectStoreError::ExistingObjectConflict,
+            "object key already exists with conflicting bytes",
+        ),
+        (
+            LocalObjectStoreError::RangeOutOfBounds,
+            "requested byte range exceeded stored object length",
+        ),
+        (
+            LocalObjectStoreError::InvalidStoredKey,
+            "stored object path could not be represented as a valid object key",
+        ),
+        (
+            LocalObjectStoreError::InvalidObjectPath,
+            "validated object key could not be mapped to a local path",
+        ),
+        (
+            LocalObjectStoreError::InvalidStartAfter,
+            "start_after key is outside the requested prefix",
+        ),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
 }
 
 // ── chunk_hash ───────────────────────────────────────────────────────────
@@ -1463,55 +1436,38 @@ fn local_list_flat_namespace_rejects_start_after_outside_prefix() {
 // ── existing_object_outcome verifies the expected digest and length ───────
 
 #[test]
-fn local_existing_object_outcome_matches_expected_integrity() {
-    let storage = shardline_test_support::TempStorage::new();
-    let path = storage.path().join("target.bin");
-    std::fs::write(&path, b"exact match").unwrap();
-    let result = super::io::existing_object_outcome(
-        storage.path(),
-        &path,
-        &ObjectIntegrity::new(super::util::chunk_hash(b"exact match"), 11),
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
-fn local_existing_object_outcome_rejects_wrong_digest() {
-    let storage = shardline_test_support::TempStorage::new();
-    let path = storage.path().join("target2.bin");
-    std::fs::write(&path, b"exact match").unwrap();
-    let result = super::io::existing_object_outcome(
-        storage.path(),
-        &path,
-        &ObjectIntegrity::new(super::util::chunk_hash(b"wrong bytes"), 11),
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn local_existing_object_outcome_accepts_empty_object() {
-    let storage = shardline_test_support::TempStorage::new();
-    let path = storage.path().join("target3.bin");
-    std::fs::write(&path, b"").unwrap();
-    let result = super::io::existing_object_outcome(
-        storage.path(),
-        &path,
-        &ObjectIntegrity::new(super::util::chunk_hash(b""), 0),
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
-fn local_existing_object_outcome_rejects_wrong_length() {
-    let storage = shardline_test_support::TempStorage::new();
-    let path = storage.path().join("target4.bin");
-    std::fs::write(&path, b"existing data").unwrap();
-    let result = super::io::existing_object_outcome(
-        storage.path(),
-        &path,
-        &ObjectIntegrity::new(super::util::chunk_hash(b"different data"), 14),
-    );
-    assert!(result.is_err());
+fn local_existing_object_outcome_integrity_contract() {
+    for (name, bytes, hash_bytes, length, valid) in [
+        (
+            "target.bin",
+            b"exact match".as_slice(),
+            b"exact match".as_slice(),
+            11,
+            true,
+        ),
+        (
+            "target2.bin",
+            b"exact match".as_slice(),
+            b"wrong bytes".as_slice(),
+            11,
+            false,
+        ),
+        ("target3.bin", b"".as_slice(), b"".as_slice(), 0, true),
+        (
+            "target4.bin",
+            b"existing data".as_slice(),
+            b"different data".as_slice(),
+            14,
+            false,
+        ),
+    ] {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join(name);
+        fs::write(&path, bytes).unwrap();
+        let integrity = ObjectIntegrity::new(super::util::chunk_hash(hash_bytes), length);
+        let result = super::io::existing_object_outcome(storage.path(), &path, &integrity);
+        assert_eq!(result.is_ok(), valid, "{name}: {result:?}");
+    }
 }
 
 // ── remove_temporary_file with non-existent file ──────────────────────────
