@@ -938,16 +938,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_stream_reads_object_in_segments() {
         let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf());
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
-        let object_key = ObjectKey::parse("ab/object");
-        assert!(object_key.is_ok());
-        let Ok(object_key) = object_key else {
-            return;
-        };
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/object").unwrap();
         let bytes = vec![7_u8; 64 * 1024 + 3];
         let path = object_store.path_for_key(&object_key);
         if let Some(parent) = path.parent() {
@@ -957,22 +949,16 @@ mod tests {
         let written = fs::write(&path, &bytes).await;
         assert!(written.is_ok());
 
-        let byte_stream = local_object_byte_stream(
+        let mut byte_stream = local_object_byte_stream(
             object_store,
             object_key,
             u64::try_from(bytes.len()).unwrap_or(0),
         )
-        .await;
-        assert!(byte_stream.is_ok());
-        let Ok(mut byte_stream) = byte_stream else {
-            return;
-        };
+        .await
+        .unwrap();
         let mut observed = Vec::with_capacity(bytes.len());
         while let Some(item) = byte_stream.next().await {
-            assert!(item.is_ok());
-            let Ok(chunk) = item else {
-                return;
-            };
+            let chunk = item.unwrap();
             observed.extend_from_slice(&chunk);
         }
 
@@ -982,16 +968,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_stream_rejects_index_length_mismatch() {
         let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf());
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
-        let object_key = ObjectKey::parse("ab/object");
-        assert!(object_key.is_ok());
-        let Ok(object_key) = object_key else {
-            return;
-        };
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/object").unwrap();
         let path = object_store.path_for_key(&object_key);
         if let Some(parent) = path.parent() {
             let created = fs::create_dir_all(parent).await;
@@ -1013,16 +991,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_range_stream_rejects_growth_after_length_validation() {
         let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf());
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
-        let object_key = ObjectKey::parse("ab/object");
-        assert!(object_key.is_ok());
-        let Ok(object_key) = object_key else {
-            return;
-        };
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/object").unwrap();
         let path = object_store.path_for_key(&object_key);
         if let Some(parent) = path.parent() {
             let created = fs::create_dir_all(parent).await;
@@ -1065,16 +1035,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_range_stream_reads_only_requested_range() {
         let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf());
-        assert!(object_store.is_ok());
-        let Ok(object_store) = object_store else {
-            return;
-        };
-        let object_key = ObjectKey::parse("ab/object");
-        assert!(object_key.is_ok());
-        let Ok(object_key) = object_key else {
-            return;
-        };
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/object").unwrap();
         let bytes = b"abcdefghijkl".to_vec();
         let path = object_store.path_for_key(&object_key);
         if let Some(parent) = path.parent() {
@@ -1083,29 +1045,19 @@ mod tests {
         }
         let written = fs::write(&path, &bytes).await;
         assert!(written.is_ok());
-        let range = ByteRange::new(2, 7);
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = ByteRange::new(2, 7).unwrap();
 
-        let byte_stream = local_object_byte_range_stream(
+        let mut byte_stream = local_object_byte_range_stream(
             object_store,
             object_key,
             u64::try_from(bytes.len()).unwrap_or(0),
             range,
         )
-        .await;
-        assert!(byte_stream.is_ok());
-        let Ok(mut byte_stream) = byte_stream else {
-            return;
-        };
+        .await
+        .unwrap();
         let mut observed = Vec::new();
         while let Some(item) = byte_stream.next().await {
-            assert!(item.is_ok());
-            let Ok(chunk) = item else {
-                return;
-            };
+            let chunk = item.unwrap();
             observed.extend_from_slice(&chunk);
         }
 
