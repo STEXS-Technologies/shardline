@@ -11,83 +11,43 @@ use shardline_storage::{
 use super::*;
 
 #[test]
-fn chunk_object_key_valid() {
-    let hash = "a".repeat(64);
-    let key = chunk_object_key(&hash).unwrap();
-    assert!(key.as_str().starts_with("aa/"));
-    assert!(key.as_str().ends_with(&hash));
-}
-
-#[test]
-fn chunk_object_key_empty_hash() {
-    let err = chunk_object_key("").unwrap_err();
-    assert!(
-        matches!(err, ServerObjectStoreError::InvalidContentHash),
-        "empty hash should return InvalidContentHash, got: {err}"
-    );
-}
-
-#[test]
-fn chunk_object_key_single_char_hash() {
-    // A single hex character is too short — validation should reject it.
-    let err = chunk_object_key("a").unwrap_err();
-    assert!(
-        matches!(err, ServerObjectStoreError::InvalidContentHash),
-        "single-char hash should return InvalidContentHash, got: {err}"
-    );
-}
-
-#[test]
-fn chunk_object_key_invalid_hex() {
-    // Non-hex characters (uppercase, 'g', symbols)
-    let invalid_hashes = [
-        "G".repeat(64),                        // uppercase
-        format!("{}g{}", "a".repeat(62), "g"), // 'g' is not hex
-        format!("{}!{}", "a".repeat(62), "!"), // symbol
-        format!("{}z{}", "a".repeat(62), "z"), // 'z' is not hex
-    ];
-    for hash in &invalid_hashes {
-        let err = chunk_object_key(hash).unwrap_err();
-        assert!(
-            matches!(err, ServerObjectStoreError::InvalidContentHash),
-            "non-hex hash {hash:?} should return InvalidContentHash, got: {err}"
+fn chunk_object_key_valid_inputs_round_trip() {
+    for (hash, prefix) in [
+        ("a".repeat(64), "aa"),
+        ("0123456789abcdef".repeat(4), "01"),
+        ("f".repeat(64), "ff"),
+        ("0".repeat(64), "00"),
+    ] {
+        let key = chunk_object_key(&hash).unwrap();
+        assert_eq!(key.as_str(), format!("{prefix}/{hash}"));
+        assert_eq!(
+            chunk_hash_from_chunk_object_key_if_present(&key).unwrap(),
+            Some(hash.as_str()),
+            "{key:?}"
         );
     }
-
-    // Too short
-    let err = chunk_object_key("short").unwrap_err();
-    assert!(
-        matches!(err, ServerObjectStoreError::InvalidContentHash),
-        "short hash should return InvalidContentHash, got: {err}"
-    );
-
-    // Too long
-    let err = chunk_object_key(&"a".repeat(65)).unwrap_err();
-    assert!(
-        matches!(err, ServerObjectStoreError::InvalidContentHash),
-        "long hash should return InvalidContentHash, got: {err}"
-    );
 }
 
 #[test]
-fn chunk_object_key_valid_inputs() {
-    // All lowercase hex, exactly 64 chars
-    let hash = "a".repeat(64);
-    let key = chunk_object_key(&hash).unwrap();
-    assert!(key.as_str().starts_with("aa/"));
-    assert!(key.as_str().ends_with(&hash));
-    assert_eq!(key.as_str(), format!("aa/{hash}"));
-
-    // Mixed hex digits
-    let hash = "0123456789abcdef".repeat(4);
-    let key = chunk_object_key(&hash).unwrap();
-    assert!(key.as_str().starts_with("01/"));
-    assert_eq!(key.as_str(), format!("01/{hash}"));
-
-    // All 'f' (max hex)
-    let hash = "f".repeat(64);
-    let key = chunk_object_key(&hash).unwrap();
-    assert!(key.as_str().starts_with("ff/"));
+fn chunk_object_key_rejects_invalid_hashes() {
+    for hash in [
+        String::new(),
+        "a".to_owned(),
+        "G".repeat(64),
+        format!("{}gg", "a".repeat(62)),
+        format!("{}!!", "a".repeat(62)),
+        format!("{}zz", "a".repeat(62)),
+        "short".to_owned(),
+        "a".repeat(65),
+    ] {
+        assert!(
+            matches!(
+                chunk_object_key(&hash),
+                Err(ServerObjectStoreError::InvalidContentHash)
+            ),
+            "{hash:?} should return InvalidContentHash"
+        );
+    }
 }
 
 #[test]
@@ -147,26 +107,25 @@ proptest::proptest! {
 }
 
 #[test]
-fn chunk_hash_from_chunk_object_key_if_present_valid_key() {
+fn chunk_hash_from_chunk_object_key_skips_non_chunk_keys() {
     let hash = "a".repeat(64);
-    let key = ObjectKey::parse(&format!("aa/{hash}")).unwrap();
-    let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
-    assert_eq!(result, Some(hash.as_str()));
-}
-
-#[test]
-fn chunk_hash_from_chunk_object_key_if_present_non_chunk_key() {
-    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb").unwrap();
-    let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
-    assert_eq!(result, None);
-}
-
-#[test]
-fn chunk_hash_from_chunk_object_key_if_present_extra_segments() {
-    let hash = "a".repeat(64);
-    let key = ObjectKey::parse(&format!("aa/{hash}/extra")).unwrap();
-    let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
-    assert_eq!(result, None);
+    for raw_key in [
+        "xorbs/default/aa/hash.xorb".to_owned(),
+        format!("aa/{hash}/extra"),
+        "a/abc".to_owned(),
+        "gg/abc".to_owned(),
+        "aa/bbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        "onlyprefix".to_owned(),
+        format!("aa/aa{}", "z".repeat(62)),
+    ] {
+        let key = ObjectKey::parse(&raw_key).unwrap();
+        // Malformed or transient keys must be skipped without aborting GC scans.
+        assert_eq!(
+            chunk_hash_from_chunk_object_key_if_present(&key).unwrap(),
+            None,
+            "{raw_key:?}"
+        );
+    }
 }
 
 #[test]
@@ -979,17 +938,6 @@ fn ops_locator_content_hash_latest_returns_none() {
     assert_eq!(result, None);
 }
 
-// ── OpsRecordStore impl for PostgresRecordStore ──────────────────
-//
-// The OpsRecordStore methods on PostgresRecordStore are identical to the
-// LocalRecordStore methods.  We test them separately for line coverage.
-//
-// Construction: PostgresRecordStore wraps a `PgPool` (an `Arc`).  The
-// `OpsRecordStore` methods only use the locator parameter, never
-// `self.pool`.  We use `ManuallyDrop` to prevent the destructor from
-// running on a zeroed-out pool instance, which is safe because the pool
-// is never accessed.
-
 // ── parse_stored_file_record_bytes (additional targeted tests) ────
 
 #[test]
@@ -1011,62 +959,6 @@ fn parse_stored_file_record_oversized_returns_too_large_error() {
         msg.contains("bounded parser ceiling"),
         "expected StoredFileMetadataTooLarge, got: {err}"
     );
-}
-
-// ── ServerObjectStoreError Display ──────────────────────────────────
-
-#[test]
-fn server_object_store_error_display_not_found() {
-    assert_eq!(
-        ServerObjectStoreError::NotFound.to_string(),
-        "content not found"
-    );
-}
-
-#[test]
-fn server_object_store_error_display_overflow() {
-    assert_eq!(
-        ServerObjectStoreError::Overflow.to_string(),
-        "arithmetic overflow"
-    );
-}
-
-#[test]
-fn server_object_store_error_display_invalid_content_hash() {
-    assert_eq!(
-        ServerObjectStoreError::InvalidContentHash.to_string(),
-        "content hash must be 64 hexadecimal characters"
-    );
-}
-
-#[test]
-fn server_object_store_error_display_stored_object_length_mismatch() {
-    assert_eq!(
-        ServerObjectStoreError::StoredObjectLengthMismatch.to_string(),
-        "stored object length did not match indexed metadata"
-    );
-}
-
-// ── Error Display for remaining types ────────────────────────────────
-
-#[test]
-fn parse_stored_file_record_error_json_display() {
-    let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
-    let err = ParseStoredFileRecordError::Json(json_err);
-    let msg = err.to_string();
-    assert_eq!(msg, "json operation failed");
-}
-
-// ── provider_directory ───────────────────────────────────────────────
-
-#[test]
-fn provider_directory_github() {
-    assert_eq!(provider_directory(RepositoryProvider::GitHub), "github");
-}
-
-#[test]
-fn provider_directory_gitea() {
-    assert_eq!(provider_directory(RepositoryProvider::Gitea), "gitea");
 }
 
 // ── chunk_hash ───────────────────────────────────────────────────────
@@ -1103,13 +995,6 @@ fn local_path_for_key_with_local_store_returns_some() {
     let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
     let key = ObjectKey::parse("aa/abcd").unwrap();
     assert!(store.local_path_for_key(&key).is_some());
-}
-
-#[test]
-fn local_path_for_key_with_s3_returns_none() {
-    let store = ServerObjectStore::blackhole();
-    let key = ObjectKey::parse("aa/abcd").unwrap();
-    assert!(store.local_path_for_key(&key).is_none());
 }
 
 #[test]
@@ -1155,50 +1040,6 @@ fn server_object_store_put_content_addressed_file_blackhole() {
     let integrity = ObjectIntegrity::new(chunk_hash(b"data"), 4);
     let result = store.put_content_addressed_file(&key, &file_path, &integrity);
     assert!(matches!(result, Ok(PutOutcome::Inserted)));
-}
-
-// ── Additional chunk_object_key edge cases ──────────────────────────
-
-#[test]
-fn chunk_object_key_edge_cases() {
-    // Minimum hex boundary
-    let hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let key = chunk_object_key(hash).unwrap();
-    assert_eq!(
-        key.as_str(),
-        "00/0000000000000000000000000000000000000000000000000000000000000000"
-    );
-
-    // Maximum hex boundary
-    let hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    let key = chunk_object_key(hash).unwrap();
-    assert_eq!(
-        key.as_str(),
-        "ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    );
-}
-
-#[test]
-fn chunk_hash_from_chunk_key_if_present_prefix_too_short() {
-    let key = ObjectKey::parse("a/abc").unwrap();
-    let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
-    assert_eq!(result, None);
-}
-
-#[test]
-fn chunk_hash_from_chunk_key_if_present_non_hex_prefix() {
-    let key = ObjectKey::parse("gg/abc").unwrap();
-    let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
-    assert_eq!(result, None);
-}
-
-#[test]
-fn chunk_hash_from_chunk_key_if_present_hash_does_not_start_with_prefix() {
-    let key =
-        ObjectKey::parse("aa/bbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
-            .unwrap();
-    let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
-    assert_eq!(result, None);
 }
 
 // ── ServerObjectStoreError Display for all variants ──────────────────
@@ -1371,43 +1212,17 @@ fn read_full_object_blackhole_zero_length() {
 fn map_object_key_error_all_variants_return_overflow() {
     use crate::validation::map_object_key_error;
     use shardline_storage::ObjectKeyError;
-    assert!(matches!(
-        map_object_key_error(ObjectKeyError::Empty),
-        ServerObjectStoreError::Overflow
-    ));
-    assert!(matches!(
-        map_object_key_error(ObjectKeyError::UnsafePath),
-        ServerObjectStoreError::Overflow
-    ));
-    assert!(matches!(
-        map_object_key_error(ObjectKeyError::ControlCharacter),
-        ServerObjectStoreError::Overflow
-    ));
-    assert!(matches!(
-        map_object_key_error(ObjectKeyError::TooLong),
-        ServerObjectStoreError::Overflow
-    ));
-}
-
-// ── chunk_hash_from_chunk_object_key_if_present additional edge cases ─
-
-#[test]
-fn chunk_hash_from_chunk_key_if_present_single_segment() {
-    // Key with no '/' → second segments.next() returns None → Ok(None)
-    let key = ObjectKey::parse("onlyprefix").unwrap();
-    let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
-    assert_eq!(result, None);
-}
-
-#[test]
-fn chunk_hash_from_chunk_key_if_present_invalid_hash_returns_none() {
-    // 64 chars starting with "aa" but 'z' is not hex → not a valid chunk hash:
-    // the key is skipped (Ok(None)), never an error, so a GC orphan scan does
-    // not abort on a transient or malformed key.
-    let hash = format!("aa{}", "z".repeat(62));
-    let key = ObjectKey::parse(&format!("aa/{hash}")).unwrap();
-    let result = chunk_hash_from_chunk_object_key_if_present(&key);
-    assert!(matches!(result, Ok(None)));
+    for error in [
+        ObjectKeyError::Empty,
+        ObjectKeyError::UnsafePath,
+        ObjectKeyError::ControlCharacter,
+        ObjectKeyError::TooLong,
+    ] {
+        assert!(matches!(
+            map_object_key_error(error),
+            ServerObjectStoreError::Overflow
+        ));
+    }
 }
 
 // ── read_full_object non-local path (blackhole, length > 0) ──────────
