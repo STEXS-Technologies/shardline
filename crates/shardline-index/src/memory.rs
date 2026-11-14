@@ -3587,34 +3587,38 @@ mod tests {
         assert!(visited.is_empty());
     }
 
-    // ── Empty lifecycle list methods ───────────────────────────────────────
-
     #[test]
-    fn memory_index_store_list_webhook_deliveries_empty() {
+    fn memory_index_store_empty_lifecycle_contract() {
         let store = MemoryIndexStore::new();
-        let deliveries = store.list_webhook_deliveries().unwrap();
-        assert!(deliveries.is_empty());
-    }
-
-    #[test]
-    fn memory_index_store_list_retention_holds_empty() {
-        let store = MemoryIndexStore::new();
-        let holds = store.list_retention_holds().unwrap();
-        assert!(holds.is_empty());
-    }
-
-    #[test]
-    fn memory_index_store_list_quarantine_candidates_empty() {
-        let store = MemoryIndexStore::new();
-        let candidates = store.list_quarantine_candidates().unwrap();
-        assert!(candidates.is_empty());
-    }
-
-    #[test]
-    fn memory_index_store_list_provider_repository_states_empty() {
-        let store = MemoryIndexStore::new();
-        let states = store.list_provider_repository_states().unwrap();
-        assert!(states.is_empty());
+        assert!(store.list_webhook_deliveries().unwrap().is_empty());
+        assert!(store.list_retention_holds().unwrap().is_empty());
+        assert!(store.list_quarantine_candidates().unwrap().is_empty());
+        assert!(store.list_provider_repository_states().unwrap().is_empty());
+        LifecycleStore::visit_webhook_deliveries(
+            &store,
+            |_| -> Result<(), MemoryIndexStoreError> {
+                panic!("empty webhook_deliveries visitor received a record")
+            },
+        )
+        .unwrap();
+        LifecycleStore::visit_retention_holds(&store, |_| -> Result<(), MemoryIndexStoreError> {
+            panic!("empty retention_holds visitor received a record")
+        })
+        .unwrap();
+        LifecycleStore::visit_quarantine_candidates(
+            &store,
+            |_| -> Result<(), MemoryIndexStoreError> {
+                panic!("empty quarantine_candidates visitor received a record")
+            },
+        )
+        .unwrap();
+        LifecycleStore::visit_provider_repository_states(
+            &store,
+            |_| -> Result<(), MemoryIndexStoreError> {
+                panic!("empty provider_repository_states visitor received a record")
+            },
+        )
+        .unwrap();
     }
 
     // ── Repository-scoped listing with populated stores ───────────────────
@@ -3706,56 +3710,6 @@ mod tests {
             .await
             .unwrap();
         assert!(locators.is_empty());
-    }
-
-    // ── Empty visit lifecycle methods ──────────────────────────────────────
-
-    #[test]
-    fn memory_index_store_visit_webhook_deliveries_empty() {
-        let store = MemoryIndexStore::new();
-        let mut visited = Vec::new();
-        LifecycleStore::visit_webhook_deliveries(&store, |d| {
-            visited.push(d);
-            Ok::<(), MemoryIndexStoreError>(())
-        })
-        .unwrap();
-        assert!(visited.is_empty());
-    }
-
-    #[test]
-    fn memory_index_store_visit_retention_holds_empty() {
-        let store = MemoryIndexStore::new();
-        let mut visited = Vec::new();
-        LifecycleStore::visit_retention_holds(&store, |h| {
-            visited.push(h);
-            Ok::<(), MemoryIndexStoreError>(())
-        })
-        .unwrap();
-        assert!(visited.is_empty());
-    }
-
-    #[test]
-    fn memory_index_store_visit_quarantine_candidates_empty() {
-        let store = MemoryIndexStore::new();
-        let mut visited = Vec::new();
-        LifecycleStore::visit_quarantine_candidates(&store, |c| {
-            visited.push(c);
-            Ok::<(), MemoryIndexStoreError>(())
-        })
-        .unwrap();
-        assert!(visited.is_empty());
-    }
-
-    #[test]
-    fn memory_index_store_visit_provider_repository_states_empty() {
-        let store = MemoryIndexStore::new();
-        let mut visited = Vec::new();
-        LifecycleStore::visit_provider_repository_states(&store, |s| {
-            visited.push(s);
-            Ok::<(), MemoryIndexStoreError>(())
-        })
-        .unwrap();
-        assert!(visited.is_empty());
     }
 
     // ── MemoryIndexStoreError Display / Debug / Clone ─────────────────────
