@@ -241,8 +241,12 @@ impl LocalBackend {
             &self.packing_work_pool,
         );
         if matches!(storage, UploadStorage::ProtocolContainers) {
-            ingestor =
-                ingestor.with_packed_protocol_storage(&object_store, &self.packing_work_pool);
+            ingestor = ingestor
+                .with_packed_protocol_storage(&object_store, &self.packing_work_pool)
+                .with_protocol_chunk_reuse(
+                    crate::ServerBackend::Local(self.clone()),
+                    repository_scope.cloned(),
+                );
         }
         ingestor.ingest_body(&object_store, &mut body).await?;
 

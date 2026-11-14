@@ -16,6 +16,7 @@ mod native_body;
 mod native_shard;
 mod native_xorb;
 mod packed_protocol;
+mod protocol_reuse;
 mod upload_attempt;
 pub mod xorb_packer;
 

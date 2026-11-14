@@ -176,3 +176,125 @@ async fn local_generic_upload_retains_standalone_chunk_keys() {
         assert!(ObjectStore::contains(&backend.object_store(), &key).unwrap());
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protocol_ingest_reuses_physical_members_across_s3_and_basic_lfs() {
+    use sha2::{Digest as _, Sha256};
+    for remote in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let provider = if remote {
+            Some(Provider::new(0).await)
+        } else {
+            None
+        };
+        let objects = provider.as_ref().map_or_else(
+            || ServerObjectStore::local(root.path().join("chunks")).unwrap(),
+            |provider| provider.objects.clone(),
+        );
+        let backend = crate::LocalBackend::new_with_object_store(
+            root.path().to_owned(),
+            "http://localhost".to_owned(),
+            NonZeroUsize::new(64 * 1024).unwrap(),
+            objects.clone(),
+        )
+        .await
+        .unwrap();
+        let mut state = 0x1234_5678_90ab_cdef_u64;
+        let original: Vec<u8> = (0..4 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let first = backend
+            .upload_s3_protocol_stream(
+                "s3-source",
+                crate::upload_ingest::RequestBodyReader::from_bytes(Bytes::copy_from_slice(
+                    &original,
+                )),
+            )
+            .await
+            .unwrap();
+        let physical_bytes = || -> u64 {
+            provider.as_ref().map_or_else(
+                || {
+                    ObjectStore::list_prefix(&objects, &ObjectPrefix::parse("xorbs/").unwrap())
+                        .unwrap()
+                        .iter()
+                        .map(|entry| entry.length())
+                        .sum()
+                },
+                |provider| {
+                    provider
+                        .state
+                        .lock()
+                        .unwrap()
+                        .objects
+                        .values()
+                        .map(|bytes| bytes.len() as u64)
+                        .sum()
+                },
+            )
+        };
+        let before = physical_bytes();
+        let exact = backend
+            .upload_digest_protocol_stream(
+                "lfs-exact",
+                crate::upload_ingest::RequestBodyReader::from_bytes(Bytes::copy_from_slice(
+                    &original,
+                )),
+                &hex::encode(Sha256::digest(&original)),
+            )
+            .await
+            .unwrap();
+        assert!(exact.reused_chunks > 0);
+        assert_eq!(exact.inserted_chunks, 0);
+        assert_eq!(
+            physical_bytes(),
+            before,
+            "cross-protocol exact reuse must write no new payload"
+        );
+        let mut edited = original.clone();
+        edited[2 * 1024 * 1024..2 * 1024 * 1024 + 4096].fill(0x5a);
+        let changed = backend
+            .upload_digest_protocol_stream(
+                "lfs-edited",
+                crate::upload_ingest::RequestBodyReader::from_bytes(Bytes::copy_from_slice(
+                    &edited,
+                )),
+                &hex::encode(Sha256::digest(&edited)),
+            )
+            .await
+            .unwrap();
+        assert!(changed.reused_chunks > changed.inserted_chunks);
+        assert!(
+            physical_bytes() - before < original.len() as u64 / 4,
+            "a 4 KiB edit must not retain another complete 4 MiB container"
+        );
+        assert_eq!(
+            backend
+                .download_file("s3-source", Some(&first.content_hash), None)
+                .await
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            backend
+                .download_file("lfs-edited", Some(&changed.content_hash), None)
+                .await
+                .unwrap(),
+            edited
+        );
+        assert!(backend.delete_file_reference("s3-source").await.unwrap());
+        assert!(backend.delete_file_reference("lfs-exact").await.unwrap());
+        assert_eq!(
+            backend
+                .download_file("lfs-edited", Some(&changed.content_hash), None)
+                .await
+                .unwrap(),
+            edited
+        );
+    }
+}

@@ -3866,3 +3866,47 @@ storage, recovery and evidence checks. It is an index of the changed guarantees,
 not a substitute for the existing integration and release gates. Further source
 cuts require evidence of duplicated inputs, failure boundaries and assertions;
 the inventory does not justify removing an arbitrary percentage of tests.
+
+## Shared protocol chunk reuse qualification
+
+The shared ingestion path now consults the existing scoped native chunk index,
+verifies the source Xorb through the existing descriptor recovery code, and
+records references to its members. It packs new chunks instead of repacking
+verified existing members. Native dedup discovery and raw-protocol ingestion
+share one source-selection implementation, including repository visibility and
+pending-delete checks. Publication continues through the existing durable
+content and transactional reference checks.
+
+Reproduce the local storage qualification with `hf_xet==1.7.0` installed:
+
+```bash
+python scripts/shardline/benchmark_protocol_dedup.py \
+  target/debug/shardline /tmp/shardline-dedup-new-output
+```
+
+Measured on 2026-11-14: 32 independently edited versions of one deterministic
+4 MiB file, each with a distinct 4 KiB replacement, 64 KiB CDC target, fresh
+metadata and storage per protocol. Total retained logical content: 134,217,728
+bytes. Native uploads use one warm stock Xet session; basic LFS explicitly
+negotiates the basic adapter. S3 uses its HTTP frontend with bearer auth.
+
+| Frontend | Xorb bytes after GC | All object bytes after GC | Verified reads after GC |
+| --- | ---: | ---: | ---: |
+| Native Xet | 6,984,571 | 7,025,522 | 32 |
+| S3 | 6,984,691 | 6,984,810 | 32 |
+| Basic Git LFS | 6,984,691 | 6,984,810 | 32 |
+
+All object bytes include a 119-byte GC control object; native Xet additionally
+retains 40,832 bytes of shard metadata. They exclude the metadata database,
+filesystem allocation overhead and client caches. Native verification uses a
+separate process and an empty download cache. For S3 and LFS, deleting the first
+31 objects and running GC again also preserved a verified download of the last
+version, which still references shared source containers. Whole-container
+retention explains why this second GC did not reduce their physical footprint.
+
+This qualifies physical reuse on this workload, not throughput, multi-replica
+behavior, arbitrary workload savings or a paired historical performance gain.
+Existing containers without native chunk-index entries need the existing index
+rebuild/backfill machinery before lookup can discover them. Storage tests also
+exercise the S3-compatible object-store fixture; these measurements use local
+physical storage. Benchmark output includes inventories and per-lane logs.

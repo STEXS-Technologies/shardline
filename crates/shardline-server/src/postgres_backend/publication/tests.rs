@@ -2061,11 +2061,12 @@ async fn s3_publication_rejects_a_chunk_deleted_after_staging() {
         )
         .await
         .unwrap();
-    let prepared = fixture
+    let retry = fixture
         .backend
         .prepare_s3_object_stream(&logical, RequestBodyReader::from_bytes(bytes))
-        .await
-        .unwrap();
+        .await;
+    assert!(matches!(retry, Err(error) if error.is_remote_delete_pending()));
+    let prepared = seed;
     let entry = S3ObjectEntry {
         scope_namespace: namespace,
         object_key: "staged-object".to_owned(),
@@ -2253,4 +2254,75 @@ async fn staged_content_locks_last_until_the_publication_transaction_ends() {
         after,
         "the backing-object lock must release with the transaction"
     );
+}
+
+#[tokio::test]
+async fn protocol_preparation_reuses_members_and_publication_rejects_missing_source() {
+    let Some(fixture) = PostgresFixture::new().await else {
+        return;
+    };
+    fixture.migrate().await;
+    let backend = fixture.postgres();
+    let original = Bytes::from(vec![b'a'; 32768]);
+    let (first, _) = backend
+        .prepare_file_stream(
+            "reuse-source",
+            RequestBodyReader::from_bytes(original.clone()),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut connection = backend.record_store.pool().acquire().await.unwrap();
+    backend
+        .commit_staged_file_on_connection(&mut connection, &first)
+        .await
+        .unwrap();
+    drop(connection);
+    let mut edited = original.to_vec();
+    edited[0] = b'b';
+    let (second, response) = backend
+        .prepare_file_stream(
+            "reuse-copy",
+            RequestBodyReader::from_bytes(Bytes::from(edited.clone())),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(response.reused_chunks > 0);
+    assert!(
+        second
+            .chunks
+            .iter()
+            .any(|chunk| first.chunks.iter().any(|old| old.hash == chunk.hash))
+    );
+    let mut connection = backend.record_store.pool().acquire().await.unwrap();
+    backend
+        .commit_staged_file_on_connection(&mut connection, &second)
+        .await
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        backend
+            .download_file("reuse-copy", Some(&response.content_hash), None)
+            .await
+            .unwrap(),
+        edited
+    );
+    let (lost, _) = backend
+        .prepare_file_stream("reuse-lost", RequestBodyReader::from_bytes(original), None)
+        .await
+        .unwrap();
+    let source = first.chunks.first().unwrap();
+    let key = crate::xet_adapter::xorb_object_key(&source.hash).unwrap();
+    backend.object_store().delete_if_present(&key).unwrap();
+    let mut connection = backend.record_store.pool().acquire().await.unwrap();
+    assert!(
+        backend
+            .commit_staged_file_on_connection(&mut connection, &lost)
+            .await
+            .is_err()
+    );
+    drop(connection);
+    assert!(backend.protocol_file_record("reuse-lost").await.is_err());
+    fixture.finish().await;
 }

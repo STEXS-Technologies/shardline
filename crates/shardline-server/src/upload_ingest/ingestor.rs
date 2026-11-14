@@ -119,6 +119,19 @@ impl FileUploadIngestor {
         self
     }
 
+    pub(crate) fn with_protocol_chunk_reuse(
+        mut self,
+        backend: crate::ServerBackend,
+        scope: Option<RepositoryScope>,
+    ) -> Self {
+        if let Some(packed) = &mut self.packed_protocol {
+            packed.reuse = Some(super::protocol_reuse::ProtocolChunkReuse::new(
+                backend, scope,
+            ));
+        }
+        self
+    }
+
     /// Consume a checked request stream without publishing file metadata.
     /// Keep backend fencing and final publication outside this shared loop.
     pub(crate) async fn ingest_body(

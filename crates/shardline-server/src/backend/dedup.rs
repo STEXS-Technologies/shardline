@@ -20,12 +20,70 @@ use crate::{ServerError, admission::blocking_work, record_store::parse_stored_fi
 mod cohort;
 
 impl ServerBackend {
+    pub(crate) async fn cache_verified_xorb_descriptor(
+        &self,
+        descriptor: &XetXorbDescriptor,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .record_store()
+                    .cache_xet_xorb_descriptors(std::slice::from_ref(descriptor))
+                    .await?
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .record_store()
+                    .cache_xet_xorb_descriptors(std::slice::from_ref(descriptor))
+                    .await?
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn scoped_dedup_shard(
         &self,
         chunk_hash: &str,
         scope: Option<&RepositoryScope>,
         limits: crate::ShardMetadataLimits,
     ) -> Result<Vec<u8>, ServerError> {
+        self.with_scoped_dedup_sources(chunk_hash, scope, limits, |sources| {
+            let (infos, masks): (Vec<_>, Vec<_>) = sources
+                .into_iter()
+                .map(|(_, info, visible)| (info, visible))
+                .unzip();
+            let mut public_key = [0_u8; 32];
+            let mut private_key = [0_u8; 32];
+            getrandom::fill(&mut public_key)
+                .and_then(|()| getrandom::fill(&mut private_key))
+                .map_err(|_error| {
+                    ServerError::Io(io::Error::other("deduplication entropy unavailable"))
+                })?;
+            serialize_scoped_keyed_dedup_shard(
+                &infos,
+                &masks,
+                public_key.into(),
+                private_key.into(),
+                Duration::from_secs(900),
+            )
+            .map_err(|_error| invalid_descriptor())
+        })
+        .await
+    }
+
+    /// Runs native and server-side reuse through the same authorization,
+    /// descriptor verification and remote-delete admission boundary.
+    pub(crate) async fn with_scoped_dedup_sources<Output: Send + 'static>(
+        &self,
+        chunk_hash: &str,
+        scope: Option<&RepositoryScope>,
+        limits: crate::ShardMetadataLimits,
+        prepare: impl FnOnce(
+            Vec<(XetXorbDescriptor, MDBXorbInfo, Vec<bool>)>,
+        ) -> Result<Output, ServerError>
+        + Send
+        + 'static,
+    ) -> Result<Output, ServerError> {
         let mut after = None::<String>;
         let mut legacy_attempted = false;
         loop {
@@ -121,20 +179,7 @@ impl ServerBackend {
                 })
                 .await?;
                 if let Some(descriptor) = descriptor {
-                    match self {
-                        Self::Local(backend) => {
-                            backend
-                                .record_store()
-                                .cache_xet_xorb_descriptors(std::slice::from_ref(&descriptor))
-                                .await?
-                        }
-                        Self::Postgres(backend) => {
-                            backend
-                                .record_store()
-                                .cache_xet_xorb_descriptors(std::slice::from_ref(&descriptor))
-                                .await?
-                        }
-                    }
+                    self.cache_verified_xorb_descriptor(&descriptor).await?;
                     candidates.push(descriptor);
                 }
             }
@@ -221,8 +266,7 @@ impl ServerBackend {
                     }
                     Self::Local(_) => None,
                 };
-                let mut infos = Vec::new();
-                let mut masks = Vec::new();
+                let mut sources = Vec::new();
                 for (index, ((source, source_info, source_visible), key)) in
                     prepared.into_iter().zip(&keys).enumerate()
                 {
@@ -240,34 +284,16 @@ impl ServerBackend {
                     if metadata.length() != source.total_bytes {
                         return Err(invalid_descriptor());
                     }
-                    infos.push(source_info);
-                    masks.push(source_visible);
+                    sources.push((source, source_info, source_visible));
                 }
-                let bytes = blocking_work(&pool, move || {
-                    let mut public_key = [0_u8; 32];
-                    let mut private_key = [0_u8; 32];
-                    getrandom::fill(&mut public_key)
-                        .and_then(|()| getrandom::fill(&mut private_key))
-                        .map_err(|_error| {
-                            ServerError::Io(io::Error::other("deduplication entropy unavailable"))
-                        })?;
-                    serialize_scoped_keyed_dedup_shard(
-                        &infos,
-                        &masks,
-                        public_key.into(),
-                        private_key.into(),
-                        Duration::from_secs(900),
-                    )
-                    .map_err(|_error| invalid_descriptor())
-                })
-                .await?;
+                let output = blocking_work(&pool, move || prepare(sources)).await?;
                 if let Some(transaction) = delete_guard.take() {
                     transaction
                         .commit()
                         .await
                         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
                 }
-                return Ok(bytes);
+                return Ok(output);
             }
             if legacy_attempted {
                 return Err(ServerError::NotFound);
