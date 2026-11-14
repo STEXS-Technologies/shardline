@@ -3750,28 +3750,28 @@ metadata.
 
 The November 14, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`556569ff68e019a9eb7c0ab6b18f19b76a665e98`. It counts all tracked `.rs`
+`d7004fa5e16bc3c83658fc6349c68b0e0ac868f5`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 590,427 | 13,222 (2.19%) |
-| Server | 220,570 | 212,782 | 7,788 (3.53%) |
+| Entire repository | 603,649 | 589,727 | 13,922 (2.31%) |
+| Server | 220,570 | 213,196 | 7,374 (3.34%) |
 | Server core | 6,454 | 5,630 | 824 (12.77%) |
 | Storage | 20,373 | 19,469 | 904 (4.44%) |
 | S3 adapter | 10,954 | 10,365 | 589 (5.38%) |
 | Cache | 6,573 | 5,933 | 640 (9.74%) |
-| Index | 71,472 | 71,003 | 469 (0.66%) |
+| Index | 71,472 | 70,033 | 1,439 (2.01%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
 | GC | 10,954 | 10,621 | 333 (3.04%) |
 | Fsck | 8,989 | 8,457 | 532 (5.92%) |
 | Rebuild | 4,326 | 4,068 | 258 (5.96%) |
-| CLI | 37,677 | 37,578 | 99 (0.26%) |
+| CLI | 37,677 | 37,375 | 302 (0.80%) |
 | Protocol | 4,076 | 3,824 | 252 (6.18%) |
 | Protocol adapters | 1,670 | 1,503 | 167 (10.00%) |
-| Provider events | 5,283 | 5,176 | 107 (2.03%) |
+| Provider events | 5,283 | 5,116 | 167 (3.16%) |
 | VCS | 9,393 | 9,033 | 360 (3.83%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
@@ -3781,8 +3781,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 556569ff68e019a9eb7c0ab6b18f19b76a665e98 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 556569ff68e019a9eb7c0ab6b18f19b76a665e98 -- '*.rs' | wc -l
+git grep -I -n '^' d7004fa5e16bc3c83658fc6349c68b0e0ac868f5 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' d7004fa5e16bc3c83658fc6349c68b0e0ac868f5 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
