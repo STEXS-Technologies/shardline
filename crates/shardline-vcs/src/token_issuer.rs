@@ -280,10 +280,7 @@ mod tests {
     #[test]
     fn granted_repository_access_runs_adapter_authorization() {
         let adapter = github_adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let revision = RevisionRef::new("refs/heads/main");
         let allowed_subject = ProviderSubject::new("github-user-1");
@@ -352,17 +349,11 @@ mod tests {
             b"a]32-byte-signing-key-for-testing!",
             NonZeroU64::MIN,
         );
-        assert!(issuer.is_ok());
-        let Ok(issuer) = issuer else {
-            return;
-        };
+        let issuer = issuer.expect("expected valid issuer");
 
         let issued = issuer.issue_at(&grant, 41);
 
-        assert!(issued.is_ok());
-        let Ok(issued) = issued else {
-            return;
-        };
+        let issued = issued.expect("expected valid issued");
         assert_eq!(issued.claims().issuer(), "gitlab-adapter");
         assert_eq!(issued.claims().subject(), "gitlab-user-7");
         assert_eq!(issued.claims().repository().owner(), "group");
@@ -374,15 +365,9 @@ mod tests {
         assert_eq!(issued.claims().expires_at_unix_seconds(), 42);
 
         let signer = TokenSigner::new(b"a]32-byte-signing-key-for-testing!");
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let signer = signer.expect("expected valid signer");
         let verified = signer.verify_at(issued.token(), 42);
-        assert!(verified.is_ok());
-        let Ok(verified) = verified else {
-            return;
-        };
+        let verified = verified.expect("expected valid verified");
         assert_eq!(verified, issued.claims().clone());
     }
 
@@ -408,10 +393,7 @@ mod tests {
             b"a]32-byte-signing-key-for-testing!",
             NonZeroU64::MIN,
         );
-        assert!(issuer.is_ok());
-        let Ok(issuer) = issuer else {
-            return;
-        };
+        let issuer = issuer.expect("expected valid issuer");
 
         let issued = issuer.issue_at(&grant, u64::MAX);
 

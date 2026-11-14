@@ -551,16 +551,10 @@ mod tests {
         let provider = MockProvider;
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
 
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let metadata = provider.repository_metadata(&repository);
 
-        assert!(metadata.is_ok());
-        let Ok(metadata) = metadata else {
-            return;
-        };
+        let metadata = metadata.expect("expected valid metadata");
 
         assert_eq!(metadata.repository(), &repository);
         assert_eq!(metadata.visibility(), RepositoryVisibility::Private);
@@ -577,19 +571,13 @@ mod tests {
         let request = WebhookRequest::new("push", "delivery-1", Some("sig"), b"{}");
         let event = provider.parse_webhook(request);
 
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = event.expect("expected valid event");
         let Some(event) = event else {
             return;
         };
         let revision = RevisionRef::new("refs/heads/main");
 
-        assert!(revision.is_ok());
-        let Ok(revision) = revision else {
-            return;
-        };
+        let revision = revision.expect("expected valid revision");
 
         assert_eq!(event.delivery_id().as_str(), "delivery-1");
         assert_eq!(event.repository().provider(), ProviderKind::GitHub);

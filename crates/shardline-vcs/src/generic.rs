@@ -221,22 +221,13 @@ mod tests {
     #[test]
     fn generic_adapter_returns_registered_metadata() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets");
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
 
         let metadata = adapter.repository_metadata(&repository);
 
-        assert!(metadata.is_ok());
-        let Ok(metadata) = metadata else {
-            return;
-        };
+        let metadata = metadata.expect("expected valid metadata");
         assert_eq!(
             metadata.clone_url().as_str(),
             "https://forge.example/team/assets.git"
@@ -247,10 +238,7 @@ mod tests {
     #[test]
     fn generic_adapter_allows_registered_write_access() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets");
         let revision = RevisionRef::new("refs/heads/main");
         let subject = ProviderSubject::new("generic-user-1");
@@ -295,10 +283,7 @@ mod tests {
     #[test]
     fn generic_adapter_parses_revision_pushed_webhook() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "kind":"revision_pushed",
             "repository":{"owner":"team","name":"assets"},
@@ -310,16 +295,10 @@ mod tests {
 
         let event = adapter.parse_webhook(request);
 
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = event.expect("expected valid event");
         let event = event.expect("expected webhook event");
         let revision = RevisionRef::new("refs/heads/main");
-        assert!(revision.is_ok());
-        let Ok(revision) = revision else {
-            return;
-        };
+        let revision = revision.expect("expected valid revision");
         assert_eq!(event.delivery_id().as_str(), "delivery-1");
         assert_eq!(event.repository().provider(), ProviderKind::Generic);
         assert_eq!(
@@ -331,10 +310,7 @@ mod tests {
     #[test]
     fn generic_adapter_parses_repository_rename_webhook() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "kind":"repository_renamed",
             "repository":{"owner":"team","name":"assets"},
@@ -350,16 +326,10 @@ mod tests {
 
         let event = adapter.parse_webhook(request);
 
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = event.expect("expected valid event");
         let event = event.expect("expected webhook event");
         let new_repository = RepositoryRef::new(ProviderKind::Generic, "team", "new-assets");
-        assert!(new_repository.is_ok());
-        let Ok(new_repository) = new_repository else {
-            return;
-        };
+        let new_repository = new_repository.expect("expected valid new_repository");
         assert_eq!(event.delivery_id().as_str(), "delivery-2");
         assert_eq!(
             event.kind(),
@@ -370,10 +340,7 @@ mod tests {
     #[test]
     fn generic_adapter_rejects_invalid_signature() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let request = WebhookRequest::new(
             "repository_deleted",
             "delivery-1",
@@ -392,10 +359,7 @@ mod tests {
     #[test]
     fn generic_adapter_parses_push_event_as_revision_pushed() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "repository":{"owner":"team","name":"assets"},
             "ref":"refs/heads/main"
@@ -405,10 +369,7 @@ mod tests {
 
         let event = adapter.parse_webhook(request);
 
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = event.expect("expected valid event");
         let event = event.expect("expected webhook event");
         assert_eq!(event.delivery_id().as_str(), "delivery-push-1");
         assert!(matches!(
@@ -420,10 +381,7 @@ mod tests {
     #[test]
     fn generic_adapter_parses_repository_deleted_webhook() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "repository":{"owner":"team","name":"assets"}
         }"#;
@@ -437,10 +395,7 @@ mod tests {
 
         let event = adapter.parse_webhook(request);
 
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = event.expect("expected valid event");
         let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
     }
@@ -448,10 +403,7 @@ mod tests {
     #[test]
     fn generic_adapter_parses_access_changed_webhook() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "repository":{"owner":"team","name":"assets"}
         }"#;
@@ -465,10 +417,7 @@ mod tests {
 
         let event = adapter.parse_webhook(request);
 
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = event.expect("expected valid event");
         let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
@@ -529,10 +478,7 @@ mod tests {
     #[test]
     fn generic_adapter_parses_event_kind_from_payload_when_event_name_empty() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "kind":"revision_pushed",
             "repository":{"owner":"team","name":"assets"},
@@ -551,10 +497,7 @@ mod tests {
     #[test]
     fn generic_adapter_parses_event_kind_from_nested_event_kind() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "event":{"kind":"revision_pushed"},
             "repository":{"owner":"team","name":"assets"},
@@ -573,10 +516,7 @@ mod tests {
     #[test]
     fn generic_adapter_revision_pushed_uses_ref_fallback() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "kind":"revision_pushed",
             "repository":{"full_name":"team/assets"},
@@ -595,10 +535,7 @@ mod tests {
     #[test]
     fn generic_repository_uses_root_owner_and_name() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "kind":"revision_pushed",
             "owner":"team",
@@ -621,10 +558,7 @@ mod tests {
     #[test]
     fn generic_repository_uses_namespace_fallback() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "kind":"revision_pushed",
             "repository":{"namespace":"team","name":"assets"},
@@ -642,10 +576,7 @@ mod tests {
     #[test]
     fn generic_repository_missing_owner_errors() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{"kind":"access_changed","repository":{"name":"assets"}}"#;
         let signature = signature(body);
         let request = WebhookRequest::new(
@@ -664,10 +595,7 @@ mod tests {
     #[test]
     fn generic_repository_missing_name_errors() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{"kind":"access_changed","repository":{"owner":"team"}}"#;
         let signature = signature(body);
         let request = WebhookRequest::new(
@@ -686,10 +614,7 @@ mod tests {
     #[test]
     fn generic_adapter_revision_pushed_missing_revision_errors() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{"kind":"revision_pushed","repository":{"owner":"team","name":"assets"}}"#;
         let signature = signature(body);
         let request = WebhookRequest::new(
@@ -708,10 +633,7 @@ mod tests {
     #[test]
     fn generic_repository_uses_full_name() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "kind":"repository_deleted",
             "repository":{"full_name":"team/assets"}
@@ -732,10 +654,7 @@ mod tests {
     #[test]
     fn generic_adapter_parse_repository_renamed_with_new_repository_full_name() {
         let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter.expect("expected valid adapter");
         let body = br#"{
             "kind":"repository_renamed",
             "repository":{"full_name":"team/assets"},
