@@ -3,7 +3,7 @@ use shardline_server_core::{AuthProvider, AuthorizedRepository, LocalHmacProvide
 
 use super::*;
 
-fn test_scope() -> RepositoryScope {
+pub(super) fn test_scope() -> RepositoryScope {
     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None).unwrap()
 }
 
@@ -11,7 +11,7 @@ fn test_scope() -> RepositoryScope {
 /// anonymous capability when `None`), mirroring how the auth layer mints
 /// capabilities: the claims are verified through a real provider so the
 /// type-level seal is satisfied.
-fn test_capability(scope: Option<RepositoryScope>) -> AuthorizedRepository {
+pub(super) fn test_capability(scope: Option<RepositoryScope>) -> AuthorizedRepository {
     scope.map_or_else(AuthorizedRepository::anonymous_full_access, |repo| {
         let claims = TokenClaims::new("local", "test", TokenScope::Write, repo, u64::MAX).unwrap();
         let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap();
