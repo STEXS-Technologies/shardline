@@ -845,93 +845,43 @@ mod tests {
     // ---- candidate_is_newer tests ----
 
     #[test]
-    fn candidate_is_newer_when_modified_since_epoch_is_higher() {
-        let older = VersionCandidate {
-            record: make_file_record("f", &valid_hex_hash()),
-            locator: "loc-a",
-            modified_since_epoch: Duration::from_secs(100),
-        };
-        let newer = VersionCandidate {
-            record: make_file_record("f", &valid_hex_hash()),
-            locator: "loc-b",
-            modified_since_epoch: Duration::from_secs(200),
-        };
+    fn candidate_ordering_uses_epoch_then_hash_then_locator() {
+        fn candidate(
+            (seconds, hash, locator): (u64, &str, &'static str),
+        ) -> VersionCandidate<&'static str> {
+            VersionCandidate {
+                record: make_file_record("f", &hash.repeat(64)),
+                locator,
+                modified_since_epoch: Duration::from_secs(seconds),
+            }
+        }
 
-        assert!(candidate_is_newer(&newer, &older));
-        assert!(!candidate_is_newer(&older, &newer));
-    }
-
-    #[test]
-    fn candidate_is_newer_when_same_epoch_higher_content_hash() {
-        let epoch = Duration::from_secs(100);
-        let low_hash = VersionCandidate {
-            record: make_file_record("f", &"0".repeat(64)),
-            locator: "loc-a",
-            modified_since_epoch: epoch,
-        };
-        let high_hash = VersionCandidate {
-            record: make_file_record("f", &"f".repeat(64)),
-            locator: "loc-b",
-            modified_since_epoch: epoch,
-        };
-
-        assert!(candidate_is_newer(&high_hash, &low_hash));
-        assert!(!candidate_is_newer(&low_hash, &high_hash));
-    }
-
-    #[test]
-    fn candidate_is_newer_when_same_epoch_same_hash_higher_locator() {
-        let epoch = Duration::from_secs(100);
-        let hash = valid_hex_hash();
-        let lower_locator = VersionCandidate {
-            record: make_file_record("f", &hash),
-            locator: "loc-a",
-            modified_since_epoch: epoch,
-        };
-        let higher_locator = VersionCandidate {
-            record: make_file_record("f", &hash),
-            locator: "loc-b",
-            modified_since_epoch: epoch,
-        };
-
-        // "loc-b" > "loc-a"
-        assert!(candidate_is_newer(&higher_locator, &lower_locator));
-        assert!(!candidate_is_newer(&lower_locator, &higher_locator));
-    }
-
-    #[test]
-    fn candidate_is_not_newer_when_equal() {
-        let epoch = Duration::from_secs(100);
-        let hash = valid_hex_hash();
-        let a = VersionCandidate {
-            record: make_file_record("f", &hash),
-            locator: "loc-a",
-            modified_since_epoch: epoch,
-        };
-        let b = VersionCandidate {
-            record: make_file_record("f", &hash),
-            locator: "loc-a",
-            modified_since_epoch: epoch,
-        };
-
-        assert!(!candidate_is_newer(&a, &b));
-    }
-
-    #[test]
-    fn candidate_is_newer_epoch_beats_content_hash() {
-        let lower_epoch = VersionCandidate {
-            record: make_file_record("f", &"f".repeat(64)),
-            locator: "loc-b",
-            modified_since_epoch: Duration::from_secs(100),
-        };
-        let higher_epoch = VersionCandidate {
-            record: make_file_record("f", &"0".repeat(64)),
-            locator: "loc-a",
-            modified_since_epoch: Duration::from_secs(200),
-        };
-
-        // Higher epoch wins even with lower content hash
-        assert!(candidate_is_newer(&higher_epoch, &lower_epoch));
+        for (lower, higher, strictly_ordered) in [
+            // Timestamp decides when hashes match.
+            ((100, "a", "loc-a"), (200, "a", "loc-b"), true),
+            // Hash decides when timestamps match.
+            ((100, "0", "loc-a"), (100, "f", "loc-b"), true),
+            // Locator breaks a timestamp/hash tie.
+            ((100, "a", "loc-a"), (100, "a", "loc-b"), true),
+            // Equal candidates never replace each other.
+            ((100, "a", "loc-a"), (100, "a", "loc-a"), false),
+            // Timestamp takes priority over both hash and locator.
+            ((100, "f", "loc-b"), (200, "0", "loc-a"), true),
+            // Hash takes priority over locator.
+            ((100, "0", "loc-b"), (100, "f", "loc-a"), true),
+        ] {
+            let lower = candidate(lower);
+            let higher = candidate(higher);
+            assert_eq!(
+                candidate_is_newer(&higher, &lower),
+                strictly_ordered,
+                "higher: {higher:?}, lower: {lower:?}"
+            );
+            assert!(
+                !candidate_is_newer(&lower, &higher),
+                "lower: {lower:?}, higher: {higher:?}"
+            );
+        }
     }
 
     // ---- validate_repository_scope tests ----
