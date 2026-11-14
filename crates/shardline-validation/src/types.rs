@@ -281,304 +281,173 @@ mod tests {
     }
 
     #[test]
-    fn invalid_lifecycle_metadata_display_delete_before_first_seen() {
-        let err = InvalidLifecycleMetadataError::QuarantineCandidateDeleteBeforeFirstSeen {
-            object_key: "obj".to_owned(),
-            delete_after_unix_seconds: 100,
-            first_seen_unreachable_at_unix_seconds: 200,
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("obj"));
-        assert!(msg.contains("delete-after"));
+    fn serialized_shard_error_display() {
+        use InvalidSerializedShardError::*;
+        for (error, expected) in [
+            (ParserRejectedMetadata, "shard parser rejected metadata"),
+            (
+                NativeXetTermEmptyOrInvertedChunkRange,
+                "native xet term had an empty or inverted chunk range",
+            ),
+            (
+                NativeXetTermRangeExceededXorbChunkCount,
+                "native xet term range exceeded xorb chunk count",
+            ),
+            (
+                ShardFileTermEmptyOrInvertedChunkRange,
+                "shard file term had an empty or inverted chunk range",
+            ),
+            (
+                XorbMetadataCacheInsertionFailed,
+                "xorb metadata cache insertion failed",
+            ),
+            (
+                ShardTermRangeStartedPastXorbChunkList,
+                "shard term chunk range started past the xorb chunk list",
+            ),
+            (
+                ShardTermRangeEndedPastXorbChunkList,
+                "shard term chunk range ended past the xorb chunk list",
+            ),
+            (
+                RetainedShardChunkHashesNotStrictlyOrdered,
+                "retained shard chunk hashes were not strictly ordered",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected, "{error:?}");
+        }
     }
-
     #[test]
-    fn invalid_lifecycle_metadata_display_missing_object() {
-        let err = InvalidLifecycleMetadataError::QuarantineCandidateMissingObject {
-            object_key: "obj".to_owned(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("obj"));
+    fn reconstruction_response_error_display() {
+        use InvalidReconstructionResponseError::*;
+        for (error, expected) in [
+            (
+                RecordStoreGlobalLatestWalkAttempted,
+                "global latest-record walk attempted",
+            ),
+            (RecordStoreRecordNotFound, "record not found"),
+            (
+                TermCountExceededRecordChunkCount,
+                "response term count exceeded record chunk count",
+            ),
+            (
+                TermHadZeroUnpackedLength,
+                "response term had zero unpacked length",
+            ),
+            (
+                TermHadEmptyChunkRange,
+                "response term had an empty chunk range",
+            ),
+            (
+                TermMissingFetchInfo,
+                "response term did not have matching fetch info",
+            ),
+            (
+                EmptyFetchList,
+                "response fetch info contained an empty fetch list",
+            ),
+            (
+                FetchUrlHashMismatch,
+                "response fetch URL did not match its xorb hash",
+            ),
+            (
+                FetchEntryEmptyChunkRange,
+                "response fetch entry had an empty chunk range",
+            ),
+            (
+                FetchEntryInvertedByteRange,
+                "response fetch entry had an inverted byte range",
+            ),
+            (
+                FetchEntryMissingTerm,
+                "response fetch entry did not have a matching term",
+            ),
+            (
+                V2ChangedOffsetIntoFirstRange,
+                "v2 response changed offset_into_first_range",
+            ),
+            (V2ChangedTerms, "v2 response changed reconstruction terms"),
+            (
+                V2ChangedXorbFetchInfoCardinality,
+                "v2 response changed xorb fetch-info cardinality",
+            ),
+            (
+                V2FetchHashAbsentFromV1,
+                "v2 response emitted a fetch hash absent from v1",
+            ),
+            (V2EmptyFetchList, "v2 response emitted an empty fetch list"),
+            (
+                V2FetchEntryWithoutRanges,
+                "v2 response emitted a fetch entry without ranges",
+            ),
+            (
+                V2EmptyChunkRange,
+                "v2 response emitted an empty chunk range",
+            ),
+            (
+                V2InvertedByteRange,
+                "v2 response emitted an inverted byte range",
+            ),
+            (
+                V2FetchCountDisagreedWithV1,
+                "v2 response fetch count disagreed with v1",
+            ),
+            (
+                V2RangeCountDisagreedWithV1,
+                "v2 response range count disagreed with v1",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected, "{error:?}");
+        }
     }
-
     #[test]
-    fn invalid_lifecycle_metadata_display_length_mismatch() {
-        let err = InvalidLifecycleMetadataError::QuarantineCandidateLengthMismatch {
-            object_key: "obj".to_owned(),
-            expected_length: 100,
-            observed_length: 200,
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("expected length"));
-    }
-
-    #[test]
-    fn invalid_lifecycle_metadata_display_release_before_held() {
-        let err = InvalidLifecycleMetadataError::RetentionHoldReleaseBeforeHeld {
-            object_key: "obj".to_owned(),
-            release_after_unix_seconds: 50,
-            held_at_unix_seconds: 100,
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("release-after"));
-    }
-
-    #[test]
-    fn invalid_lifecycle_metadata_display_hold_missing_object() {
-        let err = InvalidLifecycleMetadataError::ActiveRetentionHoldMissingObject {
-            object_key: "obj".to_owned(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("missing object"));
-    }
-
-    #[test]
-    fn invalid_lifecycle_metadata_display_hold_quarantined() {
-        let err = InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined {
-            object_key: "obj".to_owned(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("coexisted with quarantine"));
-    }
-
-    #[test]
-    fn invalid_serialized_shard_error_parser_rejected() {
-        assert_eq!(
-            InvalidSerializedShardError::ParserRejectedMetadata.to_string(),
-            "shard parser rejected metadata"
-        );
-    }
-
-    #[test]
-    fn invalid_serialized_shard_error_native_xet_empty_range() {
-        assert_eq!(
-            InvalidSerializedShardError::NativeXetTermEmptyOrInvertedChunkRange.to_string(),
-            "native xet term had an empty or inverted chunk range"
-        );
-    }
-
-    #[test]
-    fn invalid_serialized_shard_error_native_xet_range_exceeded() {
-        assert_eq!(
-            InvalidSerializedShardError::NativeXetTermRangeExceededXorbChunkCount.to_string(),
-            "native xet term range exceeded xorb chunk count"
-        );
-    }
-
-    #[test]
-    fn invalid_serialized_shard_error_shard_file_term_empty_range() {
-        assert_eq!(
-            InvalidSerializedShardError::ShardFileTermEmptyOrInvertedChunkRange.to_string(),
-            "shard file term had an empty or inverted chunk range"
-        );
-    }
-
-    #[test]
-    fn invalid_serialized_shard_error_xorb_cache_insertion_failed() {
-        assert_eq!(
-            InvalidSerializedShardError::XorbMetadataCacheInsertionFailed.to_string(),
-            "xorb metadata cache insertion failed"
-        );
-    }
-
-    #[test]
-    fn invalid_serialized_shard_error_shard_term_started_past() {
-        assert_eq!(
-            InvalidSerializedShardError::ShardTermRangeStartedPastXorbChunkList.to_string(),
-            "shard term chunk range started past the xorb chunk list"
-        );
-    }
-
-    #[test]
-    fn invalid_serialized_shard_error_shard_term_ended_past() {
-        assert_eq!(
-            InvalidSerializedShardError::ShardTermRangeEndedPastXorbChunkList.to_string(),
-            "shard term chunk range ended past the xorb chunk list"
-        );
-    }
-
-    #[test]
-    fn invalid_serialized_shard_error_retained_hashes_not_ordered() {
-        assert_eq!(
-            InvalidSerializedShardError::RetainedShardChunkHashesNotStrictlyOrdered.to_string(),
-            "retained shard chunk hashes were not strictly ordered"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_record_store_global_latest() {
-        assert_eq!(
-            InvalidReconstructionResponseError::RecordStoreGlobalLatestWalkAttempted.to_string(),
-            "global latest-record walk attempted"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_record_not_found() {
-        assert_eq!(
-            InvalidReconstructionResponseError::RecordStoreRecordNotFound.to_string(),
-            "record not found"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_term_count_exceeded() {
-        assert_eq!(
-            InvalidReconstructionResponseError::TermCountExceededRecordChunkCount.to_string(),
-            "response term count exceeded record chunk count"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_term_zero_unpacked() {
-        assert_eq!(
-            InvalidReconstructionResponseError::TermHadZeroUnpackedLength.to_string(),
-            "response term had zero unpacked length"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_term_empty_chunk_range() {
-        assert_eq!(
-            InvalidReconstructionResponseError::TermHadEmptyChunkRange.to_string(),
-            "response term had an empty chunk range"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_term_missing_fetch_info() {
-        assert_eq!(
-            InvalidReconstructionResponseError::TermMissingFetchInfo.to_string(),
-            "response term did not have matching fetch info"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_empty_fetch_list() {
-        assert_eq!(
-            InvalidReconstructionResponseError::EmptyFetchList.to_string(),
-            "response fetch info contained an empty fetch list"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_fetch_url_hash_mismatch() {
-        assert_eq!(
-            InvalidReconstructionResponseError::FetchUrlHashMismatch.to_string(),
-            "response fetch URL did not match its xorb hash"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_fetch_entry_empty_chunk_range() {
-        assert_eq!(
-            InvalidReconstructionResponseError::FetchEntryEmptyChunkRange.to_string(),
-            "response fetch entry had an empty chunk range"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_fetch_entry_inverted_byte_range() {
-        assert_eq!(
-            InvalidReconstructionResponseError::FetchEntryInvertedByteRange.to_string(),
-            "response fetch entry had an inverted byte range"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_fetch_entry_missing_term() {
-        assert_eq!(
-            InvalidReconstructionResponseError::FetchEntryMissingTerm.to_string(),
-            "response fetch entry did not have a matching term"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_changed_offset() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2ChangedOffsetIntoFirstRange.to_string(),
-            "v2 response changed offset_into_first_range"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_changed_terms() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2ChangedTerms.to_string(),
-            "v2 response changed reconstruction terms"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_changed_xorb_cardinality() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2ChangedXorbFetchInfoCardinality.to_string(),
-            "v2 response changed xorb fetch-info cardinality"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_hash_absent_from_v1() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2FetchHashAbsentFromV1.to_string(),
-            "v2 response emitted a fetch hash absent from v1"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_empty_fetch_list() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2EmptyFetchList.to_string(),
-            "v2 response emitted an empty fetch list"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_fetch_entry_without_ranges() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2FetchEntryWithoutRanges.to_string(),
-            "v2 response emitted a fetch entry without ranges"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_empty_chunk_range() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2EmptyChunkRange.to_string(),
-            "v2 response emitted an empty chunk range"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_inverted_byte_range() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2InvertedByteRange.to_string(),
-            "v2 response emitted an inverted byte range"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_fetch_count_disagreed() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2FetchCountDisagreedWithV1.to_string(),
-            "v2 response fetch count disagreed with v1"
-        );
-    }
-
-    #[test]
-    fn invalid_reconstruction_response_error_v2_range_count_disagreed() {
-        assert_eq!(
-            InvalidReconstructionResponseError::V2RangeCountDisagreedWithV1.to_string(),
-            "v2 response range count disagreed with v1"
-        );
-    }
-
-    #[test]
-    fn invalid_lifecycle_metadata_display_active_retention_hold_quarantined() {
-        let err = InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined {
-            object_key: "obj".to_owned(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("coexisted with quarantine"));
+    fn lifecycle_metadata_error_display() {
+        use InvalidLifecycleMetadataError::*;
+        for (error, expected) in [
+            (
+                QuarantineCandidateDeleteBeforeFirstSeen {
+                    object_key: "obj".to_owned(),
+                    delete_after_unix_seconds: 100,
+                    first_seen_unreachable_at_unix_seconds: 200,
+                },
+                "quarantine candidate for obj had delete-after 100 before first-seen 200",
+            ),
+            (
+                QuarantineCandidateMissingObject {
+                    object_key: "obj".to_owned(),
+                },
+                "quarantine candidate referenced missing object obj",
+            ),
+            (
+                QuarantineCandidateLengthMismatch {
+                    object_key: "obj".to_owned(),
+                    expected_length: 100,
+                    observed_length: 200,
+                },
+                "quarantine candidate for obj expected length 100, got 200",
+            ),
+            (
+                RetentionHoldReleaseBeforeHeld {
+                    object_key: "obj".to_owned(),
+                    release_after_unix_seconds: 50,
+                    held_at_unix_seconds: 100,
+                },
+                "retention hold for obj had release-after 50 before held-at 100",
+            ),
+            (
+                ActiveRetentionHoldMissingObject {
+                    object_key: "obj".to_owned(),
+                },
+                "active retention hold referenced missing object obj",
+            ),
+            (
+                ActiveRetentionHoldQuarantined {
+                    object_key: "obj".to_owned(),
+                },
+                "active retention hold for obj coexisted with quarantine state",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected, "{error:?}");
+        }
     }
 }
