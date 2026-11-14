@@ -923,14 +923,6 @@ fn oci_blob_key_with_scope() {
 }
 
 #[test]
-fn oci_blob_key_empty_repo_errors() {
-    assert!(matches!(
-        oci_blob_key("", VALID_DIGEST_FULL, None),
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
 fn oci_manifest_key_global_namespace() {
     let key = oci_manifest_key("team/assets", VALID_DIGEST_FULL, None).unwrap();
     let s = key.as_str();
@@ -990,14 +982,6 @@ fn oci_tag_key_with_scope() {
         "should not contain global namespace with scope, got: {s}"
     );
     assert!(s.contains("/tags/v1.0"), "expected tags/v1.0, got: {s}");
-}
-
-#[test]
-fn oci_tag_key_empty_tag_errors() {
-    assert!(matches!(
-        oci_tag_key("team/assets", "", None),
-        Err(OciAdapterError::InvalidManifestReference)
-    ));
 }
 
 #[test]
@@ -1588,6 +1572,14 @@ fn oci_tag_target_key_with_scope() {
 fn oci_keys_reject_invalid_repositories() {
     for (case, result) in [
         (
+            "oci_manifest_key_rejects_empty_repo",
+            super::oci_manifest_key("", VALID_DIGEST_FULL, None).err(),
+        ),
+        (
+            "oci_blob_key_empty_repo_errors",
+            oci_blob_key("", VALID_DIGEST_FULL, None).err(),
+        ),
+        (
             "oci_tag_target_key_empty_repo_errors",
             super::oci_tag_target_key("", VALID_DIGEST, "latest", None).err(),
         ),
@@ -1627,6 +1619,18 @@ fn oci_keys_reject_invalid_repositories() {
 #[test]
 fn oci_keys_reject_invalid_tags() {
     for (case, result) in [
+        (
+            "oci_tag_key_invalid_tag_uppercase",
+            super::oci_tag_key("team/assets", "-starts-with-hyphen", None).err(),
+        ),
+        (
+            "oci_tag_key_rejects_invalid_tag_starting_with_hyphen",
+            super::oci_tag_key("repo", "-invalid", None).err(),
+        ),
+        (
+            "oci_tag_key_empty_tag_errors",
+            oci_tag_key("team/assets", "", None).err(),
+        ),
         (
             "oci_tag_target_key_empty_tag_errors",
             super::oci_tag_target_key("team/assets", VALID_DIGEST, "", None).err(),
@@ -1970,34 +1974,10 @@ fn oci_blob_key_empty_digest_fails() {
 }
 
 #[test]
-fn oci_manifest_key_rejects_empty_repo() {
-    let result = super::oci_manifest_key("", VALID_DIGEST_FULL, None);
-    assert!(matches!(
-        result,
-        Err(OciAdapterError::InvalidRepositoryName)
-    ));
-}
-
-#[test]
-fn oci_manifest_key_rejects_invalid_digest() {
+fn oci_manifest_key_accepts_opaque_digest() {
     // The function doesn't validate the digest, it just uses it as part of the key path
     let result = super::oci_manifest_key("repo", "sha256:nothex", None);
     assert!(result.is_ok(), "digest is used as opaque path component");
-}
-
-#[test]
-fn oci_tag_key_rejects_invalid_tag_starting_with_hyphen() {
-    let result = super::oci_tag_key("repo", "-invalid", None);
-    assert!(matches!(
-        result,
-        Err(OciAdapterError::InvalidManifestReference)
-    ));
-}
-
-#[test]
-fn oci_manifest_prefix_works_with_scope() {
-    let result = super::oci_manifest_prefix("team/assets", Some(&test_scope()));
-    assert!(result.is_ok());
 }
 
 #[test]
@@ -2096,16 +2076,6 @@ fn oci_tag_key_with_scope_uses_hashed_namespace() {
         s.contains("/tags/stable"),
         "expected /tags/stable, got: {s}"
     );
-}
-
-#[test]
-fn oci_tag_key_invalid_tag_uppercase() {
-    // Tags must be valid OCI references; uppercase tags are allowed per spec,
-    // but we test what validate_oci_tag actually rejects.
-    assert!(matches!(
-        super::oci_tag_key("team/assets", "-starts-with-hyphen", None),
-        Err(OciAdapterError::InvalidManifestReference)
-    ));
 }
 
 // ── S3 multipart error branch coverage tests ──────────────────────────────
