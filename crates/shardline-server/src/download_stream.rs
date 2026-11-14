@@ -31,7 +31,9 @@ pub(crate) mod checkpoint_reader;
 mod collect;
 mod fallback_chunks;
 mod xorb_files;
+#[cfg(test)]
 pub(crate) use collect::collect_file_record_bytes;
+pub(crate) use collect::download_file_record_bytes;
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 

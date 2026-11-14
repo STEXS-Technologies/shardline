@@ -1,24 +1,21 @@
 use std::time::Duration;
 
-use shardline_index::{
-    FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordTraversal,
-};
+use shardline_index::{FileRecord, PostgresMetadataStoreError, RecordTraversal};
 use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
 #[cfg(test)]
 use shardline_storage::ObjectStore;
 use shardline_storage::{AsyncObjectStore, DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix};
 use sqlx::{PgPool, query_scalar};
-use tokio::task;
 
 use crate::{
     ServerError,
     chunk_store::chunk_object_key,
     download_stream::{
-        ServerByteStream, VerifiedXorb, collect_file_record_bytes, file_record_response_stream,
+        ServerByteStream, VerifiedXorb, download_file_record_bytes, file_record_response_stream,
         object_byte_range_stream, object_byte_stream, prepare_xorb_byte_range,
     },
     error::IndexError,
-    object_store::{reconstruct_file_record_bytes, visit_object_prefix},
+    object_store::visit_object_prefix,
     record_store::{parse_stored_file_record_bytes, repository_references_hash_in_scope},
     validation::ensure_directory,
     xet_adapter::{
@@ -294,24 +291,13 @@ impl super::PostgresBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
-        let object_store = self.object_store();
-        let server_frontends = self.server_frontends.clone();
-
-        // ReferencedObjectTerms layout (shard/xorb-referenced) is handled
-        // by the raw reconstruct path; StoredChunks layout (ingestor/CDC)
-        // uses the streaming path for LZ4 decompression and xorb packing.
-        if matches!(
-            record.storage_layout(),
-            FileRecordStorageLayout::ReferencedObjectTerms
-        ) {
-            return task::spawn_blocking(move || {
-                reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
-            })
-            .await
-            .map_err(ServerError::BlockingTask)?;
-        }
-
-        collect_file_record_bytes(object_store, record, self.stream_work_pool.clone()).await
+        download_file_record_bytes(
+            self.object_store(),
+            &self.server_frontends,
+            record,
+            &self.stream_work_pool,
+        )
+        .await
     }
 
     /// Reads a stored chunk by hash.

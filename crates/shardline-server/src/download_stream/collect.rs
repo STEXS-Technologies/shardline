@@ -1,11 +1,35 @@
-//! Reuse bounded validation output only for callers already requesting a Vec.
+//! Select complete-file reads and reuse bounded validation output for Vec callers.
 use futures_util::StreamExt;
-use shardline_index::FileRecord;
+use shardline_index::{FileRecord, FileRecordStorageLayout};
 use shardline_xet_adapter::ValidatedXorb;
 
-use crate::{ServerError, admission::BoundedPool, object_store::ServerObjectStore};
+use crate::{
+    ServerError, ServerFrontend,
+    admission::BoundedPool,
+    object_store::{ServerObjectStore, reconstruct_file_record_bytes},
+};
 
 const MAX_COLLECTED_XORB_BYTES: u64 = 1024 * 1024;
+
+/// Select the same complete-file reconstruction path for both metadata backends.
+pub(crate) async fn download_file_record_bytes(
+    store: ServerObjectStore,
+    frontends: &[ServerFrontend],
+    record: FileRecord,
+    pool: &BoundedPool,
+) -> Result<Vec<u8>, ServerError> {
+    // Referenced terms use raw reconstruction; stored chunks use the bounded
+    // stream collector for LZ4 decompression and xorb packing.
+    if record.storage_layout() == FileRecordStorageLayout::ReferencedObjectTerms {
+        let frontends = frontends.to_vec();
+        return tokio::task::spawn_blocking(move || {
+            reconstruct_file_record_bytes(&store, &frontends, &record)
+        })
+        .await
+        .map_err(ServerError::BlockingTask)?;
+    }
+    collect_file_record_bytes(store, record, pool.clone()).await
+}
 
 pub(crate) async fn collect_file_record_bytes(
     store: ServerObjectStore,

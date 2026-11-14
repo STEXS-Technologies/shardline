@@ -1,19 +1,17 @@
 use axum::body::Bytes;
 use shardline_cas::{CasCoordinator, CasLimits};
 use shardline_index::FileRecord;
-use shardline_index::{FileRecordStorageLayout, UploadIntent, UploadIntentState};
+use shardline_index::{UploadIntent, UploadIntentState};
 use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
 use shardline_storage::ObjectStore;
 use std::num::NonZeroU64;
-use tokio::task;
 
 use super::LocalBackend;
 use crate::{
     ServerError, ShardMetadataLimits,
     chunk_store::chunk_object_key,
-    download_stream::{ServerByteStream, collect_file_record_bytes, file_record_response_stream},
+    download_stream::{ServerByteStream, download_file_record_bytes, file_record_response_stream},
     model::UploadFileResponse,
-    object_store::reconstruct_file_record_bytes,
     upload_ingest::{
         FileUploadIngestor, RequestBodyReader, UploadStorage, read_native_body, upload_attempt_id,
     },
@@ -448,24 +446,13 @@ impl LocalBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
-        let object_store = self.object_store();
-
-        // ReferencedObjectTerms layout (shard/xorb-referenced) is handled
-        // by the raw reconstruct path; StoredChunks layout (ingestor/CDC)
-        // uses the streaming path for LZ4 decompression and xorb packing.
-        if matches!(
-            record.storage_layout(),
-            FileRecordStorageLayout::ReferencedObjectTerms
-        ) {
-            let server_frontends = self.server_frontends.clone();
-            return task::spawn_blocking(move || {
-                reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
-            })
-            .await
-            .map_err(ServerError::BlockingTask)?;
-        }
-
-        collect_file_record_bytes(object_store, record, self.stream_work_pool.clone()).await
+        download_file_record_bytes(
+            self.object_store(),
+            &self.server_frontends,
+            record,
+            &self.stream_work_pool,
+        )
+        .await
     }
 
     /// Reads a stored chunk by hash.
