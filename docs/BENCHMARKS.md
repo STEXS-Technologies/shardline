@@ -3750,15 +3750,16 @@ metadata.
 
 The November 14, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`2d98161f61e14589327732790bfb9a56af687cb9`. It counts all tracked `.rs`
+`556569ff68e019a9eb7c0ab6b18f19b76a665e98`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 591,511 | 12,138 (2.01%) |
-| Server | 220,570 | 212,841 | 7,729 (3.50%) |
+| Entire repository | 603,649 | 590,427 | 13,222 (2.19%) |
+| Server | 220,570 | 212,782 | 7,788 (3.53%) |
+| Server core | 6,454 | 5,630 | 824 (12.77%) |
 | Storage | 20,373 | 19,469 | 904 (4.44%) |
 | S3 adapter | 10,954 | 10,365 | 589 (5.38%) |
 | Cache | 6,573 | 5,933 | 640 (9.74%) |
@@ -3768,17 +3769,20 @@ or the amount of additional code that can safely be removed.
 | Fsck | 8,989 | 8,457 | 532 (5.92%) |
 | Rebuild | 4,326 | 4,068 | 258 (5.96%) |
 | CLI | 37,677 | 37,578 | 99 (0.26%) |
-| Protocol adapters | 1,670 | 1,519 | 151 (9.04%) |
-| Provider events | 5,283 | 5,188 | 95 (1.80%) |
+| Protocol | 4,076 | 3,824 | 252 (6.18%) |
+| Protocol adapters | 1,670 | 1,503 | 167 (10.00%) |
+| Provider events | 5,283 | 5,176 | 107 (2.03%) |
+| VCS | 9,393 | 9,033 | 360 (3.83%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
-using the corresponding commit and path, or omit the path for the total:
+using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 2d98161f61e14589327732790bfb9a56af687cb9 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 556569ff68e019a9eb7c0ab6b18f19b76a665e98 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 556569ff68e019a9eb7c0ab6b18f19b76a665e98 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
