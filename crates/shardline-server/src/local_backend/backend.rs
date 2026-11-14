@@ -4,16 +4,12 @@ use shardline_index::{
     LocalIndexStore, LocalRecordStore, OciObjectKey, OciObjectStore, OciTagEntry,
     ReconstructionStore, RecordTraversal,
 };
-use shardline_storage::{ObjectPrefix, ObjectStore};
+use shardline_storage::ObjectStore;
 
 use crate::{
-    ServerError, ServerFrontend,
-    chunk_store::chunk_hash_from_chunk_object_key_if_present,
-    config::default_upload_max_in_flight_chunks,
-    local_path::ensure_directory_path_components_are_not_symlinked,
-    model::ServerStatsResponse,
-    object_store::{ServerObjectStore, visit_object_prefix},
-    overflow::{checked_add, checked_increment},
+    ServerError, ServerFrontend, config::default_upload_max_in_flight_chunks,
+    local_path::ensure_directory_path_components_are_not_symlinked, model::ServerStatsResponse,
+    object_store::ServerObjectStore,
 };
 
 use super::records::read_record;
@@ -209,36 +205,7 @@ impl LocalBackend {
     ///
     /// Returns [`ServerError`] when local metadata cannot be traversed.
     pub async fn stats(&self) -> Result<ServerStatsResponse, ServerError> {
-        let object_store = self.object_store();
-        let prefix = ObjectPrefix::parse("").map_err(|_error| ServerError::InvalidContentHash)?;
-        let mut objects = 0_u64;
-        let mut object_bytes = 0_u64;
-        let mut chunks = 0_u64;
-        let mut chunk_bytes = 0_u64;
-        visit_object_prefix(&object_store, &prefix, |metadata| {
-            objects = checked_increment(objects)?;
-            object_bytes = checked_add(object_bytes, metadata.length())?;
-            let is_chunk = chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
-            if is_chunk {
-                chunks = checked_increment(chunks)?;
-                chunk_bytes = checked_add(chunk_bytes, metadata.length())?;
-            }
-
-            Ok(())
-        })?;
-        let files = u64::try_from(
-            RecordTraversal::list_latest_record_locators(&self.record_store)
-                .await?
-                .len(),
-        )?;
-
-        Ok(ServerStatsResponse {
-            objects,
-            object_bytes,
-            chunks,
-            chunk_bytes,
-            files,
-        })
+        crate::storage_stats::storage_stats(&self.object_store(), &self.record_store).await
     }
 
     pub(crate) fn object_store(&self) -> ServerObjectStore {

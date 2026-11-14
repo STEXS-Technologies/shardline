@@ -120,6 +120,7 @@ mod runtime_check;
 mod server_frontend;
 mod server_role;
 mod storage_migration;
+mod storage_stats;
 pub mod task_tracking;
 pub mod test_fixtures;
 pub mod test_invariant_error;
