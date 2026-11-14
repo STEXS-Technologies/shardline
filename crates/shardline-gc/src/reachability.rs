@@ -539,21 +539,37 @@ mod tests {
         DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome,
     };
 
-    /// A mock object store that returns metadata for a set of known keys.
-    struct MockObjectStore {
-        existing_keys: HashSet<String>,
+    /// A mock object store exposing controllable metadata (including
+    /// backend-observed mtimes) for a fixed set of keys.
+    struct MetadataObjectStore {
+        objects: Vec<ObjectMetadata>,
     }
 
-    impl MockObjectStore {
-        fn new(existing: &[&str]) -> Self {
+    impl MetadataObjectStore {
+        fn with_keys(keys: &[&str]) -> Self {
+            Self::new(keys.iter().map(|key| (*key, 1024, None)).collect())
+        }
+
+        fn new(objects: Vec<(&str, u64, Option<u64>)>) -> Self {
             Self {
-                existing_keys: existing.iter().map(|s| (*s).to_owned()).collect(),
+                objects: objects
+                    .into_iter()
+                    .map(|(key, length, modified)| {
+                        let metadata =
+                            ObjectMetadata::new(ObjectKey::parse(key).unwrap(), length, None);
+                        if let Some(modified) = modified {
+                            metadata.with_modified(modified)
+                        } else {
+                            metadata
+                        }
+                    })
+                    .collect(),
             }
         }
     }
 
     #[allow(clippy::unreachable)]
-    impl ObjectStore for MockObjectStore {
+    impl ObjectStore for MetadataObjectStore {
         type Error = std::io::Error;
 
         fn put_if_absent(
@@ -574,19 +590,19 @@ mod tests {
         }
 
         fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-            Ok(self.existing_keys.contains(key.as_str()))
+            Ok(self.objects.iter().any(|metadata| metadata.key() == key))
         }
 
         fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
-            if self.existing_keys.contains(key.as_str()) {
-                Ok(Some(ObjectMetadata::new(key.clone(), 1024, None)))
-            } else {
-                Ok(None)
-            }
+            Ok(self
+                .objects
+                .iter()
+                .find(|metadata| metadata.key() == key)
+                .cloned())
         }
 
         fn list_prefix(&self, _prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
-            unreachable!("not used in tests")
+            Ok(self.objects.clone())
         }
 
         fn delete_if_present(&self, _key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
@@ -596,7 +612,7 @@ mod tests {
 
     #[test]
     fn mark_optional_existing_object_is_referenced() {
-        let store = MockObjectStore::new(&["chunks/abc123"]);
+        let store = MetadataObjectStore::with_keys(&["chunks/abc123"]);
         let key = ObjectKey::parse("chunks/abc123").unwrap();
         let mut referenced = HashSet::new();
         let mut missing = HashSet::new();
@@ -615,7 +631,7 @@ mod tests {
 
     #[test]
     fn mark_optional_missing_object_is_marked_missing() {
-        let store = MockObjectStore::new(&[]);
+        let store = MetadataObjectStore::with_keys(&[]);
         let key = ObjectKey::parse("chunks/xyz789").unwrap();
         let mut referenced = HashSet::new();
         let mut missing = HashSet::new();
@@ -634,7 +650,7 @@ mod tests {
 
     #[test]
     fn mark_optional_already_referenced_is_noop() {
-        let store = MockObjectStore::new(&["chunks/abc"]);
+        let store = MetadataObjectStore::with_keys(&["chunks/abc"]);
         let key = ObjectKey::parse("chunks/abc").unwrap();
         let mut referenced = HashSet::new();
         referenced.insert("chunks/abc".to_owned());
@@ -649,7 +665,7 @@ mod tests {
 
     #[test]
     fn mark_optional_already_missing_is_noop() {
-        let store = MockObjectStore::new(&[]);
+        let store = MetadataObjectStore::with_keys(&[]);
         let key = ObjectKey::parse("chunks/def").unwrap();
         let mut referenced = HashSet::new();
         let mut missing = HashSet::new();
@@ -1225,81 +1241,6 @@ mod tests {
 
     const TEMP_TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    /// A mock object store exposing controllable metadata (including
-    /// backend-observed mtimes) for a fixed set of keys.
-    struct MockTempStore {
-        objects: Vec<(String, u64, Option<u64>)>,
-    }
-
-    impl MockTempStore {
-        fn new(objects: Vec<(&str, u64, Option<u64>)>) -> Self {
-            Self {
-                objects: objects
-                    .into_iter()
-                    .map(|(key, length, modified)| (key.to_owned(), length, modified))
-                    .collect(),
-            }
-        }
-    }
-
-    #[allow(clippy::unreachable)]
-    impl ObjectStore for MockTempStore {
-        type Error = std::io::Error;
-
-        fn put_if_absent(
-            &self,
-            _key: &ObjectKey,
-            _body: ObjectBody<'_>,
-            _integrity: &ObjectIntegrity,
-        ) -> Result<PutOutcome, Self::Error> {
-            unreachable!("not used in tests")
-        }
-
-        fn read_range(
-            &self,
-            _key: &ObjectKey,
-            _range: shardline_protocol::ByteRange,
-        ) -> Result<Vec<u8>, Self::Error> {
-            unreachable!("not used in tests")
-        }
-
-        fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-            Ok(self.objects.iter().any(|(k, _, _)| k == key.as_str()))
-        }
-
-        fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
-            Ok(self.objects.iter().find(|(k, _, _)| k == key.as_str()).map(
-                |(k, length, modified)| {
-                    let mut metadata =
-                        ObjectMetadata::new(ObjectKey::parse(k).unwrap(), *length, None);
-                    if let Some(modified) = modified {
-                        metadata = metadata.with_modified(*modified);
-                    }
-                    metadata
-                },
-            ))
-        }
-
-        fn list_prefix(&self, _prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
-            Ok(self
-                .objects
-                .iter()
-                .map(|(k, length, modified)| {
-                    let mut metadata =
-                        ObjectMetadata::new(ObjectKey::parse(k).unwrap(), *length, None);
-                    if let Some(modified) = modified {
-                        metadata = metadata.with_modified(*modified);
-                    }
-                    metadata
-                })
-                .collect())
-        }
-
-        fn delete_if_present(&self, _key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
-            unreachable!("not used in tests")
-        }
-    }
-
     fn temp_key(nanos: u128, counter: u64) -> String {
         let prefix = &TEMP_TEST_HASH[..2];
         format!("{prefix}/{TEMP_TEST_HASH}.tmp-{nanos}-{counter}")
@@ -1315,7 +1256,7 @@ mod tests {
         let old_embedded = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
         let fresh_mtime = u64::try_from(u128::from(now_secs - 10) * 1_000_000_000).unwrap();
         let key = temp_key(old_embedded, 0);
-        let store = MockTempStore::new(vec![(key.as_str(), 42, Some(fresh_mtime))]);
+        let store = MetadataObjectStore::new(vec![(key.as_str(), 42, Some(fresh_mtime))]);
 
         let scan =
             scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now_secs).unwrap();
@@ -1335,7 +1276,7 @@ mod tests {
         let old_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
         let old_mtime = u64::try_from(old_nanos).unwrap();
         let key = temp_key(old_nanos, 0);
-        let store = MockTempStore::new(vec![(key.as_str(), 42, Some(old_mtime))]);
+        let store = MetadataObjectStore::new(vec![(key.as_str(), 42, Some(old_mtime))]);
 
         let scan =
             scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now_secs).unwrap();
@@ -1355,7 +1296,7 @@ mod tests {
         let fresh_embedded = u128::from(now_secs) * 1_000_000_000;
         let stale_key = temp_key(old_embedded, 0);
         let fresh_key = temp_key(fresh_embedded, 1);
-        let store = MockTempStore::new(vec![
+        let store = MetadataObjectStore::new(vec![
             (stale_key.as_str(), 42, None),
             (fresh_key.as_str(), 7, None),
         ]);
@@ -1398,7 +1339,7 @@ mod tests {
         let old_mtime = u64::try_from(old_nanos).unwrap();
         let xorb_key = xorb_temp_key(old_nanos, 0);
         let shard_key = shard_temp_key(old_nanos, 1);
-        let store = MockTempStore::new(vec![
+        let store = MetadataObjectStore::new(vec![
             (xorb_key.as_str(), 512, Some(old_mtime)),
             (shard_key.as_str(), 64, Some(old_mtime)),
         ]);
@@ -1439,7 +1380,7 @@ mod tests {
             XORB_TEMP_TEST_HASH
         );
         let chunk_live = format!("{}/{}", &XORB_TEMP_TEST_HASH[..2], XORB_TEMP_TEST_HASH);
-        let store = MockTempStore::new(vec![
+        let store = MetadataObjectStore::new(vec![
             (xorb_live.as_str(), 512, Some(old_mtime)),
             (shard_live.as_str(), 64, Some(old_mtime)),
             (chunk_live.as_str(), 32, Some(old_mtime)),
@@ -1475,7 +1416,7 @@ mod tests {
             "xorbs/default/aa/{}.xorb.tmp-{old_embedded}-3",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         );
-        let store = MockTempStore::new(vec![
+        let store = MetadataObjectStore::new(vec![
             (user_key.as_str(), 10, Some(old_mtime)),
             (non_managed_key.as_str(), 11, Some(old_mtime)),
             (short_hash_xorb.as_str(), 12, Some(old_mtime)),
@@ -1558,7 +1499,7 @@ mod tests {
         let live_key = crate::quarantine::GC_CLOCK_BOOT_OBSERVATION_KEY;
         let temp_key = format!("{live_key}.tmp-{old_nanos}-0");
         let old_mtime = u64::try_from(old_nanos).unwrap();
-        let store = MockTempStore::new(vec![
+        let store = MetadataObjectStore::new(vec![
             (live_key, 50, Some(old_mtime)),
             (temp_key.as_str(), 50, Some(old_mtime)),
         ]);
@@ -1585,7 +1526,7 @@ mod tests {
         let old_mtime = u64::try_from(old_nanos).unwrap();
         let sidecar_key = xorb_chunks_temp_key(old_nanos, 0);
         let anchor_key = anchor_temp_key(old_nanos, 1);
-        let store = MockTempStore::new(vec![
+        let store = MetadataObjectStore::new(vec![
             (sidecar_key.as_str(), 42, Some(old_mtime)),
             (anchor_key.as_str(), 7, Some(old_mtime)),
         ]);
@@ -1630,7 +1571,7 @@ mod tests {
             &SIDECAR_TEMP_TEST_HASH[..2],
             SIDECAR_TEMP_TEST_HASH
         );
-        let store = MockTempStore::new(vec![
+        let store = MetadataObjectStore::new(vec![
             (sidecar_live.as_str(), 512, Some(old_mtime)),
             (anchor_live, 19, Some(old_mtime)),
             (chunk_live.as_str(), 32, Some(old_mtime)),
@@ -1669,7 +1610,7 @@ mod tests {
         let prefix_mismatch_hash = format!("bb{}", "0".repeat(62));
         let prefix_mismatch_sidecar =
             format!("_xorb_chunks/aa/{prefix_mismatch_hash}.tmp-{old_embedded}-5");
-        let store = MockTempStore::new(vec![
+        let store = MetadataObjectStore::new(vec![
             (user_key.as_str(), 10, Some(old_mtime)),
             (other_gc_key.as_str(), 11, Some(old_mtime)),
             (anchor_like_key.as_str(), 12, Some(old_mtime)),
