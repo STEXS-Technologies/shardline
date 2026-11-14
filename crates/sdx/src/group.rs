@@ -113,23 +113,11 @@ struct StreamRegistration {
 }
 
 impl StreamRegistration {
-    fn new(id: u64, stream: &DownloadStream) -> Arc<Self> {
+    fn new(id: u64, run_state: Arc<RunState>, start_signal: Option<Arc<Notify>>) -> Arc<Self> {
         Arc::new(Self {
             id,
-            run_state: stream.run_state(),
-            start_signal: stream.pending_start_signal(),
-            started: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
-            explicitly_cancelled: AtomicBool::new(false),
-            observed_failure: Mutex::new(None),
-        })
-    }
-
-    fn new_unordered(id: u64, stream: &UnorderedDownloadStream) -> Arc<Self> {
-        Arc::new(Self {
-            id,
-            run_state: stream.run_state(),
-            start_signal: stream.pending_start_signal(),
+            run_state,
+            start_signal,
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             explicitly_cancelled: AtomicBool::new(false),
@@ -182,6 +170,27 @@ impl StreamRegistration {
         }
         XetTaskState::Queued
     }
+}
+
+/// Collect live registrations while holding the registry lock, then order by id.
+fn group_status<T>(
+    aborted: &AtomicBool,
+    active: &Mutex<HashMap<u64, Weak<T>>>,
+    state: impl Fn(&T, bool) -> XetTaskState,
+) -> Vec<(u64, XetTaskState)> {
+    let aborted = aborted.load(Ordering::Relaxed);
+    let active = active
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut states = Vec::with_capacity(active.len());
+    for (id, weak) in active.iter() {
+        let Some(registration) = weak.upgrade() else {
+            continue;
+        };
+        states.push((*id, state(&registration, aborted)));
+    }
+    states.sort_by_key(|(id, _)| *id);
+    states
 }
 
 impl XetStreamGroupInner {
@@ -261,7 +270,8 @@ impl XetStreamGroup {
             .await?;
         reconstructor = reconstructor.with_cancellation_token(stream_token.clone());
         let stream = reconstructor.reconstruct_to_stream();
-        let registration = StreamRegistration::new(id, &stream);
+        let registration =
+            StreamRegistration::new(id, stream.run_state(), stream.pending_start_signal());
         self.register(&registration);
         Ok(GroupedDownloadStream::new(
             stream,
@@ -294,7 +304,8 @@ impl XetStreamGroup {
             .await?;
         reconstructor = reconstructor.with_cancellation_token(stream_token.clone());
         let stream = reconstructor.reconstruct_to_unordered_stream();
-        let registration = StreamRegistration::new_unordered(id, &stream);
+        let registration =
+            StreamRegistration::new(id, stream.run_state(), stream.pending_start_signal());
         self.register(&registration);
         Ok(GroupedUnorderedDownloadStream::new(
             stream,
@@ -330,21 +341,11 @@ impl XetStreamGroup {
     /// state)` pairs, ordered by stream id.
     #[must_use]
     pub fn status(&self) -> Vec<(u64, XetTaskState)> {
-        let aborted = self.inner.aborted.load(Ordering::Relaxed);
-        let active = self
-            .inner
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut states = Vec::with_capacity(active.len());
-        for (id, weak) in active.iter() {
-            let Some(registration) = weak.upgrade() else {
-                continue;
-            };
-            states.push((*id, registration.state(aborted)));
-        }
-        states.sort_by_key(|(id, _)| *id);
-        states
+        group_status(
+            &self.inner.aborted,
+            &self.inner.active,
+            StreamRegistration::state,
+        )
     }
 
     /// Number of live (not-yet-dropped) streams registered with this group.
@@ -735,21 +736,11 @@ impl XetUploadCommit {
     /// pairs, ordered by upload id.
     #[must_use]
     pub fn status(&self) -> Vec<(u64, XetTaskState)> {
-        let aborted = self.inner.aborted.load(Ordering::Relaxed);
-        let active = self
-            .inner
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut states = Vec::with_capacity(active.len());
-        for (id, weak) in active.iter() {
-            let Some(registration) = weak.upgrade() else {
-                continue;
-            };
-            states.push((*id, registration.state(aborted)));
-        }
-        states.sort_by_key(|(id, _)| *id);
-        states
+        group_status(
+            &self.inner.aborted,
+            &self.inner.active,
+            UploadRegistration::state,
+        )
     }
 
     /// Number of live (not-yet-dropped) upload handles registered with this
