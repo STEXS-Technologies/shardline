@@ -23,12 +23,5 @@ subtle.workspace = true
 thiserror.workspace = true
 zeroize = { workspace = true, features = ["derive"] }
 
-[dev-dependencies]
-criterion = { workspace = true, features = ["cargo_bench_support"] }
-
 [lints]
 workspace = true
-
-[[bench]]
-name = "protocol_core"
-harness = false

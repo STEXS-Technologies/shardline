@@ -33,7 +33,47 @@ shardline-server-core.workspace = true
 shardline-storage = { workspace = true, features = ["s3"] }
 
 [dev-dependencies]
-criterion.workspace = true
+criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
+blake3.workspace = true
+hex.workspace = true
+sha2.workspace = true
+shardline-cache.workspace = true
+shardline-server.workspace = true
+shardline-xet-adapter.workspace = true
+shardline-xet-core.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "local_backend"
+harness = false
+
+[[bench]]
+name = "oci_tags"
+harness = false
+
+[[bench]]
+name = "oci_tags_fixed"
+harness = false
+
+[[bench]]
+name = "oci_finalize_fixed"
+harness = false
+
+[[bench]]
+name = "protocol_core"
+harness = false
+
+[[bench]]
+name = "auth_verify"
+harness = false
+
+[[bench]]
+name = "reconstruction_cache"
+harness = false
+
+[[bench]]
+name = "xorb_validate"
+harness = false

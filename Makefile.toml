@@ -216,13 +216,13 @@ args = ["expand", "${@}"]
 description = "Run shardline protocol microbenchmarks"
 workspace = false
 command = "cargo"
-args = ["bench", "-p", "shardline-protocol", "--bench", "protocol_core", "--", "--noplot", "${@}"]
+args = ["bench", "-p", "shardline-bench", "--bench", "protocol_core", "--", "--noplot", "${@}"]
 
 [tasks.shardline-bench-local-backend]
 description = "Run shardline local-backend microbenchmarks"
 workspace = false
 command = "cargo"
-args = ["bench", "-p", "shardline-server", "--bench", "local_backend", "--", "--noplot", "${@}"]
+args = ["bench", "-p", "shardline-bench", "--bench", "local_backend", "--", "--noplot", "${@}"]
 
 [tasks.shardline-bench-e2e]
 description = "Run the shardline deterministic end-to-end benchmark suite"

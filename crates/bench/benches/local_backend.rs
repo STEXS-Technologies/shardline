@@ -2,7 +2,7 @@ use std::{
     error::Error, fmt::Display, future::Future, hint::black_box, num::NonZeroUsize, process::abort,
 };
 
-use axum::body::Bytes;
+use bytes::Bytes;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use shardline_server::{LocalBackend, ServerError};
 use tempfile::TempDir;

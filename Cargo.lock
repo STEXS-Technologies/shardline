@@ -4018,15 +4018,23 @@ dependencies = [
 name = "shardline-bench"
 version = "1.13.0"
 dependencies = [
+ "blake3",
  "bytes",
  "criterion",
+ "hex",
  "libc",
  "reqwest 0.12.28",
  "serde_json",
+ "sha2 0.10.9",
+ "shardline-cache",
  "shardline-index",
  "shardline-protocol",
+ "shardline-server",
  "shardline-server-core",
  "shardline-storage",
+ "shardline-xet-adapter",
+ "shardline-xet-core",
+ "tempfile",
  "tokio",
 ]
 
@@ -4034,7 +4042,6 @@ dependencies = [
 name = "shardline-cache"
 version = "1.13.0"
 dependencies = [
- "criterion",
  "getrandom 0.3.4",
  "hex",
  "redis",
@@ -4256,7 +4263,6 @@ dependencies = [
 name = "shardline-protocol"
 version = "1.13.0"
 dependencies = [
- "criterion",
  "hex",
  "hmac 0.12.1",
  "serde",
@@ -4388,7 +4394,6 @@ dependencies = [
  "bytes",
  "chrono",
  "crc-fast",
- "criterion",
  "dotenvy",
  "ed25519-dalek 2.2.0",
  "futures-util",
@@ -4462,7 +4467,6 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
- "criterion",
  "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
  "hex",
@@ -4537,7 +4541,6 @@ version = "1.13.0"
 dependencies = [
  "axum",
  "blake3",
- "criterion",
  "futures-util",
  "serde",
  "sha2 0.10.9",

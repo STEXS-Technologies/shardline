@@ -6,18 +6,21 @@ The goal is to make regression checks and hotspot investigation routine, not ad 
 
 ## Microbenchmarks
 
-Shardline ships Criterion-based microbenchmarks for public hot paths.
+Shardline keeps Criterion microbenchmarks in the unpublished `shardline-bench`
+crate so ordinary library tests do not compile the benchmark framework.
+Target names and Criterion report groups remain unchanged. Other targets include
+`auth_verify`, `reconstruction_cache`, `xorb_validate`, and `oci_tags`.
 
 Protocol microbenchmarks:
 
 ```bash
-cargo bench -p shardline-protocol --bench protocol_core -- --noplot
+cargo bench -p shardline-bench --bench protocol_core -- --noplot
 ```
 
 Local backend microbenchmarks:
 
 ```bash
-cargo bench -p shardline-server --bench local_backend -- --noplot
+cargo bench -p shardline-bench --bench local_backend -- --noplot
 ```
 
 Equivalent cargo-make tasks:

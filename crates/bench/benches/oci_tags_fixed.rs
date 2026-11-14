@@ -3,10 +3,13 @@ use std::{hint::black_box, process::ExitCode, time::Instant};
 use blake3::hash as blake3_hash;
 use shardline_protocol::ShardlineHash;
 use shardline_storage::{
-    LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix,
-    ObjectStore,
+    LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore,
 };
 use tempfile::TempDir;
+
+#[path = "support/oci_tags.rs"]
+mod tag_pages;
+use tag_pages::{new_flat_namespace_page, old_full_scan_page};
 
 const OCI_TAG_COUNT: usize = 50_000;
 const OCI_TAG_PAGE_SIZE: usize = 128;
@@ -93,10 +96,18 @@ fn main() -> ExitCode {
     let start = Instant::now();
     for _ in 0..iterations {
         let page = match mode {
-            "old" => old_full_scan_page(&fixture.store, &fixture.prefix, OCI_TAG_PAGE_SIZE, last),
-            "new" => {
-                new_flat_namespace_page(&fixture.store, &fixture.prefix, OCI_TAG_PAGE_SIZE, last)
-            }
+            "old" => old_full_scan_page(
+                &fixture.store,
+                &fixture.prefix,
+                OCI_TAG_PAGE_SIZE,
+                Some(last),
+            ),
+            "new" => new_flat_namespace_page(
+                &fixture.store,
+                &fixture.prefix,
+                OCI_TAG_PAGE_SIZE,
+                Some(last),
+            ),
             invalid => {
                 eprintln!("unsupported mode: {invalid}");
                 return ExitCode::FAILURE;
@@ -111,68 +122,4 @@ fn main() -> ExitCode {
         "mode={mode} iterations={iterations} elapsed_ms={elapsed_ms}.{elapsed_micros_remainder:03}"
     );
     ExitCode::SUCCESS
-}
-
-fn old_full_scan_page(
-    store: &LocalObjectStore,
-    prefix: &ObjectPrefix,
-    page_size: usize,
-    last: &str,
-) -> Vec<String> {
-    let mut tags = std::collections::BTreeSet::new();
-    let mut has_more = false;
-    if let Err(error) = store.visit_prefix(prefix, |object: ObjectMetadata| {
-        let Some(tag) = object.key().as_str().rsplit('/').next() else {
-            return Ok::<(), shardline_storage::LocalObjectStoreError>(());
-        };
-        if tag <= last {
-            return Ok(());
-        }
-        let _inserted = tags.insert(tag.to_owned());
-        if tags.len() > page_size {
-            let _removed = tags.pop_last();
-            has_more = true;
-        }
-        Ok(())
-    }) {
-        eprintln!("old_full_scan_page failed: {error}");
-        std::process::abort();
-    }
-    let tags = tags.into_iter().collect::<Vec<_>>();
-    black_box(has_more);
-    tags
-}
-
-fn new_flat_namespace_page(
-    store: &LocalObjectStore,
-    prefix: &ObjectPrefix,
-    page_size: usize,
-    last: &str,
-) -> Vec<String> {
-    let start_after =
-        ObjectKey::parse(&format!("{}{}", prefix.as_str(), last)).unwrap_or_else(|error| {
-            eprintln!("start-after key parse failed: {error}");
-            std::process::abort();
-        });
-    let page = store
-        .list_flat_namespace_page(prefix, Some(&start_after), page_size.saturating_add(1))
-        .unwrap_or_else(|error| {
-            eprintln!("new_flat_namespace_page failed: {error}");
-            std::process::abort();
-        });
-    let mut tags = page
-        .into_iter()
-        .filter_map(|object| {
-            object
-                .key()
-                .as_str()
-                .rsplit('/')
-                .next()
-                .map(ToOwned::to_owned)
-        })
-        .collect::<Vec<_>>();
-    let has_more = tags.len() > page_size;
-    tags.truncate(page_size);
-    black_box(has_more);
-    tags
 }
