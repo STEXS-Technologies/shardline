@@ -23,14 +23,14 @@ use serde_json::{Value, from_slice, from_str, from_value, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
     EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot,
-    OciTagEvidenceLog, OciTagSnapshot, OperationKind, ProviderEvidenceLog, ProviderLifecycleEvent,
-    ProviderLifecycleSnapshot, QuarantineEvidenceLog, QuarantineLifecycleEvent,
-    QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
-    RetentionHoldLifecycleEvent, RetentionHoldLifecycleState, RetentionHoldSnapshot,
-    RetentionObjectIdentity, S3ObjectEvidenceLog, S3ObjectSnapshot, S3ObjectState,
-    SnapshotEvidence, SnapshotEvidenceLog, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
-    WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState, WebhookDeliverySnapshot,
-    verify_or_repair_snapshot_evidence, verify_snapshot_evidence,
+    OciTagEvidenceLog, OciTagSnapshot, OperationKind, ProviderEvidenceLog,
+    ProviderLifecycleSnapshot, QuarantineEvidenceLog, QuarantineLifecycleState,
+    QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
+    S3ObjectEvidenceLog, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence, SnapshotEvidenceLog,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
+    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -723,24 +723,30 @@ pub(crate) fn load_quarantine_evidence(
     )
 }
 
+fn load_snapshot_evidence_batch<S>(
+    connection: &Connection,
+    operation_kind: OperationKind,
+    operation_ids: &[String],
+) -> Result<HashMap<String, SnapshotEvidenceLog<S>>, LocalIndexStoreError>
+where
+    S: SnapshotEvidence + serde::de::DeserializeOwned,
+{
+    load_latest_verified_event_json_batch(connection, operation_kind, operation_ids)?
+        .into_iter()
+        .map(|(operation_id, event)| {
+            Ok((
+                operation_id,
+                SnapshotEvidenceLog::from_head(from_value(event)?)?,
+            ))
+        })
+        .collect()
+}
+
 pub(crate) fn load_quarantine_evidence_batch(
     transaction: &Connection,
     object_keys: &[String],
 ) -> Result<HashMap<String, QuarantineEvidenceLog>, LocalIndexStoreError> {
-    let heads = load_latest_verified_event_json_batch(
-        transaction,
-        OperationKind::GarbageCollection,
-        object_keys,
-    )?;
-    heads
-        .into_iter()
-        .map(|(object_key, event)| {
-            Ok((
-                object_key,
-                QuarantineEvidenceLog::from_head(from_value::<QuarantineLifecycleEvent>(event)?)?,
-            ))
-        })
-        .collect()
+    load_snapshot_evidence_batch(transaction, OperationKind::GarbageCollection, object_keys)
 }
 
 pub(crate) fn retention_evidence_operation_id(object_key: &str) -> String {
@@ -775,20 +781,7 @@ pub(crate) fn load_retention_evidence_batch(
     transaction: &Connection,
     object_keys: &[String],
 ) -> Result<HashMap<String, RetentionEvidenceLog>, LocalIndexStoreError> {
-    let heads = load_latest_verified_event_json_batch(
-        transaction,
-        OperationKind::RetentionHold,
-        object_keys,
-    )?;
-    heads
-        .into_iter()
-        .map(|(object_key, event)| {
-            Ok((
-                object_key,
-                RetentionEvidenceLog::from_head(from_value::<RetentionHoldLifecycleEvent>(event)?)?,
-            ))
-        })
-        .collect()
+    load_snapshot_evidence_batch(transaction, OperationKind::RetentionHold, object_keys)
 }
 
 pub(crate) fn webhook_snapshot(
@@ -1080,26 +1073,12 @@ pub(crate) fn load_provider_evidence_batch(
         .iter()
         .map(provider_evidence_operation_id)
         .collect::<Vec<_>>();
-    let heads = load_latest_verified_event_json_batch(
-        transaction,
-        OperationKind::ProviderEvent,
-        &operation_ids,
-    )?;
-    operation_ids
-        .into_iter()
-        .map(|operation_id| {
-            let evidence = heads
-                .get(&operation_id)
-                .map(|event| {
-                    ProviderEvidenceLog::from_head(from_value::<ProviderLifecycleEvent>(
-                        event.clone(),
-                    )?)
-                })
-                .transpose()?
-                .unwrap_or_default();
-            Ok((operation_id, evidence))
-        })
-        .collect()
+    let mut evidence =
+        load_snapshot_evidence_batch(transaction, OperationKind::ProviderEvent, &operation_ids)?;
+    for operation_id in operation_ids {
+        evidence.entry(operation_id).or_default();
+    }
+    Ok(evidence)
 }
 
 impl SqliteExecutor for Connection {

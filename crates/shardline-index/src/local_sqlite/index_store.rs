@@ -3518,7 +3518,11 @@ mod tests {
                 "legacy-provider",
             )
             .unwrap(),
-            Some(state)
+            Some(state.clone())
+        );
+        assert_eq!(
+            LifecycleStore::list_provider_repository_states(&store).unwrap(),
+            vec![state]
         );
     }
 
