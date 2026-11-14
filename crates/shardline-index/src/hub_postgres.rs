@@ -1,7 +1,5 @@
 use crate::store::escape_like;
 
-use std::collections::HashMap;
-
 mod creation;
 mod file_write;
 mod object_location;
@@ -22,13 +20,12 @@ use crate::{
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
-        load_postgres_snapshot_evidence_for, u64_to_i64,
+        load_postgres_latest_evidence_heads, load_postgres_snapshot_evidence_for, u64_to_i64,
     },
 };
 use shardline_reliability::{
     HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, OperationKind, SnapshotEvidence,
-    persisted_event_sequence, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit_with_previous,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
     verify_snapshot_evidence,
 };
 
@@ -104,93 +101,24 @@ async fn verify_hub_ref_evidence_batch(
                 .operation_id,
         );
     }
-    let rows = sqlx::query(
-        "WITH requested AS (
-             SELECT operation_id
-             FROM unnest($1::text[]) AS values(operation_id)
-         )
-         SELECT requested.operation_id,
-                latest.sequence,
-                latest.event_json,
-                latest.merkle_commit_json,
-                CASE WHEN EXISTS (
-                    SELECT 1
-                    FROM shardline_reliability_events AS missing
-                    WHERE missing.operation_kind = 'MetadataCommit'
-                      AND missing.operation_id = requested.operation_id
-                      AND missing.sequence < latest.sequence
-                      AND missing.merkle_commit_json IS NULL
-                ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE previous.merkle_commit_json END
-                    AS previous_merkle_commit_json
-         FROM requested
-         LEFT JOIN LATERAL (
-             SELECT sequence, event_json, merkle_commit_json
-             FROM shardline_reliability_events
-             WHERE operation_kind = 'MetadataCommit'
-               AND operation_id = requested.operation_id
-             ORDER BY sequence DESC
-             LIMIT 1
-         ) AS latest ON TRUE
-         LEFT JOIN LATERAL (
-             SELECT merkle_commit_json
-             FROM shardline_reliability_events
-             WHERE operation_kind = 'MetadataCommit'
-               AND operation_id = requested.operation_id
-               AND sequence < latest.sequence
-             ORDER BY sequence DESC
-             LIMIT 1
-         ) AS previous ON TRUE",
+    let mut heads = load_postgres_latest_evidence_heads(
+        &mut **transaction,
+        OperationKind::MetadataCommit,
+        &operation_ids,
     )
-    .bind(&operation_ids)
-    .fetch_all(&mut **transaction)
     .await?;
-    let mut heads = HashMap::with_capacity(operation_ids.len());
-    for row in rows {
-        let operation_id: String = row.try_get("operation_id")?;
-        let sequence: Option<i64> = row.try_get("sequence")?;
-        let event_json: Option<serde_json::Value> = row.try_get("event_json")?;
-        let merkle_commit: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
-        let previous_merkle_commit: Option<serde_json::Value> =
-            row.try_get("previous_merkle_commit_json")?;
-        heads.insert(
-            operation_id,
-            (sequence, event_json, merkle_commit, previous_merkle_commit),
-        );
-    }
     for (reference, operation_id) in refs.iter().zip(operation_ids) {
         let snapshot = HubRefSnapshot::new(
             &reference.repo_id,
             &reference.ref_name,
             Some(reference.sha.clone()),
         )?;
-        let (sequence, event_json, merkle_commit, previous_merkle_commit) = heads
-            .remove(&operation_id)
-            .ok_or(PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::OperationMismatch,
-            ))?;
-        let sequence = u64::try_from(sequence.ok_or(PostgresMetadataStoreError::Reliability(
-            shardline_reliability::ReliabilityError::OperationMismatch,
-        ))?)
-        .map_err(|error| {
-            PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
-        })?;
-        let event_json = event_json.ok_or(PostgresMetadataStoreError::Reliability(
-            shardline_reliability::ReliabilityError::OperationMismatch,
-        ))?;
-        if persisted_event_sequence(OperationKind::MetadataCommit, event_json.clone())? != sequence
-        {
-            return Err(PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::Merkle(
-                    "hub evidence row sequence does not match its event".into(),
-                ),
-            ));
-        }
-        verify_persisted_merkle_commit_with_previous(
-            OperationKind::MetadataCommit,
-            event_json.clone(),
-            merkle_commit,
-            previous_merkle_commit,
-        )?;
+        let event_json =
+            heads
+                .remove(&operation_id)
+                .ok_or(PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ))?;
         let event = from_value::<HubRefLifecycleEvent>(event_json)?;
         let evidence = HubRefEvidenceLog::from_head(event)?;
         verify_snapshot_evidence(&evidence, &snapshot)?;
@@ -1827,6 +1755,9 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean up tampered hub evidence");
+        assert!(store.list_refs(repo_id).is_err());
+        assert!(store.list_repos().is_err());
+        assert!(store.search_repos(None, repo_id, 10).is_err());
         cleanup_repo(&store, repo_id).await;
     }
 
