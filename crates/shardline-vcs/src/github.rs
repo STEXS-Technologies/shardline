@@ -212,9 +212,7 @@ mod tests {
         let request = WebhookRequest::new("push", "delivery-1", signature.as_deref(), body);
 
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         let revision = RevisionRef::new("refs/heads/main").unwrap();
         assert_eq!(event.delivery_id().as_str(), "delivery-1");
         assert_eq!(
@@ -235,9 +233,7 @@ mod tests {
         let request = WebhookRequest::new("repository", "delivery-2", signature.as_deref(), body);
 
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         let new_repository =
             RepositoryRef::new(ProviderKind::GitHub, "team", "new-assets").unwrap();
         assert_eq!(event.repository().name(), "assets");
@@ -258,9 +254,7 @@ mod tests {
         let request = WebhookRequest::new("repository", "delivery-3", signature.as_deref(), body);
 
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.repository().owner(), "team");
         assert_eq!(event.repository().name(), "assets");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
@@ -351,9 +345,7 @@ mod tests {
         let request =
             WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -368,9 +360,7 @@ mod tests {
         let request =
             WebhookRequest::new("repository", "delivery-priv", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -384,9 +374,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-pub", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -414,9 +402,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-alt", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.repository().name(), "assets");
     }
 
@@ -510,7 +496,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-del", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
         assert_eq!(event.repository().owner(), "team");
     }
@@ -526,7 +512,7 @@ mod tests {
         let request =
             WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -542,7 +528,7 @@ mod tests {
         let request =
             WebhookRequest::new("repository", "delivery-alt2", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.repository().name(), "assets");
     }
 
