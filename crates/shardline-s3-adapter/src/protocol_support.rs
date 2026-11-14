@@ -629,103 +629,50 @@ mod tests {
     }
 
     #[test]
-    fn parse_s3_range_absent_header_returns_full_range() {
-        assert_eq!(
-            parse_s3_range(None, 100).unwrap(),
-            ByteRange::new(0, 99).unwrap()
-        );
-    }
-
-    #[test]
-    fn parse_s3_range_closed_range() {
-        assert_eq!(
-            parse_s3_range(Some("bytes=0-4"), 100).unwrap(),
-            ByteRange::new(0, 4).unwrap()
-        );
-    }
-
-    #[test]
-    fn parse_s3_range_open_ended_is_clamped() {
-        assert_eq!(
-            parse_s3_range(Some("bytes=95-"), 100).unwrap(),
-            ByteRange::new(95, 99).unwrap()
-        );
-    }
-
-    #[test]
-    fn parse_s3_range_suffix_range() {
-        assert_eq!(
-            parse_s3_range(Some("bytes=-3"), 100).unwrap(),
-            ByteRange::new(97, 99).unwrap()
-        );
-    }
-
-    #[test]
-    fn parse_s3_range_unsatisfiable_maps_to_invalid_range() {
-        let error = parse_s3_range(Some("bytes=100-"), 100).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-        assert_eq!(error.status, 416);
-        let error = parse_s3_range(Some("bytes=5-2"), 100).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-    }
-
-    #[test]
-    fn parse_s3_range_malformed_maps_to_invalid_range() {
-        for header in ["5-10", "bytes=", "bytes=abc", "bytes=0-4,8-9"] {
-            let error = parse_s3_range(Some(header), 100).unwrap_err();
-            assert_eq!(error.code, "InvalidRange", "header {header:?}");
+    fn parse_s3_range_accepts_supported_ranges_and_clamps_bounds() {
+        for (header, total_bytes, start, end) in [
+            (None, 100, 0, 99),
+            (Some("bytes=0-4"), 100, 0, 4),
+            (Some("bytes=95-"), 100, 95, 99),
+            (Some("bytes=-3"), 100, 97, 99),
+            (Some("bytes=0-"), 100, 0, 99),
+            (Some("bytes=0-18446744073709551615"), 100, 0, 99),
+            (Some("bytes=99-"), 100, 99, 99),
+        ] {
+            assert_eq!(
+                parse_s3_range(header, total_bytes).unwrap(),
+                ByteRange::new(start, end).unwrap(),
+                "header {header:?}, length {total_bytes}",
+            );
         }
     }
 
     #[test]
-    fn parse_s3_range_empty_resource_is_invalid() {
-        let error = parse_s3_range(None, 0).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-        let error = parse_s3_range(Some("bytes=-5"), 0).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-    }
-
-    #[test]
-    fn parse_s3_range_edge_cases() {
-        // Open-ended from zero.
-        assert_eq!(
-            parse_s3_range(Some("bytes=0-"), 100).unwrap(),
-            ByteRange::new(0, 99).unwrap()
-        );
-        // A zero-length suffix is invalid.
-        let error = parse_s3_range(Some("bytes=-0"), 100).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-        assert_eq!(error.status, 416);
-        // Inverted range.
-        let error = parse_s3_range(Some("bytes=5-2"), 100).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-        // A huge end is clamped to the resource length.
-        assert_eq!(
-            parse_s3_range(Some("bytes=0-18446744073709551615"), 100).unwrap(),
-            ByteRange::new(0, 99).unwrap()
-        );
-        // Multi-range is rejected.
-        let error = parse_s3_range(Some("bytes=0-1,3-4"), 100).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-        // The byte-range unit must be lowercase `bytes=`.
-        for header in ["Bytes=0-1", "BYTES=0-1", "bytes =0-1"] {
-            let error = parse_s3_range(Some(header), 100).unwrap_err();
-            assert_eq!(error.code, "InvalidRange", "header {header:?}");
+    fn parse_s3_range_rejects_invalid_requests_with_s3_error() {
+        for (header, total_bytes) in [
+            (Some("bytes=100-"), 100),
+            (Some("bytes=5-2"), 100),
+            (Some("5-10"), 100),
+            (Some("bytes="), 100),
+            (Some("bytes=abc"), 100),
+            (Some("bytes=0-4,8-9"), 100),
+            (None, 0),
+            (Some("bytes=-5"), 0),
+            (Some("bytes=-0"), 100),
+            (Some("bytes=0-1,3-4"), 100),
+            (Some("Bytes=0-1"), 100),
+            (Some("BYTES=0-1"), 100),
+            (Some("bytes =0-1"), 100),
+            (Some("bytes=0-99999999999999999999999"), 100),
+            (Some(" bytes=0-1"), 100),
+        ] {
+            let error = parse_s3_range(header, total_bytes).unwrap_err();
+            assert_eq!(
+                error.code, "InvalidRange",
+                "header {header:?}, length {total_bytes}"
+            );
+            assert_eq!(error.status, 416, "header {header:?}, length {total_bytes}");
         }
-        // Single-byte open-ended range.
-        assert_eq!(
-            parse_s3_range(Some("bytes=99-"), 100).unwrap(),
-            ByteRange::new(99, 99).unwrap()
-        );
-        // Start beyond the resource.
-        let error = parse_s3_range(Some("bytes=100-"), 100).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-        // Numeric overflow in the end is invalid syntax.
-        let error = parse_s3_range(Some("bytes=0-99999999999999999999999"), 100).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
-        // Whitespace padding is not accepted.
-        let error = parse_s3_range(Some(" bytes=0-1"), 100).unwrap_err();
-        assert_eq!(error.code, "InvalidRange");
     }
 
     fn strong(value: &str) -> EntityTag {
