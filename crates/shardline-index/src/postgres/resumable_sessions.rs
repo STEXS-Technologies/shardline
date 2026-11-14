@@ -723,43 +723,13 @@ impl PostgresIndexStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *transaction)
             .await?;
-        let rows = sqlx::query(
-            "SELECT sequence, event_json, merkle_commit_json
-             FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
-        )
-        .bind("ResumableSession")
-        .bind(session_id)
-        .fetch_all(&mut *transaction)
-        .await?;
-        let mut events = Vec::with_capacity(rows.len());
-        let mut event_json = Vec::with_capacity(rows.len());
-        let mut merkle_commits = Vec::with_capacity(rows.len());
-        for row in rows {
-            let sequence: i64 = row.try_get("sequence")?;
-            if sequence < 0 {
-                return Err(PostgresMetadataStoreError::IntegerOutOfRange(
-                    "reliability sequence".into(),
-                ));
-            }
-            let value: serde_json::Value = row.try_get("event_json")?;
-            let event = serde_json::from_value::<StateTransitionEvent>(value.clone())?;
-            if u64_to_i64(event.sequence)? != sequence {
-                return Err(PostgresMetadataStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::Merkle(
-                        "resumable event sequence does not match its row".into(),
-                    ),
-                ));
-            }
-            events.push(event);
-            event_json.push(value);
-            merkle_commits.push(row.try_get("merkle_commit_json")?);
-        }
-        shardline_reliability::verify_persisted_event_merkle_chain(
-            shardline_reliability::OperationKind::ResumableSession,
-            &event_json,
-            &merkle_commits,
-        )?;
+        let events: Vec<StateTransitionEvent> =
+            super::index_store::load_postgres_reliability_events(
+                &mut transaction,
+                shardline_reliability::OperationKind::ResumableSession,
+                session_id,
+            )
+            .await?;
         let session = sqlx::query(
             "SELECT scope_namespace, target_key, state
              FROM shardline_resumable_sessions
@@ -2212,6 +2182,12 @@ mod tests {
 
         assert!(matches!(
             store.resumable_session_by_id(session.session_id()).await,
+            Err(PostgresMetadataStoreError::Reliability(_))
+        ));
+        assert!(matches!(
+            store
+                .resumable_reliability_events(session.session_id())
+                .await,
             Err(PostgresMetadataStoreError::Reliability(_))
         ));
         sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id = $1")

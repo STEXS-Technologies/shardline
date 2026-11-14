@@ -194,6 +194,49 @@ pub(crate) async fn load_postgres_latest_evidence_heads(
     Ok(heads)
 }
 
+/// Reads an ordered journal and verifies its row keys and complete Merkle chain
+/// before returning typed events. Callers retain their transaction and domain
+/// checks against the authoritative upload intent or resumable session.
+pub(super) async fn load_postgres_reliability_events<T: serde::de::DeserializeOwned>(
+    connection: &mut PgConnection,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<Vec<T>, PostgresMetadataStoreError> {
+    let rows = query(
+        "SELECT sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
+    )
+    .bind(operation_kind.as_str())
+    .bind(operation_id)
+    .fetch_all(connection)
+    .await?;
+    let mut sequences = Vec::with_capacity(rows.len());
+    let mut events = Vec::with_capacity(rows.len());
+    let mut commitments = Vec::with_capacity(rows.len());
+    for row in rows {
+        sequences.push(
+            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
+                PostgresMetadataStoreError::IntegerOutOfRange(format!(
+                    "reliability sequence: {error}"
+                ))
+            })?,
+        );
+        events.push(row.try_get("event_json")?);
+        commitments.push(row.try_get("merkle_commit_json")?);
+    }
+    verify_persisted_event_merkle_chain_with_sequences(
+        operation_kind,
+        &sequences,
+        &events,
+        &commitments,
+    )?;
+    events
+        .into_iter()
+        .map(|event| serde_json::from_value(event).map_err(Into::into))
+        .collect()
+}
+
 async fn verify_postgres_quarantine_evidence_batch(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     candidates: &[QuarantineCandidate],
@@ -2476,40 +2519,12 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 shardline_reliability::ReliabilityError::EmptyField("unknown upload intent state"),
             )
         })?;
-        let rows = sqlx::query(
-            "SELECT sequence, event_json, merkle_commit_json
-             FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id = $2
-             ORDER BY sequence",
-        )
-        .bind("Upload")
-        .bind(&event.operation.operation_id)
-        .fetch_all(&mut *transaction)
-        .await?;
-        let mut sequences = Vec::with_capacity(rows.len());
-        let mut event_json = Vec::with_capacity(rows.len());
-        let mut merkle_commits = Vec::with_capacity(rows.len());
-        for row in rows {
-            let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-                PostgresMetadataStoreError::IntegerOutOfRange(format!(
-                    "reliability sequence: {error}"
-                ))
-            })?;
-            event_json.push(row.try_get("event_json")?);
-            merkle_commits.push(row.try_get("merkle_commit_json")?);
-            sequences.push(sequence);
-        }
-        verify_persisted_event_merkle_chain_with_sequences(
+        let mut events: Vec<LifecycleEvent> = load_postgres_reliability_events(
+            &mut transaction,
             OperationKind::Upload,
-            &sequences,
-            &event_json,
-            &merkle_commits,
-        )?;
-        let mut events = event_json
-            .iter()
-            .cloned()
-            .map(serde_json::from_value::<LifecycleEvent>)
-            .collect::<Result<Vec<LifecycleEvent>, _>>()?;
+            &event.operation.operation_id,
+        )
+        .await?;
         if let Some(existing) = events
             .iter()
             .find(|existing| existing.sequence == event.sequence)
@@ -2546,40 +2561,9 @@ impl UploadIntentStore for super::PostgresIndexStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *transaction)
             .await?;
-        let rows = sqlx::query(
-            "SELECT sequence, event_json, merkle_commit_json
-             FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id = $2
-             ORDER BY sequence",
-        )
-        .bind("Upload")
-        .bind(operation_id)
-        .fetch_all(&mut *transaction)
-        .await?;
-        let mut events = Vec::with_capacity(rows.len());
-        let mut event_json = Vec::with_capacity(rows.len());
-        let mut merkle_commits = Vec::with_capacity(rows.len());
-        for row in rows {
-            let sequence: i64 = row.try_get("sequence")?;
-            if sequence < 0 {
-                return Err(PostgresMetadataStoreError::IntegerOutOfRange(
-                    "reliability sequence".into(),
-                ));
-            }
-            let value: serde_json::Value = row.try_get("event_json")?;
-            let event = serde_json::from_value::<LifecycleEvent>(value.clone())?;
-            if u64_to_i64(event.sequence)? != sequence {
-                return Err(PostgresMetadataStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::Merkle(
-                        "upload event sequence does not match its row".into(),
-                    ),
-                ));
-            }
-            events.push(event);
-            event_json.push(value);
-            merkle_commits.push(row.try_get("merkle_commit_json")?);
-        }
-        verify_persisted_event_merkle_chain(OperationKind::Upload, &event_json, &merkle_commits)?;
+        let events: Vec<LifecycleEvent> =
+            load_postgres_reliability_events(&mut transaction, OperationKind::Upload, operation_id)
+                .await?;
         let intent = sqlx::query(
             "SELECT object_key, object_hash, state
              FROM shardline_upload_intents
@@ -3986,6 +3970,7 @@ mod tests {
         )
         .unwrap();
         assert!(store.record_reliability_event(&event).await.is_err());
+        assert!(store.reliability_events(intent.intent_id()).await.is_err());
         let appended: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM shardline_reliability_events
              WHERE operation_kind = 'Upload' AND operation_id = $1 AND sequence = 2",
