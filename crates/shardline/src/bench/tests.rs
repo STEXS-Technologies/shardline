@@ -646,7 +646,6 @@ async fn bench_focused_initial_upload_scenario() {
         },
     )
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     // Only initial upload should have non-zero latency
     assert!(report.latency.initial_upload_micros > 0);
@@ -673,7 +672,6 @@ async fn bench_focused_sparse_update_upload_scenario() {
         },
     )
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.latency.sparse_update_upload_micros > 0);
     assert_eq!(report.latency.initial_upload_micros, 0);
@@ -697,7 +695,6 @@ async fn bench_focused_latest_download_scenario() {
         },
     )
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.latency.latest_download_micros > 0);
     assert_eq!(report.latency.initial_upload_micros, 0);
@@ -721,7 +718,6 @@ async fn bench_focused_ranged_reconstruction_scenario() {
         },
     )
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.latency.ranged_reconstruction_micros > 0);
 }
@@ -743,7 +739,6 @@ async fn bench_focused_concurrent_upload_scenario() {
         },
     )
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.latency.concurrent_upload_micros > 0);
     assert_eq!(report.latency.initial_upload_micros, 0);
@@ -767,7 +762,6 @@ async fn bench_focused_concurrent_latest_download_scenario() {
         },
     )
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.latency.concurrent_latest_download_micros > 0);
 }
@@ -789,7 +783,6 @@ async fn bench_focused_cached_latest_reconstruction_scenario() {
         },
     )
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     // Either cold or hot load may be zero if the cache wasn't populated
     // but at least one should have data
@@ -814,7 +807,6 @@ async fn ingest_bench_focused_initial_upload() {
         mutated_bytes: 1024,
     })
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.average_initial_upload_micros > 0);
     assert_eq!(report.average_sparse_update_upload_micros, 0);
@@ -834,7 +826,6 @@ async fn ingest_bench_focused_sparse_update() {
         mutated_bytes: 1024,
     })
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.average_sparse_update_upload_micros > 0);
     // Total should still be base bytes (reuse is bounded by CDC boundary
@@ -855,7 +846,6 @@ async fn ingest_bench_focused_concurrent_upload() {
         mutated_bytes: 1024,
     })
     .await;
-    assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.average_concurrent_upload_micros > 0);
     assert_eq!(report.average_initial_upload_micros, 0);

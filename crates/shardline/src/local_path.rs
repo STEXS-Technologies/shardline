@@ -126,7 +126,6 @@ mod tests {
     fn resolve_root_with_temp_dir_succeeds() {
         let sandbox = tempfile::tempdir().unwrap();
         let result = resolve_root(Some(sandbox.path()));
-        assert!(result.is_ok());
         let root = result.unwrap();
         assert!(root.is_absolute());
     }

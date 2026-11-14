@@ -994,7 +994,6 @@ mod tests {
     fn xorb_object_key_constructs_valid_key() {
         let hash = "ab".repeat(32);
         let key = xorb_object_key(&hash);
-        assert!(key.is_ok());
         let key = key.unwrap();
         assert!(key.as_str().starts_with("xorbs/default/ab/"));
         assert!(key.as_str().ends_with(".xorb"));
@@ -1286,7 +1285,6 @@ mod tests {
         let expected_hash = parse_xet_hash_hex(&serialized.hash.hex()).unwrap();
 
         let normalized = normalize_serialized_xorb(expected_hash, &serialized.serialized_data);
-        assert!(normalized.is_ok());
         let normalized = normalized.unwrap();
         assert!(normalized.len() > serialized.serialized_data.len());
 
@@ -1495,7 +1493,6 @@ mod tests {
 
         let result =
             async_store_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok());
         let stored = result.unwrap();
         assert!(stored.was_inserted);
         assert!(stored.stored_bytes > 0);

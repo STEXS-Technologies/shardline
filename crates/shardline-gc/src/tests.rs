@@ -1859,7 +1859,6 @@ fn gc_very_long_retention_preserves_quarantine() {
             LocalGcOptions::mark_only(100_000_000),
         )
         .await;
-        assert!(result.is_ok());
         let diag = result.unwrap();
         assert_eq!(diag.report.new_quarantine_candidates, 1);
         assert_eq!(diag.report.active_quarantine_candidates, 1);
@@ -1873,7 +1872,6 @@ fn gc_very_long_retention_preserves_quarantine() {
             LocalGcOptions::sweep_only(),
         )
         .await;
-        assert!(sweep_result.is_ok());
         let sweep_diag = sweep_result.unwrap();
         assert_eq!(sweep_diag.report.deleted_chunks, 0);
         assert_eq!(sweep_diag.report.active_quarantine_candidates, 1);
@@ -1905,7 +1903,6 @@ fn gc_mark_and_sweep_in_one_pass_deletes_orphans() {
             LocalGcOptions::mark_and_sweep(0),
         )
         .await;
-        assert!(result.is_ok());
         let diag = result.unwrap();
         assert_eq!(diag.report.new_quarantine_candidates, 1);
         assert_eq!(diag.report.deleted_chunks, 1);
@@ -1957,7 +1954,6 @@ fn gc_with_retention_hold_and_quarantine_in_mark_sweep() {
             LocalGcOptions::mark_and_sweep(0),
         )
         .await;
-        assert!(result.is_ok());
         let diag = result.unwrap();
         // Held orphan should not appear in orphan count or be quarantined/deleted
         assert_eq!(
@@ -2010,7 +2006,6 @@ fn gc_with_existing_quarantine_candidates_retains_unexpired() {
             LocalGcOptions::sweep_only(),
         )
         .await;
-        assert!(result.is_ok());
         let diag = result.unwrap();
         assert_eq!(
             diag.report.deleted_chunks, 0,

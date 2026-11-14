@@ -1648,7 +1648,6 @@ mod tests {
         std::fs::write(&tim, b"timer").unwrap();
 
         let result = super::uninstall_gc_schedule(sandbox.path(), "test");
-        assert!(result.is_ok());
         let report = result.unwrap();
         assert!(report.removed_service);
         assert!(report.removed_timer);

@@ -427,7 +427,6 @@ mod tests {
             60,
         );
 
-        assert!(token.is_ok());
         let token = token.unwrap();
         assert!(token.contains('.'));
     }
@@ -600,7 +599,6 @@ mod tests {
             60,
         );
 
-        assert!(token.is_ok());
         let token = token.unwrap();
         assert!(token.contains('.'));
     }

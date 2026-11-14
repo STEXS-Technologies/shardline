@@ -1080,7 +1080,6 @@ mod tests {
         std::fs::create_dir(&dir_path).unwrap();
 
         let result = open_existing_regular_file(&dir_path);
-        assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }

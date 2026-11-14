@@ -225,7 +225,6 @@ mod tests {
         let state_dir = temp.path().join(".shardline");
 
         let report = run_providerless_setup(Some(&state_dir));
-        assert!(report.is_ok());
         let report = report.unwrap();
 
         assert_eq!(report.state_dir, state_dir);
@@ -265,7 +264,6 @@ mod tests {
         );
 
         let config = apply_providerless_source_checkout_defaults(config);
-        assert!(config.is_ok());
         let config = config.unwrap();
 
         assert_eq!(config.root_dir(), data_root.as_path());
@@ -289,7 +287,6 @@ mod tests {
         );
 
         let config = apply_providerless_source_checkout_defaults(config);
-        assert!(config.is_ok());
         let config = config.unwrap();
 
         assert!(config.token_signing_key().is_none());
@@ -349,7 +346,6 @@ mod tests {
     #[test]
     fn resolve_providerless_state_dir_without_override_uses_cwd() {
         let dir = super::resolve_providerless_state_dir(None);
-        assert!(dir.is_ok());
         let dir = dir.unwrap();
         assert!(dir.ends_with(".shardline"));
     }

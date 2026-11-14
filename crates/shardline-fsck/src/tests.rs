@@ -954,7 +954,6 @@ fn fsck_error_from_postgres_metadata_store_error() {
 #[test]
 fn unix_now_seconds_checked_returns_ok() {
     let result = unix_now_seconds_checked();
-    assert!(result.is_ok());
     let seconds = result.unwrap();
     assert!(seconds > 1_700_000_000, "timestamp should be plausible");
 }

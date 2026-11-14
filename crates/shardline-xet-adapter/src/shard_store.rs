@@ -1955,7 +1955,6 @@ mod tests {
 
         let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
 
-        assert!(hashes.is_ok());
         let result = hashes.unwrap();
         assert_eq!(result.len(), 1, "file start chunk should be retained");
         assert_eq!(result[0], chunk_hash.hex());
@@ -2183,7 +2182,6 @@ mod tests {
     fn shard_object_key_constructs_valid_key() {
         let hash = "cd".repeat(32);
         let key = shard_object_key(&hash);
-        assert!(key.is_ok());
         let key = key.unwrap();
         assert!(key.as_str().starts_with("shards/cd/"));
         assert!(key.as_str().ends_with(".shard"));
@@ -2561,7 +2559,6 @@ mod tests {
         );
 
         let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
-        assert!(hashes.is_ok());
         let result = hashes.unwrap();
         // Chunk 0 is not a file start (file starts at chunk 1), and its hash
         // is unlikely to be dedup-eligible. If hash_is_global_dedup_eligible

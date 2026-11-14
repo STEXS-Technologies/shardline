@@ -229,7 +229,6 @@ mod tests {
     #[test]
     fn referenced_term_object_key_with_xet_returns_ok() {
         let result = referenced_term_object_key(&[ServerFrontend::Xet], VALID_HASH);
-        assert!(result.is_ok());
         let key = result.unwrap();
         // Should produce a valid xorb key
         assert!(key.as_str().starts_with("xorbs/default/"));

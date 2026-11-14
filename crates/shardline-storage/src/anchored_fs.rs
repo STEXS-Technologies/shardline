@@ -812,7 +812,6 @@ mod tests {
             AnchoredPathOptions::new(None, None),
             invalid_path_error,
         );
-        assert!(result.is_ok());
         let target = result.unwrap();
         assert_eq!(target.file_name(), OsStr::new("file.txt"));
         assert_eq!(target.parent_path, root.path().join("sub/dir"));
@@ -975,7 +974,6 @@ mod tests {
         let payload = b"hello world";
 
         let result = write_anchored_temporary_file(&target, payload, None);
-        assert!(result.is_ok());
         let tmp_path = result.unwrap();
 
         // Short destinations retain the GC-recognizable suffix
@@ -998,7 +996,6 @@ mod tests {
         let payload = b"mode test";
 
         let result = write_anchored_temporary_file(&target, payload, Some(0o600));
-        assert!(result.is_ok());
         let tmp_path = result.unwrap();
         assert!(tmp_path.exists());
         let contents = fs::read(&tmp_path).unwrap();
@@ -1160,7 +1157,6 @@ mod tests {
         std::fs::write(&first_tmp, b"stale").unwrap();
 
         let result = write_anchored_temporary_file(&target, payload, None);
-        assert!(result.is_ok());
         let tmp_path = result.unwrap();
         let contents = std::fs::read(&tmp_path).unwrap();
         assert_eq!(contents, payload);
@@ -1558,7 +1554,6 @@ mod tests {
 
         // L244: symlink detected
         let result = ensure_parent_path_matches_anchor(&target, "parent replaced with symlink");
-        assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }

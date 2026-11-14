@@ -1163,7 +1163,6 @@ mod tests {
     fn endpoint_local_with_root_returns_local_endpoint() {
         let sandbox = tempfile::tempdir().unwrap();
         let result = super::endpoint(ObjectStorageAdapter::Local, Some(sandbox.path()), "source");
-        assert!(result.is_ok());
         let endpoint = result.unwrap();
         assert!(matches!(
             endpoint,

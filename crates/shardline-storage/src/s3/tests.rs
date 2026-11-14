@@ -1554,7 +1554,6 @@ mod minio_tests {
                 let finish = store
                     .finish_content_addressed_upload(writer, &temp_key, &canonical)
                     .await;
-                assert!(finish.is_ok());
                 let outcome = finish.unwrap();
                 // Could be Inserted or AlreadyExists depending on timing
                 assert!(
