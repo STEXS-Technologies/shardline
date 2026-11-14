@@ -85,44 +85,35 @@ fn verify_oci_tag_listing_evidence_chunk(
     if values.is_empty() {
         return Ok(());
     }
-    let mut operations = Vec::with_capacity(values.len());
-    for value in values {
-        let snapshot = oci_tag_snapshot(
-            &value.scope_namespace,
-            &value.repository,
-            &value.tag,
-            Some(value.digest_hex.clone()),
-        )?;
-        operations.push(snapshot.evidence_operation()?);
-    }
-    let operation_ids = operations
+    let snapshots = values
         .iter()
-        .map(|operation| operation.operation_id.clone())
-        .collect::<Vec<_>>();
+        .map(|value| {
+            oci_tag_snapshot(
+                &value.scope_namespace,
+                &value.repository,
+                &value.tag,
+                Some(value.digest_hex.clone()),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let operation_ids = snapshots
+        .iter()
+        .map(|snapshot| Ok(snapshot.evidence_operation()?.operation_id))
+        .collect::<Result<Vec<_>, LocalIndexStoreError>>()?;
     let mut latest = super::helpers::load_latest_verified_event_json_batch(
         transaction,
         OperationKind::OciTag,
         &operation_ids,
     )?;
-    for (value, operation) in values.iter().zip(operations) {
-        let Some(event_json) = latest.remove(&operation.operation_id) else {
+    for (snapshot, operation_id) in snapshots.iter().zip(operation_ids) {
+        let Some(event_json) = latest.remove(&operation_id) else {
             return Err(LocalIndexStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         };
         let event: OciTagLifecycleEvent = serde_json::from_value(event_json)?;
-        let expected = oci_tag_snapshot(
-            &value.scope_namespace,
-            &value.repository,
-            &value.tag,
-            Some(value.digest_hex.clone()),
-        )?;
-        verify_snapshot_event(&event, &expected)?;
-        if event.operation != operation {
-            return Err(LocalIndexStoreError::Reliability(
-                shardline_reliability::ReliabilityError::OperationMismatch,
-            ));
-        }
+        // Event verification binds its operation identity to this exact snapshot.
+        verify_snapshot_event(&event, snapshot)?;
     }
     Ok(())
 }

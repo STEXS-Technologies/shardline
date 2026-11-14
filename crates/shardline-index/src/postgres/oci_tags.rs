@@ -65,34 +65,25 @@ async fn verify_tag_listing_evidence(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let operations = snapshots
+    let operation_ids = snapshots
         .iter()
-        .map(OciTagSnapshot::evidence_operation)
-        .collect::<Result<Vec<_>, _>>()?;
-    let operation_ids = operations
-        .iter()
-        .map(|operation| operation.operation_id.clone())
-        .collect::<Vec<_>>();
+        .map(|snapshot| Ok(snapshot.evidence_operation()?.operation_id))
+        .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
     let mut latest = super::load_postgres_latest_evidence_heads(
         connection,
         OperationKind::OciTag,
         &operation_ids,
     )
     .await?;
-    for (snapshot, operation) in snapshots.into_iter().zip(operations) {
-        let operation_id = &operation.operation_id;
-        let Some(event_json) = latest.remove(operation_id) else {
+    for (snapshot, operation_id) in snapshots.iter().zip(operation_ids) {
+        let Some(event_json) = latest.remove(&operation_id) else {
             return Err(PostgresMetadataStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         };
         let event: OciTagLifecycleEvent = from_value(event_json)?;
-        verify_snapshot_event(&event, &snapshot)?;
-        if event.operation != operation {
-            return Err(PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::OperationMismatch,
-            ));
-        }
+        // Event verification binds its operation identity to this exact snapshot.
+        verify_snapshot_event(&event, snapshot)?;
     }
     Ok(())
 }
