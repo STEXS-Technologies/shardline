@@ -282,11 +282,7 @@ mod tests {
 
     #[test]
     fn gitlab_adapter_denies_unconfigured_write_access() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let repository = RepositoryRef::new(ProviderKind::GitLab, "group", "assets");
         let revision = RevisionRef::new("refs/heads/main");
         let subject = ProviderSubject::new("gitlab-user-1");
@@ -306,11 +302,7 @@ mod tests {
 
     #[test]
     fn gitlab_adapter_parses_push_hook() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "event_name":"push",
             "ref":"refs/heads/main",
@@ -327,11 +319,7 @@ mod tests {
         let Some(event) = event else {
             return;
         };
-        let revision = RevisionRef::new("refs/heads/main");
-        assert!(revision.is_ok());
-        let Ok(revision) = revision else {
-            return;
-        };
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
         assert_eq!(event.repository().owner(), "group");
         assert_eq!(
             event.kind(),
@@ -341,11 +329,7 @@ mod tests {
 
     #[test]
     fn gitlab_adapter_parses_project_destroy_hook() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "event_name":"project_destroy",
             "path_with_namespace":"group/assets"
@@ -369,11 +353,7 @@ mod tests {
 
     #[test]
     fn gitlab_adapter_parses_project_rename_system_hook() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "event_name":"project_rename",
             "path_with_namespace":"group/new-assets",
@@ -390,11 +370,8 @@ mod tests {
         let Some(event) = event else {
             return;
         };
-        let new_repository = RepositoryRef::new(ProviderKind::GitLab, "group", "new-assets");
-        assert!(new_repository.is_ok());
-        let Ok(new_repository) = new_repository else {
-            return;
-        };
+        let new_repository =
+            RepositoryRef::new(ProviderKind::GitLab, "group", "new-assets").unwrap();
         assert_eq!(event.repository().owner(), "group");
         assert_eq!(event.repository().name(), "assets");
         assert_eq!(
@@ -405,11 +382,7 @@ mod tests {
 
     #[test]
     fn gitlab_adapter_parses_project_update_system_hook_as_access_change() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "event_name":"project_update",
             "path_with_namespace":"group/assets"
@@ -433,11 +406,7 @@ mod tests {
 
     #[test]
     fn gitlab_adapter_parses_repository_update_system_hook_with_single_ref() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "event_name":"repository_update",
             "project":{"path_with_namespace":"group/assets"},
@@ -454,11 +423,7 @@ mod tests {
         let Some(event) = event else {
             return;
         };
-        let revision = RevisionRef::new("refs/heads/main");
-        assert!(revision.is_ok());
-        let Ok(revision) = revision else {
-            return;
-        };
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
         assert_eq!(
             event.kind(),
             &RepositoryWebhookEventKind::RevisionPushed { revision }
@@ -488,11 +453,7 @@ mod tests {
 
     #[test]
     fn gitlab_adapter_rejects_invalid_token() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let request = WebhookRequest::new("Push Hook", "delivery-1", Some("wrong"), br#"{}"#);
 
         let event = adapter.parse_webhook(request);

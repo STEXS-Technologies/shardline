@@ -205,16 +205,8 @@ mod tests {
 
     #[test]
     fn github_adapter_returns_registered_metadata() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
-        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
 
         let metadata = adapter.repository_metadata(&repository);
 
@@ -231,11 +223,7 @@ mod tests {
 
     #[test]
     fn github_adapter_allows_registered_write_access() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let revision = RevisionRef::new("refs/heads/main");
         let subject = ProviderSubject::new("github-user-1");
@@ -279,11 +267,7 @@ mod tests {
 
     #[test]
     fn github_adapter_parses_push_webhook() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "ref":"refs/heads/main",
             "repository":{"full_name":"team/assets"}
@@ -300,11 +284,7 @@ mod tests {
         let Some(event) = event else {
             return;
         };
-        let revision = RevisionRef::new("refs/heads/main");
-        assert!(revision.is_ok());
-        let Ok(revision) = revision else {
-            return;
-        };
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
         assert_eq!(event.delivery_id().as_str(), "delivery-1");
         assert_eq!(
             event.kind(),
@@ -314,11 +294,7 @@ mod tests {
 
     #[test]
     fn github_adapter_parses_repository_rename() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "action":"renamed",
             "repository":{"full_name":"team/new-assets"},
@@ -336,11 +312,8 @@ mod tests {
         let Some(event) = event else {
             return;
         };
-        let new_repository = RepositoryRef::new(ProviderKind::GitHub, "team", "new-assets");
-        assert!(new_repository.is_ok());
-        let Ok(new_repository) = new_repository else {
-            return;
-        };
+        let new_repository =
+            RepositoryRef::new(ProviderKind::GitHub, "team", "new-assets").unwrap();
         assert_eq!(event.repository().name(), "assets");
         assert_eq!(
             event.kind(),
@@ -350,11 +323,7 @@ mod tests {
 
     #[test]
     fn github_adapter_parses_repository_transfer_as_access_change() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "action":"transferred",
             "repository":{"full_name":"team/assets"}
@@ -378,11 +347,7 @@ mod tests {
 
     #[test]
     fn github_adapter_rejects_invalid_signature() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{"ref":"refs/heads/main","repository":{"full_name":"team/assets"}}"#;
         let request = WebhookRequest::new("push", "delivery-1", Some("sha256=deadbeef"), body);
 

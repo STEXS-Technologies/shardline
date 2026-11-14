@@ -213,11 +213,7 @@ mod tests {
 
     #[test]
     fn codeberg_adapter_parses_push_webhook() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "ref":"refs/heads/main",
             "repository":{
@@ -236,11 +232,7 @@ mod tests {
         let Some(event) = event else {
             return;
         };
-        let revision = RevisionRef::new("refs/heads/main");
-        assert!(revision.is_ok());
-        let Ok(revision) = revision else {
-            return;
-        };
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
         assert_eq!(event.repository().provider(), ProviderKind::Codeberg);
         assert_eq!(
             event.kind(),
@@ -250,11 +242,7 @@ mod tests {
 
     #[test]
     fn codeberg_adapter_parses_repository_deleted_webhook() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "action":"deleted",
             "repository":{"full_name":"team/assets"}
@@ -276,11 +264,7 @@ mod tests {
 
     #[test]
     fn codeberg_adapter_parses_repository_renamed_webhook() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "action":"renamed",
             "repository":{"full_name":"team/new-assets"},
@@ -298,11 +282,8 @@ mod tests {
         let Some(event) = event else {
             return;
         };
-        let new_repository = RepositoryRef::new(ProviderKind::Codeberg, "team", "new-assets");
-        assert!(new_repository.is_ok());
-        let Ok(new_repository) = new_repository else {
-            return;
-        };
+        let new_repository =
+            RepositoryRef::new(ProviderKind::Codeberg, "team", "new-assets").unwrap();
         assert_eq!(event.repository().owner(), "team");
         assert_eq!(event.repository().name(), "assets");
         assert_eq!(
@@ -313,11 +294,7 @@ mod tests {
 
     #[test]
     fn codeberg_adapter_parses_repository_access_change_webhook() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let body = br#"{
             "action":"transferred",
             "repository":{"full_name":"team/assets"}
@@ -339,11 +316,7 @@ mod tests {
 
     #[test]
     fn codeberg_adapter_rejects_invalid_signature() {
-        let adapter = adapter();
-        assert!(adapter.is_ok());
-        let Ok(adapter) = adapter else {
-            return;
-        };
+        let adapter = adapter().unwrap();
         let request = WebhookRequest::new("push", "delivery-1", Some("deadbeef"), br#"{}"#);
 
         let event = adapter.parse_webhook(request);
