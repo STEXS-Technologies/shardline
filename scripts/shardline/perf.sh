@@ -134,13 +134,13 @@ fi
 
 case "${mode}" in
   e2e)
-    cargo build --locked --bin shardline
+    cargo build --locked -p shardline --bin shardline
     exec ./target/debug/shardline "${bench_args[@]}" "${passthrough_args[@]}"
     ;;
   perf-e2e)
     perf_output="${SHARDLINE_PERF_OUTPUT:-/tmp/shardline-e2e.perf.data}"
     perf_frequency="${SHARDLINE_PERF_FREQUENCY:-999}"
-    cargo build --locked --profile profiling --bin shardline
+    cargo build --locked --profile profiling -p shardline --bin shardline
     exec perf record \
       -F "${perf_frequency}" \
       -g \
