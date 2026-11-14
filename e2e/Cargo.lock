@@ -3329,7 +3329,6 @@ dependencies = [
  "bytes",
  "crc32fast",
  "futures-util",
- "hex",
  "http-body",
  "httpdate",
  "percent-encoding",
@@ -3643,7 +3642,6 @@ dependencies = [
  "shardline-xet-adapter",
  "shardline-xet-core",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -3661,7 +3659,6 @@ dependencies = [
  "shardline-storage",
  "shardline-xet-adapter",
  "thiserror",
- "tokio",
  "tracing",
 ]
 
@@ -3669,9 +3666,7 @@ dependencies = [
 name = "shardline-hub-api"
 version = "1.13.0"
 dependencies = [
- "arrow-array",
  "arrow-json",
- "arrow-schema",
  "axum",
  "base64 0.22.1",
  "blake3",
@@ -3773,10 +3768,8 @@ dependencies = [
 name = "shardline-protocol-adapters"
 version = "1.13.0"
 dependencies = [
- "hex",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "shardline-protocol",
  "shardline-server-core",
  "shardline-storage",
