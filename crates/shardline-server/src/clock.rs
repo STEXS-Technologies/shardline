@@ -16,7 +16,6 @@ mod tests {
     #[test]
     fn unix_now_seconds_checked_returns_reasonable_value() {
         let result = unix_now_seconds_checked();
-        assert!(result.is_ok());
         let seconds = result.unwrap();
         // Sanity: should be >= 2023 (1700000000) and not absurdly far in the future.
         assert!(

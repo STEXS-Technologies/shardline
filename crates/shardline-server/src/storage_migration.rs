@@ -516,7 +516,6 @@ mod tests {
     fn ensure_observed_hash_matches_key_err_when_not_equal() {
         let key = ObjectKey::parse("aa/aaa").unwrap();
         let result = ensure_observed_hash_matches_key(&key, "abc", "xyz");
-        assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, ServerError::ObjectStore(_)));
         let msg = format!("{err}");

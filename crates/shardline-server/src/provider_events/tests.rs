@@ -781,7 +781,6 @@ async fn apply_provider_webhook_with_local_config_uses_local_stores() {
 
     let result = super::apply_provider_webhook(&config, &event).await;
     // Without pre-populated data, the webhook should succeed as a no-op
-    assert!(result.is_ok());
     let outcome = result.unwrap();
     assert_eq!(outcome.affected_file_versions, 0);
     assert_eq!(outcome.affected_chunks, 0);
@@ -805,7 +804,6 @@ async fn apply_provider_webhook_with_local_config_repository_deleted_is_noop_on_
     );
 
     let result = super::apply_provider_webhook(&config, &event).await;
-    assert!(result.is_ok());
     let outcome = result.unwrap();
     assert_eq!(outcome.affected_file_versions, 0);
 }

@@ -1390,7 +1390,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     #[test]
     fn parse_server_frontends_env_multiple_with_dedup() {
         let result = parse_server_frontends_env("xet,lfs,oci,lfs");
-        assert!(result.is_ok());
         let frontends = result.unwrap();
         assert_eq!(frontends.len(), 3);
         assert!(frontends.contains(&crate::ServerFrontend::Xet));
@@ -1401,7 +1400,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     #[test]
     fn parse_server_frontends_env_all_known() {
         let result = parse_server_frontends_env("xet,lfs,bazel-http,oci,hub");
-        assert!(result.is_ok());
         let frontends = result.unwrap();
         assert_eq!(frontends.len(), 5);
     }

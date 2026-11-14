@@ -116,7 +116,6 @@ mod tests {
     fn xorb_object_key_accepts_valid_hash() {
         let hash = "a".repeat(64);
         let key = xorb_object_key(&hash);
-        assert!(key.is_ok());
         let key = key.unwrap();
         assert!(key.as_str().contains(&hash));
     }

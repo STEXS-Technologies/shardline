@@ -145,7 +145,6 @@ mod tests {
         let hash = "ab".repeat(32);
         let frontends = vec![ServerFrontend::Xet];
         let result = optional_chunk_container_keys(&frontends, &hash);
-        assert!(result.is_ok());
         let keys = result.unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0], xorb_object_key(&hash).unwrap());
@@ -180,7 +179,6 @@ mod tests {
             ServerFrontend::Oci,
         ];
         let result = optional_chunk_container_keys(&frontends, &hash);
-        assert!(result.is_ok());
         let keys = result.unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0], xorb_object_key(&hash).unwrap());

@@ -520,7 +520,6 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer any-token"));
         let result = auth.authorize(&headers, TokenScope::Write);
-        assert!(result.is_ok());
         let ctx = result.unwrap();
         // PassthroughProvider uses "anonymous" as the default subject
         assert!(ctx.claims().subject() == "anonymous" || ctx.claims().subject() == "passthrough");

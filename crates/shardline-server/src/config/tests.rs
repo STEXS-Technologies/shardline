@@ -1092,7 +1092,6 @@ fn configure_provider_runtime_from_paths_noop_when_both_none() {
         Ok(NonZeroU64::MIN),
     );
 
-    assert!(result.is_ok());
     let result = result.unwrap();
     assert_eq!(result.provider_config_path(), config.provider_config_path());
     assert_eq!(result.provider_api_key(), config.provider_api_key());
@@ -1121,7 +1120,6 @@ fn configure_provider_runtime_from_paths_updates_config_when_both_provided() {
         Ok(NonZeroU64::new(300).unwrap()),
     );
 
-    assert!(result.is_ok());
     let result = result.unwrap();
     assert_eq!(
         result.provider_config_path(),

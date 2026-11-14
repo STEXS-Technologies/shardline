@@ -621,7 +621,6 @@ mod tests {
         };
         let mut output = Vec::new();
         let result = append_referenced_term_bytes(&store, &term, &mut output);
-        assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
             err,
@@ -645,7 +644,6 @@ mod tests {
         };
         let mut output = Vec::new();
         let result = append_referenced_term_bytes(&store, &term, &mut output);
-        assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
             err,

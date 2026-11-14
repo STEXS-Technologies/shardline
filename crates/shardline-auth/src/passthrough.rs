@@ -76,7 +76,6 @@ mod tests {
     fn verify_any_nonempty_token_succeeds() {
         let provider = PassthroughProvider;
         let result = provider.verify_token("any-token-string");
-        assert!(result.is_ok());
 
         let claims = result.unwrap();
         assert_eq!(claims.subject(), "anonymous");
@@ -124,7 +123,6 @@ mod tests {
         .unwrap();
 
         let result = provider.mint_token(&claims);
-        assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AuthError::ProviderError(_)));
     }
 }

@@ -675,7 +675,6 @@ mod tests {
         let report = BackupManifestReport::new("test", "local");
         let mut buffer = Vec::new();
         let result = write_manifest_body(&mut buffer, &store, report);
-        assert!(result.is_ok());
         let report = result.unwrap();
         assert_eq!(report.object_count, 2);
         assert_eq!(report.object_bytes, 11); // "hello" (5) + "world!" (6)
@@ -703,7 +702,6 @@ mod tests {
         let report = BackupManifestReport::new("test", "local");
         let mut buffer = Vec::new();
         let result = write_manifest_body(&mut buffer, &store, report);
-        assert!(result.is_ok());
         let report = result.unwrap();
         assert_eq!(report.object_count, 1);
         assert_eq!(report.object_bytes, 4);
@@ -731,7 +729,6 @@ mod tests {
         let report = BackupManifestReport::new("test", "local");
         let mut buffer = Vec::new();
         let result = write_manifest_body(&mut buffer, &store, report);
-        assert!(result.is_ok());
         let report = result.unwrap();
         assert_eq!(report.object_count, 3);
         assert_eq!(report.object_bytes, 3);

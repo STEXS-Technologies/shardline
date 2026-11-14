@@ -79,7 +79,6 @@ mod tests {
     #[test]
     fn new_with_empty_key_errors() {
         let result = LocalHmacProvider::new(b"");
-        assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AuthError::ProviderError(_)));
     }
 

@@ -736,7 +736,6 @@ async fn run_local_index_rebuild_succeeds_on_empty_directory_with_chunks_subdir(
         .await
         .unwrap();
     let result = super::run_local_index_rebuild(tmp.path().to_path_buf()).await;
-    assert!(result.is_ok());
     let report = result.unwrap();
     assert!(report.is_clean());
 }

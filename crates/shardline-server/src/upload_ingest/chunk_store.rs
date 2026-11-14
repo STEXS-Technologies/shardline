@@ -216,7 +216,6 @@ mod tests {
     fn pooled_chunk_produces_valid_content_addressed_key() {
         let chunk = ChunkBuffer(Bytes::from_static(b"hello world"));
         let result = chunk_object_key_and_integrity(&chunk);
-        assert!(result.is_ok());
         let request = result.unwrap();
         // Key should contain the hash prefix layout
         assert!(!request.hash_hex.is_empty());

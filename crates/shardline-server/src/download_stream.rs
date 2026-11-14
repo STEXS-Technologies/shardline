@@ -1105,7 +1105,6 @@ mod tests {
 
         let result = local_object_byte_stream(object_store, object_key, 0).await;
         // Zero-length object → empty stream
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         use futures_util::StreamExt;
         let next = stream.next().await;
@@ -1215,7 +1214,6 @@ mod tests {
         let total = data.len() as u64;
         let range = ByteRange::new(0, total - 1).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, total, range).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1265,7 +1263,6 @@ mod tests {
 
         let range = ByteRange::new(0, 3).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1288,7 +1285,6 @@ mod tests {
         tokio::fs::write(&path, &data).await.unwrap();
 
         let result = local_object_byte_stream(object_store, object_key, data.len() as u64).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1350,7 +1346,6 @@ mod tests {
 
         let range = ByteRange::new(3, 9).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 10, range).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1375,7 +1370,6 @@ mod tests {
         let total = content.len() as u64;
         let range = ByteRange::new(0, total - 1).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, total, range).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1395,7 +1389,6 @@ mod tests {
 
         let range = ByteRange::new(2, 2).unwrap(); // just 'c'
         let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1635,7 +1628,6 @@ mod tests {
         let store = ServerObjectStore::Local(object_store);
         let range = ByteRange::new(3, 7).unwrap();
         let result = super::object_byte_range_stream(store, object_key, 10, range).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         use futures_util::StreamExt;
@@ -1679,7 +1671,6 @@ mod tests {
         // Range at end: byte 5 of 6 → last byte
         let range = ByteRange::new(5, 5).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1700,7 +1691,6 @@ mod tests {
 
         let range = ByteRange::new(0, 0).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 1, range).await;
-        assert!(result.is_ok());
         let mut stream = result.unwrap();
         let observed: Vec<u8> = futures_util::StreamExt::collect::<Vec<_>>(&mut stream)
             .await

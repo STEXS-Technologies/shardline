@@ -916,7 +916,6 @@ mod tests {
             .parse()
             .unwrap();
         let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
-        assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.0.access_token, response.0.token);
         assert!(response.0.expires_in > 0);

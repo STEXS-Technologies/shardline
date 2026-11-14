@@ -507,7 +507,6 @@ mod tests {
     #[test]
     fn size_over_limit_is_err() {
         let result = ensure_secret_size_within_limit(1025, 1024, size_error);
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("exceed") || err_msg.contains("TooLarge"));
     }
@@ -581,7 +580,6 @@ mod tests {
             size_error,
             length_mismatch_error,
         );
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("exceed") || err_msg.contains("TooLarge"));
     }
@@ -827,7 +825,6 @@ mod tests {
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
 
         let result = open_secret_file(tmp.path());
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("overly permissive mode"));
     }
@@ -862,7 +859,6 @@ mod tests {
             "TEST_FILE_ENV",
             Some("/some/file".to_owned()),
         );
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("credential source conflict"));
     }
@@ -893,7 +889,6 @@ mod tests {
         let bucket: Result<String, _> = Ok("my-bucket".to_owned());
 
         let result = configure_s3_object_store_config(bucket, inputs, || Ok((None, None, None)));
-        assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.bucket(), "my-bucket");
         assert!(config.key_prefix().is_none());
@@ -919,7 +914,6 @@ mod tests {
                 Some(SecretString::from_secret("token")),
             ))
         });
-        assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.bucket(), "data-bucket");
         // The key_prefix is normalized (trailing slash stripped).
@@ -1157,7 +1151,6 @@ mod tests {
             "issuer".to_owned(),
             Ok(std::num::NonZeroU64::new(300).unwrap_or(std::num::NonZeroU64::MIN)),
         );
-        assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.provider_api_key(), Some(b"my-api-key" as &[u8]));
     }
@@ -1219,7 +1212,6 @@ mod tests {
             "TEST_FILE_ENV",
             Some(tmp.path().display().to_string()),
         );
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("UTF-8")
@@ -1439,7 +1431,6 @@ mod tests {
             "TEST_FILE_ENV",
             Some(tmp.path().display().to_string()),
         );
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("exceed") || err_msg.contains("TooLarge"));
     }
@@ -1456,7 +1447,6 @@ mod tests {
         remove_env_var("SHARDLINE_S3_ACCESS_KEY_ID");
         remove_env_var("SHARDLINE_S3_SECRET_ACCESS_KEY");
         let result = super::load_s3_object_store_config_from_env();
-        assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.bucket(), "test-bucket");
         assert!(config.key_prefix().is_some());

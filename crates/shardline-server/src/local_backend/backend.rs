@@ -764,7 +764,6 @@ mod tests {
             NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
         )
         .await;
-        assert!(backend.is_ok());
         let backend = backend.unwrap();
         assert_eq!(backend.public_base_url(), "http://127.0.0.1:8080");
     }
