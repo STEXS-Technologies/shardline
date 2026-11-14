@@ -460,32 +460,44 @@ fn local_object_store_rejects_symlinked_object_path() {
 }
 
 #[cfg(unix)]
+struct SymlinkedParent {
+    _storage: shardline_test_support::TempStorage,
+    store: LocalObjectStore,
+    key: ObjectKey,
+    outside: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl SymlinkedParent {
+    fn new(prefix: &str, contents: Option<&[u8]>) -> Self {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse(&format!("xorbs/default/{prefix}/hash.xorb")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        if let Some(contents) = contents {
+            fs::write(outside.path().join("hash.xorb"), contents).unwrap();
+        }
+        let path = store.path_for_key(&key);
+        let link = path.parent().unwrap();
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(outside.path(), link).unwrap();
+        Self {
+            _storage: storage,
+            store,
+            key,
+            outside,
+        }
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn local_object_store_rejects_symlinked_parent_directory_reads() {
-    let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let fixture = SymlinkedParent::new("aa", Some(b"secret"));
 
-    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb").unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    let outside_path = outside.path().join("hash.xorb");
-    let outside_write = fs::write(&outside_path, b"secret");
-    assert!(outside_write.is_ok());
-
-    let link = storage
-        .path()
-        .join("objects")
-        .join("xorbs")
-        .join("default")
-        .join("aa");
-    let parent = link.parent().unwrap();
-    let created = fs::create_dir_all(parent);
-    assert!(created.is_ok());
-    let linked = symlink(outside.path(), &link);
-    assert!(linked.is_ok());
-
-    let metadata = store.metadata(&key);
+    let metadata = fixture.store.metadata(&fixture.key);
     let range = ByteRange::new(0, 5).unwrap();
-    let read = store.read_range(&key, range);
+    let read = fixture.store.read_range(&fixture.key, range);
 
     assert!(matches!(
         metadata,
@@ -500,33 +512,21 @@ fn local_object_store_rejects_symlinked_parent_directory_reads() {
 #[cfg(unix)]
 #[test]
 fn local_object_store_rejects_symlinked_parent_directory_writes() {
-    let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
-
-    let key = ObjectKey::parse("xorbs/default/bb/hash.xorb").unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    let link = storage
-        .path()
-        .join("objects")
-        .join("xorbs")
-        .join("default")
-        .join("bb");
-    let parent = link.parent().unwrap();
-    let created = fs::create_dir_all(parent);
-    assert!(created.is_ok());
-    let linked = symlink(outside.path(), &link);
-    assert!(linked.is_ok());
+    let fixture = SymlinkedParent::new("bb", None);
 
     let body = b"payload";
     let integrity = ObjectIntegrity::new(super::util::chunk_hash(body), 7);
-    let result = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+    let result =
+        fixture
+            .store
+            .put_if_absent(&fixture.key, ObjectBody::from_slice(body), &integrity);
 
     assert!(matches!(
         result,
         Err(LocalObjectStoreError::InvalidObjectPath)
     ));
     assert!(
-        !outside.path().join("hash.xorb").exists(),
+        !fixture.outside.path().join("hash.xorb").exists(),
         "object write escaped into a symlink target outside the object root"
     );
 }
@@ -607,35 +607,16 @@ fn local_object_store_rejects_parent_swap_race() {
 #[cfg(unix)]
 #[test]
 fn local_object_store_rejects_symlinked_parent_directory_deletes() {
-    let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let fixture = SymlinkedParent::new("cc", Some(b"secret"));
 
-    let key = ObjectKey::parse("xorbs/default/cc/hash.xorb").unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    let outside_path = outside.path().join("hash.xorb");
-    let outside_write = fs::write(&outside_path, b"secret");
-    assert!(outside_write.is_ok());
-
-    let link = storage
-        .path()
-        .join("objects")
-        .join("xorbs")
-        .join("default")
-        .join("cc");
-    let parent = link.parent().unwrap();
-    let created = fs::create_dir_all(parent);
-    assert!(created.is_ok());
-    let linked = symlink(outside.path(), &link);
-    assert!(linked.is_ok());
-
-    let result = store.delete_if_present(&key);
+    let result = fixture.store.delete_if_present(&fixture.key);
 
     assert!(matches!(
         result,
         Err(LocalObjectStoreError::InvalidObjectPath)
     ));
     assert!(
-        outside_path.exists(),
+        fixture.outside.path().join("hash.xorb").exists(),
         "object delete escaped into a symlink target outside the object root"
     );
 }
