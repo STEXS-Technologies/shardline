@@ -81,19 +81,23 @@ fn make_delete_test_store() -> (tempfile::TempDir, BoxedHubStore) {
     (ts, boxed)
 }
 
-/// Helper: returns (TempDir, HubState) with no auth.
-pub(super) fn make_test_state() -> (tempfile::TempDir, HubState) {
-    let (td, store) = make_delete_test_store();
-    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+fn state_with_store(root: &std::path::Path, store: BoxedHubStore) -> HubState {
+    let object_store = shardline_server_core::ServerObjectStore::local(root.join("lfs"))
         .expect("local object store");
-    let state = HubState {
+    HubState {
         store,
         object_store,
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
         public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    }
+}
+
+/// Helper: returns (TempDir, HubState) with no auth.
+pub(super) fn make_test_state() -> (tempfile::TempDir, HubState) {
+    let (td, store) = make_delete_test_store();
+    let state = state_with_store(td.path(), store);
     (td, state)
 }
 
@@ -1040,16 +1044,7 @@ async fn handler_repo_list_with_repos() {
     store
         .create_repo(HubRepoType::Dataset, "org/data-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_list(State(state.clone()), test_repo(&state, &default_headers()))
         .await
         .unwrap();
@@ -1112,16 +1107,7 @@ async fn handler_repo_search_finds_matching() {
     store
         .create_repo(HubRepoType::Model, "other/other", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     // The search uses LIKE 'q%' on repo_id, so prefix-match the full ID.
     let result = repo_search(
         State(state.clone()),
@@ -1588,16 +1574,7 @@ async fn handler_repo_info_missing_repo() {
 #[tokio::test]
 async fn handler_repo_info_returns_repo() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/existing");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_info(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -1629,16 +1606,7 @@ async fn handler_repo_info_with_card_data() {
         blake3::hash(readme_content).to_hex().as_str(),
         readme_content,
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_info(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -1673,16 +1641,7 @@ async fn handler_repo_modelcard_missing_repo() {
 #[tokio::test]
 async fn handler_repo_modelcard_no_readme() {
     let (_td, store) = make_store_with_revision(HubRepoType::Model, "org/no-readme", "sha_nr", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_modelcard(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -1711,16 +1670,7 @@ async fn handler_repo_modelcard_with_readme() {
         "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
         content,
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_modelcard(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -1747,16 +1697,7 @@ async fn handler_repo_modelcard_with_readme() {
 async fn handler_repo_revisions_with_revisions() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/has-revs", "sha_rev1", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_revisions(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -1879,16 +1820,7 @@ async fn handler_repo_delete_missing_repo() {
 #[tokio::test]
 async fn handler_repo_delete_success() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/to-delete");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_delete(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -1947,16 +1879,7 @@ async fn handler_preupload_checks_existence() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = preupload(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -2034,16 +1957,7 @@ fn ndjson_headers() -> HeaderMap {
 async fn handler_commit_inline_file_success() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/commit-test", "parent_sha_001", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let body = r#"{"header":{"message":"add readme"}}
 {"file":{"path":"README.md","content":"SGVsbG8gV29ybGQ="}}
 "#;
@@ -2070,16 +1984,7 @@ async fn handler_commit_inline_file_success() {
 async fn handler_commit_lfs_pointer_success() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/lfs-commit", "parent_lfs", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     // Valid SHA-256 OID (64 hex chars)
     let oid = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
     let body = format!(
@@ -2119,16 +2024,7 @@ async fn handler_commit_delete_file() {
         }],
     );
     store_test_content(&_td, blake3::hash(content).to_hex().as_str(), content);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let body = r#"{"header":{"message":"delete file"}}
 {"deletedEntry":{"path":"old.txt"}}
 "#;
@@ -2156,16 +2052,7 @@ async fn handler_commit_parent_mismatch() {
         "actual_parent_sha",
         &[],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     // Body specifies parentCommit that does NOT match URL resolution
     let body = r#"{"header":{"message":"mismatch","parentCommit":"wrong_parent_sha"}}
 {"file":{"path":"f.txt","content":"dGVzdA=="}}
@@ -2198,16 +2085,7 @@ async fn handler_commit_parent_mismatch() {
 async fn handler_apply_commit_inline_file() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/apply-test", "parent_apply", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let parsed = ParsedCommit {
         message: "apply inline".into(),
         parent_commit: None,
@@ -2242,16 +2120,7 @@ async fn handler_apply_commit_inline_file() {
 async fn handler_apply_commit_lfs_pointer() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/apply-lfs", "parent_lfs2", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let oid = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
     let parsed = ParsedCommit {
         message: "add lfs".into(),
@@ -2292,16 +2161,7 @@ async fn handler_apply_commit_delete() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     store_test_content(&_td, blake3::hash(content).to_hex().as_str(), content);
     let parsed = ParsedCommit {
         message: "delete file".into(),
@@ -2328,16 +2188,7 @@ async fn handler_apply_commit_delete() {
 async fn handler_apply_commit_parent_mismatch() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/apply-mismatch", "actual_sha", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let parsed = ParsedCommit {
         message: "bad parent".into(),
         parent_commit: Some("different_sha".into()),
@@ -2384,16 +2235,7 @@ async fn handler_file_tree_basic() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     materialize_tree_fixture(&state, "sha_tree");
     let entries = file_tree(
         State(state.clone()),
@@ -2462,16 +2304,7 @@ async fn handler_file_tree_recursive() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     materialize_tree_fixture(&state, "sha_tree_rec");
     let entries = file_tree(
         State(state.clone()),
@@ -2523,16 +2356,7 @@ async fn handler_file_tree_with_limit_and_cursor() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     materialize_tree_fixture(&state, "sha_tree_lim");
     let entries = file_tree(
         State(state.clone()),
@@ -2578,16 +2402,7 @@ async fn handler_resolve_file_inline() {
     );
     // Pre-load file content into ObjectStore
     store_test_content(&_td, blake3::hash(content).to_hex().as_str(), content);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = resolve_file(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -2682,16 +2497,7 @@ async fn handler_resolve_large_lfs_file_returns_absolute_redirect_and_metadata()
 async fn handler_resolve_file_not_found() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/resolve-miss", "sha_miss", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = resolve_file(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -2714,16 +2520,7 @@ async fn handler_resolve_file_not_found() {
 
 fn make_lfs_state() -> (tempfile::TempDir, HubState) {
     let (td, store) = make_delete_test_store();
-    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(td.path(), store);
     (td, state)
 }
 
@@ -3732,16 +3529,7 @@ async fn handler_lfs_download_supports_single_ranges_and_if_range() {
 #[tokio::test]
 async fn handler_repo_revisions_has_initial() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/init-rev");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_revisions(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -3758,16 +3546,7 @@ async fn handler_repo_revisions_has_initial() {
 async fn handler_git_head_with_revision() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/has-head", "sha_head123", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = git_head(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -3786,16 +3565,7 @@ async fn handler_git_head_with_revision() {
 #[tokio::test]
 async fn handler_commit_no_revision() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/no-rev");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     // "nonexistent_rev" isn't a known ref or SHA → revision not found
     let result = commit(
         State(state.clone()),
@@ -3834,16 +3604,7 @@ async fn handler_dataset_parquet_lists_files() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_parquet(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -3882,16 +3643,7 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_parquet(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -3910,16 +3662,7 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
 async fn handler_dataset_first_rows_empty_dataset() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Dataset, "org/empty-ds", "sha_empty_ds", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_first_rows(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -3955,16 +3698,7 @@ async fn handler_dataset_first_rows_with_jsonl() {
         "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
         jsonl_content,
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_first_rows(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4006,16 +3740,7 @@ async fn handler_dataset_viewer_with_data() {
         "4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
         csv_content,
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_viewer(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4053,16 +3778,7 @@ async fn handler_dataset_viewer_pagination() {
         "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f",
         csv_content,
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_viewer(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4088,16 +3804,7 @@ async fn handler_dataset_viewer_pagination() {
 #[tokio::test]
 async fn handler_webhook_create_success() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-test");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let (status, resp) = webhook_create(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4118,16 +3825,7 @@ async fn handler_webhook_create_success() {
 #[tokio::test]
 async fn handler_webhook_create_invalid_url() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-badurl");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = webhook_create(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4149,16 +3847,7 @@ async fn handler_webhook_create_invalid_url() {
 #[tokio::test]
 async fn handler_webhook_create_too_many_events() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-toomany");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let events: Vec<String> = (0..51).map(|i| format!("event_{i}")).collect();
     let result = webhook_create(
         State(state.clone()),
@@ -4185,16 +3874,7 @@ async fn handler_webhook_create_too_many_events() {
 #[tokio::test]
 async fn handler_webhook_list_empty() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-list-empty");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = webhook_list(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4224,16 +3904,7 @@ async fn handler_webhook_list_with_webhooks() {
             Some("secret"),
         )
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = webhook_list(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4259,16 +3930,7 @@ async fn handler_webhook_delete_success() {
             None,
         )
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = webhook_delete(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4339,16 +4001,7 @@ fn route_authorize_with_auth_and_no_header_is_err() {
 async fn handler_apply_commit_empty_instructions() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/empty-inst", "parent_empty", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let parsed = ParsedCommit {
         message: "empty commit".into(),
         parent_commit: None,
@@ -4375,16 +4028,7 @@ async fn handler_apply_commit_empty_instructions() {
 async fn handler_dataset_parquet_non_dataset_repo_errors() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/model-repo", "sha_model", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_parquet(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4406,16 +4050,7 @@ async fn handler_dataset_parquet_non_dataset_repo_errors() {
 async fn handler_dataset_first_rows_non_dataset_errors() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/model-ds", "sha_model_ds", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_first_rows(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4442,16 +4077,7 @@ async fn handler_dataset_first_rows_non_dataset_errors() {
 async fn handler_dataset_viewer_non_dataset_errors() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/model-view", "sha_model_view", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_viewer(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4480,16 +4106,7 @@ async fn handler_repo_search_sort_by_last_modified_asc() {
     store
         .create_repo(HubRepoType::Model, "org/model-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_search(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4513,16 +4130,7 @@ async fn handler_repo_search_sort_likes_noop() {
     store
         .create_repo(HubRepoType::Model, "org/likes-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     // "likes" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
         State(state.clone()),
@@ -4547,16 +4155,7 @@ async fn handler_repo_search_sort_downloads_noop() {
     store
         .create_repo(HubRepoType::Model, "org/dl-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     // "downloads" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
         State(state.clone()),
@@ -4585,16 +4184,7 @@ async fn handler_repo_search_unknown_sort_keeps_default_order() {
     store
         .create_repo(HubRepoType::Model, "org/order-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = repo_search(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4649,16 +4239,7 @@ async fn handler_dataset_first_rows_content_not_inline() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_first_rows(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4681,16 +4262,7 @@ async fn handler_dataset_first_rows_content_not_inline() {
 async fn handler_dataset_viewer_split_not_found() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Dataset, "org/no-split", "sha_no_split", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = dataset_viewer(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -4800,16 +4372,7 @@ async fn handler_repo_revision_info_returns_siblings() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     store_test_content(&_td, blake3::hash(content).to_hex().as_str(), content);
     let result = repo_revision_info(
         State(state.clone()),
@@ -4917,16 +4480,7 @@ async fn handler_file_tree_at_root_returns_files() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     materialize_tree_fixture(&state, "sha_root_tree");
     let entries = file_tree_at_root(
         State(state.clone()),
@@ -4956,16 +4510,7 @@ async fn handler_file_tree_at_root_returns_files() {
 async fn handler_git_head_returns_ref() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/git-head", "sha_head", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = git_head(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -5023,16 +4568,7 @@ async fn handler_repo_create_with_organization() {
 #[tokio::test]
 async fn handler_repo_create_conflict() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "ns/existing");
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let req = RepoCreateRequest {
         repo_type: RepoType::Model,
         name: "ns/existing".to_owned(),
@@ -5624,16 +5160,7 @@ async fn handler_webhook_create_duplicate_url() {
             None,
         )
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let result = webhook_create(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -5762,16 +5289,7 @@ async fn handler_dataset_parquet_finds_data_files() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let resp = dataset_parquet(
         State(state.clone()),
         test_repo(&state, &default_headers()),
@@ -5806,16 +5324,7 @@ async fn handler_webhook_list_with_hooks() {
             None,
         )
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
-        .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store);
     let resp = webhook_list(
         State(state.clone()),
         test_repo(&state, &default_headers()),
