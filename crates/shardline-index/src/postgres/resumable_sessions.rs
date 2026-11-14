@@ -1781,72 +1781,19 @@ mod tests {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
     pub(super) async fn store() -> Option<PostgresIndexStore> {
-        let pool = super::super::connect_isolated_postgres().await?;
-        sqlx::raw_sql(include_str!(
-            "../../../../migrations/20260823000000_resumable_sessions.up.sql"
+        // The shared fixture copies the migrated tables and their triggers.
+        Some(PostgresIndexStore::new(
+            super::super::connect_isolated_postgres().await?,
         ))
-        .execute(&pool)
-        .await
-        .ok()?;
-        sqlx::raw_sql(include_str!(
-            "../../../../migrations/20260922000000_reliability_events.up.sql"
-        ))
-        .execute(&pool)
-        .await
-        .ok()?;
-        let has_state_digest: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1 FROM information_schema.columns
-                 WHERE table_name = 'shardline_resumable_sessions'
-                   AND column_name = 'state_digest'
-             )",
-        )
-        .fetch_one(&pool)
-        .await
-        .ok()?;
-        if !has_state_digest {
-            sqlx::raw_sql(include_str!(
-                "../../../../migrations/20260924000000_resumable_state_digest.up.sql"
-            ))
-            .execute(&pool)
-            .await
-            .ok()?;
-        }
-        sqlx::raw_sql(include_str!(
-            "../../../../migrations/20261001000000_resumable_session_reliability_gate.up.sql"
-        ))
-        .execute(&pool)
-        .await
-        .ok()?;
-        Some(PostgresIndexStore::new(pool))
     }
 
-    /// Removes rows whose `session_id` begins with one of `prefixes` so tests
-    /// that assert exact result counts are idempotent across repeated runs.
-    async fn cleanup_session_prefixes(store: &PostgresIndexStore, prefixes: &[&str]) {
-        for prefix in prefixes {
-            let escaped = prefix
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            sqlx::query(
-                "DELETE FROM shardline_resumable_sessions
-                 WHERE session_id LIKE $1 || '%' ESCAPE '\\'",
-            )
-            .bind(escaped)
-            .execute(store.pool())
-            .await
-            .ok();
-            sqlx::query(
-                "DELETE FROM shardline_reliability_events
-                 WHERE operation_kind = $1 AND operation_id LIKE $2 || '%' ESCAPE '\\'",
-            )
-            .bind("ResumableSession")
-            .bind(prefix)
-            .execute(store.pool())
-            .await
-            .ok();
-        }
+    fn future_expiry() -> Duration {
+        Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp())
+                .unwrap()
+                .checked_add(3600)
+                .unwrap(),
+        )
     }
 
     pub(super) fn session(prefix: &str, expires_at: Duration) -> ResumableSession {
@@ -1866,8 +1813,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry =
-            Duration::from_secs(u64::try_from(chrono::Utc::now().timestamp()).unwrap() + 3600);
+        let expiry = future_expiry();
         let active = session("bound-active", expiry);
         let completing = session("bound-completing", expiry);
         let candidate = session("bound-create", expiry);
@@ -1970,9 +1916,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         let first = session("bounded-first", expiry)
             .with_attributes_json(r#"{"bucket":"models"}"#.to_owned())
             .expect("valid attributes");
@@ -2037,9 +1981,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         let original = session("reuse", expiry);
         assert!(store.create_resumable_session(&original).await.unwrap());
         assert!(
@@ -2092,9 +2034,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         let session = session("reopen-failed-completion", expiry);
         assert!(store.create_resumable_session(&session).await.unwrap());
 
@@ -2164,9 +2104,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         let session = session("read-evidence", expiry);
         assert!(store.create_resumable_session(&session).await.unwrap());
 
@@ -2203,9 +2141,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         let session = session("mixed-version-state", expiry);
         assert!(store.create_resumable_session(&session).await.unwrap());
 
@@ -2238,9 +2174,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         let session = session("mixed-version-part", expiry);
         assert!(store.create_resumable_session(&session).await.unwrap());
         assert!(
@@ -2289,9 +2223,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         let session = session("parts", expiry);
         assert!(store.create_resumable_session(&session).await.unwrap());
 
@@ -2446,10 +2378,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
-        cleanup_session_prefixes(&store, &["gc-live-", "gc-terminal-"]).await;
+        let expiry = future_expiry();
         let live = session("gc-live", expiry);
         let terminal = session("gc-terminal", expiry);
         assert!(store.create_resumable_session(&live).await.unwrap());
@@ -2560,13 +2489,10 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         // Seed a deterministic set of active sessions whose ids sort in a known
         // order. The session() helper already prefixes ids with "keyset", so
         // query on that shared prefix.
-        cleanup_session_prefixes(&store, &["keyset-"]).await;
         let mut expected: Vec<String> = Vec::new();
         for _ in 0..5u32 {
             let s = session("keyset", expiry);
@@ -2619,10 +2545,7 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
-        cleanup_session_prefixes(&store, &["special-"]).await;
+        let expiry = future_expiry();
         // Insert an active session with a literal % and _ in its id.
         let special = ResumableSession::new(
             format!("special-a%b_1-{}", std::process::id()),
@@ -2691,11 +2614,8 @@ mod tests {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
         };
-        let expiry = Duration::from_secs(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
-        );
+        let expiry = future_expiry();
         // Seed interleaved active/completing/terminal ids under one prefix.
-        cleanup_session_prefixes(&store, &["inflight-"]).await;
         let mut seeded: Vec<(ResumableSession, ResumableSessionState)> = Vec::new();
         for i in 0..5u32 {
             let state = if i % 2 == 0 {
