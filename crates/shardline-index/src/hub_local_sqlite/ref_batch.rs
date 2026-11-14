@@ -61,10 +61,10 @@ pub(super) fn apply(
             }
             if missing {
                 for event in evidence.events() {
-                    persist_hub_ref_evidence(&tx, event)?;
+                    persist_reliability_event(&tx, event)?;
                 }
             } else if let Some(event) = evidence.events().last() {
-                persist_hub_ref_evidence(&tx, event)?;
+                persist_reliability_event(&tx, event)?;
             }
         }
         tx.commit()?;

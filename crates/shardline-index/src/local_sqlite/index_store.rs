@@ -24,7 +24,7 @@ use crate::{
     local_sqlite::helpers::{
         load_provider_evidence_batch, load_quarantine_evidence_batch, load_retention_evidence,
         load_retention_evidence_batch, load_webhook_evidence, load_webhook_evidence_batch,
-        persist_retention_evidence, persist_webhook_evidence, retention_snapshot, webhook_snapshot,
+        persist_reliability_event, retention_snapshot, webhook_snapshot,
     },
     parse_xet_hash_hex,
     provider_evidence::snapshot_from_state,
@@ -1020,10 +1020,10 @@ impl LifecycleStore for LocalIndexStore {
         })?;
         if evidence_was_empty {
             for stored_event in evidence.events() {
-                super::helpers::persist_quarantine_evidence(&transaction, stored_event)?;
+                super::helpers::persist_reliability_event(&transaction, stored_event)?;
             }
         } else {
-            super::helpers::persist_quarantine_evidence(&transaction, event)?;
+            super::helpers::persist_reliability_event(&transaction, event)?;
         }
         transaction.commit()?;
         Ok(())
@@ -1065,10 +1065,10 @@ impl LifecycleStore for LocalIndexStore {
             })?;
             if evidence_was_empty {
                 for stored_event in evidence.events() {
-                    super::helpers::persist_quarantine_evidence(&transaction, stored_event)?;
+                    super::helpers::persist_reliability_event(&transaction, stored_event)?;
                 }
             } else {
-                super::helpers::persist_quarantine_evidence(&transaction, event)?;
+                super::helpers::persist_reliability_event(&transaction, event)?;
             }
         }
         transaction.commit()?;
@@ -1129,10 +1129,10 @@ impl LifecycleStore for LocalIndexStore {
         })?;
         if evidence_was_empty {
             for stored_event in evidence.events() {
-                super::helpers::persist_quarantine_evidence(&transaction, stored_event)?;
+                super::helpers::persist_reliability_event(&transaction, stored_event)?;
             }
         } else {
-            super::helpers::persist_quarantine_evidence(&transaction, event)?;
+            super::helpers::persist_reliability_event(&transaction, event)?;
         }
         transaction.commit()?;
         Ok(true)
@@ -1258,10 +1258,10 @@ impl LifecycleStore for LocalIndexStore {
         )?;
         if evidence_was_empty {
             for event in evidence.events() {
-                persist_retention_evidence(&transaction, event)?;
+                persist_reliability_event(&transaction, event)?;
             }
         } else if let Some(event) = evidence.events().last() {
-            persist_retention_evidence(&transaction, event)?;
+            persist_reliability_event(&transaction, event)?;
         }
         transaction.commit()?;
         Ok(())
@@ -1291,10 +1291,10 @@ impl LifecycleStore for LocalIndexStore {
                 verify_and_append_snapshot_transition(evidence, active, released)?;
             if evidence_was_empty {
                 for event in evidence.events() {
-                    persist_retention_evidence(&transaction, event)?;
+                    persist_reliability_event(&transaction, event)?;
                 }
             } else if let Some(event) = evidence.events().last() {
-                persist_retention_evidence(&transaction, event)?;
+                persist_reliability_event(&transaction, event)?;
             }
         }
         transaction.commit()?;
@@ -1349,10 +1349,10 @@ impl LifecycleStore for LocalIndexStore {
         }
         if evidence_was_empty {
             for event in evidence.events() {
-                persist_retention_evidence(&transaction, event)?;
+                persist_reliability_event(&transaction, event)?;
             }
         } else if let Some(event) = evidence.events().last() {
-            persist_retention_evidence(&transaction, event)?;
+            persist_reliability_event(&transaction, event)?;
         }
         transaction.commit()?;
         Ok(true)
@@ -1411,10 +1411,10 @@ impl LifecycleStore for LocalIndexStore {
         )?;
         if evidence_was_empty {
             for event in evidence.events() {
-                persist_webhook_evidence(&transaction, event)?;
+                persist_reliability_event(&transaction, event)?;
             }
         } else if let Some(event) = evidence.events().last() {
-            persist_webhook_evidence(&transaction, event)?;
+            persist_reliability_event(&transaction, event)?;
         }
         transaction.commit()?;
         Ok(true)
@@ -1500,10 +1500,10 @@ impl LifecycleStore for LocalIndexStore {
         )?;
         if evidence_was_empty {
             for event in evidence.events() {
-                persist_webhook_evidence(&transaction, event)?;
+                persist_reliability_event(&transaction, event)?;
             }
         } else if let Some(event) = evidence.events().last() {
-            persist_webhook_evidence(&transaction, event)?;
+            persist_reliability_event(&transaction, event)?;
         }
         transaction.commit()?;
         Ok(changed > 0)
@@ -1561,10 +1561,10 @@ impl LifecycleStore for LocalIndexStore {
         }
         if evidence_was_empty {
             for event in evidence.events() {
-                persist_webhook_evidence(&transaction, event)?;
+                persist_reliability_event(&transaction, event)?;
             }
         } else if let Some(event) = evidence.events().last() {
-            persist_webhook_evidence(&transaction, event)?;
+            persist_reliability_event(&transaction, event)?;
         }
         transaction.commit()?;
         Ok(true)
@@ -1670,10 +1670,10 @@ impl LifecycleStore for LocalIndexStore {
                 )?;
                 if evidence_was_empty {
                     for event in evidence.events() {
-                        persist_webhook_evidence(&transaction, event)?;
+                        persist_reliability_event(&transaction, event)?;
                     }
                 } else if let Some(event) = evidence.events().last() {
-                    persist_webhook_evidence(&transaction, event)?;
+                    persist_reliability_event(&transaction, event)?;
                 }
             }
         }
@@ -1940,7 +1940,7 @@ impl LifecycleStore for LocalIndexStore {
                 "provider evidence",
             ))
         })?;
-        super::helpers::persist_provider_evidence(&transaction, event)?;
+        super::helpers::persist_reliability_event(&transaction, event)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1978,7 +1978,7 @@ impl LifecycleStore for LocalIndexStore {
                 let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
                 verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
                 for event in baseline.events() {
-                    super::helpers::persist_provider_evidence(&transaction, event)?;
+                    super::helpers::persist_reliability_event(&transaction, event)?;
                 }
             } else {
                 verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
@@ -3308,7 +3308,7 @@ mod tests {
                 params![delivery.owner(),delivery.delivery_id(),u64_to_i64(observed_at).unwrap()],
             ).unwrap();
             for event in evidence.events() {
-                persist_webhook_evidence(&transaction, event).unwrap();
+                persist_reliability_event(&transaction, event).unwrap();
             }
             last = Some(delivery);
         }

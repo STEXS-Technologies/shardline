@@ -306,7 +306,7 @@ fn record_s3_object_transition(
     )?
     .0;
     if let Some(event) = evidence.events().last() {
-        helpers::persist_s3_object_evidence(transaction, event)?;
+        helpers::persist_reliability_event(transaction, event)?;
     }
     Ok(())
 }

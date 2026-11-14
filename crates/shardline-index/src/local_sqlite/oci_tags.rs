@@ -5,7 +5,7 @@ use super::{LocalIndexStore, LocalIndexStoreError, collect_rows};
 use crate::{
     OciTagEntry, OciTagStore,
     local_sqlite::{
-        current_oci_tag_evidence, oci_tag_snapshot, persist_oci_tag_evidence,
+        current_oci_tag_evidence, oci_tag_snapshot, persist_reliability_event,
         verify_oci_tag_evidence,
     },
 };
@@ -47,10 +47,10 @@ pub(crate) fn record_tag_transition(
         verify_and_append_snapshot_transition(stored_evidence, before_snapshot, after_snapshot)?.0;
     if evidence_was_missing {
         for event in evidence.events() {
-            persist_oci_tag_evidence(transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     } else if let Some(event) = evidence.events().last() {
-        persist_oci_tag_evidence(transaction, event)?;
+        persist_reliability_event(transaction, event)?;
     }
     Ok(())
 }
@@ -678,7 +678,7 @@ mod tests {
                 "INSERT INTO shardline_oci_tags(scope_namespace,repository,tag,digest_hex) VALUES('chunk-fixture','team/assets',?1,?2)",
                 params![tag,digest]).unwrap();
             for event in evidence.events() {
-                persist_oci_tag_evidence(&transaction, event).unwrap();
+                persist_reliability_event(&transaction, event).unwrap();
             }
         }
         transaction.commit().unwrap();

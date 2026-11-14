@@ -18,7 +18,7 @@ use crate::{
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
-        i64_to_u64, persist_hub_ref_evidence, retry_sqlite_busy, u64_to_i64,
+        i64_to_u64, persist_reliability_event, retry_sqlite_busy, u64_to_i64,
         verify_hub_ref_evidence, verify_hub_ref_evidence_batch,
     },
 };
@@ -471,10 +471,10 @@ impl HubStore for LocalIndexStore {
             let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
             if evidence_was_missing {
                 for event in evidence.events() {
-                    persist_hub_ref_evidence(&tx, event)?;
+                    persist_reliability_event(&tx, event)?;
                 }
             } else if let Some(event) = evidence.events().last() {
-                persist_hub_ref_evidence(&tx, event)?;
+                persist_reliability_event(&tx, event)?;
             }
             tx.commit()?;
             Ok(())
@@ -1152,10 +1152,10 @@ impl LocalIndexStore {
             let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
             if evidence_was_missing {
                 for event in evidence.events() {
-                    persist_hub_ref_evidence(&tx, event)?;
+                    persist_reliability_event(&tx, event)?;
                 }
             } else if let Some(event) = evidence.events().last() {
-                persist_hub_ref_evidence(&tx, event)?;
+                persist_reliability_event(&tx, event)?;
             }
 
             let revision = tx.query_row(

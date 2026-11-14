@@ -23,13 +23,12 @@ use serde_json::{Value, from_slice, from_str, from_value, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
     EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot,
-    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind, ProviderEvidenceLog,
-    ProviderLifecycleEvent, ProviderLifecycleSnapshot, QuarantineEvidenceLog,
-    QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
-    QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
-    S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
-    SnapshotEvidenceLog, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
+    OciTagEvidenceLog, OciTagSnapshot, OperationKind, ProviderEvidenceLog, ProviderLifecycleEvent,
+    ProviderLifecycleSnapshot, QuarantineEvidenceLog, QuarantineLifecycleEvent,
+    QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
+    RetentionHoldLifecycleEvent, RetentionHoldLifecycleState, RetentionHoldSnapshot,
+    RetentionObjectIdentity, S3ObjectEvidenceLog, S3ObjectSnapshot, S3ObjectState,
+    SnapshotEvidence, SnapshotEvidenceLog, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
     WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState, WebhookDeliverySnapshot,
     verify_or_repair_snapshot_evidence, verify_snapshot_evidence,
 };
@@ -744,13 +743,6 @@ pub(crate) fn load_quarantine_evidence_batch(
         .collect()
 }
 
-pub(crate) fn persist_quarantine_evidence(
-    transaction: &Transaction<'_>,
-    event: &QuarantineLifecycleEvent,
-) -> Result<(), LocalIndexStoreError> {
-    persist_reliability_event(transaction, event)
-}
-
 pub(crate) fn retention_evidence_operation_id(object_key: &str) -> String {
     object_key.to_owned()
 }
@@ -797,13 +789,6 @@ pub(crate) fn load_retention_evidence_batch(
             ))
         })
         .collect()
-}
-
-pub(crate) fn persist_retention_evidence(
-    transaction: &Transaction<'_>,
-    event: &RetentionHoldLifecycleEvent,
-) -> Result<(), LocalIndexStoreError> {
-    persist_reliability_event(transaction, event)
 }
 
 pub(crate) fn webhook_snapshot(
@@ -871,13 +856,6 @@ pub(crate) fn load_webhook_evidence_batch(
         .collect()
 }
 
-pub(crate) fn persist_webhook_evidence(
-    transaction: &Transaction<'_>,
-    event: &WebhookDeliveryLifecycleEvent,
-) -> Result<(), LocalIndexStoreError> {
-    persist_reliability_event(transaction, event)
-}
-
 pub(crate) fn hub_ref_snapshot(
     repository: &str,
     ref_name: &str,
@@ -897,13 +875,6 @@ pub(crate) fn load_hub_ref_evidence(
         OperationKind::MetadataCommit,
         &operation.operation_id,
     )
-}
-
-pub(crate) fn persist_hub_ref_evidence(
-    transaction: &Transaction<'_>,
-    event: &HubRefLifecycleEvent,
-) -> Result<(), LocalIndexStoreError> {
-    persist_reliability_event(transaction, event)
 }
 
 pub(crate) fn current_hub_ref_evidence(
@@ -1020,13 +991,6 @@ pub(crate) fn verify_oci_tag_evidence(
     Ok(evidence)
 }
 
-pub(crate) fn persist_oci_tag_evidence(
-    transaction: &Transaction<'_>,
-    event: &OciTagLifecycleEvent,
-) -> Result<(), LocalIndexStoreError> {
-    persist_reliability_event(transaction, event)
-}
-
 pub(crate) fn s3_object_snapshot(
     scope_namespace: &str,
     object_key: &str,
@@ -1067,7 +1031,7 @@ pub(crate) fn current_s3_object_evidence(
     let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
     if was_missing {
         for event in evidence.events() {
-            persist_s3_object_evidence(transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
     Ok(evidence)
@@ -1083,13 +1047,6 @@ pub(crate) fn verify_s3_object_evidence(
     let evidence = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(evidence)
-}
-
-pub(crate) fn persist_s3_object_evidence(
-    transaction: &Transaction<'_>,
-    event: &S3ObjectLifecycleEvent,
-) -> Result<(), LocalIndexStoreError> {
-    persist_reliability_event(transaction, event)
 }
 
 pub(crate) trait SqliteExecutor {
@@ -1143,13 +1100,6 @@ pub(crate) fn load_provider_evidence_batch(
             Ok((operation_id, evidence))
         })
         .collect()
-}
-
-pub(crate) fn persist_provider_evidence(
-    transaction: &Transaction<'_>,
-    event: &ProviderLifecycleEvent,
-) -> Result<(), LocalIndexStoreError> {
-    persist_reliability_event(transaction, event)
 }
 
 impl SqliteExecutor for Connection {

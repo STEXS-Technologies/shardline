@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     hub::{HubCreationActor, HubCreationPolicy, HubRepo, HubRepoType},
-    local_sqlite::{hub_ref_snapshot, persist_hub_ref_evidence},
+    local_sqlite::{hub_ref_snapshot, persist_reliability_event},
 };
 
 pub(super) fn create(
@@ -47,7 +47,7 @@ pub(super) fn create(
             Some(initial_sha.to_owned()),
         )?)?;
         for event in evidence.events() {
-            persist_hub_ref_evidence(&tx, event)?;
+            persist_reliability_event(&tx, event)?;
         }
         tx.commit()?;
         Ok(())
