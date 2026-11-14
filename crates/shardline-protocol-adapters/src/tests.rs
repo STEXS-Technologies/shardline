@@ -27,19 +27,12 @@ fn scope_namespace_none_returns_global() {
 }
 
 #[test]
-fn scope_namespace_returns_64_char_hex() {
+fn scope_namespace_is_stable_64_char_hex() {
     let scope = test_scope();
     let ns = scope_namespace(Some(&scope));
+    assert_eq!(ns, scope_namespace(Some(&scope)));
     assert_eq!(ns.len(), 64);
     assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
-}
-
-#[test]
-fn scope_namespace_deterministic() {
-    let scope = test_scope();
-    let ns1 = scope_namespace(Some(&scope));
-    let ns2 = scope_namespace(Some(&scope));
-    assert_eq!(ns1, ns2);
 }
 
 #[test]
@@ -52,11 +45,6 @@ fn scope_namespace_differs_with_revision() {
         scope_namespace(Some(&scope_no_rev)),
         scope_namespace(Some(&scope_rev))
     );
-}
-
-#[test]
-fn bazel_cache_object_key_invalid_hash() {
-    assert!(bazel_cache_object_key(BazelCacheKind::Cas, "short", &test_capability(None)).is_err());
 }
 
 // --- ProtocolError::Display ---
@@ -141,45 +129,29 @@ fn deterministic_object_key() {
 // --- Scope isolation ---
 
 #[test]
-fn scope_isolation_lfs_different_scopes() {
+fn object_keys_isolate_repositories_and_global_access() {
     let hash = "a".repeat(64);
     let scope_a = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo-a", None).unwrap();
     let scope_b = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo-b", None).unwrap();
-    let key_a = lfs_object_key(&hash, &test_capability(Some(scope_a))).unwrap();
-    let key_b = lfs_object_key(&hash, &test_capability(Some(scope_b))).unwrap();
-    assert_ne!(key_a, key_b);
-}
-
-#[test]
-fn scope_isolation_bazel_different_scopes() {
-    let hash = "a".repeat(64);
-    let scope_a = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo-a", None).unwrap();
-    let scope_b = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo-b", None).unwrap();
-    let key_a = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(Some(scope_a)))
-        .unwrap();
-    let key_b = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(Some(scope_b)))
-        .unwrap();
-    assert_ne!(key_a, key_b);
-}
-
-#[test]
-fn scope_isolation_lfs_with_vs_without_scope() {
-    let hash = "a".repeat(64);
-    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None).unwrap();
-    let key_with = lfs_object_key(&hash, &test_capability(Some(scope))).unwrap();
-    let key_without = lfs_object_key(&hash, &test_capability(None)).unwrap();
-    assert_ne!(key_with, key_without);
-}
-
-#[test]
-fn scope_isolation_bazel_with_vs_without_scope() {
-    let hash = "a".repeat(64);
-    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None).unwrap();
-    let key_with =
-        bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(Some(scope))).unwrap();
-    let key_without =
-        bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None)).unwrap();
-    assert_ne!(key_with, key_without);
+    for (case, left, right) in [
+        ("different repositories", Some(scope_a), Some(scope_b)),
+        ("scoped versus global", Some(test_scope()), None),
+    ] {
+        let left = test_capability(left);
+        let right = test_capability(right);
+        assert_ne!(
+            lfs_object_key(&hash, &left).unwrap(),
+            lfs_object_key(&hash, &right).unwrap(),
+            "LFS: {case}"
+        );
+        for kind in [BazelCacheKind::Cas, BazelCacheKind::Ac] {
+            assert_ne!(
+                bazel_cache_object_key(kind, &hash, &left).unwrap(),
+                bazel_cache_object_key(kind, &hash, &right).unwrap(),
+                "{kind:?}: {case}"
+            );
+        }
+    }
 }
 
 // Shared validation must agree across both Bazel kinds and LFS.
