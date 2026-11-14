@@ -120,9 +120,9 @@ echo ""
 
 # Build the load test binary
 echo "Building load test binary..."
-if ! cargo build --bin load_test --release 2>/dev/null; then
+if ! cargo build -p shardline-bench --bin load_test --release 2>/dev/null; then
     echo "Build failed. Trying debug build..."
-    cargo build --bin load_test
+    cargo build -p shardline-bench --bin load_test
 fi
 BINARY="./target/release/load_test"
 if [[ ! -x "${BINARY}" ]]; then

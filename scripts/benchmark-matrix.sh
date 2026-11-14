@@ -24,7 +24,7 @@ fi
 mkdir -p "$run_dir/results" "$run_dir/storage"
 
 cd "$repo_root"
-cargo build --locked --release --bin shardline
+cargo build --locked --release -p shardline --bin shardline
 
 python3 - "$run_dir/metadata.json" "$commit" "$dirty" "$timestamp" "$deployment_target" \
   "$concurrency_levels" "$iterations" "$base_bytes" "$mutated_bytes" \
