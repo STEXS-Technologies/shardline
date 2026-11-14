@@ -10,10 +10,7 @@ use sqlx::{PgPool, query_scalar};
 use crate::{
     ServerError,
     chunk_store::chunk_object_key,
-    download_stream::{
-        ServerByteStream, download_file_record_bytes, file_record_response_stream,
-        object_byte_range_stream, object_byte_stream,
-    },
+    download_stream::{ServerByteStream, download_file_record_bytes, file_record_response_stream},
     error::IndexError,
     record_store::{parse_stored_file_record_bytes, repository_references_hash_in_scope},
     validation::ensure_directory,
@@ -329,21 +326,6 @@ impl super::PostgresBackend {
             return Err(ServerError::NotFound);
         };
         Ok(metadata.length())
-    }
-
-    pub(crate) async fn read_object_stream(
-        &self,
-        object_key: &ObjectKey,
-        total_length: u64,
-        range: Option<ByteRange>,
-    ) -> Result<ServerByteStream, ServerError> {
-        let object_store = self.object_store();
-        if let Some(range) = range {
-            return object_byte_range_stream(object_store, object_key.clone(), total_length, range)
-                .await;
-        }
-
-        object_byte_stream(object_store, object_key.clone(), total_length).await
     }
 
     pub(crate) async fn delete_object_if_present(
@@ -1702,8 +1684,8 @@ mod tests {
         let key = ObjectKey::parse("test/stream/no-range").unwrap();
         let data = b"stream data without range";
         store_object(&backend.object_store(), &key, data);
-        let result = backend
-            .read_object_stream(&key, data.len() as u64, None)
+        let result = crate::ServerBackend::Postgres(backend)
+            .direct_object_stream(&key, data.len() as u64, None)
             .await;
         assert!(result.is_ok());
     }
@@ -1715,8 +1697,8 @@ mod tests {
         let data = b"stream data with range spec";
         store_object(&backend.object_store(), &key, data);
         let range = ByteRange::new(0, data.len() as u64 - 1).unwrap();
-        let result = backend
-            .read_object_stream(&key, data.len() as u64, Some(range))
+        let result = crate::ServerBackend::Postgres(backend)
+            .direct_object_stream(&key, data.len() as u64, Some(range))
             .await;
         assert!(result.is_ok());
     }

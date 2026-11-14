@@ -1,11 +1,7 @@
-use shardline_protocol::ByteRange;
 use shardline_storage::{DeleteOutcome, ObjectKey, ObjectStore};
 
 use super::LocalBackend;
-use crate::{
-    ServerError,
-    download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
-};
+use crate::ServerError;
 
 impl LocalBackend {
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
@@ -20,21 +16,6 @@ impl LocalBackend {
         })
         .await
         .map_err(ServerError::BlockingTask)?
-    }
-
-    pub(crate) async fn read_object_stream(
-        &self,
-        object_key: &ObjectKey,
-        total_length: u64,
-        range: Option<ByteRange>,
-    ) -> Result<ServerByteStream, ServerError> {
-        let object_store = self.object_store();
-        if let Some(range) = range {
-            return object_byte_range_stream(object_store, object_key.clone(), total_length, range)
-                .await;
-        }
-
-        object_byte_stream(object_store, object_key.clone(), total_length).await
     }
 
     pub(crate) async fn delete_object_if_present(
@@ -268,8 +249,8 @@ mod tests {
         let key = ObjectKey::parse("stream-test-key").unwrap();
         let data = b"stream-content";
         backend.put_fixture(&key, data.to_vec()).unwrap();
-        let result = backend
-            .read_object_stream(&key, data.len() as u64, None)
+        let result = crate::ServerBackend::Local(backend)
+            .direct_object_stream(&key, data.len() as u64, None)
             .await;
         assert!(result.is_ok());
     }
@@ -296,8 +277,8 @@ mod tests {
         backend.put_fixture(&key, data.to_vec()).unwrap();
         use shardline_protocol::ByteRange;
         let range = ByteRange::new(0, 4).unwrap();
-        let result = backend
-            .read_object_stream(&key, data.len() as u64, Some(range))
+        let result = crate::ServerBackend::Local(backend)
+            .direct_object_stream(&key, data.len() as u64, Some(range))
             .await;
         assert!(result.is_ok());
     }

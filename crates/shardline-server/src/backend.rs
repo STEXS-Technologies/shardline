@@ -26,7 +26,7 @@ use std::sync::{LazyLock, Mutex};
 use crate::{
     LocalBackend, ObjectStorageAdapter, ObjectStoreError, PostgresBackend, ServerConfig,
     ServerError, ShardMetadataLimits, check_database_schema_compatibility,
-    download_stream::ServerByteStream,
+    download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
     model::{ServerStatsResponse, UploadFileResponse},
     object_store::{ServerObjectStore, object_store_from_config},
     reconstruction_cache::{
@@ -1353,18 +1353,9 @@ impl ServerBackend {
         if direct_length.is_ok() {
             if let Some(digest_hex) = destination.as_str().strip_prefix("objects/sha256/") {
                 let total_length = direct_length?;
-                let source_stream = match self {
-                    Self::Local(backend) => {
-                        backend
-                            .read_object_stream(source, total_length, None)
-                            .await?
-                    }
-                    Self::Postgres(backend) => {
-                        backend
-                            .read_object_stream(source, total_length, None)
-                            .await?
-                    }
-                };
+                let source_stream = self
+                    .direct_object_stream(source, total_length, None)
+                    .await?;
                 return self
                     .put_sha256_addressed_object_stream_if_absent(
                         destination,
@@ -1502,6 +1493,21 @@ impl ServerBackend {
         }
     }
 
+    pub(crate) async fn direct_object_stream(
+        &self,
+        object_key: &ObjectKey,
+        total_length: u64,
+        range: Option<ByteRange>,
+    ) -> Result<ServerByteStream, ServerError> {
+        let object_store = self.object_store();
+        if let Some(range) = range {
+            return object_byte_range_stream(object_store, object_key.clone(), total_length, range)
+                .await;
+        }
+
+        object_byte_stream(object_store, object_key.clone(), total_length).await
+    }
+
     pub(crate) async fn read_object_stream(
         &self,
         object_key: &ObjectKey,
@@ -1528,18 +1534,9 @@ impl ServerBackend {
     ) -> Result<ServerByteStream, ServerError> {
         if snapshot.representation == ObjectReadRepresentation::Direct {
             crate::metrics::record_object_read_by_repr("direct_object", snapshot.total_length);
-            return match self {
-                Self::Local(backend) => {
-                    backend
-                        .read_object_stream(object_key, snapshot.total_length, range)
-                        .await
-                }
-                Self::Postgres(backend) => {
-                    backend
-                        .read_object_stream(object_key, snapshot.total_length, range)
-                        .await
-                }
-            };
+            return self
+                .direct_object_stream(object_key, snapshot.total_length, range)
+                .await;
         }
         let file_id = protocol_object_file_id(object_key);
         let (stream, record_length) = match self {
