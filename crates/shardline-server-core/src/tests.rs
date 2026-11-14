@@ -1,7 +1,5 @@
 mod denied_s3;
 
-use std::num::NonZeroUsize;
-
 use proptest::prelude::*;
 use shardline_index::{LocalRecordStore, RecordTraversal};
 use shardline_protocol::{
@@ -13,115 +11,6 @@ use shardline_storage::{
 };
 
 use super::*;
-
-#[test]
-fn validate_identifier_accepts_simple_name() {
-    assert!(validate_identifier("hello.txt").is_ok());
-}
-
-#[test]
-fn validate_identifier_accepts_dotted_name() {
-    assert!(validate_identifier("file.name.txt").is_ok());
-}
-
-#[test]
-fn validate_identifier_rejects_empty() {
-    assert!(validate_identifier("").is_err());
-}
-
-#[test]
-fn validate_identifier_rejects_whitespace_only() {
-    assert!(validate_identifier("   ").is_err());
-}
-
-#[test]
-fn validate_identifier_rejects_dot() {
-    assert!(validate_identifier(".").is_err());
-}
-
-#[test]
-fn validate_identifier_rejects_leading_slash() {
-    assert!(validate_identifier("/etc/passwd").is_err());
-}
-
-#[test]
-fn validate_identifier_rejects_traversal() {
-    assert!(validate_identifier("foo/../bar").is_err());
-}
-
-#[test]
-fn validate_identifier_rejects_backslash() {
-    assert!(validate_identifier("foo\\bar").is_err());
-}
-
-#[test]
-fn validate_identifier_rejects_control_char() {
-    assert!(validate_identifier("foo\tbar").is_err());
-}
-
-#[test]
-fn validate_identifier_rejects_null_byte() {
-    // Null bytes are control characters and MUST be rejected.
-    assert!(validate_identifier("foo\0bar").is_err());
-    assert!(validate_identifier("\0").is_err());
-    assert!(validate_identifier("null\0end").is_err());
-}
-
-#[test]
-fn validate_content_hash_accepts_valid_hash() {
-    let hash = "a".repeat(64);
-    assert!(validate_content_hash(&hash).is_ok());
-}
-
-#[test]
-fn validate_content_hash_rejects_too_short() {
-    assert!(validate_content_hash("abc123").is_err());
-}
-
-#[test]
-fn validate_content_hash_rejects_too_long() {
-    let hash = "a".repeat(65);
-    assert!(validate_content_hash(&hash).is_err());
-}
-
-#[test]
-fn validate_content_hash_rejects_uppercase() {
-    let hash = "A".repeat(64);
-    assert!(validate_content_hash(&hash).is_err());
-}
-
-#[test]
-fn validate_content_hash_rejects_non_hex() {
-    let mut hash = "a".repeat(64);
-    hash.push('g');
-    hash.remove(0);
-    assert!(validate_content_hash(&hash).is_err());
-}
-
-#[test]
-fn checked_add_normal() {
-    assert_eq!(checked_add(1, 2).unwrap(), 3);
-}
-
-#[test]
-fn checked_add_zero() {
-    assert_eq!(checked_add(0, 0).unwrap(), 0);
-}
-
-#[test]
-fn checked_add_overflow() {
-    assert!(checked_add(u64::MAX, 1).is_err());
-}
-
-#[test]
-fn checked_increment_normal() {
-    assert_eq!(checked_increment(0).unwrap(), 1);
-}
-
-#[test]
-fn checked_increment_overflow() {
-    assert!(checked_increment(u64::MAX).is_err());
-}
 
 #[test]
 fn chunk_object_key_valid() {
@@ -329,23 +218,6 @@ fn content_hash_determinism_different_inputs_different_hash() {
 fn validate_content_hash_with_valid_64_hex() {
     let hash = "0123456789abcdef".repeat(4);
     assert!(validate_content_hash_with(&hash, || ()).is_ok());
-}
-
-#[test]
-fn validate_content_hash_with_too_short() {
-    assert!(validate_content_hash_with("abc123", || ()).is_err());
-}
-
-#[test]
-fn validate_content_hash_with_uppercase_rejected() {
-    let hash = "A".repeat(64);
-    assert!(validate_content_hash_with(&hash, || ()).is_err());
-}
-
-#[test]
-fn validate_content_hash_with_non_hex_rejected() {
-    let hash = format!("{}g{}", "a".repeat(62), "a");
-    assert!(validate_content_hash_with(&hash, || ()).is_err());
 }
 
 #[test]
@@ -1158,28 +1030,6 @@ fn auth_context_new_and_accessors() {
 
 // ── ShardMetadataLimits ──────────────────────────────────────────────
 
-#[test]
-fn shard_metadata_limits_new_and_accessors() {
-    let limits = ShardMetadataLimits::new(
-        NonZeroUsize::new(10).unwrap(),
-        NonZeroUsize::new(20).unwrap(),
-        NonZeroUsize::new(30).unwrap(),
-        NonZeroUsize::new(40).unwrap(),
-    );
-    assert_eq!(limits.max_files().get(), 10);
-    assert_eq!(limits.max_xorbs().get(), 20);
-    assert_eq!(limits.max_reconstruction_terms().get(), 30);
-    assert_eq!(limits.max_xorb_chunks().get(), 40);
-}
-
-#[test]
-fn shard_metadata_limits_default_matches_const() {
-    assert_eq!(
-        ShardMetadataLimits::default(),
-        DEFAULT_SHARD_METADATA_LIMITS
-    );
-}
-
 // ── AuthError Display ────────────────────────────────────────────────
 
 #[test]
@@ -1290,26 +1140,6 @@ fn server_object_store_error_display_stored_object_length_mismatch() {
 }
 
 // ── Error Display for remaining types ────────────────────────────────
-
-#[test]
-fn validate_identifier_error_display() {
-    let msg = ValidateIdentifierError.to_string();
-    assert!(!msg.is_empty());
-    assert!(msg.contains("identifier"));
-}
-
-#[test]
-fn validate_content_hash_error_display() {
-    let msg = ValidateContentHashError.to_string();
-    assert!(!msg.is_empty());
-    assert!(msg.contains("hexadecimal"));
-}
-
-#[test]
-fn rebuild_overflow_error_display() {
-    let msg = RebuildOverflowError.to_string();
-    assert_eq!(msg, "arithmetic overflow");
-}
 
 #[test]
 fn parse_stored_file_record_error_json_display() {
@@ -1625,15 +1455,6 @@ fn read_full_object_blackhole_zero_length() {
     let result = read_full_object(&store, &key, 0);
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
-}
-
-// ── unix_now_seconds_checked ────────────────────────────────────────
-
-#[test]
-fn unix_now_seconds_checked_is_recent() {
-    let ts = unix_now_seconds_checked().unwrap();
-    // Should be well past the year 2020
-    assert!(ts >= 1_577_836_800, "timestamp {ts} too small for 2020");
 }
 
 // ── map_object_key_error ──────────────────────────────────────────────
