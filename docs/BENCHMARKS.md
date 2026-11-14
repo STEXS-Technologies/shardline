@@ -3750,23 +3750,25 @@ metadata.
 
 The November 14, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`c21ac9cd8a5df982401e0cfcc708323b8b035c3a`. It counts all tracked `.rs`
+`1ecacfbbf1040af98ba7f98b31a890af0c37d1cf`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 592,967 | 10,682 (1.77%) |
-| Server | 220,570 | 212,872 | 7,698 (3.49%) |
+| Entire repository | 603,649 | 591,992 | 11,657 (1.93%) |
+| Server | 220,570 | 212,841 | 7,729 (3.50%) |
 | Storage | 20,373 | 19,469 | 904 (4.44%) |
 | S3 adapter | 10,954 | 10,365 | 589 (5.38%) |
 | Cache | 6,573 | 5,933 | 640 (9.74%) |
-| Index | 71,472 | 71,175 | 297 (0.42%) |
+| Index | 71,472 | 71,165 | 307 (0.43%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
-| GC | 10,954 | 10,764 | 190 (1.73%) |
-| Fsck | 8,989 | 8,821 | 168 (1.87%) |
-| Rebuild | 4,326 | 4,245 | 81 (1.87%) |
+| GC | 10,954 | 10,621 | 333 (3.04%) |
+| Fsck | 8,989 | 8,457 | 532 (5.92%) |
+| Rebuild | 4,326 | 4,068 | 258 (5.96%) |
+| CLI | 37,677 | 37,578 | 99 (0.26%) |
+| Protocol adapters | 1,670 | 1,519 | 151 (9.04%) |
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
@@ -3774,7 +3776,7 @@ using the corresponding commit and path, or omit the path for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' c21ac9cd8a5df982401e0cfcc708323b8b035c3a -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 1ecacfbbf1040af98ba7f98b31a890af0c37d1cf -- 'crates/shardline-server/*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
@@ -3785,9 +3787,10 @@ critical-path timings have not been established; no percentage build-time
 improvement is claimed. A source reduction also does not establish a throughput,
 latency, memory or I/O improvement.
 
-### Current Cargo build sample
+### Recorded Cargo build sample
 
-At the cleanup commit above, an x86_64 Linux shared-host sample used Rust
+At commit `c21ac9cd8a5df982401e0cfcc708323b8b035c3a`, an x86_64 Linux
+shared-host sample used Rust
 1.99.0 (`b940084d7`) and Cargo 1.99.0 (`5f94df478`), four build jobs, no Rust
 compiler wrapper, and `CARGO_PROFILE_DEV_DEBUG=0`. This overrides the repository's
 default debug information setting. The target directory already contained
