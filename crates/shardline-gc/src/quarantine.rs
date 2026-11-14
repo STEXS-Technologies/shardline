@@ -651,22 +651,7 @@ mod tests {
                 )
                 .unwrap(),
             );
-            let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
-                orphan_chunks: 0,
-                orphan_chunk_bytes: 0,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
-                ..LocalGcReport::default()
-            };
+            let mut report = LocalGcReport::default();
 
             reconcile_quarantine_entries(
                 &index_store,
@@ -710,22 +695,7 @@ mod tests {
             let retention = 86_400_u64;
 
             let mut quarantine_entries = HashMap::new();
-            let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
-                orphan_chunks: 0,
-                orphan_chunk_bytes: 0,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
-                ..LocalGcReport::default()
-            };
+            let mut report = LocalGcReport::default();
 
             reconcile_quarantine_entries(
                 &index_store,
@@ -794,22 +764,7 @@ mod tests {
             orphan_objects.insert(orphan.hash.clone(), orphan.clone());
 
             let mut quarantine_entries = HashMap::new();
-            let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
-                orphan_chunks: 0,
-                orphan_chunk_bytes: 0,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
-                ..LocalGcReport::default()
-            };
+            let mut report = LocalGcReport::default();
 
             reconcile_quarantine_entries(
                 &index_store,
@@ -872,22 +827,7 @@ mod tests {
             .unwrap();
             quarantine_entries.insert(orphan.hash.clone(), candidate);
 
-            let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
-                orphan_chunks: 0,
-                orphan_chunk_bytes: 0,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
-                ..LocalGcReport::default()
-            };
+            let mut report = LocalGcReport::default();
 
             reconcile_quarantine_entries(
                 &index_store,
@@ -1006,19 +946,8 @@ mod tests {
             quarantine_entries.insert(orphan.hash.clone(), candidate);
 
             let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
                 orphan_chunks: 1,
                 orphan_chunk_bytes: 512,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
                 ..LocalGcReport::default()
             };
 
@@ -1160,19 +1089,8 @@ mod tests {
             quarantine_entries.insert(orphan.hash.clone(), candidate);
 
             let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
                 orphan_chunks: 1,
                 orphan_chunk_bytes: 256,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
                 ..LocalGcReport::default()
             };
 
@@ -1225,22 +1143,7 @@ mod tests {
             let mut quarantine_entries = HashMap::new();
             quarantine_entries.insert(orphan.hash.clone(), candidate);
 
-            let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
-                orphan_chunks: 0,
-                orphan_chunk_bytes: 0,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
-                ..LocalGcReport::default()
-            };
+            let mut report = LocalGcReport::default();
 
             sweep_quarantine_entries(
                 &record_store,
@@ -1394,22 +1297,7 @@ mod tests {
             .unwrap();
             quarantine_entries.insert(orphan.hash.clone(), old_candidate);
 
-            let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
-                orphan_chunks: 0,
-                orphan_chunk_bytes: 0,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
-                ..LocalGcReport::default()
-            };
+            let mut report = LocalGcReport::default();
 
             reconcile_quarantine_entries(
                 &index_store,
@@ -1461,22 +1349,7 @@ mod tests {
             let mut quarantine_entries = HashMap::new();
             quarantine_entries.insert(orphan.hash.clone(), candidate);
 
-            let mut report = LocalGcReport {
-                scanned_records: 0,
-                referenced_chunks: 0,
-                orphan_chunks: 0,
-                orphan_chunk_bytes: 0,
-                active_quarantine_candidates: 0,
-                new_quarantine_candidates: 0,
-                retained_quarantine_candidates: 0,
-                released_quarantine_candidates: 0,
-                deleted_chunks: 0,
-                deleted_bytes: 0,
-                reaped_stale_temporary_chunks: 0,
-                reaped_stale_temporary_bytes: 0,
-                pruned_revisions_over_cap: 0,
-                ..LocalGcReport::default()
-            };
+            let mut report = LocalGcReport::default();
 
             // Empty orphan_objects → the stale entry should be released.
             reconcile_quarantine_entries(

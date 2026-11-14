@@ -805,20 +805,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn empty_lifecycle_repair_report() -> LifecycleRepairReport {
-        LifecycleRepairReport {
-            scanned_records: 0,
-            referenced_objects: 0,
-            scanned_quarantine_candidates: 0,
-            removed_missing_quarantine_candidates: 0,
-            removed_reachable_quarantine_candidates: 0,
-            removed_held_quarantine_candidates: 0,
-            scanned_retention_holds: 0,
-            removed_expired_retention_holds: 0,
-            removed_missing_retention_holds: 0,
-            scanned_webhook_deliveries: 0,
-            removed_stale_webhook_deliveries: 0,
-            removed_future_webhook_deliveries: 0,
-        }
+        LifecycleRepairReport::default()
     }
 
     #[test]
@@ -904,22 +891,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn empty_gc_report() -> LocalGcReport {
-        LocalGcReport {
-            scanned_records: 0,
-            referenced_chunks: 0,
-            orphan_chunks: 0,
-            orphan_chunk_bytes: 0,
-            active_quarantine_candidates: 0,
-            new_quarantine_candidates: 0,
-            retained_quarantine_candidates: 0,
-            released_quarantine_candidates: 0,
-            deleted_chunks: 0,
-            deleted_bytes: 0,
-            reaped_stale_temporary_chunks: 0,
-            reaped_stale_temporary_bytes: 0,
-            pruned_revisions_over_cap: 0,
-            ..LocalGcReport::default()
-        }
+        LocalGcReport::default()
     }
 
     #[test]

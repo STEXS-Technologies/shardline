@@ -327,20 +327,7 @@ mod tests {
     fn empty_repair_report() -> RepairReport {
         RepairReport {
             index_rebuild: LocalIndexRebuildReport::default(),
-            lifecycle_repair: LifecycleRepairReport {
-                scanned_records: 0,
-                referenced_objects: 0,
-                scanned_quarantine_candidates: 0,
-                removed_missing_quarantine_candidates: 0,
-                removed_reachable_quarantine_candidates: 0,
-                removed_held_quarantine_candidates: 0,
-                scanned_retention_holds: 0,
-                removed_expired_retention_holds: 0,
-                removed_missing_retention_holds: 0,
-                scanned_webhook_deliveries: 0,
-                removed_stale_webhook_deliveries: 0,
-                removed_future_webhook_deliveries: 0,
-            },
+            lifecycle_repair: LifecycleRepairReport::default(),
             fsck: LocalFsckReport::default(),
         }
     }

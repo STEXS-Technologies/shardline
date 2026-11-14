@@ -153,16 +153,7 @@ where
     let mut report = LifecycleRepairReport {
         scanned_records: reachability.scanned_records,
         referenced_objects: u64::try_from(reachability.referenced_object_keys.len())?,
-        scanned_quarantine_candidates: 0,
-        removed_missing_quarantine_candidates: 0,
-        removed_reachable_quarantine_candidates: 0,
-        removed_held_quarantine_candidates: 0,
-        scanned_retention_holds: 0,
-        removed_expired_retention_holds: 0,
-        removed_missing_retention_holds: 0,
-        scanned_webhook_deliveries: 0,
-        removed_stale_webhook_deliveries: 0,
-        removed_future_webhook_deliveries: 0,
+        ..LifecycleRepairReport::default()
     };
 
     let retention_holds = index_store

@@ -32,7 +32,7 @@ impl Default for LifecycleRepairOptions {
 }
 
 /// Lifecycle-repair report.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LifecycleRepairReport {
     /// Number of file and file-version records scanned to derive reachability.
     pub scanned_records: u64,

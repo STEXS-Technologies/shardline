@@ -286,23 +286,7 @@ where
         referenced_chunks: u64::try_from(reachability.referenced_object_keys.len())?,
         orphan_chunks: u64::try_from(orphan_objects.len())?,
         orphan_chunk_bytes,
-        active_quarantine_candidates: 0,
-        new_quarantine_candidates: 0,
-        retained_quarantine_candidates: 0,
-        released_quarantine_candidates: 0,
-        deleted_chunks: 0,
-        deleted_bytes: 0,
-        reaped_stale_temporary_chunks: 0,
-        reaped_stale_temporary_bytes: 0,
-        pruned_revisions_over_cap: 0,
-        scanned_oci_tombstones: 0,
-        eligible_oci_tombstones: 0,
-        reclaimed_oci_tombstones: 0,
-        scanned_resumable_staging_objects: 0,
-        protected_resumable_staging_objects: 0,
-        reclaimed_resumable_staging_objects: 0,
-        reclaimed_resumable_staging_bytes: 0,
-        reclaimed_resumable_sessions: 0,
+        ..LocalGcReport::default()
     };
 
     // The mark is gated on the same `!retention_clock_is_skewed_forward`

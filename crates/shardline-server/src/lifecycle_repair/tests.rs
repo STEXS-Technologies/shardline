@@ -338,20 +338,7 @@ fn repair_reachability_can_accumulate_keys() {
 
 #[test]
 fn lifecycle_repair_report_all_fields_default_to_zero() {
-    let report = LifecycleRepairReport {
-        scanned_records: 0,
-        referenced_objects: 0,
-        scanned_quarantine_candidates: 0,
-        removed_missing_quarantine_candidates: 0,
-        removed_reachable_quarantine_candidates: 0,
-        removed_held_quarantine_candidates: 0,
-        scanned_retention_holds: 0,
-        removed_expired_retention_holds: 0,
-        removed_missing_retention_holds: 0,
-        scanned_webhook_deliveries: 0,
-        removed_stale_webhook_deliveries: 0,
-        removed_future_webhook_deliveries: 0,
-    };
+    let report = LifecycleRepairReport::default();
     assert_eq!(report.scanned_records, 0);
     assert_eq!(report.referenced_objects, 0);
     assert_eq!(report.scanned_quarantine_candidates, 0);
@@ -395,16 +382,7 @@ fn lifecycle_repair_report_clone_and_eq() {
     let report = LifecycleRepairReport {
         scanned_records: 5,
         referenced_objects: 3,
-        scanned_quarantine_candidates: 0,
-        removed_missing_quarantine_candidates: 0,
-        removed_reachable_quarantine_candidates: 0,
-        removed_held_quarantine_candidates: 0,
-        scanned_retention_holds: 0,
-        removed_expired_retention_holds: 0,
-        removed_missing_retention_holds: 0,
-        scanned_webhook_deliveries: 0,
-        removed_stale_webhook_deliveries: 0,
-        removed_future_webhook_deliveries: 0,
+        ..LifecycleRepairReport::default()
     };
     let cloned = report.clone();
     assert_eq!(report, cloned);
