@@ -4,8 +4,8 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
-    EvidenceEventMetadata, LifecycleEvent, OperationKind, ProviderLifecycleEvent,
-    QuarantineEvidenceLog, QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot,
+    EvidenceEventMetadata, LifecycleEvent, OperationKind, QuarantineEvidenceLog,
+    QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot,
     ReliabilityMerkleCommit, RetentionEvidenceLog, RetentionHoldLifecycleState,
     RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence, SnapshotEvidenceLog,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
@@ -450,20 +450,7 @@ async fn verify_postgres_provider_evidence(
     state: &ProviderRepositoryState,
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = crate::provider_evidence::snapshot_from_state(state)?;
-    let operation_id = snapshot.evidence_operation()?.operation_id;
-    let Some(event) = load_postgres_latest_evidence_event(
-        &store.pool,
-        OperationKind::ProviderEvent,
-        &operation_id,
-    )
-    .await?
-    else {
-        return Err(PostgresMetadataStoreError::Reliability(
-            shardline_reliability::ReliabilityError::OperationMismatch,
-        ));
-    };
-    let event = serde_json::from_value::<ProviderLifecycleEvent>(event)?;
-    let evidence = shardline_reliability::ProviderEvidenceLog::from_head(event)?;
+    let evidence = load_postgres_snapshot_evidence_for(&store.pool, &snapshot).await?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(())
 }

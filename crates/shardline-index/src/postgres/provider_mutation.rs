@@ -1,11 +1,10 @@
 use shardline_protocol::RepositoryProvider;
 use shardline_reliability::{
-    OperationKind, ProviderEvidenceLog, ProviderLifecycleSnapshot, ProviderRepositoryOperationId,
-    RetentionEvidenceLog, RetentionHoldLifecycleState, SnapshotEvidence,
-    WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
-    verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
-    verify_and_reactivate_retention_hold, verify_or_repair_snapshot_evidence,
-    verify_provider_lifecycle_events,
+    ProviderEvidenceLog, ProviderRepositoryOperationId, RetentionEvidenceLog,
+    RetentionHoldLifecycleState, WebhookDeliveryLifecycleState,
+    append_or_baseline_snapshot_evidence, verify_and_append_snapshot_transition,
+    verify_and_append_webhook_delivery_retry, verify_and_reactivate_retention_hold,
+    verify_or_repair_snapshot_evidence, verify_provider_lifecycle_events,
 };
 use sqlx::{Acquire, PgConnection, Postgres, Transaction, query, query_scalar};
 
@@ -447,7 +446,7 @@ pub(super) async fn upsert_provider_repository_state(
         .map(|current_state| snapshot_from_state(&current_state))
         .transpose()?;
     let evidence = if let Some(snapshot) = current_snapshot.as_ref() {
-        load_provider_evidence(transaction, snapshot).await?
+        super::load_postgres_snapshot_evidence_for(&mut **transaction, snapshot).await?
     } else {
         query(
             "DELETE FROM shardline_reliability_events
@@ -592,25 +591,13 @@ pub(super) async fn upsert_provider_repository_state(
     Ok(())
 }
 
-async fn load_provider_evidence(
-    transaction: &mut Transaction<'_, Postgres>,
-    snapshot: &ProviderLifecycleSnapshot,
-) -> Result<ProviderEvidenceLog, PostgresMetadataStoreError> {
-    let operation_id = snapshot.evidence_operation()?.operation_id;
-    super::index_store::load_postgres_snapshot_evidence(
-        &mut **transaction,
-        OperationKind::ProviderEvent,
-        &operation_id,
-    )
-    .await
-}
-
 pub(super) async fn verify_provider_repository_state_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     state: &ProviderRepositoryState,
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = snapshot_from_state(state)?;
-    let evidence = load_provider_evidence(transaction, &snapshot).await?;
+    let evidence =
+        super::load_postgres_snapshot_evidence_for(&mut **transaction, &snapshot).await?;
     if evidence.events().is_empty() {
         let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
         verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
