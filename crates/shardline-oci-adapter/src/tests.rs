@@ -337,6 +337,17 @@ fn max_sessions() -> NonZeroUsize {
     NonZeroUsize::new(100).unwrap()
 }
 
+fn upload_session_fixture() -> OciUploadSession {
+    OciUploadSession {
+        repository: "repo".to_owned(),
+        scope_namespace: "global".to_owned(),
+        created_at_unix_seconds: 0,
+        last_touched_unix_seconds: 0,
+        use_s3_multipart: false,
+        s3_multipart: None,
+    }
+}
+
 fn create_test_session(
     root: &Path,
     use_s3: bool,
@@ -814,12 +825,9 @@ async fn new_upload_session_id_is_unique() {
 #[test]
 fn upload_session_expired_returns_true_when_past_ttl() {
     let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
         created_at_unix_seconds: 1000,
         last_touched_unix_seconds: 1000,
-        use_s3_multipart: false,
-        s3_multipart: None,
+        ..upload_session_fixture()
     };
     let ttl = NonZeroU64::new(60).unwrap();
     assert!(upload_session_expired(&session, ttl, 1061));
@@ -828,26 +836,20 @@ fn upload_session_expired_returns_true_when_past_ttl() {
 #[test]
 fn upload_session_expired_returns_false_when_within_ttl() {
     let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
         created_at_unix_seconds: 1000,
         last_touched_unix_seconds: 1000,
-        use_s3_multipart: false,
-        s3_multipart: None,
+        ..upload_session_fixture()
     };
     let ttl = NonZeroU64::new(60).unwrap();
     assert!(!upload_session_expired(&session, ttl, 1050));
 }
 
 #[test]
-fn upload_session_expired_returns_false_at_exact_boundary() {
+fn upload_session_expires_at_exact_ttl_boundary() {
     let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
         created_at_unix_seconds: 1000,
         last_touched_unix_seconds: 1000,
-        use_s3_multipart: false,
-        s3_multipart: None,
+        ..upload_session_fixture()
     };
     let ttl = NonZeroU64::new(60).unwrap();
     assert!(upload_session_expired(&session, ttl, 1060));
@@ -1459,24 +1461,13 @@ fn upload_body_path_for_session_rejects_invalid_id() {
 
 #[test]
 fn upload_session_length_without_multipart_returns_none() {
-    let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
-        created_at_unix_seconds: 0,
-        last_touched_unix_seconds: 0,
-        use_s3_multipart: false,
-        s3_multipart: None,
-    };
+    let session = upload_session_fixture();
     assert_eq!(super::upload_session_length(&session), None);
 }
 
 #[test]
 fn upload_session_length_with_multipart_returns_length() {
     let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
-        created_at_unix_seconds: 0,
-        last_touched_unix_seconds: 0,
         use_s3_multipart: true,
         s3_multipart: Some(crate::OciS3MultipartUploadSession {
             temporary_object_key: "tmp/key".to_owned(),
@@ -1485,6 +1476,7 @@ fn upload_session_length_with_multipart_returns_length() {
             total_length: 42,
             sha256_state: crate::SerializableSha256State::default(),
         }),
+        ..upload_session_fixture()
     };
     assert_eq!(super::upload_session_length(&session), Some(42));
 }
@@ -1492,12 +1484,8 @@ fn upload_session_length_with_multipart_returns_length() {
 #[test]
 fn upload_session_length_with_multipart_no_data_returns_zero() {
     let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
-        created_at_unix_seconds: 0,
-        last_touched_unix_seconds: 0,
         use_s3_multipart: true,
-        s3_multipart: None,
+        ..upload_session_fixture()
     };
     assert_eq!(super::upload_session_length(&session), Some(0));
 }
@@ -1536,14 +1524,7 @@ async fn touch_upload_session_persists_updated_timestamp() {
 
 #[tokio::test]
 async fn abort_s3_multipart_upload_session_no_multipart_returns_ok() {
-    let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
-        created_at_unix_seconds: 0,
-        last_touched_unix_seconds: 0,
-        use_s3_multipart: false,
-        s3_multipart: None,
-    };
+    let session = upload_session_fixture();
     let backend = TestBackend;
     let result = super::abort_s3_multipart_upload_session(&backend, &session).await;
     assert!(result.is_ok());
@@ -2529,14 +2510,7 @@ async fn count_active_sessions_skips_expired_session() {
     let upload_dir = crate::upload_dir(root.path());
     tokio::fs::create_dir_all(&upload_dir).await.unwrap();
     // Write an expired session (last_touched very old)
-    let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
-        created_at_unix_seconds: 0,
-        last_touched_unix_seconds: 0,
-        use_s3_multipart: false,
-        s3_multipart: None,
-    };
+    let session = upload_session_fixture();
     let bytes = serde_json::to_vec(&session).unwrap();
     let json_path = upload_dir.join("expired.json");
     tokio::fs::write(&json_path, &bytes).await.unwrap();
@@ -2933,12 +2907,9 @@ async fn create_upload_session_metadata_write_failure_cleans_up() {
 
     // Create a minimal session object and try to persist it
     let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
         created_at_unix_seconds: 1,
         last_touched_unix_seconds: 1,
-        use_s3_multipart: false,
-        s3_multipart: None,
+        ..upload_session_fixture()
     };
     let result = super::persist_upload_session(root.path(), &session_id, &session).await;
     assert!(
@@ -3022,14 +2993,7 @@ async fn upload_length_with_zero_length_body() {
 #[tokio::test]
 async fn touch_upload_session_invalid_session_id_errors() {
     let root = temp_root();
-    let session = OciUploadSession {
-        repository: "repo".to_owned(),
-        scope_namespace: "global".to_owned(),
-        created_at_unix_seconds: 0,
-        last_touched_unix_seconds: 0,
-        use_s3_multipart: false,
-        s3_multipart: None,
-    };
+    let session = upload_session_fixture();
     let result = super::touch_upload_session(root.path(), "bad/session/id", session).await;
     assert!(matches!(result, Err(OciAdapterError::InvalidUploadSession)));
 }
