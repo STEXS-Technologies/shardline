@@ -17,17 +17,9 @@ use crate::{
 #[test]
 fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path_buf()).unwrap();
 
-    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb").unwrap();
     let body = b"abcdefgh";
     let integrity = ObjectIntegrity::new(super::util::chunk_hash(body), 8);
 
@@ -43,27 +35,15 @@ fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
         assert_eq!(metadata.length(), 8);
     }
 
-    let range = ByteRange::new(2, 5);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ByteRange::new(2, 5).unwrap();
     let read = store.read_range(&key, range);
     assert!(read.is_ok());
     if let Ok(read) = read {
         assert_eq!(read, b"cdef".to_vec());
     }
 
-    let prefix = ObjectPrefix::parse("xorbs/default/");
-    assert!(prefix.is_ok());
-    let Ok(prefix) = prefix else {
-        return;
-    };
-    let listed = store.list_prefix(&prefix);
-    assert!(listed.is_ok());
-    let Ok(listed) = listed else {
-        return;
-    };
+    let prefix = ObjectPrefix::parse("xorbs/default/").unwrap();
+    let listed = store.list_prefix(&prefix).unwrap();
     assert_eq!(listed.len(), 1);
     let first = listed.first();
     assert!(first.is_some());
@@ -215,17 +195,9 @@ fn local_temporary_upload_reads_each_candidate_and_existing_object_once() {
 #[test]
 fn local_object_store_rejects_integrity_mismatch_and_out_of_bounds_range() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path_buf()).unwrap();
 
-    let key = ObjectKey::parse("xorbs/default/bb/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/bb/hash.xorb").unwrap();
     let wrong_integrity = ObjectIntegrity::new(super::util::chunk_hash(b"abc"), 4);
 
     let result = store.put_if_absent(&key, ObjectBody::from_slice(b"abc"), &wrong_integrity);
@@ -238,11 +210,7 @@ fn local_object_store_rejects_integrity_mismatch_and_out_of_bounds_range() {
     let inserted = store.put_if_absent(&key, ObjectBody::from_slice(b"abc"), &integrity);
     assert!(matches!(inserted, Ok(PutOutcome::Inserted)));
 
-    let range = ByteRange::new(1, 5);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ByteRange::new(1, 5).unwrap();
     let read = store.read_range(&key, range);
     assert!(matches!(read, Err(LocalObjectStoreError::RangeOutOfBounds)));
 }
@@ -250,16 +218,8 @@ fn local_object_store_rejects_integrity_mismatch_and_out_of_bounds_range() {
 #[test]
 fn local_object_store_installs_temporary_file_without_buffering() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
-    let key = ObjectKey::parse("xorbs/default/dd/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let key = ObjectKey::parse("xorbs/default/dd/hash.xorb").unwrap();
     let temporary = storage.path().join("body.tmp");
     let write = fs::write(&temporary, b"streamed-body");
     assert!(write.is_ok());
@@ -269,11 +229,7 @@ fn local_object_store_installs_temporary_file_without_buffering() {
 
     assert!(matches!(inserted, Ok(PutOutcome::Inserted)));
     assert!(!temporary.exists());
-    let range = ByteRange::new(0, 12);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ByteRange::new(0, 12).unwrap();
     let read = store.read_range(&key, range);
     assert!(matches!(read, Ok(bytes) if bytes == b"streamed-body"));
 }
@@ -281,16 +237,8 @@ fn local_object_store_installs_temporary_file_without_buffering() {
 #[test]
 fn local_object_store_temporary_file_duplicate_is_idempotent() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
-    let key = ObjectKey::parse("xorbs/default/ee/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let key = ObjectKey::parse("xorbs/default/ee/hash.xorb").unwrap();
     let body = b"same-body";
     let integrity = ObjectIntegrity::new(super::util::chunk_hash(body), 9);
     let inserted = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
@@ -308,16 +256,8 @@ fn local_object_store_temporary_file_duplicate_is_idempotent() {
 #[test]
 fn local_object_store_temporary_file_rejects_conflicting_existing_object() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
-    let key = ObjectKey::parse("xorbs/default/ef/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let key = ObjectKey::parse("xorbs/default/ef/hash.xorb").unwrap();
     let inserted = store.put_if_absent(
         &key,
         ObjectBody::from_slice(b"same-size"),
@@ -349,11 +289,7 @@ fn local_object_store_open_is_non_mutating_until_write() {
 
     assert!(!root.exists());
 
-    let key = ObjectKey::parse("xorbs/default/cc/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/cc/hash.xorb").unwrap();
     let contains = store.contains(&key);
 
     assert!(matches!(contains, Ok(false)));
@@ -395,11 +331,7 @@ fn local_object_store_list_prefix_rejects_symlinked_root_ancestor() {
     let linked = symlink(&target, &link);
     assert!(linked.is_ok());
     let store = LocalObjectStore::open(link.join("objects"));
-    let prefix = ObjectPrefix::parse("aa/");
-    assert!(prefix.is_ok());
-    let Ok(prefix) = prefix else {
-        return;
-    };
+    let prefix = ObjectPrefix::parse("aa/").unwrap();
 
     let listed = store.list_prefix(&prefix);
 
@@ -414,11 +346,7 @@ fn local_object_store_maps_validated_key_under_root() {
     let storage = shardline_test_support::TempStorage::new();
     let root = storage.path().join("objects");
     let store = LocalObjectStore::open(root.clone());
-    let key = ObjectKey::parse("aa/hash");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("aa/hash").unwrap();
 
     let path = store.path_for_key(&key);
 
@@ -428,23 +356,11 @@ fn local_object_store_maps_validated_key_under_root() {
 #[test]
 fn local_object_store_rejects_corrupted_existing_object_under_same_key() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
 
-    let key = ObjectKey::parse("xorbs/default/dd/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/dd/hash.xorb").unwrap();
     let path = store.path_for_key(&key);
-    let parent = path.parent();
-    assert!(parent.is_some());
-    let Some(parent) = parent else {
-        return;
-    };
+    let parent = path.parent().unwrap();
     let created = fs::create_dir_all(parent);
     assert!(created.is_ok());
 
@@ -516,37 +432,21 @@ fn local_object_store_does_not_confirm_replaced_pinned_object_as_durable() {
 #[test]
 fn local_object_store_rejects_symlinked_object_path() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let outside = storage.path().join("outside-secret");
     let outside_write = fs::write(&outside, b"secret");
     assert!(outside_write.is_ok());
 
-    let key = ObjectKey::parse("xorbs/default/ff/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/ff/hash.xorb").unwrap();
     let path = store.path_for_key(&key);
-    let parent = path.parent();
-    assert!(parent.is_some());
-    let Some(parent) = parent else {
-        return;
-    };
+    let parent = path.parent().unwrap();
     let created = fs::create_dir_all(parent);
     assert!(created.is_ok());
     let linked = symlink(&outside, &path);
     assert!(linked.is_ok());
 
     let metadata = store.metadata(&key);
-    let range = ByteRange::new(0, 5);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ByteRange::new(0, 5).unwrap();
     let read = store.read_range(&key, range);
 
     assert!(matches!(
@@ -563,22 +463,10 @@ fn local_object_store_rejects_symlinked_object_path() {
 #[test]
 fn local_object_store_rejects_symlinked_parent_directory_reads() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
 
-    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
-    let outside = tempfile::tempdir();
-    assert!(outside.is_ok());
-    let Ok(outside) = outside else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb").unwrap();
+    let outside = tempfile::tempdir().unwrap();
     let outside_path = outside.path().join("hash.xorb");
     let outside_write = fs::write(&outside_path, b"secret");
     assert!(outside_write.is_ok());
@@ -589,22 +477,14 @@ fn local_object_store_rejects_symlinked_parent_directory_reads() {
         .join("xorbs")
         .join("default")
         .join("aa");
-    let parent = link.parent();
-    assert!(parent.is_some());
-    let Some(parent) = parent else {
-        return;
-    };
+    let parent = link.parent().unwrap();
     let created = fs::create_dir_all(parent);
     assert!(created.is_ok());
     let linked = symlink(outside.path(), &link);
     assert!(linked.is_ok());
 
     let metadata = store.metadata(&key);
-    let range = ByteRange::new(0, 5);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ByteRange::new(0, 5).unwrap();
     let read = store.read_range(&key, range);
 
     assert!(matches!(
@@ -621,33 +501,17 @@ fn local_object_store_rejects_symlinked_parent_directory_reads() {
 #[test]
 fn local_object_store_rejects_symlinked_parent_directory_writes() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
 
-    let key = ObjectKey::parse("xorbs/default/bb/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
-    let outside = tempfile::tempdir();
-    assert!(outside.is_ok());
-    let Ok(outside) = outside else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/bb/hash.xorb").unwrap();
+    let outside = tempfile::tempdir().unwrap();
     let link = storage
         .path()
         .join("objects")
         .join("xorbs")
         .join("default")
         .join("bb");
-    let parent = link.parent();
-    assert!(parent.is_some());
-    let Some(parent) = parent else {
-        return;
-    };
+    let parent = link.parent().unwrap();
     let created = fs::create_dir_all(parent);
     assert!(created.is_ok());
     let linked = symlink(outside.path(), &link);
@@ -671,16 +535,8 @@ fn local_object_store_rejects_symlinked_parent_directory_writes() {
 #[test]
 fn local_object_store_put_overwrite_rejects_parent_swap_race() {
     let storage = shardline_test_support::TempStorage::new();
-    let outside = tempfile::tempdir();
-    assert!(outside.is_ok());
-    let Ok(outside) = outside else {
-        return;
-    };
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let outside = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
 
     let key = ObjectKey::parse("xorbs/default/ee/hash.xorb").unwrap();
     let path = store.path_for_key(&key);
@@ -713,28 +569,12 @@ fn local_object_store_put_overwrite_rejects_parent_swap_race() {
 #[test]
 fn local_object_store_rejects_parent_swap_race() {
     let storage = shardline_test_support::TempStorage::new();
-    let outside = tempfile::tempdir();
-    assert!(outside.is_ok());
-    let Ok(outside) = outside else {
-        return;
-    };
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let outside = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
 
-    let key = ObjectKey::parse("xorbs/default/dd/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/dd/hash.xorb").unwrap();
     let path = store.path_for_key(&key);
-    let parent = path.parent().map(PathBuf::from);
-    assert!(parent.is_some());
-    let Some(parent) = parent else {
-        return;
-    };
+    let parent = path.parent().map(PathBuf::from).unwrap();
     let moved_parent = storage.path().join("swapped-object-parent");
     let moved_parent_for_hook = moved_parent.clone();
     let escape_dir = outside.path().to_path_buf();
@@ -768,22 +608,10 @@ fn local_object_store_rejects_parent_swap_race() {
 #[test]
 fn local_object_store_rejects_symlinked_parent_directory_deletes() {
     let storage = shardline_test_support::TempStorage::new();
-    let store = LocalObjectStore::new(storage.path().join("objects"));
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
 
-    let key = ObjectKey::parse("xorbs/default/cc/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
-    let outside = tempfile::tempdir();
-    assert!(outside.is_ok());
-    let Ok(outside) = outside else {
-        return;
-    };
+    let key = ObjectKey::parse("xorbs/default/cc/hash.xorb").unwrap();
+    let outside = tempfile::tempdir().unwrap();
     let outside_path = outside.path().join("hash.xorb");
     let outside_write = fs::write(&outside_path, b"secret");
     assert!(outside_write.is_ok());
@@ -794,11 +622,7 @@ fn local_object_store_rejects_symlinked_parent_directory_deletes() {
         .join("xorbs")
         .join("default")
         .join("cc");
-    let parent = link.parent();
-    assert!(parent.is_some());
-    let Some(parent) = parent else {
-        return;
-    };
+    let parent = link.parent().unwrap();
     let created = fs::create_dir_all(parent);
     assert!(created.is_ok());
     let linked = symlink(outside.path(), &link);
