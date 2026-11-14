@@ -185,59 +185,6 @@ mod tests {
     }
 
     #[test]
-    fn record_belongs_to_repository_matching() {
-        let record = test_record();
-        let repository = RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
-        assert!(record_belongs_to_repository(&record, &repository));
-    }
-
-    #[test]
-    fn record_belongs_to_repository_mismatched_owner() {
-        let record = test_record();
-        let repository = RepositoryRef::new(ProviderKind::GitHub, "other-owner", "repo").unwrap();
-        assert!(!record_belongs_to_repository(&record, &repository));
-    }
-
-    #[test]
-    fn record_belongs_to_repository_mismatched_name() {
-        let record = test_record();
-        let repository = RepositoryRef::new(ProviderKind::GitHub, "owner", "other-repo").unwrap();
-        assert!(!record_belongs_to_repository(&record, &repository));
-    }
-
-    #[test]
-    fn record_belongs_to_repository_mismatched_provider() {
-        let record = test_record();
-        let repository = RepositoryRef::new(ProviderKind::GitLab, "owner", "repo").unwrap();
-        assert!(!record_belongs_to_repository(&record, &repository));
-    }
-
-    #[test]
-    fn record_belongs_to_repository_check_all_fields() {
-        // Verify that all three conditions (provider, owner, name) must match
-        let record = test_record();
-        // Owner differs
-        let wrong_owner = RepositoryRef::new(ProviderKind::GitHub, "wrong", "repo").unwrap();
-        assert!(!record_belongs_to_repository(&record, &wrong_owner));
-        // Name differs
-        let wrong_name = RepositoryRef::new(ProviderKind::GitHub, "owner", "wrong").unwrap();
-        assert!(!record_belongs_to_repository(&record, &wrong_name));
-        // Provider differs
-        let wrong_provider = RepositoryRef::new(ProviderKind::GitLab, "owner", "repo").unwrap();
-        assert!(!record_belongs_to_repository(&record, &wrong_provider));
-    }
-
-    #[test]
-    fn record_belongs_to_repository_no_scope() {
-        let record = super::FileRecord {
-            repository_scope: None,
-            ..test_record()
-        };
-        let repository = RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
-        assert!(!record_belongs_to_repository(&record, &repository));
-    }
-
-    #[test]
     fn renamed_file_record_updates_scope() {
         let record = test_record();
         let new_repository =
@@ -279,13 +226,6 @@ mod tests {
         };
         let key = record_identity_key(&record);
         assert!(key.contains("unscoped"));
-    }
-
-    #[test]
-    fn repository_record_scope_maps_correctly() {
-        let repository = RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
-        let scope = repository_record_scope(&repository);
-        assert_eq!(scope.provider(), RepositoryProvider::GitHub);
     }
 
     #[test]
@@ -402,36 +342,6 @@ mod tests {
         ));
     }
 
-    // ── collect_deleted_repository_record_references: provider+all providers ─
-
-    #[test]
-    fn repository_record_scope_all_providers() {
-        for provider in &[
-            RepositoryProvider::GitHub,
-            RepositoryProvider::GitLab,
-            RepositoryProvider::Gitea,
-            RepositoryProvider::Codeberg,
-            RepositoryProvider::Generic,
-        ] {
-            let repo = RepositoryRef::new(
-                match provider {
-                    RepositoryProvider::GitHub => ProviderKind::GitHub,
-                    RepositoryProvider::GitLab => ProviderKind::GitLab,
-                    RepositoryProvider::Gitea => ProviderKind::Gitea,
-                    RepositoryProvider::Codeberg => ProviderKind::Codeberg,
-                    RepositoryProvider::Generic => ProviderKind::Generic,
-                },
-                "owner",
-                "repo",
-            )
-            .unwrap();
-            let scope = repository_record_scope(&repo);
-            assert_eq!(scope.provider(), *provider);
-            assert_eq!(scope.owner(), "owner");
-            assert_eq!(scope.name(), "repo");
-        }
-    }
-
     // ── renamed_file_record preserves revision ────────────────────────────
 
     #[test]
@@ -467,29 +377,50 @@ mod tests {
         assert!(key.contains("file with spaces (1).bin"));
     }
 
-    // ── record_belongs_to_repository all provider variants ───────────────
-
     #[test]
-    fn record_belongs_to_repository_all_providers_match() {
-        let cases = [
+    fn repository_scope_matching_and_mapping() {
+        let providers = [
             (ProviderKind::GitHub, RepositoryProvider::GitHub),
             (ProviderKind::GitLab, RepositoryProvider::GitLab),
             (ProviderKind::Gitea, RepositoryProvider::Gitea),
             (ProviderKind::Codeberg, RepositoryProvider::Codeberg),
             (ProviderKind::Generic, RepositoryProvider::Generic),
         ];
-        for (kind, prov) in &cases {
-            let record = super::FileRecord {
-                repository_scope: Some(
-                    RepositoryScope::new(*prov, "owner", "repo", Some("main")).unwrap(),
-                ),
+        for (kind, provider) in providers {
+            let repository = RepositoryRef::new(kind, "owner", "repo").unwrap();
+            let scope = repository_record_scope(&repository);
+            assert_eq!(scope.provider(), provider);
+            assert_eq!(scope.owner(), "owner");
+            assert_eq!(scope.name(), "repo");
+
+            for (other_kind, other_provider) in providers {
+                let record = super::FileRecord {
+                    repository_scope: Some(
+                        RepositoryScope::new(other_provider, "owner", "repo", Some("main"))
+                            .unwrap(),
+                    ),
+                    ..test_record()
+                };
+                for (owner, name) in [
+                    ("owner", "repo"),
+                    ("other-owner", "repo"),
+                    ("wrong", "repo"),
+                    ("owner", "other-repo"),
+                    ("owner", "wrong"),
+                ] {
+                    let target = RepositoryRef::new(kind, owner, name).unwrap();
+                    assert_eq!(
+                        record_belongs_to_repository(&record, &target),
+                        kind == other_kind && owner == "owner" && name == "repo",
+                        "record={other_kind:?}, target={kind:?}/{owner}/{name}",
+                    );
+                }
+            }
+            let unscoped = super::FileRecord {
+                repository_scope: None,
                 ..test_record()
             };
-            let repository = RepositoryRef::new(*kind, "owner", "repo").unwrap();
-            assert!(
-                record_belongs_to_repository(&record, &repository),
-                "expected match for {kind:?}"
-            );
+            assert!(!record_belongs_to_repository(&unscoped, &repository));
         }
     }
 
