@@ -209,15 +209,20 @@ mod tests {
     }
 
     #[test]
-    fn bucket_decode_rejects_missing_separator() {
-        assert!(matches!(
-            decode_bucket("acme"),
-            Err(BucketDecodeError::MissingSeparator)
-        ));
-        assert!(matches!(
-            decode_bucket(""),
-            Err(BucketDecodeError::MissingSeparator)
-        ));
+    fn bucket_decode_error_contract() {
+        for (bucket, error) in [
+            ("acme", BucketDecodeError::MissingSeparator),
+            ("", BucketDecodeError::MissingSeparator),
+            ("Acme.models", BucketDecodeError::NotLowercase),
+            ("acme.Models", BucketDecodeError::NotLowercase),
+            (".models", BucketDecodeError::EmptyPart),
+            ("acme.", BucketDecodeError::EmptyPart),
+            ("A.B", BucketDecodeError::NotLowercase),
+            (".b", BucketDecodeError::EmptyPart),
+            ("a.", BucketDecodeError::EmptyPart),
+        ] {
+            assert_eq!(decode_bucket(bucket), Err(error), "{bucket:?}");
+        }
     }
 
     #[test]
@@ -243,18 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn bucket_decode_rejects_uppercase() {
-        assert!(matches!(
-            decode_bucket("Acme.models"),
-            Err(BucketDecodeError::NotLowercase)
-        ));
-        assert!(matches!(
-            decode_bucket("acme.Models"),
-            Err(BucketDecodeError::NotLowercase)
-        ));
-    }
-
-    #[test]
     fn bucket_decode_rejects_oversized() {
         let bucket = format!("{}.{}", "a".repeat(63), "b".repeat(64));
         assert!(matches!(
@@ -263,18 +256,6 @@ mod tests {
         ));
         // 63 characters total (including the separator) is accepted.
         assert!(decode_bucket(&format!("{}.{}", "a".repeat(31), "b".repeat(31))).is_ok());
-    }
-
-    #[test]
-    fn bucket_decode_rejects_empty_owner_or_name() {
-        assert!(matches!(
-            decode_bucket(".models"),
-            Err(BucketDecodeError::EmptyPart)
-        ));
-        assert!(matches!(
-            decode_bucket("acme."),
-            Err(BucketDecodeError::EmptyPart)
-        ));
     }
 
     #[test]
@@ -295,19 +276,27 @@ mod tests {
             s3_object_key("global", ""),
             Err(S3KeyError::EmptyKey)
         ));
-        assert!(matches!(
-            s3_object_key("global", "/leading"),
-            Err(S3KeyError::LeadingSlash)
-        ));
-        assert!(matches!(
-            s3_object_key("global", "bad\nkey"),
-            Err(S3KeyError::ControlCharacter)
-        ));
-        // Path traversal is rejected by ObjectKey::parse on the assembled path.
-        assert!(matches!(
-            s3_object_key("global", "../escape"),
-            Err(S3KeyError::ObjectKey(_))
-        ));
+        for key in ["/leading", "/abs"] {
+            assert!(
+                matches!(s3_object_key("global", key), Err(S3KeyError::LeadingSlash)),
+                "{key:?}"
+            );
+        }
+        for key in ["bad\nkey", "bad\u{7}"] {
+            assert!(
+                matches!(
+                    s3_object_key("global", key),
+                    Err(S3KeyError::ControlCharacter)
+                ),
+                "{key:?}"
+            );
+        }
+        for key in ["../escape", "../evil", "a/../evil"] {
+            assert!(
+                matches!(s3_object_key("global", key), Err(S3KeyError::ObjectKey(_))),
+                "{key:?}"
+            );
+        }
     }
 
     #[test]
@@ -323,25 +312,12 @@ mod tests {
             decode_bucket("a.b.c.d").unwrap(),
             ("a".to_owned(), "b.c.d".to_owned())
         );
-        // Uppercase anywhere is rejected.
-        assert!(matches!(
-            decode_bucket("A.B"),
-            Err(BucketDecodeError::NotLowercase)
-        ));
         // A doubled separator yields a name starting with a dot (names may
-        // contain dots); an EMPTY owner or name is rejected.
+        // contain dots). Empty parts are covered by the error matrix.
         assert_eq!(
             decode_bucket("a..b").unwrap(),
             ("a".to_owned(), ".b".to_owned())
         );
-        assert!(matches!(
-            decode_bucket(".b"),
-            Err(BucketDecodeError::EmptyPart)
-        ));
-        assert!(matches!(
-            decode_bucket("a."),
-            Err(BucketDecodeError::EmptyPart)
-        ));
         // 63 chars accepted, 64 rejected.
         assert!(decode_bucket(&format!("{}.{}", "a".repeat(31), "b".repeat(31))).is_ok());
         assert!(matches!(
@@ -364,28 +340,6 @@ mod tests {
         // index matches prefixes as literal strings, not LIKE patterns).
         assert!(s3_object_key("global", "100%/done").is_ok());
         assert!(s3_object_key("global", "100_done").is_ok());
-        // Absolute, traversal, and control-character keys are rejected.
-        assert!(matches!(
-            s3_object_key("global", "/abs"),
-            Err(S3KeyError::LeadingSlash)
-        ));
-        assert!(matches!(
-            s3_object_key("global", "../evil"),
-            Err(S3KeyError::ObjectKey(_))
-        ));
-        assert!(matches!(
-            s3_object_key("global", "a/../evil"),
-            Err(S3KeyError::ObjectKey(_))
-        ));
-        assert!(matches!(
-            s3_object_key("global", "bad\u{7}"),
-            Err(S3KeyError::ControlCharacter)
-        ));
-        // Empty key.
-        assert!(matches!(
-            s3_object_key("global", ""),
-            Err(S3KeyError::EmptyKey)
-        ));
     }
 
     #[test]
