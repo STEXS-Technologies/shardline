@@ -542,10 +542,7 @@ mod tests {
     #[test]
     fn local_endpoint_rejects_symlinked_root() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let target = sandbox.path().join("target-root");
         let create_target = fs::create_dir_all(&target);
         assert!(create_target.is_ok());
@@ -564,10 +561,7 @@ mod tests {
     #[test]
     fn local_endpoint_accepts_real_root() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
 
         let endpoint = local_endpoint(Some(sandbox.path()), "source");
 
@@ -647,10 +641,7 @@ mod tests {
     #[test]
     fn build_s3_config_accepts_file_backed_credentials_without_debug_leak() {
         let access_key_file = tempfile::NamedTempFile::new();
-        assert!(access_key_file.is_ok());
-        let Ok(access_key_file) = access_key_file else {
-            return;
-        };
+        let access_key_file = access_key_file.expect("expected valid access_key_file");
         let write = fs::write(access_key_file.path(), b"file-access-key");
         assert!(write.is_ok());
 
@@ -720,10 +711,7 @@ mod tests {
     #[test]
     fn build_s3_config_rejects_invalid_utf8_file_backed_credential() {
         let access_key_file = tempfile::NamedTempFile::new();
-        assert!(access_key_file.is_ok());
-        let Ok(access_key_file) = access_key_file else {
-            return;
-        };
+        let access_key_file = access_key_file.expect("expected valid access_key_file");
         let write = fs::write(access_key_file.path(), [0xff, 0xfe]);
         assert!(write.is_ok());
 
@@ -744,10 +732,7 @@ mod tests {
     #[test]
     fn build_s3_config_rejects_credential_file_growth_after_validation() {
         let access_key_file = tempfile::NamedTempFile::new();
-        assert!(access_key_file.is_ok());
-        let Ok(access_key_file) = access_key_file else {
-            return;
-        };
+        let access_key_file = access_key_file.expect("expected valid access_key_file");
         let write = fs::write(access_key_file.path(), b"access");
         assert!(write.is_ok());
         let path = access_key_file.path().to_path_buf();

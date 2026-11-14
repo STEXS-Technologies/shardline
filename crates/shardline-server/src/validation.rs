@@ -119,10 +119,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
+        let temp = temp.expect("expected valid temp");
         let target = temp.path().join("target");
         let create = create_dir_all(&target).await;
         assert!(create.is_ok());

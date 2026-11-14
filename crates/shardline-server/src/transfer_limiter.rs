@@ -158,10 +158,7 @@ mod tests {
     async fn limiter_blocks_until_capacity_returns() {
         let limiter = TransferLimiter::new(CHUNK_SIZE, NonZeroUsize::MIN);
         let first = limiter.acquire_bytes(4).await;
-        assert!(first.is_ok());
-        let Ok(first) = first else {
-            return;
-        };
+        let first = first.expect("expected valid first");
 
         let blocked = timeout(Duration::from_millis(50), limiter.acquire_bytes(4)).await;
         assert!(blocked.is_err());
@@ -169,10 +166,7 @@ mod tests {
         drop(first);
 
         let released = timeout(Duration::from_secs(1), limiter.acquire_bytes(4)).await;
-        assert!(released.is_ok());
-        let Ok(released) = released else {
-            return;
-        };
+        let released = released.expect("expected valid released");
         assert!(released.is_ok());
     }
 

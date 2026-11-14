@@ -751,10 +751,7 @@ mod tests {
         let destination = tempfile::tempdir().unwrap();
         let key =
             ObjectKey::parse("aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = key.expect("expected valid key");
         let source_path = source.path().join("chunks").join(key.as_str());
         let parent = source_path.parent().unwrap();
         let created = fs::create_dir_all(parent);

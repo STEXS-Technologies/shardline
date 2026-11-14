@@ -300,10 +300,7 @@ mod tests {
         drop(tmpfile);
 
         let bytes = std::fs::read(&tmp_path);
-        assert!(bytes.is_ok());
-        let Ok(bytes) = bytes else {
-            return;
-        };
+        let bytes = bytes.expect("expected valid bytes");
         let result = backend.put_fixture(&canonical_key, bytes);
         assert!(
             result.is_ok(),

@@ -55,10 +55,7 @@ mod tests {
             "assets/..",
             Some("refs/heads/../main"),
         );
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.expect("expected valid scope");
 
         let path = scoped_root(Path::new("/var/lib/shardline/files"), &scope);
 
@@ -89,10 +86,7 @@ mod tests {
     #[test]
     fn scoped_root_without_revision_omits_revision_component() {
         let scope = RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.expect("expected valid scope");
 
         let path = scoped_root(Path::new("/base"), &scope);
 

@@ -273,10 +273,7 @@ mod tests {
         let capability =
             AuthorizedRepository::verify_and_authorize(&provider, &token, TokenScope::Write);
 
-        assert!(capability.is_ok());
-        let Ok(capability) = capability else {
-            return;
-        };
+        let capability = capability.expect("expected valid capability");
         let claims = capability.claims().expect("capability carries claims");
         assert_eq!(claims.subject(), "provider-user-1");
         assert_eq!(claims.scope(), TokenScope::Write);

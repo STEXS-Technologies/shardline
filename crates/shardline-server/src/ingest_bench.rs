@@ -86,10 +86,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(response.is_ok());
-        let Ok(response) = response else {
-            return;
-        };
+        let response = response.expect("expected valid response");
 
         assert_eq!(response.total_bytes, 8);
         // With chunk_size=128 and data < min_chunk (16), CDC produces 1 chunk
@@ -121,10 +118,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(second.is_ok());
-        let Ok(second) = second else {
-            return;
-        };
+        let second = second.expect("expected valid second");
 
         // With chunk_size=128 and data < min_chunk (16), CDC produces 1 chunk
         assert_eq!(second.inserted_chunks, 1);
@@ -187,8 +181,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(result.is_ok());
-        let Ok(response) = result else { return };
+        let response = result.expect("expected valid response");
         assert_eq!(response.total_bytes, 6);
     }
 }

@@ -67,10 +67,7 @@ mod tests {
     fn chunk_hash_from_chunk_object_key_if_present_skips_non_chunk_namespaces() {
         let key = ObjectKey::parse("shards/ab/example.shard");
 
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = key.expect("expected valid key");
         let extracted = chunk_hash_from_chunk_object_key_if_present(&key);
 
         assert!(matches!(extracted, Ok(None)));

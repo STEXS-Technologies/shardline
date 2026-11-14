@@ -824,10 +824,7 @@ mod tests {
     #[test]
     fn install_gc_schedule_writes_systemd_units() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let env_file = sandbox.path().join("shardline.env");
         let signing_key = sandbox.path().join("token.key");
         let root_dir = sandbox.path().join("data");
@@ -854,24 +851,15 @@ mod tests {
         };
 
         let report = install_gc_schedule(&options);
-        assert!(report.is_ok());
-        let Ok(report) = report else {
-            return;
-        };
+        let report = report.expect("expected valid report");
 
         let service = read_to_string(report.service_path);
-        assert!(service.is_ok());
-        let Ok(service) = service else {
-            return;
-        };
+        let service = service.expect("expected valid service");
         assert!(service.contains("gc --mark --sweep --retention-seconds 600"));
         assert!(service.contains(&format!("WorkingDirectory={}", root_dir.display())));
 
         let timer = read_to_string(report.timer_path);
-        assert!(timer.is_ok());
-        let Ok(timer) = timer else {
-            return;
-        };
+        let timer = timer.expect("expected valid timer");
         assert!(timer.contains("OnCalendar=hourly"));
     }
 
@@ -879,10 +867,7 @@ mod tests {
     #[test]
     fn uninstall_gc_schedule_removes_both_units() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let env_file = sandbox.path().join("shardline.env");
         let signing_key = sandbox.path().join("token.key");
         let env_write = write_file(
@@ -907,10 +892,7 @@ mod tests {
         assert!(install.is_ok());
 
         let report = uninstall_gc_schedule(sandbox.path(), "shardline-gc");
-        assert!(report.is_ok());
-        let Ok(report) = report else {
-            return;
-        };
+        let report = report.expect("expected valid report");
         assert!(report.removed_service);
         assert!(report.removed_timer);
         assert!(!report.service_path.exists());
@@ -921,10 +903,7 @@ mod tests {
     #[test]
     fn install_gc_schedule_rejects_control_characters() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let env_file = sandbox.path().join("shardline.env");
         let env_write = write_file(&env_file, "SHARDLINE_ROOT_DIR=/var/lib/shardline\n");
         assert!(env_write.is_ok());
@@ -948,10 +927,7 @@ mod tests {
     #[test]
     fn install_gc_schedule_uses_root_dir_from_env_file() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let env_file = sandbox.path().join("shardline.env");
         let signing_key = sandbox.path().join("token.key");
         let configured_root = sandbox.path().join("custom-root");
@@ -974,10 +950,7 @@ mod tests {
             group: "root".to_owned(),
             ..GcScheduleInstallOptions::default()
         });
-        assert!(report.is_ok());
-        let Ok(report) = report else {
-            return;
-        };
+        let report = report.expect("expected valid report");
         assert_eq!(report.working_directory, configured_root);
     }
 
@@ -985,10 +958,7 @@ mod tests {
     #[test]
     fn install_gc_schedule_rejects_missing_referenced_secret() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let env_file = sandbox.path().join("shardline.env");
         let env_write = write_file(
             &env_file,
@@ -1040,10 +1010,7 @@ mod tests {
     #[test]
     fn install_gc_schedule_rejects_oversized_env_file() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let env_file = sandbox.path().join("oversized.env");
         let env_write = write_file(
             &env_file,
@@ -1091,10 +1058,7 @@ mod tests {
     #[test]
     fn read_text_file_with_limit_rejects_growth_after_validation() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
 
         let file_path = sandbox.path().join("growth.env");
         let write = write_file(&file_path, b"SHARDLINE_ROOT_DIR=/var/lib/shardline\n");
@@ -1128,10 +1092,7 @@ mod tests {
     #[test]
     fn install_gc_schedule_rejects_symlinked_env_file() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let env_target = sandbox.path().join("real.env");
         let signing_key = sandbox.path().join("token.key");
         let env_link = sandbox.path().join("shardline.env");
@@ -1167,10 +1128,7 @@ mod tests {
     #[test]
     fn install_gc_schedule_rejects_symlinked_referenced_secret() {
         let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = sandbox.expect("expected valid sandbox");
         let env_file = sandbox.path().join("shardline.env");
         let target = sandbox.path().join("real.key");
         let link = sandbox.path().join("linked.key");

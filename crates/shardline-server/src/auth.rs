@@ -278,10 +278,7 @@ mod tests {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let claims = TokenClaims::new(
             "local",
             "provider-user-1",
@@ -336,10 +333,7 @@ mod tests {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let claims = TokenClaims::new(
             "local",
             "provider-user-1",
@@ -355,10 +349,7 @@ mod tests {
 
         let context = auth.authorize(&headers, TokenScope::Read);
 
-        assert!(context.is_ok());
-        let Ok(context) = context else {
-            return;
-        };
+        let context = context.expect("expected valid context");
         assert_eq!(context.claims().subject(), "provider-user-1");
         assert_eq!(context.claims().scope(), TokenScope::Write);
     }

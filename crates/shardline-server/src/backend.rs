@@ -2284,10 +2284,7 @@ mod tests {
         let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
         let upload_budget = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
         let bind_addr = "127.0.0.1:8080".parse();
-        assert!(bind_addr.is_ok());
-        let Ok(bind_addr) = bind_addr else {
-            return;
-        };
+        let bind_addr = bind_addr.expect("expected valid bind_addr");
         let config = ServerConfig::new(
             bind_addr,
             "http://127.0.0.1:8080".to_owned(),
@@ -2297,17 +2294,11 @@ mod tests {
         .with_chunk_size(chunk_size)
         .with_upload_max_in_flight_chunks(upload_budget);
         let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = storage.expect("expected valid storage");
 
         let backend =
             BenchmarkBackend::from_config(&config, storage.path().to_path_buf(), "run-0001").await;
-        assert!(backend.is_ok());
-        let Ok(backend) = backend else {
-            return;
-        };
+        let backend = backend.expect("expected valid backend");
 
         assert_eq!(backend.metadata_backend_name(), "local");
         assert_eq!(backend.object_backend_name(), "local");
