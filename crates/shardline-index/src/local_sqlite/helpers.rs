@@ -712,6 +712,17 @@ where
     }
 }
 
+fn load_snapshot_evidence_for<S>(
+    connection: &Connection,
+    snapshot: &S,
+) -> Result<SnapshotEvidenceLog<S>, LocalIndexStoreError>
+where
+    S: SnapshotEvidence + serde::de::DeserializeOwned,
+{
+    let operation = snapshot.evidence_operation()?;
+    load_snapshot_evidence(connection, operation.kind, &operation.operation_id)
+}
+
 pub(crate) fn load_quarantine_evidence(
     transaction: &Connection,
     object_key: &str,
@@ -857,19 +868,6 @@ pub(crate) fn hub_ref_snapshot(
     Ok(HubRefSnapshot::new(repository, ref_name, head_sha)?)
 }
 
-pub(crate) fn load_hub_ref_evidence(
-    transaction: &Transaction<'_>,
-    repository: &str,
-    ref_name: &str,
-) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
-    let operation = hub_ref_snapshot(repository, ref_name, None)?.evidence_operation()?;
-    load_snapshot_evidence(
-        transaction,
-        OperationKind::MetadataCommit,
-        &operation.operation_id,
-    )
-}
-
 pub(crate) fn current_hub_ref_evidence(
     transaction: &Transaction<'_>,
     repository: &str,
@@ -877,7 +875,7 @@ pub(crate) fn current_hub_ref_evidence(
     head_sha: Option<String>,
 ) -> Result<(HubRefEvidenceLog, bool), LocalIndexStoreError> {
     let snapshot = hub_ref_snapshot(repository, ref_name, head_sha)?;
-    let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
+    let evidence = load_snapshot_evidence_for(transaction, &snapshot)?;
     Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?)
 }
 
@@ -888,7 +886,7 @@ pub(crate) fn verify_hub_ref_evidence(
     head_sha: Option<String>,
 ) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
     let snapshot = hub_ref_snapshot(repository, ref_name, head_sha)?;
-    let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
+    let evidence = load_snapshot_evidence_for(transaction, &snapshot)?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(evidence)
 }
@@ -941,17 +939,6 @@ pub(crate) fn oci_tag_snapshot(
     )?)
 }
 
-pub(crate) fn load_oci_tag_evidence(
-    transaction: &Transaction<'_>,
-    scope_namespace: &str,
-    repository: &str,
-    tag: &str,
-) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
-    let operation =
-        oci_tag_snapshot(scope_namespace, repository, tag, None)?.evidence_operation()?;
-    load_snapshot_evidence(transaction, OperationKind::OciTag, &operation.operation_id)
-}
-
 pub(crate) fn current_oci_tag_evidence(
     transaction: &Transaction<'_>,
     scope_namespace: &str,
@@ -960,7 +947,7 @@ pub(crate) fn current_oci_tag_evidence(
     digest_hex: Option<String>,
 ) -> Result<(OciTagEvidenceLog, bool), LocalIndexStoreError> {
     let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
-    let loaded = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
+    let loaded = load_snapshot_evidence_for(transaction, &snapshot)?;
     Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?)
 }
 
@@ -972,7 +959,7 @@ pub(crate) fn verify_oci_tag_evidence(
     digest_hex: Option<String>,
 ) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
     let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
-    let evidence = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
+    let evidence = load_snapshot_evidence_for(transaction, &snapshot)?;
     // An absent legacy tag has no materialized state and therefore may not
     // have a journal baseline yet.  This is the same read contract as the
     // Postgres adapter: verify an existing tag, but let a genuinely missing
@@ -1000,19 +987,6 @@ pub(crate) fn s3_object_snapshot(
     Ok(S3ObjectSnapshot::new(scope_namespace, object_key, state)?)
 }
 
-pub(crate) fn load_s3_object_evidence(
-    transaction: &Transaction<'_>,
-    scope_namespace: &str,
-    object_key: &str,
-) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
-    let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
-    load_snapshot_evidence(
-        transaction,
-        OperationKind::S3Object,
-        &operation.operation_id,
-    )
-}
-
 pub(crate) fn current_s3_object_evidence(
     transaction: &Transaction<'_>,
     scope_namespace: &str,
@@ -1020,7 +994,7 @@ pub(crate) fn current_s3_object_evidence(
     entry: Option<&crate::S3ObjectEntry>,
 ) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
-    let loaded = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
+    let loaded = load_snapshot_evidence_for(transaction, &snapshot)?;
     let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
     if was_missing {
         for event in evidence.events() {
@@ -1037,7 +1011,7 @@ pub(crate) fn verify_s3_object_evidence(
     entry: Option<&crate::S3ObjectEntry>,
 ) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
-    let evidence = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
+    let evidence = load_snapshot_evidence_for(transaction, &snapshot)?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(evidence)
 }
