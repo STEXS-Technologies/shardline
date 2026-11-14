@@ -839,62 +839,6 @@ mod tests {
             store.s3_multipart_part_count(&stored).await.unwrap(),
             Some(3)
         );
-        cleanup(&pool, &scope).await;
-    }
-
-    async fn cleanup(pool: &sqlx::PgPool, scope_namespace: &str) {
-        // The production delete gate intentionally rejects raw row cleanup.
-        // Seed a valid terminal deletion boundary for each fixture row so the
-        // test cleanup exercises the same deferred-trigger contract as a real
-        // adapter mutation, including after evidence-tampering tests.
-        sqlx::query(
-            "WITH fixture_rows AS (
-                 SELECT o.scope_namespace, o.object_key,
-                        COALESCE(MAX(e.sequence), -1) + 1 AS next_sequence
-                 FROM shardline_s3_objects AS o
-                 LEFT JOIN shardline_reliability_events AS e
-                   ON e.operation_kind = 'S3Object'
-                  AND e.operation_id = octet_length(o.scope_namespace)::text || ':' || o.scope_namespace
-                      || octet_length(o.object_key)::text || ':' || o.object_key
-                 WHERE o.scope_namespace = $1
-                 GROUP BY o.scope_namespace, o.object_key
-             )
-             INSERT INTO shardline_reliability_events
-                 (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-             SELECT 'S3Object',
-                    octet_length(scope_namespace)::text || ':' || scope_namespace
-                        || octet_length(object_key)::text || ':' || object_key,
-                    next_sequence,
-                    jsonb_build_object(
-                        'after', jsonb_build_object(
-                            'entry', NULL,
-                            'object_key', object_key,
-                            'scope_namespace', scope_namespace
-                        )
-                    ),
-                    EXTRACT(EPOCH FROM now())::bigint
-             FROM fixture_rows
-             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-        )
-        .bind(scope_namespace)
-        .execute(pool)
-        .await
-        .expect("seed deletion evidence");
-        sqlx::query("DELETE FROM shardline_s3_objects WHERE scope_namespace = $1")
-            .bind(scope_namespace)
-            .execute(pool)
-            .await
-            .expect("cleanup s3 object rows");
-        sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = $1
-               AND operation_id LIKE $2 || '%'",
-        )
-        .bind(OperationKind::S3Object.as_str())
-        .bind(format!("{}:{scope_namespace}", scope_namespace.len()))
-        .execute(pool)
-        .await
-        .expect("cleanup s3 object evidence");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -904,7 +848,6 @@ mod tests {
             return;
         };
         let scope = "pg-s3-cas";
-        cleanup(&pool, scope).await;
         let first_store = PostgresIndexStore::new(pool.clone());
         let second_store = PostgresIndexStore::new(pool.clone());
         let first = entry(scope, "model.bin", "first");
@@ -941,7 +884,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated, if third_won { third } else { fourth });
-        cleanup(&pool, scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -951,7 +893,6 @@ mod tests {
             return;
         };
         let scope = format!("s3-concurrent-upsert-{}", std::process::id());
-        cleanup(&pool, &scope).await;
         let first_store = PostgresIndexStore::new(pool.clone());
         let second_store = PostgresIndexStore::new(pool.clone());
         let first = entry(&scope, "model.bin", "first");
@@ -969,7 +910,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(stored == first || stored == second);
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -994,8 +934,6 @@ mod tests {
             .expect("scan");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0], overwrite);
-
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1083,7 +1021,6 @@ mod tests {
                 .unwrap(),
             Some(newer)
         );
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1115,8 +1052,6 @@ mod tests {
                 .expect("scan")
                 .is_empty()
         );
-
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1206,7 +1141,6 @@ mod tests {
                 .expect("verified read"),
             Some(first)
         );
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1275,7 +1209,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1308,7 +1241,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1367,7 +1299,6 @@ mod tests {
             file_id, "file-b",
             "failed append must roll back publication"
         );
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1421,7 +1352,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1469,7 +1399,6 @@ mod tests {
         .await
         .expect("count evidence");
         assert_eq!(count, 0);
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1532,8 +1461,6 @@ mod tests {
             .await
             .expect("scan");
         assert_eq!(more.len(), 2);
-
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1572,7 +1499,6 @@ mod tests {
                 .expect("read after rejected write"),
             Some(original)
         );
-        cleanup(&pool, &scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1609,8 +1535,6 @@ mod tests {
             .expect("scan");
         let keys: Vec<&str> = rows.iter().map(|row| row.object_key.as_str()).collect();
         assert_eq!(keys, vec!["a/b", "a/b/c"]);
-
-        cleanup(&pool, &scope).await;
     }
 
     /// Round-trips the bundled `s3_object_index` migration inside a rolled-back
@@ -1720,6 +1644,5 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        cleanup(&pool, &scope).await;
     }
 }

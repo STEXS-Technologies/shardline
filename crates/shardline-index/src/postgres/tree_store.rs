@@ -539,34 +539,6 @@ mod tests {
         super::super::connect_isolated_postgres().await
     }
 
-    /// Removes every tree-entry and revision row for the shared repos used by
-    /// these tests. The store is a long-lived dev/CI Postgres; a test that
-    /// panics mid-way can otherwise leak rows that break absolute-count
-    /// assertions in later runs, so each test purges its own repos first.
-    async fn cleanup_shared_repos(pool: &sqlx::PgPool) {
-        for (provider, owner, repo) in [
-            ("github", "owner", "repo"),
-            ("github", "owner", "other-repo"),
-        ] {
-            sqlx::query("DELETE FROM shardline_tree_entries WHERE provider = $1 AND owner = $2 AND repo = $3")
-                .bind(provider)
-                .bind(owner)
-                .bind(repo)
-                .execute(pool)
-                .await
-                .ok();
-            sqlx::query(
-                "DELETE FROM shardline_revisions WHERE provider = $1 AND owner = $2 AND repo = $3",
-            )
-            .bind(provider)
-            .bind(owner)
-            .bind(repo)
-            .execute(pool)
-            .await
-            .ok();
-        }
-    }
-
     fn tree_key(revision: &str) -> TreeKey {
         TreeKey::new("github", "owner", "repo", revision)
     }
@@ -797,7 +769,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let key = tree_key("main");
 
@@ -911,7 +882,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let rev = RevisionRecord {
             provider: "github".to_owned(),
@@ -1017,7 +987,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let cap = 2usize;
         // created_at deliberately NOT aligned with name order.
@@ -1061,7 +1030,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let other = RepoKey::new("github", "owner", "other-repo");
         let cap = 5usize;
@@ -1118,7 +1086,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let repo = repo_key();
         let other = RepoKey::new("github", "owner", "other-repo");
@@ -1170,7 +1137,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let repo = repo_key();
         let other = RepoKey::new("github", "owner", "other-repo");

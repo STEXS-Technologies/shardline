@@ -570,66 +570,12 @@ mod tests {
         }
     }
 
-    async fn cleanup_tags(pool: &sqlx::PgPool, scope: &str) {
-        sqlx::query(
-            "WITH fixture_rows AS (
-                 SELECT t.scope_namespace, t.repository, t.tag,
-                        COALESCE(MAX(e.sequence), -1) + 1 AS next_sequence
-                 FROM shardline_oci_tags AS t
-                 LEFT JOIN shardline_reliability_events AS e
-                   ON e.operation_kind = 'OciTag'
-                  AND e.operation_id = octet_length(t.scope_namespace)::text || ':' || t.scope_namespace
-                      || octet_length(t.repository)::text || ':' || t.repository
-                      || octet_length(t.tag)::text || ':' || t.tag
-                 WHERE t.scope_namespace = $1
-                 GROUP BY t.scope_namespace, t.repository, t.tag
-             )
-             INSERT INTO shardline_reliability_events
-                 (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-             SELECT 'OciTag',
-                    octet_length(scope_namespace)::text || ':' || scope_namespace
-                        || octet_length(repository)::text || ':' || repository
-                        || octet_length(tag)::text || ':' || tag,
-                    next_sequence,
-                    jsonb_build_object(
-                        'after', jsonb_build_object(
-                            'scope_namespace', scope_namespace,
-                            'repository', repository,
-                            'tag', tag,
-                            'digest_hex', NULL
-                        )
-                    ),
-                    EXTRACT(EPOCH FROM now())::bigint
-             FROM fixture_rows
-             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-        )
-        .bind(scope)
-        .execute(pool)
-        .await
-        .expect("seed OCI tag deletion evidence");
-        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
-            .bind(scope)
-            .execute(pool)
-            .await
-            .expect("clean OCI tag fixture");
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id LIKE $2 || '%'",
-        )
-        .bind(shardline_reliability::OperationKind::OciTag.as_str())
-        .bind(format!("{}:{scope}", scope.len()))
-        .execute(pool)
-        .await
-        .expect("clean OCI tag evidence fixture");
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn pg_identical_oci_tag_replay_appends_evidence_without_new_row_version() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_tags(&pool, "oci-pg-replay").await;
         let store = PostgresIndexStore::new(pool);
         let original = OciTagEntry {
             scope_namespace: "oci-pg-replay".to_owned(),
@@ -723,7 +669,6 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        cleanup_tags(&pool, "oci-pg-cas").await;
         let deleting_store = PostgresIndexStore::new(pool.clone());
         let retargeting_store = PostgresIndexStore::new(pool);
         let old = entry(&"a".repeat(64));
@@ -758,17 +703,16 @@ mod tests {
             return;
         };
         let store = PostgresIndexStore::new(pool.clone());
-        for mutation in [
+        for (case, mutation) in [
             "UPDATE shardline_reliability_events SET event_json = '{\"tampered\":true}' WHERE operation_kind = 'OciTag'",
             "UPDATE shardline_reliability_events SET sequence = sequence + 100 WHERE operation_kind = 'OciTag'",
             "UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_kind = 'OciTag' AND sequence = 2",
             "UPDATE shardline_reliability_events SET merkle_commit_json = NULL WHERE operation_kind = 'OciTag' AND sequence = 0",
             "UPDATE shardline_reliability_events SET merkle_commit_json = '{}'::jsonb WHERE operation_kind = 'OciTag'",
             "DELETE FROM shardline_reliability_events WHERE operation_kind = 'OciTag'",
-        ] {
-            cleanup_tags(&pool, "oci-pg-tamper").await;
+        ].into_iter().enumerate() {
             let value = OciTagEntry {
-                scope_namespace: "oci-pg-tamper".to_owned(),
+                scope_namespace: format!("oci-pg-tamper-{case}"),
                 repository: "team/assets".to_owned(),
                 tag: "latest".to_owned(),
                 digest_hex: "a".repeat(64),
@@ -822,7 +766,6 @@ mod tests {
                     "listing accepted corrupted evidence: {mutation}"
                 );
             }
-            cleanup_tags(&pool, &value.scope_namespace).await;
         }
     }
 
@@ -833,7 +776,6 @@ mod tests {
             return;
         };
         let scope = "oci-pg-repair";
-        cleanup_tags(&pool, scope).await;
         let store = PostgresIndexStore::new(pool.clone());
         let value = OciTagEntry {
             scope_namespace: scope.to_owned(),
@@ -870,7 +812,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 0);
-        cleanup_tags(&pool, scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -880,7 +821,6 @@ mod tests {
             return;
         };
         let scope = format!("oci-pg-mixed-version-{}", std::process::id());
-        cleanup_tags(&pool, &scope).await;
         let store = PostgresIndexStore::new(pool.clone());
         let value = OciTagEntry {
             scope_namespace: scope.clone(),
@@ -911,6 +851,5 @@ mod tests {
                 .expect("read after rejected write"),
             Some(value)
         );
-        cleanup_tags(&pool, &scope).await;
     }
 }
