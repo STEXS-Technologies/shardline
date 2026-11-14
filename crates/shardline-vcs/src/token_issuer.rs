@@ -249,12 +249,9 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let revision = RevisionRef::new("refs/heads/main");
         let subject = ProviderSubject::new("github-user-1");
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-        assert!(subject.is_ok());
-        let (Ok(repository), Ok(revision), Ok(subject)) = (repository, revision, subject) else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
+        let revision = revision.expect("expected valid revision");
+        let subject = subject.expect("expected valid subject");
         let request = AuthorizationRequest::new(
             subject.clone(),
             repository,
@@ -285,15 +282,10 @@ mod tests {
         let revision = RevisionRef::new("refs/heads/main");
         let allowed_subject = ProviderSubject::new("github-user-1");
         let denied_subject = ProviderSubject::new("github-user-2");
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-        assert!(allowed_subject.is_ok());
-        assert!(denied_subject.is_ok());
-        let (Ok(repository), Ok(revision), Ok(allowed_subject), Ok(denied_subject)) =
-            (repository, revision, allowed_subject, denied_subject)
-        else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
+        let revision = revision.expect("expected valid revision");
+        let allowed_subject = allowed_subject.expect("expected valid allowed_subject");
+        let denied_subject = denied_subject.expect("expected valid denied_subject");
 
         let allowed_request = AuthorizationRequest::new(
             allowed_subject.clone(),
@@ -332,12 +324,9 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::GitLab, "group", "assets");
         let revision = RevisionRef::new("refs/heads/main");
         let subject = ProviderSubject::new("gitlab-user-7");
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-        assert!(subject.is_ok());
-        let (Ok(repository), Ok(revision), Ok(subject)) = (repository, revision, subject) else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
+        let revision = revision.expect("expected valid revision");
+        let subject = subject.expect("expected valid subject");
         let grant = GrantedRepositoryAccess {
             subject,
             repository,
@@ -376,12 +365,9 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets");
         let revision = RevisionRef::new("refs/heads/main");
         let subject = ProviderSubject::new("subject-1");
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-        assert!(subject.is_ok());
-        let (Ok(repository), Ok(revision), Ok(subject)) = (repository, revision, subject) else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
+        let revision = revision.expect("expected valid revision");
+        let subject = subject.expect("expected valid subject");
         let grant = GrantedRepositoryAccess {
             subject,
             repository,

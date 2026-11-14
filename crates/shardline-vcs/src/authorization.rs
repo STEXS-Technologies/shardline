@@ -62,13 +62,9 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::GitLab, "team", "assets");
         let revision = RevisionRef::new("main");
 
-        assert!(subject.is_ok());
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-
-        let (Ok(subject), Ok(repository), Ok(revision)) = (subject, repository, revision) else {
-            return;
-        };
+        let subject = subject.expect("expected valid subject");
+        let repository = repository.expect("expected valid repository");
+        let revision = revision.expect("expected valid revision");
         let request =
             AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Write);
 

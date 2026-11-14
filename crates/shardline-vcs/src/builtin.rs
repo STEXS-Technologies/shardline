@@ -366,16 +366,13 @@ mod tests {
 
     #[test]
     fn catalog_rejects_duplicate_repository_registration() {
-        let mut catalog = BuiltInProviderCatalog::new("integration");
+        let catalog = BuiltInProviderCatalog::new("integration");
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let subject = ProviderSubject::new("user-1");
 
-        assert!(catalog.is_ok());
-        assert!(repository.is_ok());
-        assert!(subject.is_ok());
-        let (Ok(catalog), Ok(repository), Ok(subject)) = (&mut catalog, repository, subject) else {
-            return;
-        };
+        let mut catalog = catalog.expect("expected valid catalog");
+        let repository = repository.expect("expected valid repository");
+        let subject = subject.expect("expected valid subject");
         let metadata = configured_metadata(
             repository,
             RepositoryVisibility::Private,
@@ -401,20 +398,15 @@ mod tests {
 
     #[test]
     fn catalog_returns_allow_and_deny_from_repository_policy() {
-        let mut catalog = BuiltInProviderCatalog::new("integration");
+        let catalog = BuiltInProviderCatalog::new("integration");
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let allowed = ProviderSubject::new("user-1");
         let denied = ProviderSubject::new("user-2");
 
-        assert!(catalog.is_ok());
-        assert!(repository.is_ok());
-        assert!(allowed.is_ok());
-        assert!(denied.is_ok());
-        let (Ok(catalog), Ok(repository), Ok(allowed), Ok(denied)) =
-            (&mut catalog, repository, allowed, denied)
-        else {
-            return;
-        };
+        let mut catalog = catalog.expect("expected valid catalog");
+        let repository = repository.expect("expected valid repository");
+        let allowed = allowed.expect("expected valid allowed");
+        let denied = denied.expect("expected valid denied");
         let metadata = configured_metadata(
             repository.clone(),
             RepositoryVisibility::Private,
@@ -561,12 +553,9 @@ mod tests {
         let repo = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let subject = ProviderSubject::new("user-1");
         let other = ProviderSubject::new("user-2");
-        assert!(repo.is_ok());
-        assert!(subject.is_ok());
-        assert!(other.is_ok());
-        let (Ok(repo), Ok(subject), Ok(other)) = (repo, subject, other) else {
-            return;
-        };
+        let repo = repo.expect("expected valid repo");
+        let subject = subject.expect("expected valid subject");
+        let other = other.expect("expected valid other");
         let metadata = configured_metadata(
             repo,
             RepositoryVisibility::Private,
@@ -588,11 +577,8 @@ mod tests {
     fn provider_repository_policy_allows_write_subjects() {
         let repo = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let subject = ProviderSubject::new("user-1");
-        assert!(repo.is_ok());
-        assert!(subject.is_ok());
-        let (Ok(repo), Ok(subject)) = (repo, subject) else {
-            return;
-        };
+        let repo = repo.expect("expected valid repo");
+        let subject = subject.expect("expected valid subject");
         let metadata = configured_metadata(
             repo,
             RepositoryVisibility::Private,

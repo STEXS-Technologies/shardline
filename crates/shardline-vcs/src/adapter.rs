@@ -505,13 +505,9 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let revision = RevisionRef::new("refs/heads/main");
 
-        assert!(subject.is_ok());
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-
-        let (Ok(subject), Ok(repository), Ok(revision)) = (subject, repository, revision) else {
-            return;
-        };
+        let subject = subject.expect("expected valid subject");
+        let repository = repository.expect("expected valid repository");
+        let revision = revision.expect("expected valid revision");
         let request = AuthorizationRequest::new(
             subject.clone(),
             repository,
@@ -530,13 +526,9 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let revision = RevisionRef::new("refs/heads/main");
 
-        assert!(subject.is_ok());
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-
-        let (Ok(subject), Ok(repository), Ok(revision)) = (subject, repository, revision) else {
-            return;
-        };
+        let subject = subject.expect("expected valid subject");
+        let repository = repository.expect("expected valid repository");
+        let revision = revision.expect("expected valid revision");
         let request =
             AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
 
@@ -683,13 +675,9 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
         let delivery_id = WebhookDeliveryId::new("delivery-1");
         let revision = RevisionRef::new("refs/heads/main");
-        assert!(repository.is_ok());
-        assert!(delivery_id.is_ok());
-        assert!(revision.is_ok());
-        let (Ok(repository), Ok(delivery_id), Ok(revision)) = (repository, delivery_id, revision)
-        else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
+        let delivery_id = delivery_id.expect("expected valid delivery_id");
+        let revision = revision.expect("expected valid revision");
         let event = RepositoryWebhookEvent::new(
             repository.clone(),
             delivery_id.clone(),

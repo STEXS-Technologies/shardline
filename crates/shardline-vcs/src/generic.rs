@@ -243,15 +243,10 @@ mod tests {
         let revision = RevisionRef::new("refs/heads/main");
         let subject = ProviderSubject::new("generic-user-1");
         let denied_subject = ProviderSubject::new("generic-user-2");
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-        assert!(subject.is_ok());
-        assert!(denied_subject.is_ok());
-        let (Ok(repository), Ok(revision), Ok(subject), Ok(denied_subject)) =
-            (repository, revision, subject, denied_subject)
-        else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
+        let revision = revision.expect("expected valid revision");
+        let subject = subject.expect("expected valid subject");
+        let denied_subject = denied_subject.expect("expected valid denied_subject");
         let request = AuthorizationRequest::new(
             subject.clone(),
             repository.clone(),
