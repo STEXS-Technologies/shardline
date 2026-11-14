@@ -242,21 +242,20 @@ mod tests {
     // --- lfs_object_key ---
 
     #[test]
-    fn lfs_object_key_valid_no_scope() {
+    fn lfs_object_keys_are_stable_with_and_without_scope() {
         let oid = valid_oid();
-        let key = lfs_object_key(&oid, &test_capability(None)).unwrap();
-        assert!(key.as_str().contains("protocols/lfs/global/objects/"));
-        assert!(key.as_str().ends_with(&oid));
-    }
-
-    #[test]
-    fn lfs_object_key_valid_with_scope() {
-        let oid = valid_oid();
-        let scope = test_scope();
-        let key = lfs_object_key(&oid, &test_capability(Some(scope))).unwrap();
-        assert!(!key.as_str().contains("global"));
-        assert!(key.as_str().contains("protocols/lfs/"));
-        assert!(key.as_str().ends_with(&oid));
+        for scope in [None, Some(test_scope())] {
+            let scoped = scope.is_some();
+            let key = lfs_object_key(&oid, &test_capability(scope.clone())).unwrap();
+            assert_eq!(key, lfs_object_key(&oid, &test_capability(scope)).unwrap());
+            assert!(key.as_str().contains("protocols/lfs/"));
+            assert!(key.as_str().ends_with(&oid));
+            if scoped {
+                assert!(!key.as_str().contains("global"));
+            } else {
+                assert_eq!(key.as_str(), format!("protocols/lfs/global/objects/{oid}"));
+            }
+        }
     }
 
     // --- LfsBatchRequest deserialization ---

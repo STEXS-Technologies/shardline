@@ -173,37 +173,10 @@ fn cross_protocol_namespace_isolation() {
 // --- Deterministic key construction ---
 
 #[test]
-fn deterministic_lfs_object_key() {
-    let hash = "a".repeat(64);
-    let key1 = lfs_object_key(&hash, &test_capability(None)).unwrap();
-    let key2 = lfs_object_key(&hash, &test_capability(None)).unwrap();
-    assert_eq!(key1, key2);
-}
-
-#[test]
 fn deterministic_object_key() {
     let key1 = object_key("some/path").unwrap();
     let key2 = object_key("some/path").unwrap();
     assert_eq!(key1, key2);
-}
-
-#[test]
-fn deterministic_with_scope() {
-    let hash = "a".repeat(64);
-    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None).unwrap();
-    let key1 = lfs_object_key(&hash, &test_capability(Some(scope.clone()))).unwrap();
-    let key2 = lfs_object_key(&hash, &test_capability(Some(scope))).unwrap();
-    assert_eq!(key1, key2);
-}
-
-// --- Key format stability (regression prevention) ---
-
-#[test]
-fn key_format_stability_lfs() {
-    let hash = "a".repeat(64);
-    let key = lfs_object_key(&hash, &test_capability(None)).unwrap();
-    let expected_suffix = format!("protocols/lfs/global/objects/{hash}");
-    assert!(key.as_str().ends_with(&expected_suffix));
 }
 
 // --- Scope isolation ---
