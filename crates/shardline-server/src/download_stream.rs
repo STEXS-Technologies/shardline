@@ -900,7 +900,7 @@ async fn s3_store_byte_range_stream(
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write, sync::Arc};
+    use std::{io::Write, path::Path, sync::Arc};
 
     use futures_util::{StreamExt, TryStreamExt};
     use shardline_index::FileRecord;
@@ -916,6 +916,13 @@ mod tests {
     use crate::error::ObjectStoreError;
     use crate::object_store::ServerObjectStore;
     use crate::object_store::set_before_local_object_read_hook;
+
+    async fn write_fixture_file(path: &Path, bytes: impl AsRef<[u8]>) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await.unwrap();
+        }
+        fs::write(path, bytes).await.unwrap();
+    }
 
     #[test]
     fn spilled_xorb_releases_its_memory_admission_permit() {
@@ -942,12 +949,7 @@ mod tests {
         let object_key = ObjectKey::parse("ab/object").unwrap();
         let bytes = vec![7_u8; 64 * 1024 + 3];
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            let created = fs::create_dir_all(parent).await;
-            assert!(created.is_ok());
-        }
-        let written = fs::write(&path, &bytes).await;
-        assert!(written.is_ok());
+        write_fixture_file(&path, &bytes).await;
 
         let mut byte_stream = local_object_byte_stream(
             object_store,
@@ -971,12 +973,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/object").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            let created = fs::create_dir_all(parent).await;
-            assert!(created.is_ok());
-        }
-        let written = fs::write(&path, b"short").await;
-        assert!(written.is_ok());
+        write_fixture_file(&path, b"short").await;
 
         let byte_stream = local_object_byte_stream(object_store, object_key, 100).await;
 
@@ -994,13 +991,8 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/object").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            let created = fs::create_dir_all(parent).await;
-            assert!(created.is_ok());
-        }
         // Write initial content.
-        let written = fs::write(&path, b"abcd").await;
-        assert!(written.is_ok());
+        write_fixture_file(&path, b"abcd").await;
 
         // Open a writer handle for the hook to append through.
         let writer_path = path.clone();
@@ -1039,12 +1031,7 @@ mod tests {
         let object_key = ObjectKey::parse("ab/object").unwrap();
         let bytes = b"abcdefghijkl".to_vec();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            let created = fs::create_dir_all(parent).await;
-            assert!(created.is_ok());
-        }
-        let written = fs::write(&path, &bytes).await;
-        assert!(written.is_ok());
+        write_fixture_file(&path, &bytes).await;
         let range = ByteRange::new(2, 7).unwrap();
 
         let mut byte_stream = local_object_byte_range_stream(
@@ -1096,10 +1083,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/empty").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"").await.unwrap();
+        write_fixture_file(&path, b"").await;
 
         let result = local_object_byte_stream(object_store, object_key, 0).await;
         // Zero-length object → empty stream
@@ -1116,10 +1100,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/nonempty-claimed-zero").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"data").await.unwrap();
+        write_fixture_file(&path, b"data").await;
 
         let result = local_object_byte_stream(object_store, object_key, 0).await;
         assert!(matches!(
@@ -1136,10 +1117,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/range-too-large").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"abcd").await.unwrap();
+        write_fixture_file(&path, b"abcd").await;
 
         // range.end_inclusive = 10, total_length = 4 → RangeNotSatisfiable
         let range = ByteRange::new(0, 10).unwrap();
@@ -1153,10 +1131,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/stream-nonzero").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"stream-me").await.unwrap();
+        write_fixture_file(&path, b"stream-me").await;
 
         let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 9).await;
@@ -1178,10 +1153,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/not-empty").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"data").await.unwrap();
+        write_fixture_file(&path, b"data").await;
 
         let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
@@ -1265,10 +1237,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/exact-range-end").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"abcd").await.unwrap();
+        write_fixture_file(&path, b"abcd").await;
 
         let range = ByteRange::new(0, 3).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
@@ -1312,10 +1281,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/existing-empty").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"").await.unwrap();
+        write_fixture_file(&path, b"").await;
 
         let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
@@ -1331,10 +1297,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/nonempty-claimed-zero-v2").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"data").await.unwrap();
+        write_fixture_file(&path, b"data").await;
 
         let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
@@ -1393,10 +1356,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/range-start-only").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"abcdefghij").await.unwrap();
+        write_fixture_file(&path, b"abcdefghij").await;
 
         let range = ByteRange::new(3, 9).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 10, range).await;
@@ -1441,10 +1401,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/range-single-byte").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"abcdef").await.unwrap();
+        write_fixture_file(&path, b"abcdef").await;
 
         let range = ByteRange::new(2, 2).unwrap(); // just 'c'
         let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
@@ -1465,10 +1422,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/store-empty").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"").await.unwrap();
+        write_fixture_file(&path, b"").await;
 
         let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
@@ -1485,10 +1439,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/range-length-mismatch").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"short").await.unwrap();
+        write_fixture_file(&path, b"short").await;
 
         let range = ByteRange::new(0, 3).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 100, range).await;
@@ -1508,10 +1459,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/range-end-exceeds").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"abcd").await.unwrap();
+        write_fixture_file(&path, b"abcd").await;
 
         // Range end_inclusive (10) >= total_length (4) → RangeNotSatisfiable
         let range = ByteRange::new(0, 10).unwrap();
@@ -1527,10 +1475,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/range-end-equals-length").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"abcd").await.unwrap();
+        write_fixture_file(&path, b"abcd").await;
 
         // range.end_inclusive() == total_length → >= check triggers RangeNotSatisfiable
         let range = ByteRange::new(0, 4).unwrap();
@@ -1571,10 +1516,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/zero-stream").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"").await.unwrap();
+        write_fixture_file(&path, b"").await;
 
         let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
@@ -1760,10 +1702,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/mid-range").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"0123456789").await.unwrap();
+        write_fixture_file(&path, b"0123456789").await;
 
         let store = ServerObjectStore::Local(object_store);
         let range = ByteRange::new(3, 7).unwrap();
@@ -1786,10 +1725,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/first-byte").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"abcdef").await.unwrap();
+        write_fixture_file(&path, b"abcdef").await;
 
         let range = ByteRange::new(0, 0).unwrap(); // just first byte
         let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
@@ -1810,10 +1746,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/last-byte").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"abcdef").await.unwrap();
+        write_fixture_file(&path, b"abcdef").await;
 
         // Range at end: byte 5 of 6 → last byte
         let range = ByteRange::new(5, 5).unwrap();
@@ -1842,10 +1775,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/zero-claim-nonzero").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"content").await.unwrap();
+        write_fixture_file(&path, b"content").await;
 
         let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
@@ -1874,10 +1804,7 @@ mod tests {
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let object_key = ObjectKey::parse("ab/minimal-range").unwrap();
         let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&path, b"x").await.unwrap();
+        write_fixture_file(&path, b"x").await;
 
         let range = ByteRange::new(0, 0).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 1, range).await;
