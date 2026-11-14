@@ -296,92 +296,71 @@ mod tests {
     // PostgresMetadataStoreError Display and From impls
     // ------------------------------------------------------------------
     #[test]
-    fn postgres_metadata_store_error_display_sqlx() {
-        // Create a SqlxError that we can box
-        let sqlx_err = sqlx::Error::PoolClosed;
-        let err: PostgresMetadataStoreError = sqlx_err.into();
-        assert_eq!(err.to_string(), "postgres metadata store operation failed");
-        // Verify the From<SqlxError> path works and we can match
-        assert!(matches!(err, PostgresMetadataStoreError::Sqlx(_)));
+    fn postgres_metadata_store_error_sqlx_conversion_and_display() {
+        for source in [sqlx::Error::PoolClosed, sqlx::Error::PoolTimedOut] {
+            let error: PostgresMetadataStoreError = source.into();
+            assert_eq!(
+                error.to_string(),
+                "postgres metadata store operation failed"
+            );
+            assert!(matches!(error, PostgresMetadataStoreError::Sqlx(_)));
+        }
     }
 
     #[test]
-    fn postgres_metadata_store_error_display_json() {
-        let json_err = serde_json::from_str::<()>("invalid").unwrap_err();
-        let err: PostgresMetadataStoreError = json_err.into();
-        assert_eq!(err.to_string(), "postgres metadata json operation failed");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_hash_parse() {
-        let hash_err = HashParseError::InvalidLength;
-        let err: PostgresMetadataStoreError = hash_err.into();
-        assert_eq!(err.to_string(), "stored hash value was invalid");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_object_key() {
-        let obj_err = ObjectKeyError::Empty;
-        let err: PostgresMetadataStoreError = obj_err.into();
-        assert_eq!(err.to_string(), "stored object key was invalid");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_range() {
-        let range_err = RangeError::Inverted;
-        let err: PostgresMetadataStoreError = range_err.into();
-        assert_eq!(err.to_string(), "stored chunk range was invalid");
+    fn postgres_metadata_store_error_display() {
+        for (error, expected) in [
+            (
+                serde_json::from_str::<()>("invalid").unwrap_err().into(),
+                "postgres metadata json operation failed",
+            ),
+            (
+                HashParseError::InvalidLength.into(),
+                "stored hash value was invalid",
+            ),
+            (
+                ObjectKeyError::Empty.into(),
+                "stored object key was invalid",
+            ),
+            (
+                RangeError::Inverted.into(),
+                "stored chunk range was invalid",
+            ),
+            (
+                PostgresMetadataStoreError::RecordNotFound,
+                "postgres record locator was not found",
+            ),
+            (
+                PostgresMetadataStoreError::InvalidRecordKind,
+                "stored record kind was invalid",
+            ),
+            (
+                RetentionHoldError::EmptyReason.into(),
+                "stored retention hold was invalid",
+            ),
+            (
+                QuarantineCandidateError::InvertedTimeline.into(),
+                "stored quarantine candidate was invalid",
+            ),
+            (
+                WebhookDeliveryError::EmptyRepositoryOwner.into(),
+                "stored webhook delivery was invalid",
+            ),
+            (
+                PostgresMetadataStoreError::InvalidRepoType("custom".into()),
+                "invalid repository type: custom",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]
     fn postgres_metadata_store_error_display_integer_out_of_range() {
-        let err = PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned());
-        let msg = err.to_string();
-        assert!(msg.contains("stored integer exceeded the supported range"));
-        assert!(msg.contains("test"));
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_record_not_found() {
-        let err = PostgresMetadataStoreError::RecordNotFound;
-        assert_eq!(err.to_string(), "postgres record locator was not found");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_invalid_record_kind() {
-        let err = PostgresMetadataStoreError::InvalidRecordKind;
-        assert_eq!(err.to_string(), "stored record kind was invalid");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_retention_hold() {
-        let err: PostgresMetadataStoreError = RetentionHoldError::EmptyReason.into();
-        assert_eq!(err.to_string(), "stored retention hold was invalid");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_quarantine_candidate() {
-        let err: PostgresMetadataStoreError = QuarantineCandidateError::InvertedTimeline.into();
-        assert_eq!(err.to_string(), "stored quarantine candidate was invalid");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_webhook_delivery() {
-        let err: PostgresMetadataStoreError = WebhookDeliveryError::EmptyRepositoryOwner.into();
-        assert_eq!(err.to_string(), "stored webhook delivery was invalid");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_display_invalid_repo_type() {
-        let err = PostgresMetadataStoreError::InvalidRepoType("custom".into());
-        assert_eq!(err.to_string(), "invalid repository type: custom");
-    }
-
-    #[test]
-    fn postgres_metadata_store_error_from_sqlx() {
-        let sqlx_err = sqlx::Error::PoolTimedOut;
-        let pg_err: PostgresMetadataStoreError = sqlx_err.into();
-        assert!(matches!(pg_err, PostgresMetadataStoreError::Sqlx(_)));
+        let error = PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned());
+        let message = error.to_string();
+        assert!(message.contains("stored integer exceeded the supported range"));
+        assert!(message.contains("test"));
     }
 
     // ------------------------------------------------------------------
@@ -396,19 +375,15 @@ mod tests {
 
     #[test]
     fn u64_to_i64_overflow() {
-        let result = u64_to_i64(i64::MAX as u64 + 1);
-        assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
-        ));
-
-        let result = u64_to_i64(u64::MAX);
-        assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
-        ));
+        for value in [i64::MAX as u64 + 1, u64::MAX] {
+            assert!(
+                matches!(
+                    u64_to_i64(value),
+                    Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ),
+                "{value}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------
@@ -423,18 +398,14 @@ mod tests {
 
     #[test]
     fn i64_to_u64_negative() {
-        let result = i64_to_u64(-1);
-        assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
-        ));
-
-        let result = i64_to_u64(i64::MIN);
-        assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
-        ));
+        for value in [-1, i64::MIN] {
+            assert!(
+                matches!(
+                    i64_to_u64(value),
+                    Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ),
+                "{value}"
+            );
+        }
     }
 }
