@@ -644,9 +644,7 @@ mod tests {
     #[tokio::test]
     async fn redis_ownerless_reserved_mutations_do_not_fall_back_to_raw_commands() {
         let cache = RedisReconstructionCache::new("redis://127.0.0.1:9", NonZeroU64::MIN);
-        let Ok(cache) = cache else {
-            return;
-        };
+        let cache = cache.unwrap();
         let key = ReconstructionCacheKey::latest("ownerless", None);
         let token = crate::ReconstructionCacheReservation::default();
         assert!(matches!(
@@ -667,10 +665,7 @@ mod tests {
         let cache = RedisReconstructionCache::new(&url, NonZeroU64::MIN);
         let cache = cache.unwrap();
         let original = cache.get_connection().await;
-        assert!(original.is_ok());
-        let Ok(mut original) = original else {
-            return;
-        };
+        let mut original = original.unwrap();
         let original_id: u64 = redis::cmd("CLIENT")
             .arg("ID")
             .query_async(&mut original)
@@ -679,10 +674,7 @@ mod tests {
         assert_ne!(original_id, 0);
         for _ in 0..16 {
             let cloned = cache.clone().get_connection().await;
-            assert!(cloned.is_ok());
-            let Ok(mut cloned) = cloned else {
-                return;
-            };
+            let mut cloned = cloned.unwrap();
             let id: u64 = redis::cmd("CLIENT")
                 .arg("ID")
                 .query_async(&mut cloned)
@@ -700,10 +692,7 @@ mod tests {
         let cache = RedisReconstructionCache::new(&url, NonZeroU64::MIN);
         let cache = cache.unwrap();
         let original = cache.get_connection().await;
-        assert!(original.is_ok());
-        let Ok(mut original) = original else {
-            return;
-        };
+        let mut original = original.unwrap();
         let old_id: u64 = redis::cmd("CLIENT")
             .arg("ID")
             .query_async(&mut original)
@@ -714,10 +703,7 @@ mod tests {
         let controller = redis::Client::open(url);
         let controller_client = controller.unwrap();
         let connection = controller_client.get_multiplexed_async_connection().await;
-        assert!(connection.is_ok());
-        let Ok(mut controller_connection) = connection else {
-            return;
-        };
+        let mut controller_connection = connection.unwrap();
         let killed: u64 = redis::cmd("CLIENT")
             .arg("KILL")
             .arg("ID")
@@ -737,10 +723,7 @@ mod tests {
         .await;
         assert!(recovered.is_ok());
         let reconnected = cache.clone().get_connection().await;
-        assert!(reconnected.is_ok());
-        let Ok(mut reconnected) = reconnected else {
-            return;
-        };
+        let mut reconnected = reconnected.unwrap();
         let new_id: u64 = redis::cmd("CLIENT")
             .arg("ID")
             .query_async(&mut reconnected)
