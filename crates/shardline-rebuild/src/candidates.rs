@@ -79,16 +79,12 @@ where
         Err(shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
             ..
         }) => {
-            push_issue(
+            return reject_version(
                 report,
                 IndexRebuildIssueKind::OversizedVersionRecordMetadata,
                 location,
                 IndexRebuildIssueDetail::OversizedVersionRecordMetadata,
-            )?;
-            report
-                .preserved_latest_records_unreadable_version
-                .push(record_store.locator_display(&path));
-            return Ok(());
+            );
         }
         Err(shardline_server_core::ParseStoredFileRecordError::Json(_)) => {
             let (kind, detail) = if has_invalid_repository_components(&bytes) {
@@ -102,84 +98,60 @@ where
                     IndexRebuildIssueDetail::RecordJsonInvalid,
                 )
             };
-            push_issue(report, kind, location, detail)?;
-            report
-                .preserved_latest_records_unreadable_version
-                .push(record_store.locator_display(&path));
-            return Ok(());
+            return reject_version(report, kind, location, detail);
         }
     };
 
     if validate_identifier(&record.file_id).is_err() {
-        push_issue(
+        return reject_version(
             report,
             IndexRebuildIssueKind::InvalidVersionFileId,
-            record_store.locator_display(&path),
+            location,
             IndexRebuildIssueDetail::InvalidFileId {
                 file_id: record.file_id,
             },
-        )?;
-        report
-            .preserved_latest_records_unreadable_version
-            .push(record_store.locator_display(&path));
-        return Ok(());
+        );
     }
 
     if validate_content_hash(&record.content_hash).is_err() {
-        push_issue(
+        return reject_version(
             report,
             IndexRebuildIssueKind::InvalidVersionContentHash,
-            record_store.locator_display(&path),
+            location,
             IndexRebuildIssueDetail::InvalidContentHash {
                 content_hash: record.content_hash,
             },
-        )?;
-        report
-            .preserved_latest_records_unreadable_version
-            .push(record_store.locator_display(&path));
-        return Ok(());
+        );
     }
 
     if validate_repository_scope(record.repository_scope.as_ref()).is_err() {
-        push_issue(
+        return reject_version(
             report,
             IndexRebuildIssueKind::InvalidVersionRepositoryScope,
-            record_store.locator_display(&path),
+            location,
             IndexRebuildIssueDetail::InvalidRepositoryScope,
-        )?;
-        report
-            .preserved_latest_records_unreadable_version
-            .push(record_store.locator_display(&path));
-        return Ok(());
+        );
     }
 
     let expected_path = RecordTraversal::version_record_locator(record_store, &record);
     if expected_path != path {
-        push_issue(
+        return reject_version(
             report,
             IndexRebuildIssueKind::VersionPathMismatch,
-            record_store.locator_display(&path),
+            location,
             IndexRebuildIssueDetail::VersionPathMismatch {
                 expected_locator: record_store.locator_display(&expected_path),
             },
-        )?;
-        report
-            .preserved_latest_records_unreadable_version
-            .push(record_store.locator_display(&path));
-        return Ok(());
+        );
     }
 
     if let Err(error) = record.validate_reconstruction_plan() {
-        push_issue(
+        return reject_version(
             report,
             IndexRebuildIssueKind::InvalidVersionReconstructionPlan,
-            record_store.locator_display(&path),
+            location,
             reconstruction_plan_error_detail(&error),
-        )?;
-        report
-            .preserved_latest_records_unreadable_version
-            .push(record_store.locator_display(&path));
-        return Ok(());
+        );
     }
 
     let key = rebuild_key(&record);
@@ -198,6 +170,21 @@ where
         Some(_) => {}
     }
 
+    Ok(())
+}
+
+// Every rejected version dirties the scan and records why its existing head
+// must be preserved. Keep these two report updates together.
+fn reject_version(
+    report: &mut IndexRebuildReport,
+    kind: IndexRebuildIssueKind,
+    location: String,
+    detail: IndexRebuildIssueDetail,
+) -> Result<(), RebuildError> {
+    push_issue(report, kind, location.clone(), detail)?;
+    report
+        .preserved_latest_records_unreadable_version
+        .push(location);
     Ok(())
 }
 
@@ -275,6 +262,16 @@ mod tests {
     use shardline_index::{LocalRecordStore, RecordMutation, RecordTraversal};
     use shardline_protocol::{HashParseError, RepositoryProvider, RepositoryScope};
     use std::time::Duration;
+
+    fn assert_rejected_version(report: &IndexRebuildReport, kind: IndexRebuildIssueKind) {
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(report.issues[0].kind, kind);
+        assert_eq!(
+            report.preserved_latest_records_unreadable_version,
+            [report.issues[0].location.clone()]
+        );
+    }
 
     fn valid_hex_hash() -> String {
         "a".repeat(64)
@@ -446,12 +443,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean());
-        assert_eq!(report.issue_count(), 1);
-        assert_eq!(
-            report.issues[0].kind,
-            IndexRebuildIssueKind::InvalidVersionFileId
-        );
+        assert_rejected_version(&report, IndexRebuildIssueKind::InvalidVersionFileId);
         assert!(candidates.is_empty());
     }
 
@@ -473,12 +465,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean());
-        assert_eq!(report.issue_count(), 1);
-        assert_eq!(
-            report.issues[0].kind,
-            IndexRebuildIssueKind::InvalidVersionContentHash
-        );
+        assert_rejected_version(&report, IndexRebuildIssueKind::InvalidVersionContentHash);
         assert!(candidates.is_empty());
     }
 
@@ -535,11 +522,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean());
-        assert_eq!(report.issue_count(), 1);
-        assert_eq!(
-            report.issues[0].kind,
-            IndexRebuildIssueKind::InvalidVersionRepositoryScope
+        assert_rejected_version(
+            &report,
+            IndexRebuildIssueKind::InvalidVersionRepositoryScope,
         );
         assert!(candidates.is_empty());
     }
@@ -594,12 +579,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean());
-        assert_eq!(report.issue_count(), 1);
-        assert_eq!(
-            report.issues[0].kind,
-            IndexRebuildIssueKind::VersionPathMismatch
-        );
+        assert_rejected_version(&report, IndexRebuildIssueKind::VersionPathMismatch);
         assert!(candidates.is_empty());
     }
 
@@ -638,11 +618,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean());
-        assert_eq!(report.issue_count(), 1);
-        assert_eq!(
-            report.issues[0].kind,
-            IndexRebuildIssueKind::InvalidVersionReconstructionPlan
+        assert_rejected_version(
+            &report,
+            IndexRebuildIssueKind::InvalidVersionReconstructionPlan,
         );
         assert!(candidates.is_empty());
     }
@@ -803,12 +781,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean());
-        assert_eq!(report.issue_count(), 1);
-        assert_eq!(
-            report.issues[0].kind,
-            IndexRebuildIssueKind::InvalidVersionRecordJson
-        );
+        assert_rejected_version(&report, IndexRebuildIssueKind::InvalidVersionRecordJson);
         assert!(candidates.is_empty());
     }
 
