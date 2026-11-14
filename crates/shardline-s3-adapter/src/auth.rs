@@ -291,59 +291,50 @@ mod tests {
     }
 
     #[test]
-    fn sigv4_header_extracts_access_key_from_full_credential() {
-        let headers = header_map(&[(
-            AUTHORIZATION.as_str(),
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, \
+    fn header_credential_extraction_cases() {
+        for (name, value, expected) in [
+            (
+                AUTHORIZATION.as_str(),
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, \
              SignedHeaders=host;x-amz-date, Signature=abc123",
-        )]);
-        assert_eq!(extract_access_key(&headers), Some("AKIDEXAMPLE"));
-    }
-
-    #[test]
-    fn sigv4_header_extracts_access_key_from_bare_credential() {
-        let headers = header_map(&[(
-            AUTHORIZATION.as_str(),
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request",
-        )]);
-        assert_eq!(extract_access_key(&headers), Some("AKIDEXAMPLE"));
+                Some("AKIDEXAMPLE"),
+            ),
+            (
+                AUTHORIZATION.as_str(),
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request",
+                Some("AKIDEXAMPLE"),
+            ),
+            (
+                AUTHORIZATION.as_str(),
+                "AWS4-HMAC-SHA256 SignedHeaders=host, Signature=abc",
+                None,
+            ),
+            (AUTHORIZATION.as_str(), "Basic dXNlcjpwYXNz", None),
+            (
+                AUTHORIZATION.as_str(),
+                "AWS4-HMAC-SHA256 Credential=/20150830/us-east-1/s3/aws4_request",
+                None,
+            ),
+            (
+                AUTHORIZATION.as_str(),
+                "Bearer shardline-token-abc",
+                Some("shardline-token-abc"),
+            ),
+            (
+                "x-amz-security-token",
+                "shardline-token-xyz",
+                Some("shardline-token-xyz"),
+            ),
+        ] {
+            let headers = header_map(&[(name, value)]);
+            assert_eq!(extract_access_key(&headers), expected, "{name}: {value}");
+        }
     }
 
     #[test]
     fn missing_authorization_header_returns_none() {
         let headers = HeaderMap::new();
         assert_eq!(extract_access_key(&headers), None);
-    }
-
-    #[test]
-    fn malformed_sigv4_header_returns_none() {
-        // Wrong scheme.
-        let headers = header_map(&[(
-            AUTHORIZATION.as_str(),
-            "AWS4-HMAC-SHA256 SignedHeaders=host, Signature=abc",
-        )]);
-        assert_eq!(extract_access_key(&headers), None);
-        // Scheme present but not the SigV4 scheme.
-        let headers = header_map(&[(AUTHORIZATION.as_str(), "Basic dXNlcjpwYXNz")]);
-        assert_eq!(extract_access_key(&headers), None);
-        // Empty access key in the credential scope.
-        let headers = header_map(&[(
-            AUTHORIZATION.as_str(),
-            "AWS4-HMAC-SHA256 Credential=/20150830/us-east-1/s3/aws4_request",
-        )]);
-        assert_eq!(extract_access_key(&headers), None);
-    }
-
-    #[test]
-    fn bearer_header_is_returned_as_token() {
-        let headers = header_map(&[(AUTHORIZATION.as_str(), "Bearer shardline-token-abc")]);
-        assert_eq!(extract_access_key(&headers), Some("shardline-token-abc"));
-    }
-
-    #[test]
-    fn x_amz_security_token_header_is_accepted() {
-        let headers = header_map(&[("x-amz-security-token", "shardline-token-xyz")]);
-        assert_eq!(extract_access_key(&headers), Some("shardline-token-xyz"));
     }
 
     #[test]
