@@ -66,6 +66,14 @@ use shardline_reliability::{
 
 use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
 
+pub(super) async fn run_blocking_store<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, LocalIndexStoreError> + Send + 'static,
+) -> Result<T, LocalIndexStoreError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+}
+
 pub(crate) fn quarantine_evidence_operation_id(object_key: &str) -> String {
     object_key.to_owned()
 }

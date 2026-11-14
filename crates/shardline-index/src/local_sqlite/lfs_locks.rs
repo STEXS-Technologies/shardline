@@ -1,3 +1,4 @@
+use super::helpers::run_blocking_store;
 use super::{LocalIndexStoreError, LocalRecordStore};
 use crate::{CreateLfsLockOutcome, LfsLockRecord, LfsLockStore, UnlockLfsOutcome};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -12,14 +13,6 @@ fn row_lock(row: &rusqlite::Row<'_>) -> rusqlite::Result<LfsLockRecord> {
     })
 }
 
-async fn run<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T, LocalIndexStoreError> + Send + 'static,
-) -> Result<T, LocalIndexStoreError> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
-}
-
 #[async_trait::async_trait]
 impl LfsLockStore for LocalRecordStore {
     type Error = LocalIndexStoreError;
@@ -32,7 +25,7 @@ impl LfsLockStore for LocalRecordStore {
         let store = self.clone();
         let scope = scope.to_owned();
         let lock = lock.clone();
-        run(move || super::helpers::retry_sqlite_busy(|| {
+        run_blocking_store(move || super::helpers::retry_sqlite_busy(|| {
             let mut connection = store.open_connection()?;
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let existing = transaction.query_row("SELECT id,path,owner_key,owner_name,locked_at FROM shardline_lfs_locks WHERE scope_namespace=?1 AND path=?2", params![scope,lock.path], row_lock).optional()?;
@@ -58,7 +51,7 @@ impl LfsLockStore for LocalRecordStore {
         let path = path.map(str::to_owned);
         let id = id.map(str::to_owned);
         let after = after.map(str::to_owned);
-        run(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             let mut statement = connection.prepare("SELECT id,path,owner_key,owner_name,locked_at FROM shardline_lfs_locks WHERE scope_namespace=?1 AND (?2 IS NULL OR path=?2) AND (?3 IS NULL OR id=?3) AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5")?;
             Ok(statement.query_map(params![scope,path,id,after,limit], row_lock)?.collect::<Result<Vec<_>,_>>()?)
@@ -76,7 +69,7 @@ impl LfsLockStore for LocalRecordStore {
         let scope = scope.to_owned();
         let id = id.to_owned();
         let owner = owner.to_owned();
-        run(move || super::helpers::retry_sqlite_busy(|| {
+        run_blocking_store(move || super::helpers::retry_sqlite_busy(|| {
             let mut connection = store.open_connection()?;
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let existing = transaction.query_row("SELECT id,path,owner_key,owner_name,locked_at FROM shardline_lfs_locks WHERE scope_namespace=?1 AND id=?2", params![scope,id], row_lock).optional()?;

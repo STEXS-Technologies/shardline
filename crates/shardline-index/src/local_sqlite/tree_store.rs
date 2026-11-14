@@ -1,3 +1,4 @@
+use super::helpers::run_blocking_store;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
@@ -437,7 +438,7 @@ impl TreeStore for LocalIndexStore {
     ) -> Result<TreeRegistrationOutcome, Self::Error> {
         let store = self.clone();
         let entry = entry.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let mut connection = store.open_connection()?;
             helpers::retry_sqlite_busy(|| {
                 let transaction = connection
@@ -468,7 +469,6 @@ impl TreeStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn create_revision_bounded(
@@ -478,7 +478,7 @@ impl TreeStore for LocalIndexStore {
     ) -> Result<RevisionCreationOutcome, Self::Error> {
         let store = self.clone();
         let rev = rev.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let mut connection = store.open_connection()?;
             helpers::retry_sqlite_busy(|| {
                 let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -498,13 +498,13 @@ impl TreeStore for LocalIndexStore {
                 transaction.commit()?;
                 Ok(RevisionCreationOutcome::Created)
             })
-        }).await.map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+        }).await
     }
 
     async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
         let store = self.clone();
         let entry = entry.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let mut connection = store.open_connection()?;
             helpers::retry_sqlite_busy(|| {
                 let transaction = connection
@@ -515,7 +515,6 @@ impl TreeStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn tree_entry(
@@ -526,12 +525,11 @@ impl TreeStore for LocalIndexStore {
         let store = self.clone();
         let key = key.clone();
         let path = path.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             tree_entry_sql(&connection, &key, &path)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn delete_tree_entries(
@@ -543,12 +541,11 @@ impl TreeStore for LocalIndexStore {
         let store = self.clone();
         let key = key.clone();
         let path = path.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             delete_tree_entries_sql(&connection, &key, &path, recursive)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn scan_tree(
@@ -562,18 +559,17 @@ impl TreeStore for LocalIndexStore {
         let key = key.clone();
         let prefix = prefix.to_owned();
         let cursor = cursor.map(ToOwned::to_owned);
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             scan_tree_sql(&connection, &key, &prefix, cursor.as_deref(), limit)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn upsert_revision(&self, rev: &RevisionRecord) -> Result<bool, Self::Error> {
         let store = self.clone();
         let rev = rev.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let mut connection = store.open_connection()?;
             helpers::retry_sqlite_busy(|| {
                 let transaction = connection
@@ -584,7 +580,6 @@ impl TreeStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn revision(
@@ -595,34 +590,31 @@ impl TreeStore for LocalIndexStore {
         let store = self.clone();
         let key = key.clone();
         let rev = rev.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             revision_sql(&connection, &key, &rev)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn count_revisions(&self, key: &RepoKey) -> Result<u64, Self::Error> {
         let store = self.clone();
         let key = key.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             count_revisions_sql(&connection, &key)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn count_tree_entries(&self, key: &RepoKey) -> Result<u64, Self::Error> {
         let store = self.clone();
         let key = key.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             count_tree_entries_sql(&connection, &key)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn list_revisions(
@@ -634,24 +626,22 @@ impl TreeStore for LocalIndexStore {
         let store = self.clone();
         let key = key.clone();
         let cursor = cursor.map(ToOwned::to_owned);
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             list_revisions_sql(&connection, &key, cursor.as_deref(), limit)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn delete_revision(&self, key: &RepoKey, rev: &str) -> Result<u64, Self::Error> {
         let store = self.clone();
         let key = key.clone();
         let rev = rev.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let mut connection = store.open_connection()?;
             delete_revision_sql(&mut connection, &key, &rev)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn prune_revisions_over_cap(
@@ -661,22 +651,20 @@ impl TreeStore for LocalIndexStore {
     ) -> Result<u64, Self::Error> {
         let store = self.clone();
         let key = key.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let mut connection = store.open_connection()?;
             prune_revisions_over_cap_sql(&mut connection, &key, max_revisions)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn list_revision_repo_keys(&self) -> Result<Vec<RepoKey>, Self::Error> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             list_revision_repo_keys_sql(&connection)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 }
 

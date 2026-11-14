@@ -1,3 +1,4 @@
+use super::helpers::run_blocking_store;
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows};
@@ -133,7 +134,7 @@ impl OciTagStore for LocalIndexStore {
     async fn upsert_oci_tag(&self, entry: &OciTagEntry) -> Result<(), Self::Error> {
         let store = self.clone();
         let entry = entry.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             super::helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection
@@ -170,13 +171,12 @@ impl OciTagStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
     }
 
     async fn insert_oci_tag_if_absent(&self, entry: &OciTagEntry) -> Result<bool, Self::Error> {
         let store = self.clone();
         let entry = entry.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             super::helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -219,7 +219,6 @@ impl OciTagStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
     }
 
     async fn oci_tag(
@@ -232,7 +231,7 @@ impl OciTagStore for LocalIndexStore {
         let scope_namespace = scope_namespace.to_owned();
         let repository = repository.to_owned();
         let tag = tag.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             super::helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -249,7 +248,6 @@ impl OciTagStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
     }
 
     async fn list_oci_tags(
@@ -263,7 +261,7 @@ impl OciTagStore for LocalIndexStore {
         let scope_namespace = scope_namespace.to_owned();
         let repository = repository.to_owned();
         let cursor = cursor.map(ToOwned::to_owned);
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             super::helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -299,7 +297,6 @@ impl OciTagStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
     }
 
     async fn list_oci_tags_by_digest(
@@ -312,7 +309,7 @@ impl OciTagStore for LocalIndexStore {
         let scope_namespace = scope_namespace.to_owned();
         let repository = repository.to_owned();
         let digest_hex = digest_hex.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             super::helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -334,7 +331,6 @@ impl OciTagStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
     }
 
     async fn delete_oci_tag_if_digest(
@@ -349,7 +345,7 @@ impl OciTagStore for LocalIndexStore {
         let repository = repository.to_owned();
         let tag = tag.to_owned();
         let digest_hex = digest_hex.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             super::helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -371,9 +367,7 @@ impl OciTagStore for LocalIndexStore {
                 transaction.commit()?;
                 Ok(changed == 1)
             })
-        })
-        .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        }).await
     }
 }
 

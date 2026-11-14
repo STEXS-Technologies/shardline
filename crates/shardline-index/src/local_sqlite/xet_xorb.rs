@@ -1,3 +1,4 @@
+use super::helpers::run_blocking_store;
 use std::io::{Error, ErrorKind};
 
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -65,7 +66,7 @@ impl LocalRecordStore {
     ) -> Result<Option<XetXorbDescriptor>, LocalIndexStoreError> {
         let store = self.clone();
         let hash = hash.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let mut connection = store.open_connection()?;
             let transaction = connection.transaction()?;
             let json: Option<Option<String>> = transaction.query_row(
@@ -80,7 +81,7 @@ impl LocalRecordStore {
             let rows = select.query_map([&hash], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<Result<Vec<(i64, String)>, _>>()?;
             Ok(crate::xet_xorb::member_rows_match(&descriptor, &rows).then_some(descriptor))
-        }).await.map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        }).await
     }
 
     /// Finds one exact derived member location without scanning other containers.
@@ -96,7 +97,7 @@ impl LocalRecordStore {
         let store = self.clone();
         let member = member.to_owned();
         let xorb = xorb.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             let json: Option<Option<String>> = connection.query_row(
                 "SELECT CASE WHEN length(CAST(d.descriptor AS BLOB))<=4194304 THEN d.descriptor END
@@ -105,7 +106,7 @@ impl LocalRecordStore {
                 params![xorb, member], |row| row.get(0),
             ).optional()?;
             json.map(|json| decode(&json.ok_or_else(invalid)?, &xorb)).transpose()
-        }).await.map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        }).await
     }
 
     /// Reads derived metadata without treating it as source existence or authority.
@@ -118,7 +119,7 @@ impl LocalRecordStore {
     ) -> Result<Option<XetXorbDescriptor>, LocalIndexStoreError> {
         let store = self.clone();
         let hash = hash.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             let json: Option<Option<String>> = connection
                 .query_row(
@@ -128,9 +129,7 @@ impl LocalRecordStore {
                 )
                 .optional()?;
             json.map(|json| decode(&json.ok_or_else(invalid)?, &hash)).transpose()
-        })
-        .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        }).await
     }
 
     /// Installs verified rebuildable descriptors. This does not publish files.
@@ -143,7 +142,7 @@ impl LocalRecordStore {
     ) -> Result<(), LocalIndexStoreError> {
         let store = self.clone();
         let descriptors = descriptors.to_vec();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -156,7 +155,6 @@ impl LocalRecordStore {
             })
         })
         .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
     }
 
     /// Finds bounded candidate containers for a chunk in the requested scope.
@@ -187,7 +185,7 @@ impl LocalRecordStore {
         let hash = hash.to_owned();
         let scope = scope.map(|scope| repository_scope_key(Some(scope)));
         let after = after.map(str::to_owned);
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             let mut query = connection.prepare("SELECT xorb_hash,CASE WHEN length(CAST(descriptor AS BLOB))<=4194304 THEN descriptor END FROM shardline_xet_xorbs d WHERE d.xorb_hash IN (
                 SELECT DISTINCT c.xorb_hash FROM shardline_xet_chunks c WHERE c.chunk_hash=?1
@@ -196,7 +194,7 @@ impl LocalRecordStore {
                 ORDER BY c.xorb_hash LIMIT 32) ORDER BY d.xorb_hash")?;
             let rows = query.query_map(params![hash, scope, after], |row| Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?)))?;
             rows.map(|row| { let (candidate_hash, json) = row?; decode(&json.ok_or_else(invalid)?, &candidate_hash) }).collect()
-        }).await.map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        }).await
     }
 }
 
