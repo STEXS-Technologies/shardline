@@ -87,7 +87,7 @@ shardline-vcs = { path = "../crates/shardline-vcs" }
 shardline-xet-core = { path = "../crates/shardline-xet-core" }
 sdx = { path = "../crates/sdx" }
 blake3 = "1.8.3"
-redis = "1.0.2"
+redis = { version = "1.0.2", default-features = false, features = ["tokio-rustls-comp"] }
 sqlx = { version = "0.9", default-features = false }
 xet-client = "1.5.1"
 xet-data = "1.5.1"

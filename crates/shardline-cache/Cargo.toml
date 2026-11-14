@@ -16,7 +16,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 hex.workspace = true
 getrandom.workspace = true
-redis = { workspace = true, features = ["tokio-rustls-comp", "connection-manager"] }
+redis = { workspace = true, features = ["tokio-rustls-comp", "connection-manager", "script"] }
 rustls.workspace = true
 shardline-protocol.workspace = true
 thiserror.workspace = true

@@ -87,7 +87,6 @@ shardline-storage = { workspace = true, features = ["test-fault-injection"] }
 dotenvy.workspace = true
 ed25519-dalek.workspace = true
 proptest.workspace = true
-redis = { workspace = true, features = ["tokio-rustls-comp"] }
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls", "stream"] }
 rusqlite = { workspace = true, features = ["bundled"] }
 shardline-test-support.workspace = true

@@ -2977,7 +2977,6 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "itoa",
- "num-bigint 0.4.8",
  "percent-encoding",
  "pin-project-lite",
  "rustls",
