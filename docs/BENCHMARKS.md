@@ -3789,7 +3789,11 @@ git grep -I -n '^' 9a89415b1ef21991b60d085b0f8ccf1a0d954d21 -- '*.rs' | wc -l
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
 integration-test targets, reuses the pinned Nextest installer, removes unused
 dependencies/features, shares root/E2E Cargo artifacts in the E2E CI job and
-avoids unnecessary CI tool installation. These are structural reductions in work.
+avoids unnecessary CI tool installation. Local E2E commands also
+reuse the root `target/` directory through `.cargo/config.toml`; an explicit
+`CARGO_TARGET_DIR` or `--target-dir` still takes precedence. Cargo keeps distinct
+feature and profile artifacts separate within that directory. These are structural
+reductions in work.
 Controlled fresh-artifact, warm and edited-source Cargo observations appear below. Default-profile Cargo, Docker and hosted-CI
 critical-path comparisons remain outstanding; no general percentage build-time
 improvement is claimed. A source reduction also does not establish a throughput,

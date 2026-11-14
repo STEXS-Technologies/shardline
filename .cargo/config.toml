@@ -1,4 +1,6 @@
 [build]
+# Share compatible artifacts with the separate E2E workspace.
+target-dir = "target"
 # Pin cargo-nextest to a version that's compatible with recent typed_path versions
 # Version 0.104.0 has trait ambiguity issues with typed_path trait impls
 
