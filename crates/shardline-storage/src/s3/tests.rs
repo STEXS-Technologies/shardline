@@ -1912,60 +1912,29 @@ fn location_for_key_without_prefix() {
 }
 
 #[test]
-fn location_for_prefix_empty_without_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true),
-    );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
-    let prefix = crate::ObjectPrefix::parse("").unwrap();
-    let location = store.location_for_prefix(&prefix);
-    assert!(location.is_ok());
-    if let Ok(loc) = location {
-        // Empty prefix with no key_prefix should give empty path
-        assert_eq!(loc.as_ref(), "");
-    }
-}
-
-#[test]
-fn location_for_prefix_empty_with_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true)
-            .with_key_prefix(Some("tenant-x")),
-    );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
-    let prefix = crate::ObjectPrefix::parse("").unwrap();
-    let location = store.location_for_prefix(&prefix);
-    assert!(location.is_ok());
-    if let Ok(loc) = location {
-        assert_eq!(loc.as_ref(), "tenant-x");
-    }
-}
-
-#[test]
-fn location_for_prefix_with_prefix_and_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true)
-            .with_key_prefix(Some("tenant-x")),
-    );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
-    let prefix = crate::ObjectPrefix::parse("sub/").unwrap();
-    let location = store.location_for_prefix(&prefix);
-    assert!(location.is_ok());
-    if let Ok(loc) = location {
-        // ObjectStorePath::parse may strip trailing slashes
-        let path_str = loc.as_ref();
+fn location_for_prefix_contract() {
+    for (port, tenant, prefix, expected) in [
+        (9000, None, "", ""),
+        (9000, Some("tenant-x"), "", "tenant-x"),
+        (9000, Some("tenant-x"), "sub/", "tenant-x/sub"),
+        (9000, None, "my-stuff/", "my-stuff"),
+        (18993, None, "subdir/", "subdir"),
+        (18992, Some("pfx"), "subdir/", "pfx/subdir"),
+    ] {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some(format!("http://127.0.0.1:{port}")))
+                .with_allow_http(true)
+                .with_key_prefix(tenant),
+        )
+        .unwrap();
+        let location = store
+            .location_for_prefix(&ObjectPrefix::parse(prefix).unwrap())
+            .unwrap();
+        let path = location.as_ref();
         assert!(
-            path_str == "tenant-x/sub" || path_str == "tenant-x/sub/",
-            "unexpected path: {path_str}"
+            path == expected || (prefix.ends_with('/') && path == format!("{expected}/")),
+            "tenant={tenant:?}, prefix={prefix:?}: unexpected path {path:?}"
         );
     }
 }
@@ -2139,37 +2108,6 @@ fn s3_config_debug_without_endpoint_shows_none() {
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
     let dbg = format!("{config:?}");
     assert!(dbg.contains("endpoint: None"));
-}
-
-// ── S3MultipartUploadWriter Debug ────────────────────────────────────
-
-#[test]
-fn s3_multipart_upload_writer_debug_not_available() {
-    // The writer type doesn't implement Debug, but we can
-    // verify the wrapper compiles and works.
-}
-
-// ── location_for_prefix with non-empty prefix, no key prefix ─────────
-
-#[test]
-fn location_for_prefix_non_empty_no_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true),
-    );
-    assert!(store.is_ok());
-    let Ok(store) = store else { return };
-    let prefix = crate::ObjectPrefix::parse("my-stuff/").unwrap();
-    let location = store.location_for_prefix(&prefix);
-    assert!(location.is_ok());
-    if let Ok(loc) = location {
-        let path = loc.as_ref();
-        assert!(
-            path == "my-stuff" || path == "my-stuff/",
-            "unexpected: {path}"
-        );
-    }
 }
 
 // ── metadata_from_external with prefix and without ────────────────────
@@ -2358,37 +2296,6 @@ fn s3_block_on_result_fallback_on_list_flat() {
         result.is_err(),
         "expected error from unreachable S3: {result:?}"
     );
-}
-
-// ── location_for_prefix edge cases ────────────────────────────────
-
-#[test]
-fn location_for_prefix_with_prefix_no_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18993".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let prefix = ObjectPrefix::parse("subdir/").unwrap();
-    let location = store.location_for_prefix(&prefix).unwrap();
-    let path = location.as_ref();
-    assert!(path == "subdir" || path == "subdir/", "unexpected: {path}");
-}
-
-#[test]
-fn location_for_prefix_non_empty_prefix_with_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18992".to_owned()))
-            .with_allow_http(true)
-            .with_key_prefix(Some("pfx")),
-    )
-    .unwrap();
-    let prefix = ObjectPrefix::parse("subdir/").unwrap();
-    let location = store.location_for_prefix(&prefix).unwrap();
-    let path = location.as_ref();
-    assert!(path.starts_with("pfx/"), "expected pfx/ prefix, got {path}");
 }
 
 // ── copy_object_if_absent edge cases ──────────────────────────────
