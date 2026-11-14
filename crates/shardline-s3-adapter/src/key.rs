@@ -191,21 +191,23 @@ mod tests {
     #[test]
     fn bucket_encode_decode_roundtrip() {
         assert_eq!(encode_bucket("acme", "models"), "acme.models");
-        assert_eq!(
-            decode_bucket("acme.models").unwrap(),
-            ("acme".to_owned(), "models".to_owned())
-        );
-        // `a.b.c` splits on the first `.`: owner `a`, name `b.c`.
-        assert_eq!(
-            decode_bucket("a.b.c").unwrap(),
-            ("a".to_owned(), "b.c".to_owned())
-        );
-        // Round-trips for names containing dots.
-        let encoded = encode_bucket("a", "b.c");
-        assert_eq!(
-            decode_bucket(&encoded).unwrap(),
-            ("a".to_owned(), "b.c".to_owned())
-        );
+        // Decoding splits on the first dot; remaining dots belong to the name.
+        // Unicode is allowed because only ASCII uppercase is rejected.
+        for (bucket, owner, name) in [
+            ("acme.models", "acme", "models"),
+            ("a.b.c", "a", "b.c"),
+            ("ac.me.models", "ac", "me.models"),
+            ("a.b.c.d", "a", "b.c.d"),
+            ("a..b", "a", ".b"),
+            ("über.models", "über", "models"),
+        ] {
+            assert_eq!(
+                decode_bucket(bucket).unwrap(),
+                (owner.to_owned(), name.to_owned()),
+                "{bucket}"
+            );
+            assert_eq!(encode_bucket(owner, name), bucket);
+        }
     }
 
     #[test]
@@ -226,25 +228,12 @@ mod tests {
     }
 
     #[test]
-    fn bucket_decode_dotted_owner_semantics() {
-        // The owner is the segment before the FIRST dot, so an owner can never
-        // itself contain a dot: multi-dot buckets decode to a dotted NAME
-        // (`a` / `b.c`) per the frozen `a.b.c` → (`a`, `b.c`) contract.
-        assert_eq!(
-            decode_bucket("a.b.c").unwrap(),
-            ("a".to_owned(), "b.c".to_owned())
-        );
-        assert_eq!(
-            decode_bucket("ac.me.models").unwrap(),
-            ("ac".to_owned(), "me.models".to_owned())
-        );
-        // The `OwnerContainsDot` guard is a hard validation error for owners
-        // containing '.' (unreachable through split-on-first-dot, but part of
-        // the frozen contract); assert the variant maps to the documented
-        // message so Lane 2 can translate it to `404 NoSuchBucket`.
+    fn bucket_decode_dotted_owner_error_message() {
+        // Split-on-first-dot prevents this variant during decoding, but its
+        // public message remains part of the bucket error contract.
         let err = BucketDecodeError::OwnerContainsDot;
         assert_eq!(err.to_string(), "bucket owner must not contain a '.'");
-        let _ = err; // Copy variant stays usable.
+        let _ = err;
     }
 
     #[test]
@@ -252,6 +241,10 @@ mod tests {
         let bucket = format!("{}.{}", "a".repeat(63), "b".repeat(64));
         assert!(matches!(
             decode_bucket(&bucket),
+            Err(BucketDecodeError::TooLong)
+        ));
+        assert!(matches!(
+            decode_bucket(&format!("{}.{}", "a".repeat(32), "b".repeat(31))),
             Err(BucketDecodeError::TooLong)
         ));
         // 63 characters total (including the separator) is accepted.
@@ -303,32 +296,6 @@ mod tests {
     fn s3_object_key_rejects_oversized_assembled_path() {
         let result = s3_object_key("global", &"k".repeat(8192));
         assert!(matches!(result, Err(S3KeyError::ObjectKey(_))));
-    }
-
-    #[test]
-    fn bucket_decode_extra_edge_cases() {
-        // Multi-dot buckets decode to a dotted NAME (split on the first dot).
-        assert_eq!(
-            decode_bucket("a.b.c.d").unwrap(),
-            ("a".to_owned(), "b.c.d".to_owned())
-        );
-        // A doubled separator yields a name starting with a dot (names may
-        // contain dots). Empty parts are covered by the error matrix.
-        assert_eq!(
-            decode_bucket("a..b").unwrap(),
-            ("a".to_owned(), ".b".to_owned())
-        );
-        // 63 chars accepted, 64 rejected.
-        assert!(decode_bucket(&format!("{}.{}", "a".repeat(31), "b".repeat(31))).is_ok());
-        assert!(matches!(
-            decode_bucket(&format!("{}.{}", "a".repeat(32), "b".repeat(31))),
-            Err(BucketDecodeError::TooLong)
-        ));
-        // Unicode is allowed (only ASCII uppercase is rejected).
-        assert_eq!(
-            decode_bucket("über.models").unwrap(),
-            ("über".to_owned(), "models".to_owned())
-        );
     }
 
     #[test]
