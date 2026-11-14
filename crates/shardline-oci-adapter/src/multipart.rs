@@ -289,13 +289,11 @@ async fn ensure_s3_upload_started<B: OciBackend>(
         return Err(OciAdapterError::NotFound);
     };
 
-    session.s3_multipart = Some(OciS3MultipartUploadSession {
-        temporary_object_key: temporary_object_key.as_str().to_owned(),
-        upload_id,
-        uploaded_part_ids: Vec::new(),
-        total_length: 0,
-        sha256_state: SerializableSha256State::default(),
-    });
+    let multipart = session
+        .s3_multipart
+        .as_mut()
+        .ok_or(OciAdapterError::NotFound)?;
+    multipart.upload_id = upload_id;
     persist_upload_session(root, session_id, session).await
 }
 
