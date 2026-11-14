@@ -22,8 +22,6 @@ use crate::error::XetHashParseError;
 
 /// Number of hexadecimal characters in a Xet CAS API hash string.
 const HASH_HEX_LENGTH: usize = 64;
-/// Bytes per group reversed by the Xet CAS API hexadecimal ordering.
-const XET_HASH_GROUP_BYTES: usize = 8;
 
 /// Parses the reordered lowercase hash text used by Xet API paths and persisted
 /// Xet metadata.
@@ -50,20 +48,8 @@ pub fn parse_xet_hash_hex(value: &str) -> Result<MerkleHash, XetHashParseError> 
         ));
     }
 
-    let decoded =
-        hex::decode(value).map_err(|e| XetHashParseError::InvalidCharacter(e.to_string()))?;
-    let reordered = decoded
-        .as_chunks::<XET_HASH_GROUP_BYTES>()
-        .0
-        .iter()
-        .flat_map(|chunk| chunk.iter().rev().copied())
-        .collect::<Vec<u8>>();
-    let bytes = <[u8; 32]>::try_from(reordered).map_err(|vec| {
-        let _ = vec;
-        XetHashParseError::InvalidLength
-    })?;
-
-    Ok(MerkleHash::from(bytes))
+    MerkleHash::from_hex(value)
+        .map_err(|error| XetHashParseError::InvalidCharacter(error.to_string()))
 }
 
 /// Returns the reordered lowercase hash text used by Xet API paths and persisted

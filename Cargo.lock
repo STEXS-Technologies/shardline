@@ -3726,7 +3726,6 @@ dependencies = [
  "bytes",
  "crc32fast",
  "futures-util",
- "hex",
  "http-body",
  "httpdate",
  "percent-encoding",

@@ -2,7 +2,6 @@ use std::borrow::Borrow;
 
 use shardline_protocol::{HashParseError, ShardlineHash};
 
-const HASH_HEX_LENGTH: usize = 64;
 const XET_HASH_GROUP_BYTES: usize = 8;
 
 /// Parses the reordered lowercase hash text used by Xet API paths and persisted Xet metadata.
@@ -12,31 +11,10 @@ const XET_HASH_GROUP_BYTES: usize = 8;
 /// Returns [`HashParseError`] when the string has the wrong length, contains
 /// non-lowercase hexadecimal characters, or cannot be decoded into 32 bytes.
 pub fn parse_xet_hash_hex(value: &str) -> Result<ShardlineHash, HashParseError> {
-    if value.len() != HASH_HEX_LENGTH {
-        return Err(HashParseError::InvalidLength);
+    let mut bytes = *ShardlineHash::parse_hex(value)?.as_bytes();
+    for chunk in bytes.as_chunks_mut::<XET_HASH_GROUP_BYTES>().0 {
+        chunk.reverse();
     }
-
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(HashParseError::InvalidCharacter(
-            "non-lowercase hexadecimal character".to_owned(),
-        ));
-    }
-
-    let decoded =
-        hex::decode(value).map_err(|e| HashParseError::InvalidCharacter(e.to_string()))?;
-    let reordered = decoded
-        .as_chunks::<XET_HASH_GROUP_BYTES>()
-        .0
-        .iter()
-        .flat_map(|chunk| chunk.iter().rev().copied())
-        .collect::<Vec<u8>>();
-    let bytes = <[u8; 32]>::try_from(reordered).map_err(|vec| {
-        let _ = vec;
-        HashParseError::InvalidLength
-    })?;
 
     Ok(ShardlineHash::from_bytes(bytes))
 }
