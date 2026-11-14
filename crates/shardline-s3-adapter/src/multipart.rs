@@ -1440,7 +1440,7 @@ async fn load_session_with_snapshot(
             }
         };
     if let Some(head) = journal_head {
-        let records = read_evidence_journal(dir).await?;
+        let records = read_journal::<SessionEvidenceJournalRecord>(dir).await?;
         let head = usize::try_from(head).map_err(|_error| S3SessionError::Overflow)?;
         let committed = records.get(..head).ok_or_else(|| {
             S3SessionError::Reliability("session evidence journal head is missing".into())
@@ -1461,7 +1461,7 @@ async fn load_session_with_snapshot(
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     }
     if let Some(head) = merkle_head {
-        let records = read_merkle_journal(dir).await?;
+        let records = read_journal::<PersistedMerkleJournalRecord>(dir).await?;
         let head = usize::try_from(head).map_err(|_error| S3SessionError::Overflow)?;
         let committed = records.get(..head).ok_or_else(|| {
             S3SessionError::Reliability("session Merkle journal head is missing".into())
@@ -1582,7 +1582,7 @@ pub async fn repair_session_evidence(root: &Path, upload_id: &str) -> Result<(),
     let persisted = serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes)
         .map_err(S3SessionError::Json)?;
     let (evidence, snapshot_evidence) = if let Some(head) = persisted.journal_head {
-        let records = read_evidence_journal(&dir).await?;
+        let records = read_journal::<SessionEvidenceJournalRecord>(&dir).await?;
         let head = usize::try_from(head).map_err(|_error| S3SessionError::Overflow)?;
         let committed = records.get(..head).ok_or_else(|| {
             S3SessionError::Reliability("session evidence journal head is missing".into())
@@ -1638,10 +1638,21 @@ pub async fn repair_session_evidence(root: &Path, upload_id: &str) -> Result<(),
     .await
 }
 
-async fn read_evidence_journal(
-    dir: &Path,
-) -> Result<Vec<SessionEvidenceJournalRecord>, S3SessionError> {
-    let path = dir.join(SESSION_EVIDENCE_JOURNAL);
+// Bind each journal's record format to its durable filename.
+trait SessionJournalRecord: Serialize + serde::de::DeserializeOwned {
+    const FILE_NAME: &'static str;
+}
+
+impl SessionJournalRecord for SessionEvidenceJournalRecord {
+    const FILE_NAME: &'static str = SESSION_EVIDENCE_JOURNAL;
+}
+
+impl SessionJournalRecord for PersistedMerkleJournalRecord {
+    const FILE_NAME: &'static str = SESSION_MERKLE_JOURNAL;
+}
+
+async fn read_journal<T: SessionJournalRecord>(dir: &Path) -> Result<Vec<T>, S3SessionError> {
+    let path = dir.join(T::FILE_NAME);
     let bytes = match fs::read(path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1657,54 +1668,13 @@ async fn read_evidence_journal(
         .collect()
 }
 
-async fn append_evidence_journal(
+async fn append_journal<T: SessionJournalRecord>(
     dir: &Path,
     committed_head: u64,
     committed_bytes: Option<u64>,
-    record: &SessionEvidenceJournalRecord,
+    record: &T,
 ) -> Result<u64, S3SessionError> {
-    let path = dir.join(SESSION_EVIDENCE_JOURNAL);
-    let committed_bytes = prepare_journal_append(&path, committed_head, committed_bytes).await?;
-    let mut bytes = serde_json::to_vec(record)?;
-    bytes.push(b'\n');
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await?;
-    file.write_all(&bytes).await?;
-    file.sync_all().await?;
-    committed_bytes
-        .checked_add(u64::try_from(bytes.len()).map_err(|_error| S3SessionError::Overflow)?)
-        .ok_or(S3SessionError::Overflow)
-}
-
-async fn read_merkle_journal(
-    dir: &Path,
-) -> Result<Vec<PersistedMerkleJournalRecord>, S3SessionError> {
-    let path = dir.join(SESSION_MERKLE_JOURNAL);
-    let bytes = match fs::read(path).await {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(S3SessionError::Io(error)),
-    };
-    bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            serde_json::from_slice(line)
-                .map_err(|error| S3SessionError::Reliability(error.to_string()))
-        })
-        .collect()
-}
-
-async fn append_merkle_journal(
-    dir: &Path,
-    committed_head: u64,
-    committed_bytes: Option<u64>,
-    record: &PersistedMerkleJournalRecord,
-) -> Result<u64, S3SessionError> {
-    let path = dir.join(SESSION_MERKLE_JOURNAL);
+    let path = dir.join(T::FILE_NAME);
     let committed_bytes = prepare_journal_append(&path, committed_head, committed_bytes).await?;
     let mut bytes = serde_json::to_vec(record)?;
     bytes.push(b'\n');
@@ -1902,7 +1872,7 @@ async fn persist_session_with_evidence(
         // Compatibility path for metadata written before sequence sidecars
         // existed. It runs once per legacy session; subsequent mutations use
         // the durable sequence fields and do not reread the journal.
-        let records = read_evidence_journal(dir).await?;
+        let records = read_journal::<SessionEvidenceJournalRecord>(dir).await?;
         let committed_head_usize =
             usize::try_from(committed_head).map_err(|_error| S3SessionError::Overflow)?;
         let committed = records
@@ -1925,7 +1895,7 @@ async fn persist_session_with_evidence(
             || previous_merkle_evidence.is_none()
             || previous_merkle_snapshot.is_none())
     {
-        let records = read_merkle_journal(dir).await?;
+        let records = read_journal::<PersistedMerkleJournalRecord>(dir).await?;
         let head = usize::try_from(merkle_head).map_err(|_error| S3SessionError::Overflow)?;
         let committed = records.get(..head).ok_or_else(|| {
             S3SessionError::Reliability("session Merkle journal head is invalid".into())
@@ -1987,7 +1957,7 @@ async fn persist_session_with_evidence(
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     if !merkle_commits.is_empty() || !snapshot_merkle_commits.is_empty() {
         merkle_bytes = Some(
-            append_merkle_journal(
+            append_journal(
                 dir,
                 merkle_head,
                 merkle_bytes,
@@ -2024,7 +1994,7 @@ async fn persist_session_with_evidence(
         committed_head
     } else {
         journal_bytes =
-            Some(append_evidence_journal(dir, committed_head, journal_bytes, &new_record).await?);
+            Some(append_journal(dir, committed_head, journal_bytes, &new_record).await?);
         committed_head
             .checked_add(1)
             .ok_or(S3SessionError::Overflow)?
@@ -2555,7 +2525,7 @@ mod tests {
         let dir = session_dir(root.path(), &upload_id).unwrap();
         let (_session, evidence, snapshot_evidence) =
             load_session_with_snapshot(&dir).await.unwrap();
-        append_evidence_journal(
+        append_journal(
             &dir,
             1,
             None,
@@ -2569,7 +2539,9 @@ mod tests {
 
         // The metadata head still points at the first record, so an append
         // that completed before the metadata rename is not trusted on read.
-        let records = read_evidence_journal(&dir).await.unwrap();
+        let records = read_journal::<SessionEvidenceJournalRecord>(&dir)
+            .await
+            .unwrap();
         assert_eq!(records.len(), 2);
         let (_session, loaded_evidence) = load_session(&dir).await.unwrap();
         assert_eq!(loaded_evidence.events().len(), 1);
@@ -2595,12 +2567,20 @@ mod tests {
         let root = make_root().await;
         let upload_id = create_default_session(root.path(), "merkle-crash.bin").await;
         let dir = session_dir(root.path(), &upload_id).unwrap();
-        let mut records = read_merkle_journal(&dir).await.unwrap();
+        let mut records = read_journal::<PersistedMerkleJournalRecord>(&dir)
+            .await
+            .unwrap();
         let record = records.pop().expect("committed Merkle record");
-        append_merkle_journal(&dir, 1, None, &record)
+        append_journal(&dir, 1, None, &record)
             .await
             .expect("append orphaned Merkle record");
-        assert_eq!(read_merkle_journal(&dir).await.unwrap().len(), 2);
+        assert_eq!(
+            read_journal::<PersistedMerkleJournalRecord>(&dir)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
 
         let (_session, evidence) = load_session(&dir).await.unwrap();
         assert_eq!(evidence.events().len(), 1);
@@ -2617,7 +2597,13 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(read_merkle_journal(&dir).await.unwrap().len(), 2);
+        assert_eq!(
+            read_journal::<PersistedMerkleJournalRecord>(&dir)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
         let (_session, advanced_evidence) = load_session(&dir).await.unwrap();
         assert_eq!(advanced_evidence.events().len(), 2);
     }
@@ -2654,10 +2640,11 @@ mod tests {
         let root = make_root().await;
         let upload_id = create_default_session(root.path(), "data/model.pt").await;
         assert_eq!(upload_id.len(), 32);
-        let merkle_records =
-            read_merkle_journal(session_dir(root.path(), &upload_id).unwrap().as_path())
-                .await
-                .unwrap();
+        let merkle_records = read_journal::<PersistedMerkleJournalRecord>(
+            session_dir(root.path(), &upload_id).unwrap().as_path(),
+        )
+        .await
+        .unwrap();
         assert_eq!(merkle_records.len(), 1);
         assert_eq!(merkle_records[0].merkle_commits.len(), 1);
         assert_eq!(merkle_records[0].snapshot_merkle_commits.len(), 1);
