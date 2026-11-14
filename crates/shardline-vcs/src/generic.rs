@@ -191,7 +191,6 @@ fn generic_repository(payload: &Value, path: &str) -> Result<RepositoryRef, Buil
 mod tests {
     use std::collections::HashSet;
 
-    use hmac::Mac;
     use shardline_protocol::SecretString;
 
     use super::GenericAdapter;
@@ -203,22 +202,11 @@ mod tests {
     };
 
     fn adapter() -> Result<GenericAdapter, BuiltInProviderError> {
-        let mut catalog = BuiltInProviderCatalog::new("generic-bridge")?;
-        let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets")
-            .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)?;
-        let subject = ProviderSubject::new("generic-user-1")
-            .map_err(|_error| BuiltInProviderError::InvalidIntegrationSubject)?;
-        let metadata = configured_metadata(
-            repository,
-            RepositoryVisibility::Private,
-            "main",
+        let catalog = crate::provider::test_support::catalog(
+            ProviderKind::Generic,
+            "generic-bridge",
             "https://forge.example/team/assets.git",
         )?;
-        catalog.register(ProviderRepositoryPolicy::new(
-            metadata,
-            HashSet::from([subject.clone()]),
-            HashSet::from([subject]),
-        ))?;
 
         Ok(GenericAdapter::new(
             catalog,
@@ -227,16 +215,7 @@ mod tests {
     }
 
     fn signature(body: &[u8]) -> Option<String> {
-        let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret");
-        assert!(mac.is_ok());
-        let Ok(mut mac) = mac else {
-            return None;
-        };
-        mac.update(body);
-        Some(format!(
-            "sha256={}",
-            hex::encode(mac.finalize().into_bytes())
-        ))
+        crate::provider::test_support::signature(body).map(|hex| format!("sha256={hex}"))
     }
 
     #[test]
