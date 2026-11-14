@@ -1256,10 +1256,7 @@ impl ServerBackend {
     }
 
     pub(crate) fn uses_s3_object_store(&self) -> bool {
-        match self {
-            Self::Local(backend) => matches!(backend.object_store(), ServerObjectStore::S3(_)),
-            Self::Postgres(backend) => matches!(backend.object_store(), ServerObjectStore::S3(_)),
-        }
+        matches!(self.object_store(), ServerObjectStore::S3(_))
     }
 
     pub(crate) async fn put_object_bytes_if_absent(
@@ -1685,10 +1682,7 @@ impl ServerBackend {
         &self,
         object_key: &ObjectKey,
     ) -> Result<DeleteOutcome, ServerError> {
-        let direct = match self {
-            Self::Local(backend) => backend.delete_object_if_present(object_key).await,
-            Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
-        }?;
+        let direct = self.delete_direct_object_if_present(object_key).await?;
         let file_id = protocol_object_file_id(object_key);
         let record_deleted = self.delete_file_reference(&file_id).await?;
         if direct == DeleteOutcome::Deleted || record_deleted {
@@ -1792,25 +1786,14 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         &self,
         object_key: &ObjectKey,
     ) -> Result<Option<String>, shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => Ok(Some(
-                    store
-                        .create_resumable_upload(object_key)
-                        .await
-                        .map_err(shardline_oci_adapter::OciAdapterError::from)?,
-                )),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(None),
-            },
-            Self::Postgres(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => Ok(Some(
-                    store
-                        .create_resumable_upload(object_key)
-                        .await
-                        .map_err(shardline_oci_adapter::OciAdapterError::from)?,
-                )),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(None),
-            },
+        match self.object_store() {
+            ServerObjectStore::S3(store) => Ok(Some(
+                store
+                    .create_resumable_upload(object_key)
+                    .await
+                    .map_err(shardline_oci_adapter::OciAdapterError::from)?,
+            )),
+            ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(None),
         }
     }
 
@@ -1821,25 +1804,14 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         part_idx: usize,
         bytes: Bytes,
     ) -> Result<String, shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => store
-                    .upload_resumable_part(object_key, upload_id, part_idx, bytes)
-                    .await
-                    .map_err(shardline_oci_adapter::OciAdapterError::from),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-                    Err(shardline_oci_adapter::OciAdapterError::NotFound)
-                }
-            },
-            Self::Postgres(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => store
-                    .upload_resumable_part(object_key, upload_id, part_idx, bytes)
-                    .await
-                    .map_err(shardline_oci_adapter::OciAdapterError::from),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-                    Err(shardline_oci_adapter::OciAdapterError::NotFound)
-                }
-            },
+        match self.object_store() {
+            ServerObjectStore::S3(store) => store
+                .upload_resumable_part(object_key, upload_id, part_idx, bytes)
+                .await
+                .map_err(shardline_oci_adapter::OciAdapterError::from),
+            ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
+                Err(shardline_oci_adapter::OciAdapterError::NotFound)
+            }
         }
     }
 
@@ -1849,25 +1821,14 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         upload_id: &str,
         parts: Vec<(usize, String)>,
     ) -> Result<(), shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => store
-                    .complete_resumable_upload(object_key, upload_id, parts)
-                    .await
-                    .map_err(shardline_oci_adapter::OciAdapterError::from),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-                    Err(shardline_oci_adapter::OciAdapterError::NotFound)
-                }
-            },
-            Self::Postgres(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => store
-                    .complete_resumable_upload(object_key, upload_id, parts)
-                    .await
-                    .map_err(shardline_oci_adapter::OciAdapterError::from),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-                    Err(shardline_oci_adapter::OciAdapterError::NotFound)
-                }
-            },
+        match self.object_store() {
+            ServerObjectStore::S3(store) => store
+                .complete_resumable_upload(object_key, upload_id, parts)
+                .await
+                .map_err(shardline_oci_adapter::OciAdapterError::from),
+            ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
+                Err(shardline_oci_adapter::OciAdapterError::NotFound)
+            }
         }
     }
 
@@ -1876,21 +1837,12 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         object_key: &ObjectKey,
         upload_id: &str,
     ) -> Result<(), shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => store
-                    .abort_resumable_upload(object_key, upload_id)
-                    .await
-                    .map_err(shardline_oci_adapter::OciAdapterError::from),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(()),
-            },
-            Self::Postgres(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => store
-                    .abort_resumable_upload(object_key, upload_id)
-                    .await
-                    .map_err(shardline_oci_adapter::OciAdapterError::from),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(()),
-            },
+        match self.object_store() {
+            ServerObjectStore::S3(store) => store
+                .abort_resumable_upload(object_key, upload_id)
+                .await
+                .map_err(shardline_oci_adapter::OciAdapterError::from),
+            ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(()),
         }
     }
 
@@ -1936,16 +1888,9 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         &self,
         object_key: &ObjectKey,
     ) -> Result<DeleteOutcome, shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => backend
-                .delete_object_if_present(object_key)
-                .await
-                .map_err(server_error_to_oci),
-            Self::Postgres(backend) => backend
-                .delete_object_if_present(object_key)
-                .await
-                .map_err(server_error_to_oci),
-        }
+        self.delete_direct_object_if_present(object_key)
+            .await
+            .map_err(server_error_to_oci)
     }
 }
 
