@@ -440,25 +440,7 @@ impl LifecycleStore for MemoryIndexStore {
         let Some(candidate) = state.quarantine.get(object_key).cloned() else {
             return Ok(false);
         };
-        // Build and validate the complete release evidence before mutating the
-        // materialized candidate map. A corrupted journal must leave the
-        // candidate recoverable, matching the transactional adapters.
-        let active_snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
-        let evidence = state
-            .quarantine_evidence
-            .get(object_key)
-            .cloned()
-            .unwrap_or_default();
-        let released_snapshot =
-            quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
-        let (evidence, _) =
-            verify_and_append_snapshot_transition(evidence, active_snapshot, released_snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        state.quarantine.remove(object_key);
-        state
-            .quarantine_evidence
-            .insert(object_key.clone(), evidence);
-        Ok(true)
+        state.release_quarantine_candidate(object_key, &candidate)
     }
 
     fn delete_quarantine_candidate_if_matches(
@@ -472,22 +454,7 @@ impl LifecycleStore for MemoryIndexStore {
         if candidate != *expected {
             return Ok(false);
         }
-        let active_snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
-        let evidence = state
-            .quarantine_evidence
-            .get(expected.object_key())
-            .cloned()
-            .unwrap_or_default();
-        let released_snapshot =
-            quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
-        let (evidence, _) =
-            verify_and_append_snapshot_transition(evidence, active_snapshot, released_snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        state.quarantine.remove(expected.object_key());
-        state
-            .quarantine_evidence
-            .insert(expected.object_key().clone(), evidence);
-        Ok(true)
+        state.release_quarantine_candidate(expected.object_key(), &candidate)
     }
 
     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
@@ -553,22 +520,7 @@ impl LifecycleStore for MemoryIndexStore {
         let Some(hold) = state.retention_holds.get(object_key).cloned() else {
             return Ok(false);
         };
-        let evidence = state
-            .retention_evidence
-            .get(object_key)
-            .cloned()
-            .unwrap_or_default();
-        let (evidence, _) = verify_and_append_snapshot_transition(
-            evidence,
-            retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?,
-            retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?,
-        )
-        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        state
-            .retention_evidence
-            .insert(object_key.clone(), evidence);
-        state.retention_holds.remove(object_key);
-        Ok(true)
+        state.release_retention_hold(object_key, &hold)
     }
 
     fn delete_retention_hold_if_matches(
@@ -582,22 +534,7 @@ impl LifecycleStore for MemoryIndexStore {
         if hold != *expected {
             return Ok(false);
         }
-        let evidence = state
-            .retention_evidence
-            .get(expected.object_key())
-            .cloned()
-            .unwrap_or_default();
-        let (evidence, _) = verify_and_append_snapshot_transition(
-            evidence,
-            retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?,
-            retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?,
-        )
-        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        state
-            .retention_evidence
-            .insert(expected.object_key().clone(), evidence);
-        state.retention_holds.remove(expected.object_key());
-        Ok(true)
+        state.release_retention_hold(expected.object_key(), &hold)
     }
 
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
@@ -630,18 +567,7 @@ impl LifecycleStore for MemoryIndexStore {
         let Some(current) = state.webhook_deliveries.get(&key).cloned() else {
             return Ok(false);
         };
-        let evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
-            MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
-        })?;
-        let (evidence, _) = verify_and_append_snapshot_transition(
-            evidence,
-            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Processed)?,
-            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Released)?,
-        )
-        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        state.webhook_deliveries.remove(&key);
-        state.webhook_evidence.insert(key, evidence);
-        Ok(true)
+        state.release_webhook_delivery(key, &current)
     }
 
     fn delete_webhook_delivery_if_matches(
@@ -656,18 +582,7 @@ impl LifecycleStore for MemoryIndexStore {
         if current != *expected {
             return Ok(false);
         }
-        let evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
-            MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
-        })?;
-        let (evidence, _) = verify_and_append_snapshot_transition(
-            evidence,
-            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Processed)?,
-            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Released)?,
-        )
-        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        state.webhook_deliveries.remove(&key);
-        state.webhook_evidence.insert(key, evidence);
-        Ok(true)
+        state.release_webhook_delivery(key, &current)
     }
 
     fn provider_repository_state(
@@ -1496,6 +1411,72 @@ struct MemoryIndexState {
     reliability_events: HashMap<String, Vec<LifecycleEvent>>,
     tree_entries: BTreeMap<MemoryTreeKey, TreeEntry>,
     revisions: BTreeMap<MemoryRevisionKey, RevisionRecord>,
+}
+
+impl MemoryIndexState {
+    fn release_quarantine_candidate(
+        &mut self,
+        object_key: &ObjectKey,
+        candidate: &QuarantineCandidate,
+    ) -> Result<bool, MemoryIndexStoreError> {
+        // Build and validate the complete release evidence before mutating the
+        // materialized candidate map. A corrupted journal must leave the
+        // candidate recoverable, matching the transactional adapters.
+        let active_snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+        let evidence = self
+            .quarantine_evidence
+            .get(object_key)
+            .cloned()
+            .unwrap_or_default();
+        let released_snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Released)?;
+        let (evidence, _) =
+            verify_and_append_snapshot_transition(evidence, active_snapshot, released_snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        self.quarantine.remove(object_key);
+        self.quarantine_evidence
+            .insert(object_key.clone(), evidence);
+        Ok(true)
+    }
+
+    fn release_retention_hold(
+        &mut self,
+        object_key: &ObjectKey,
+        hold: &RetentionHold,
+    ) -> Result<bool, MemoryIndexStoreError> {
+        let evidence = self
+            .retention_evidence
+            .get(object_key)
+            .cloned()
+            .unwrap_or_default();
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            retention_snapshot(hold, RetentionHoldLifecycleState::Active)?,
+            retention_snapshot(hold, RetentionHoldLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        self.retention_evidence.insert(object_key.clone(), evidence);
+        self.retention_holds.remove(object_key);
+        Ok(true)
+    }
+
+    fn release_webhook_delivery(
+        &mut self,
+        key: MemoryWebhookDeliveryKey,
+        current: &WebhookDelivery,
+    ) -> Result<bool, MemoryIndexStoreError> {
+        let evidence = self.webhook_evidence.get(&key).cloned().ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
+        })?;
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            webhook_snapshot(current, WebhookDeliveryLifecycleState::Processed)?,
+            webhook_snapshot(current, WebhookDeliveryLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        self.webhook_deliveries.remove(&key);
+        self.webhook_evidence.insert(key, evidence);
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -3372,6 +3353,8 @@ mod tests {
 
         let result = store.delete_quarantine_candidate(&key);
         assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
+        let result = store.delete_quarantine_candidate_if_matches(&candidate);
+        assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
         assert!(store.state.lock().unwrap().quarantine.contains_key(&key));
     }
 
@@ -3463,6 +3446,10 @@ mod tests {
         );
 
         let result = LifecycleStore::retention_hold(&store, &key);
+        assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
+        let result = store.delete_retention_hold(&key);
+        assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
+        let result = store.delete_retention_hold_if_matches(&hold);
         assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
         assert!(
             store
