@@ -301,10 +301,7 @@ mod tests {
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
 
-        assert!(response.is_ok());
-        let Ok(response) = response else {
-            return;
-        };
+        let response = response.expect("expected valid response");
         assert_eq!(response.offset_into_first_range, 0);
         assert_eq!(response.terms.len(), 2);
         assert_eq!(
@@ -375,10 +372,7 @@ mod tests {
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, Some(range));
 
-        assert!(response.is_ok());
-        let Ok(response) = response else {
-            return;
-        };
+        let response = response.expect("expected valid response");
         assert_eq!(response.offset_into_first_range, 2);
         assert_eq!(response.terms.len(), 3);
     }
@@ -498,10 +492,7 @@ mod tests {
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
 
-        assert!(response.is_ok());
-        let Ok(response) = response else {
-            return;
-        };
+        let response = response.expect("expected valid response");
         assert!(response.terms.is_empty());
         assert!(response.fetch_info.is_empty());
         assert_eq!(response.offset_into_first_range, 0);
@@ -533,10 +524,7 @@ mod tests {
             None,
         );
 
-        assert!(response.is_ok());
-        let Ok(response) = response else {
-            return;
-        };
+        let response = response.expect("expected valid response");
         assert_eq!(response.terms.len(), 1);
     }
 
@@ -602,10 +590,7 @@ mod tests {
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
 
-        assert!(response.is_ok());
-        let Ok(response) = response else {
-            return;
-        };
+        let response = response.expect("expected valid response");
         // Both chunks reference the same hash and same range -> one fetch entry
         assert_eq!(
             response.fetch_info.get(&"a".repeat(64)).map(Vec::len),
@@ -694,10 +679,7 @@ mod tests {
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, Some(range));
 
-        assert!(response.is_ok());
-        let Ok(response) = response else {
-            return;
-        };
+        let response = response.expect("expected valid response");
         assert_eq!(response.terms.len(), 1);
         assert_eq!(response.offset_into_first_range, 0);
         assert_eq!(

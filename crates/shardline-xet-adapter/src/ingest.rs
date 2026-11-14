@@ -745,10 +745,7 @@ mod tests {
 
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.expect("expected valid scope");
 
         let mut committed = false;
         let rt = tokio::runtime::Runtime::new().unwrap();

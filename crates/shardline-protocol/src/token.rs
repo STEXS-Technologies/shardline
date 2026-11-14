@@ -921,10 +921,7 @@ mod tests {
     #[test]
     fn token_signer_debug_redacts_signing_key_material() {
         let signer = TokenSigner::new(&[1; 32]);
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let signer = signer.expect("expected valid signer");
 
         let rendered = format!("{signer:?}");
 
@@ -936,10 +933,7 @@ mod tests {
     fn token_claims_reject_empty_subject() {
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let claims = TokenClaims::new("issuer", " ", TokenScope::Read, repository, 42);
 
         assert_eq!(claims, Err(TokenClaimsError::EmptySubject));
@@ -1028,10 +1022,7 @@ mod tests {
     fn token_claims_serialization_roundtrips() {
         let repository =
             RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", Some("dev"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let claims = TokenClaims::new(
             "shardline-server",
             "ci-user",
@@ -1039,21 +1030,12 @@ mod tests {
             repository,
             2_000_000_000,
         );
-        assert!(claims.is_ok());
-        let Ok(claims) = claims else {
-            return;
-        };
+        let claims = claims.expect("expected valid claims");
 
         let serialized = serde_json::to_vec(&claims);
-        assert!(serialized.is_ok());
-        let Ok(serialized) = serialized else {
-            return;
-        };
+        let serialized = serialized.expect("expected valid serialized");
         let deserialized: Result<TokenClaims, _> = serde_json::from_slice(&serialized);
-        assert!(deserialized.is_ok());
-        let Ok(deserialized) = deserialized else {
-            return;
-        };
+        let deserialized = deserialized.expect("expected valid deserialized");
 
         assert_eq!(deserialized, claims);
         assert_eq!(deserialized.issuer(), "shardline-server");
@@ -1066,10 +1048,7 @@ mod tests {
     fn token_claims_reject_oversized_subject() {
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let oversized = "s".repeat(MAX_TOKEN_COMPONENT_BYTES + 1);
         let claims = TokenClaims::new("issuer", &oversized, TokenScope::Read, repository, 42);
 
@@ -1079,16 +1058,10 @@ mod tests {
     #[test]
     fn token_roundtrips_through_sign_and_verify() {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let signer = signer.expect("expected valid signer");
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let claims = TokenClaims::new(
             "issuer",
             "provider-user-1",
@@ -1096,38 +1069,23 @@ mod tests {
             repository,
             120,
         );
-        assert!(claims.is_ok());
-        let Ok(claims) = claims else {
-            return;
-        };
+        let claims = claims.expect("expected valid claims");
 
         let token = signer.sign(&claims);
-        assert!(token.is_ok());
-        let Ok(token) = token else {
-            return;
-        };
+        let token = token.expect("expected valid token");
         let verified = signer.verify_at(&token, 119);
 
-        assert!(verified.is_ok());
-        let Ok(verified) = verified else {
-            return;
-        };
+        let verified = verified.expect("expected valid verified");
         assert_eq!(verified, claims);
     }
 
     #[test]
     fn token_verify_rejects_tampering() {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let signer = signer.expect("expected valid signer");
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let claims = TokenClaims::new(
             "issuer",
             "provider-user-1",
@@ -1135,15 +1093,9 @@ mod tests {
             repository,
             120,
         );
-        assert!(claims.is_ok());
-        let Ok(claims) = claims else {
-            return;
-        };
+        let claims = claims.expect("expected valid claims");
         let token = signer.sign(&claims);
-        assert!(token.is_ok());
-        let Ok(token) = token else {
-            return;
-        };
+        let token = token.expect("expected valid token");
         let Some((payload, _signature)) = token.split_once('.') else {
             return;
         };
@@ -1158,10 +1110,7 @@ mod tests {
     #[test]
     fn token_verify_rejects_oversized_token_before_hex_decoding() {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let signer = signer.expect("expected valid signer");
         let token = format!(
             "{}.{}",
             "a".repeat(MAX_TOKEN_PAYLOAD_HEX_BYTES + 1),
@@ -1177,10 +1126,7 @@ mod tests {
     #[test]
     fn token_verify_rejects_oversized_signature_before_hex_decoding() {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let signer = signer.expect("expected valid signer");
         let token = format!("{}.{}", "7b7d", "0".repeat(TOKEN_SIGNATURE_HEX_BYTES + 1));
 
         assert!(matches!(
@@ -1192,16 +1138,10 @@ mod tests {
     #[test]
     fn token_verify_rejects_expired_tokens() {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
-        assert!(signer.is_ok());
-        let Ok(signer) = signer else {
-            return;
-        };
+        let signer = signer.expect("expected valid signer");
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let claims = TokenClaims::new(
             "issuer",
             "provider-user-1",
@@ -1209,15 +1149,9 @@ mod tests {
             repository,
             120,
         );
-        assert!(claims.is_ok());
-        let Ok(claims) = claims else {
-            return;
-        };
+        let claims = claims.expect("expected valid claims");
         let token = signer.sign(&claims);
-        assert!(token.is_ok());
-        let Ok(token) = token else {
-            return;
-        };
+        let token = token.expect("expected valid token");
 
         assert!(matches!(
             signer.verify_at(&token, 121),
@@ -1282,10 +1216,7 @@ mod tests {
     fn token_claims_reject_empty_issuer() {
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
+        let repository = repository.expect("expected valid repository");
         let claims = TokenClaims::new("", "subject", TokenScope::Read, repository, 42);
 
         assert_eq!(claims, Err(TokenClaimsError::EmptyIssuer));

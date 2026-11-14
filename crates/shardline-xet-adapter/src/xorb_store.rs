@@ -473,22 +473,13 @@ mod tests {
         let raw = build_raw_xorb(4, ChunkSize::Fixed(1024));
         let serialized =
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false);
-        assert!(serialized.is_ok());
-        let Ok(serialized) = serialized else {
-            return;
-        };
+        let serialized = serialized.expect("expected valid serialized");
         assert!(serialized.footer_start.is_none());
         let expected_hash = parse_xet_hash_hex(&serialized.hash.hex());
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
+        let expected_hash = expected_hash.expect("expected valid expected_hash");
 
         let normalized = normalize_serialized_xorb(expected_hash, &serialized.serialized_data);
-        assert!(normalized.is_ok());
-        let Ok(normalized) = normalized else {
-            return;
-        };
+        let normalized = normalized.expect("expected valid normalized");
         assert!(normalized.len() > serialized.serialized_data.len());
 
         let validated = validate_serialized_xorb(&mut Cursor::new(normalized), expected_hash);
@@ -500,10 +491,7 @@ mod tests {
         let raw = build_raw_xorb(2, ChunkSize::Fixed(768));
         let serialized =
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, false);
-        assert!(serialized.is_ok());
-        let Ok(serialized) = serialized else {
-            return;
-        };
+        let serialized = serialized.expect("expected valid serialized");
         let wrong_hash = ShardlineHash::from_bytes([9; 32]);
 
         let normalized = normalize_serialized_xorb(wrong_hash, &serialized.serialized_data);
@@ -515,15 +503,9 @@ mod tests {
         let raw = build_raw_xorb(3, ChunkSize::Fixed(640));
         let serialized =
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true);
-        assert!(serialized.is_ok());
-        let Ok(serialized) = serialized else {
-            return;
-        };
+        let serialized = serialized.expect("expected valid serialized");
         let expected_hash = parse_xet_hash_hex(&serialized.hash.hex());
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
+        let expected_hash = expected_hash.expect("expected valid expected_hash");
 
         let canonicalized = canonicalize_uploaded_xorb(expected_hash, &serialized.serialized_data);
 
@@ -544,15 +526,9 @@ mod tests {
         let raw = build_raw_xorb(3, ChunkSize::Fixed(640));
         let serialized =
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false);
-        assert!(serialized.is_ok());
-        let Ok(serialized) = serialized else {
-            return;
-        };
+        let serialized = serialized.expect("expected valid serialized");
         let expected_hash = parse_xet_hash_hex(&serialized.hash.hex());
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
+        let expected_hash = expected_hash.expect("expected valid expected_hash");
 
         let canonicalized = canonicalize_uploaded_xorb(expected_hash, &serialized.serialized_data);
 
@@ -661,10 +637,7 @@ mod tests {
         let hash = "ab".repeat(32);
         let key = xorb_object_key(&hash);
 
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = key.expect("expected valid key");
         let extracted = xorb_hash_from_object_key_if_present(&key);
 
         assert!(extracted.is_ok());

@@ -1409,10 +1409,7 @@ mod tests {
         let hash = "cd".repeat(32);
         let key = shard_object_key(&hash);
 
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = key.expect("expected valid key");
         let extracted = shard_hash_from_object_key_if_present(&key);
 
         assert!(extracted.is_ok());
