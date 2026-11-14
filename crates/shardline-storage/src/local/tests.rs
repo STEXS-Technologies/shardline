@@ -533,75 +533,52 @@ fn local_object_store_rejects_symlinked_parent_directory_writes() {
 
 #[cfg(unix)]
 #[test]
-fn local_object_store_put_overwrite_rejects_parent_swap_race() {
-    let storage = shardline_test_support::TempStorage::new();
-    let outside = tempfile::tempdir().unwrap();
-    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+fn local_object_store_writes_reject_parent_swap_race() {
+    for (overwrite, prefix, body, moved_name) in [
+        (false, "dd", b"payload".as_slice(), "swapped-object-parent"),
+        (
+            true,
+            "ee",
+            b"payload for overwrite".as_slice(),
+            "swapped-overwrite-parent",
+        ),
+    ] {
+        let storage = shardline_test_support::TempStorage::new();
+        let outside = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse(&format!("xorbs/default/{prefix}/hash.xorb")).unwrap();
+        let path = store.path_for_key(&key);
+        let parent = path.parent().map(PathBuf::from).unwrap();
+        let moved_parent = storage.path().join(moved_name);
+        let moved_parent_for_hook = moved_parent.clone();
+        let escape_dir = outside.path().to_path_buf();
 
-    let key = ObjectKey::parse("xorbs/default/ee/hash.xorb").unwrap();
-    let path = store.path_for_key(&key);
-    let parent = path.parent().map(PathBuf::from).unwrap();
-    let moved_parent = storage.path().join("swapped-overwrite-parent");
-    let escape_dir = outside.path().to_path_buf();
+        set_before_local_write_hook(path, move || {
+            fs::rename(&parent, &moved_parent_for_hook).unwrap();
+            symlink(&escape_dir, &parent).unwrap();
+        });
 
-    set_before_local_write_hook(path, move || {
-        let renamed = fs::rename(&parent, &moved_parent);
-        assert!(renamed.is_ok());
-        let linked = symlink(&escape_dir, &parent);
-        assert!(linked.is_ok());
-    });
-
-    let body = b"payload for overwrite";
-    let integrity = ObjectIntegrity::new(super::util::chunk_hash(body), 21);
-    let result = store.put_overwrite(&key, ObjectBody::from_slice(body), &integrity);
-
-    assert!(matches!(
-        result,
-        Err(LocalObjectStoreError::Io(error)) if error.kind() == IoErrorKind::InvalidData
-    ));
-    assert!(
-        !outside.path().join("hash.xorb").exists(),
-        "object write escaped into an attacker-controlled symlink target"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn local_object_store_rejects_parent_swap_race() {
-    let storage = shardline_test_support::TempStorage::new();
-    let outside = tempfile::tempdir().unwrap();
-    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
-
-    let key = ObjectKey::parse("xorbs/default/dd/hash.xorb").unwrap();
-    let path = store.path_for_key(&key);
-    let parent = path.parent().map(PathBuf::from).unwrap();
-    let moved_parent = storage.path().join("swapped-object-parent");
-    let moved_parent_for_hook = moved_parent.clone();
-    let escape_dir = outside.path().to_path_buf();
-
-    set_before_local_write_hook(path, move || {
-        let renamed = fs::rename(&parent, &moved_parent_for_hook);
-        assert!(renamed.is_ok());
-        let linked = symlink(&escape_dir, &parent);
-        assert!(linked.is_ok());
-    });
-
-    let body = b"payload";
-    let integrity = ObjectIntegrity::new(super::util::chunk_hash(body), 7);
-    let result = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
-
-    assert!(matches!(
-        result,
-        Err(LocalObjectStoreError::Io(error)) if error.kind() == IoErrorKind::InvalidData
-    ));
-    assert!(
-        !outside.path().join("hash.xorb").exists(),
-        "object write escaped into an attacker-controlled symlink target"
-    );
-    assert!(
-        !moved_parent.join("hash.xorb").exists(),
-        "object write left a committed file behind in the detached original directory"
-    );
+        let integrity = ObjectIntegrity::new(super::util::chunk_hash(body), body.len() as u64);
+        let result = if overwrite {
+            store.put_overwrite(&key, ObjectBody::from_slice(body), &integrity)
+        } else {
+            store
+                .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+                .map(|_| ())
+        };
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::Io(error)) if error.kind() == IoErrorKind::InvalidData
+        ));
+        assert!(
+            !outside.path().join("hash.xorb").exists(),
+            "object write escaped into an attacker-controlled symlink target"
+        );
+        assert!(
+            !moved_parent.join("hash.xorb").exists(),
+            "object write left a committed file behind in the detached original directory"
+        );
+    }
 }
 
 #[cfg(unix)]
