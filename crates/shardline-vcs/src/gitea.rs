@@ -223,12 +223,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-1", signature.as_deref(), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -250,12 +245,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-2", signature.as_deref(), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -273,12 +263,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-3", signature.as_deref(), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -301,12 +286,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-4", signature.as_deref(), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };

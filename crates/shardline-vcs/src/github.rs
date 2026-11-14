@@ -208,12 +208,7 @@ mod tests {
         let adapter = adapter().unwrap();
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
 
-        let metadata = adapter.repository_metadata(&repository);
-
-        assert!(metadata.is_ok());
-        let Ok(metadata) = metadata else {
-            return;
-        };
+        let metadata = adapter.repository_metadata(&repository).unwrap();
         assert_eq!(
             metadata.clone_url().as_str(),
             "https://github.example/team/assets.git"
@@ -224,19 +219,10 @@ mod tests {
     #[test]
     fn github_adapter_allows_registered_write_access() {
         let adapter = adapter().unwrap();
-        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
-        let revision = RevisionRef::new("refs/heads/main");
-        let subject = ProviderSubject::new("github-user-1");
-        let denied_subject = ProviderSubject::new("github-user-2");
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-        assert!(subject.is_ok());
-        assert!(denied_subject.is_ok());
-        let (Ok(repository), Ok(revision), Ok(subject), Ok(denied_subject)) =
-            (repository, revision, subject, denied_subject)
-        else {
-            return;
-        };
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("github-user-1").unwrap();
+        let denied_subject = ProviderSubject::new("github-user-2").unwrap();
         let request = AuthorizationRequest::new(
             subject.clone(),
             repository.clone(),
@@ -250,17 +236,8 @@ mod tests {
             RepositoryAccess::Write,
         );
 
-        let decision = adapter.check_access(&request);
-        let denied_decision = adapter.check_access(&denied_request);
-
-        assert!(decision.is_ok());
-        assert!(denied_decision.is_ok());
-        let Ok(decision) = decision else {
-            return;
-        };
-        let Ok(denied_decision) = denied_decision else {
-            return;
-        };
+        let decision = adapter.check_access(&request).unwrap();
+        let denied_decision = adapter.check_access(&denied_request).unwrap();
         assert_eq!(decision, AuthorizationDecision::Allow(subject));
         assert_eq!(denied_decision, AuthorizationDecision::Deny);
     }
@@ -275,12 +252,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-1", signature.as_deref(), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -303,12 +275,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-2", signature.as_deref(), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -331,12 +298,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-3", signature.as_deref(), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };

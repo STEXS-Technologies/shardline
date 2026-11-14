@@ -283,15 +283,9 @@ mod tests {
     #[test]
     fn gitlab_adapter_denies_unconfigured_write_access() {
         let adapter = adapter().unwrap();
-        let repository = RepositoryRef::new(ProviderKind::GitLab, "group", "assets");
-        let revision = RevisionRef::new("refs/heads/main");
-        let subject = ProviderSubject::new("gitlab-user-1");
-        assert!(repository.is_ok());
-        assert!(revision.is_ok());
-        assert!(subject.is_ok());
-        let (Ok(repository), Ok(revision), Ok(subject)) = (repository, revision, subject) else {
-            return;
-        };
+        let repository = RepositoryRef::new(ProviderKind::GitLab, "group", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("gitlab-user-1").unwrap();
         let request =
             AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Write);
 
@@ -310,12 +304,7 @@ mod tests {
         }"#;
         let request = WebhookRequest::new("Push Hook", "delivery-1", Some("token"), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -336,12 +325,7 @@ mod tests {
         }"#;
         let request = WebhookRequest::new("Project Hook", "delivery-2", Some("token"), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -361,12 +345,7 @@ mod tests {
         }"#;
         let request = WebhookRequest::new("System Hook", "delivery-3", Some("token"), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -389,12 +368,7 @@ mod tests {
         }"#;
         let request = WebhookRequest::new("System Hook", "delivery-4", Some("token"), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -414,12 +388,7 @@ mod tests {
         }"#;
         let request = WebhookRequest::new("System Hook", "delivery-5", Some("token"), body);
 
-        let event = adapter.parse_webhook(request);
-
-        assert!(event.is_ok());
-        let Ok(event) = event else {
-            return;
-        };
+        let event = adapter.parse_webhook(request).unwrap();
         let Some(event) = event else {
             return;
         };
@@ -441,12 +410,7 @@ mod tests {
             }
         });
 
-        let metadata = metadata_from_project_payload(&payload);
-
-        assert!(metadata.is_ok());
-        let Ok(metadata) = metadata else {
-            return;
-        };
+        let metadata = metadata_from_project_payload(&payload).unwrap();
         assert_eq!(metadata.repository().provider(), ProviderKind::GitLab);
         assert_eq!(metadata.default_revision().as_str(), "refs/heads/main");
     }
