@@ -1,3 +1,4 @@
+use super::helpers::run_blocking_store;
 #[cfg(test)]
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params_from_iter};
@@ -479,12 +480,11 @@ impl S3ObjectIndexStore for LocalIndexStore {
     ) -> Result<Option<u32>, Self::Error> {
         let store = self.clone();
         let entry = entry.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let connection = store.open_connection()?;
             read_multipart_count_sql(&connection, &entry)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn scan_s3_object_exact_with_multipart_count(
@@ -495,7 +495,7 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let store = self.clone();
         let scope_namespace = scope_namespace.to_owned();
         let object_key = object_key.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -534,7 +534,6 @@ impl S3ObjectIndexStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn compare_and_swap_s3_object_with_multipart_count(
@@ -583,7 +582,7 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let store = self.clone();
         let scope_namespace = scope_namespace.to_owned();
         let object_key = object_key.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection
@@ -594,7 +593,6 @@ impl S3ObjectIndexStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn scan_s3_objects(
@@ -627,7 +625,7 @@ impl S3ObjectIndexStore for LocalIndexStore {
             S3ObjectScanStart::Inclusive(key) => (key.to_owned(), true),
             S3ObjectScanStart::Exclusive(key) => (key.to_owned(), false),
         });
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -650,7 +648,6 @@ impl S3ObjectIndexStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn scan_s3_object_exact(
@@ -661,7 +658,7 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let store = self.clone();
         let scope_namespace = scope_namespace.to_owned();
         let object_key = object_key.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -679,7 +676,6 @@ impl S3ObjectIndexStore for LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 }
 
@@ -691,7 +687,7 @@ impl LocalIndexStore {
     ) -> Result<(), LocalIndexStoreError> {
         let store = self.clone();
         let entry = entry.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 // BEGIN IMMEDIATE prevents two unconditional upserts from both
@@ -706,7 +702,6 @@ impl LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     async fn compare_and_swap_s3_object_with_optional_count(
@@ -719,7 +714,7 @@ impl LocalIndexStore {
         let store = self.clone();
         let expected = expected.cloned();
         let replacement = replacement.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection
@@ -736,7 +731,6 @@ impl LocalIndexStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 }
 

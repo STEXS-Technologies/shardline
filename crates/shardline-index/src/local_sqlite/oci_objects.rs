@@ -1,3 +1,4 @@
+use super::helpers::run_blocking_store;
 use rusqlite::{OptionalExtension, params};
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectOperationId,
@@ -342,7 +343,7 @@ impl OciObjectStore for LocalIndexStore {
     async fn oci_object_is_deleted(&self, key: &OciObjectKey) -> Result<bool, Self::Error> {
         let store = self.clone();
         let key = key.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let mut connection = store.open_connection()?;
             let transaction = connection.transaction()?;
             let deleted_at = transaction
@@ -379,7 +380,6 @@ impl OciObjectStore for LocalIndexStore {
             Ok(deleted_at.is_some())
         })
         .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
     }
 
     async fn publish_oci_object(
@@ -390,24 +390,18 @@ impl OciObjectStore for LocalIndexStore {
         let store = self.clone();
         let key = key.clone();
         let tags = tags.to_vec();
-        tokio::task::spawn_blocking(move || store.publish_oci_object_blocking(&key, &tags))
-            .await
-            .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        run_blocking_store(move || store.publish_oci_object_blocking(&key, &tags)).await
     }
 
     async fn delete_oci_object(&self, key: &OciObjectKey) -> Result<(), Self::Error> {
         let store = self.clone();
         let key = key.clone();
-        tokio::task::spawn_blocking(move || store.delete_oci_object_blocking(&key))
-            .await
-            .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        run_blocking_store(move || store.delete_oci_object_blocking(&key)).await
     }
 
     async fn list_oci_object_tombstones(&self) -> Result<Vec<OciObjectTombstone>, Self::Error> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || store.list_oci_object_tombstones_blocking())
-            .await
-            .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
+        run_blocking_store(move || store.list_oci_object_tombstones_blocking()).await
     }
 
     async fn delete_oci_object_tombstone_if_unchanged(
@@ -416,7 +410,7 @@ impl OciObjectStore for LocalIndexStore {
     ) -> Result<bool, Self::Error> {
         let store = self.clone();
         let tombstone = tombstone.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             let deleted_at = i64::try_from(tombstone.deleted_at_unix_seconds)
                 .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?;
             let mut connection = store.open_connection()?;
@@ -466,7 +460,6 @@ impl OciObjectStore for LocalIndexStore {
             Ok(deleted != 0)
         })
         .await
-        .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
     }
 }
 

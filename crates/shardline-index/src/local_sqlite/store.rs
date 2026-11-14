@@ -1,3 +1,4 @@
+use super::helpers::run_blocking_store;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -481,7 +482,7 @@ impl LocalRecordStore {
     ) -> Result<(), LocalIndexStoreError> {
         let store = self.clone();
         let record = record.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -495,7 +496,6 @@ impl LocalRecordStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     /// Atomically removes a visible file reference and its immutable version record.
@@ -509,7 +509,7 @@ impl LocalRecordStore {
     ) -> Result<(), LocalIndexStoreError> {
         let store = self.clone();
         let record = record.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -524,7 +524,6 @@ impl LocalRecordStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     /// Atomically commits native shard metadata.
@@ -578,7 +577,7 @@ impl LocalRecordStore {
         let dedupe_mappings = dedupe_mappings.to_vec();
         let identities = identities.to_vec();
         let descriptors = descriptors.to_vec();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_store(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
@@ -639,7 +638,6 @@ impl LocalRecordStore {
             })
         })
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     /// Looks up a native Xet file identity by its Hub SHA-256 and repository.
