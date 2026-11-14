@@ -58,27 +58,29 @@ impl ProviderAdapter for GiteaAdapter {
         &self,
         request: WebhookRequest<'_>,
     ) -> Result<Option<RepositoryWebhookEvent>, Self::Error> {
-        if let Some(secret) = &self.webhook_secret {
-            let Some(signature) = request.signature() else {
-                return Err(BuiltInProviderError::MissingWebhookAuthentication);
-            };
-            verify_hex_hmac_sha256(secret.expose_secret(), signature, request.body())?;
-        } else {
-            eprintln!(
-                "[shardline] WARNING: gitea webhook signature verification SKIPPED — \
-                 no webhook secret configured; deployers MUST set a webhook secret \
-                 to prevent forged webhook injection"
-            );
-        }
-
-        parse_gitea_webhook(self.kind(), request)
+        parse_gitea_webhook(self.kind(), self.webhook_secret.as_ref(), request)
     }
 }
 
 pub(super) fn parse_gitea_webhook(
     provider: ProviderKind,
+    secret: Option<&SecretString>,
     request: WebhookRequest<'_>,
 ) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
+    if let Some(secret) = secret {
+        let Some(signature) = request.signature() else {
+            return Err(BuiltInProviderError::MissingWebhookAuthentication);
+        };
+        verify_hex_hmac_sha256(secret.expose_secret(), signature, request.body())?;
+    } else {
+        eprintln!(
+            "[shardline] WARNING: {} webhook signature verification SKIPPED — \
+             no webhook secret configured; deployers MUST set a webhook secret \
+             to prevent forged webhook injection",
+            provider.as_str()
+        );
+    }
+
     match request.event_name() {
         "push" => parse_push_event(provider, request),
         "repository" => parse_repository_event(provider, request),

@@ -3,7 +3,7 @@ use shardline_protocol::SecretString;
 use crate::{
     AuthorizationDecision, AuthorizationRequest, BuiltInProviderCatalog, BuiltInProviderError,
     ProviderAdapter, ProviderKind, RepositoryMetadata, RepositoryRef, RepositoryWebhookEvent,
-    WebhookRequest, builtin::verify_hex_hmac_sha256,
+    WebhookRequest,
 };
 
 /// Built-in Codeberg (Gitea-based) provider adapter.
@@ -53,20 +53,7 @@ impl ProviderAdapter for CodebergAdapter {
         &self,
         request: WebhookRequest<'_>,
     ) -> Result<Option<RepositoryWebhookEvent>, Self::Error> {
-        if let Some(secret) = &self.webhook_secret {
-            let Some(signature) = request.signature() else {
-                return Err(BuiltInProviderError::MissingWebhookAuthentication);
-            };
-            verify_hex_hmac_sha256(secret.expose_secret(), signature, request.body())?;
-        } else {
-            eprintln!(
-                "[shardline] WARNING: codeberg webhook signature verification SKIPPED — \
-                 no webhook secret configured; deployers MUST set a webhook secret \
-                 to prevent forged webhook injection"
-            );
-        }
-
-        crate::gitea::parse_gitea_webhook(self.kind(), request)
+        crate::gitea::parse_gitea_webhook(self.kind(), self.webhook_secret.as_ref(), request)
     }
 }
 
