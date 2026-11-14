@@ -2082,125 +2082,87 @@ fn duplicate_webhook_outcome_for_access_changed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn provider_events_error_display_all_variants() {
-    let cases: &[(ProviderEventsError, &str)] = &[
-        (ProviderEventsError::Overflow, "overflow"),
-        (ProviderEventsError::InvalidContentHash, "hash"),
+fn provider_events_error_display_messages() {
+    for (error, expected) in [
+        (ProviderEventsError::Overflow, "arithmetic overflow"),
+        (
+            ProviderEventsError::InvalidContentHash,
+            "content hash must be 64 hexadecimal characters",
+        ),
         (
             ProviderEventsError::InvalidProviderWebhookPayload,
-            "payload",
+            "provider webhook payload was invalid",
         ),
         (
             ProviderEventsError::ConflictingRenameTargetRecord,
-            "conflicting",
+            "repository rename target already contains conflicting metadata",
         ),
         (
             ProviderEventsError::Json(
                 serde_json::from_str::<serde_json::Value>("invalid json...").unwrap_err(),
             ),
-            "json",
+            "json operation failed",
         ),
         (
             ProviderEventsError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
-            "bounds",
+            "numeric conversion exceeded supported bounds",
         ),
         (
             ProviderEventsError::RetentionHold(RetentionHoldError::EmptyReason),
-            "hold",
+            "retention hold input was invalid",
         ),
         (
             ProviderEventsError::WebhookDelivery(
                 shardline_index::WebhookDeliveryError::EmptyDeliveryId,
             ),
-            "delivery",
+            "webhook delivery metadata was invalid",
         ),
         (
             ProviderEventsError::ObjectStore(
                 shardline_server_core::ServerObjectStoreError::NotFound,
             ),
-            "object",
+            "object storage operation failed",
         ),
-    ];
-    for (error, substring) in cases {
-        let msg = error.to_string();
-        assert!(!msg.is_empty(), "empty display for {error:?}");
-        assert!(
-            msg.contains(substring),
-            "expected '{substring}' in '{msg}' from {error:?}"
-        );
+        (
+            ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound),
+            "xet adapter operation failed",
+        ),
+        (
+            ProviderEventsError::IndexStore(
+                shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
+            ),
+            "index adapter operation failed",
+        ),
+        (
+            ProviderEventsError::MemoryIndexStore(
+                shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned()),
+            ),
+            "memory index adapter operation failed",
+        ),
+        (
+            ProviderEventsError::MemoryRecordStore(
+                shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned()),
+            ),
+            "memory record adapter operation failed",
+        ),
+        (
+            ProviderEventsError::ParseStoredFileRecord(
+                shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+                    observed_bytes: 999,
+                    maximum_bytes: 100,
+                },
+            ),
+            "stored file record parsing failed",
+        ),
+        (
+            ProviderEventsError::PostgresMetadata(
+                shardline_index::PostgresMetadataStoreError::HashParse(
+                    shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
+                ),
+            ),
+            "postgres metadata adapter operation failed",
+        ),
+    ] {
+        assert_eq!(error.to_string(), expected, "{error:?}");
     }
-}
-
-#[test]
-fn provider_events_error_xet_adapter_display() {
-    let error = ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
-    let msg = error.to_string();
-    assert!(!msg.is_empty());
-}
-
-#[test]
-fn provider_events_error_index_store_display() {
-    let error = ProviderEventsError::IndexStore(
-        shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
-    );
-    let msg = error.to_string();
-    assert!(!msg.is_empty());
-}
-
-#[test]
-fn provider_events_error_memory_index_store_display() {
-    let error = ProviderEventsError::MemoryIndexStore(
-        shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned()),
-    );
-    let msg = error.to_string();
-    assert!(!msg.is_empty());
-}
-
-#[test]
-fn provider_events_error_memory_record_store_display() {
-    let error = ProviderEventsError::MemoryRecordStore(
-        shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned()),
-    );
-    let msg = error.to_string();
-    assert!(!msg.is_empty());
-}
-
-#[test]
-fn provider_events_error_parse_stored_file_record_display() {
-    let error = ProviderEventsError::ParseStoredFileRecord(
-        shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
-            observed_bytes: 999,
-            maximum_bytes: 100,
-        },
-    );
-    let msg = error.to_string();
-    assert!(!msg.is_empty());
-}
-
-#[test]
-fn provider_events_error_postgres_metadata_display() {
-    let error = ProviderEventsError::PostgresMetadata(
-        shardline_index::PostgresMetadataStoreError::HashParse(
-            shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
-        ),
-    );
-    let msg = error.to_string();
-    assert_eq!(msg, "postgres metadata adapter operation failed");
-}
-
-#[test]
-fn provider_events_error_xet_adapter_display_nonempty() {
-    let error = ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
-    let msg = error.to_string();
-    assert!(!msg.is_empty());
-    assert!(msg.contains("xet"));
-}
-
-#[test]
-fn provider_events_error_index_store_display_nonempty() {
-    let error = ProviderEventsError::IndexStore(
-        shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
-    );
-    let msg = error.to_string();
-    assert!(!msg.is_empty());
 }
