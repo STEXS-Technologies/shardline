@@ -1387,6 +1387,7 @@ mod tests {
     )]
     use super::*;
     use crate::hub::{BoxedHubStore, HubRepoType, HubStore};
+    use crate::postgres::connect_isolated_postgres as connect_postgres;
     use sqlx::postgres::PgPool;
 
     // ------------------------------------------------------------------
@@ -1448,7 +1449,6 @@ mod tests {
             .expect("configured PostgreSQL fixture must connect");
         let store = make_store(pool);
         crate::hub::ref_batch_tests::contract(&store);
-        cleanup_repo(&store, "atomic/contract").await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1507,98 +1507,10 @@ mod tests {
             HubRefBatchOutcome::Applied
         );
         assert_eq!(store.list_refs(repo).unwrap().len(), 2);
-        cleanup_repo(&store, repo).await;
-    }
-
-    async fn connect_postgres() -> Option<PgPool> {
-        crate::postgres::connect_isolated_postgres().await
     }
 
     fn make_store(pool: PgPool) -> PostgresIndexStore {
         PostgresIndexStore::new(pool)
-    }
-
-    async fn cleanup_repo(store: &PostgresIndexStore, repo_id: &str) {
-        // Test cleanup must satisfy the same deferred delete gate as a real
-        // mutation.  Seed a terminal evidence event for every existing ref,
-        // delete the materialized rows in that transaction, then remove the
-        // synthetic history after commit.
-        let cleanup_result = async {
-            let mut tx = store.pool().begin().await?;
-            let refs: Vec<(String, String)> = sqlx::query_as(
-                "SELECT ref_name, sha FROM shardline_hub_refs WHERE repo_id = $1",
-            )
-            .bind(repo_id)
-            .fetch_all(&mut *tx)
-            .await?;
-            for (ref_name, _sha) in &refs {
-                let operation_id = format!(
-                    "{}:{}{}:{}",
-                    repo_id.len(),
-                    repo_id,
-                    ref_name.len(),
-                    ref_name
-                );
-                let sequence: i64 = sqlx::query_scalar(
-                    "SELECT COALESCE(MAX(sequence), 0) + 1
-                     FROM shardline_reliability_events
-                     WHERE operation_kind = 'MetadataCommit' AND operation_id = $1",
-                )
-                .bind(&operation_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                let event_json = serde_json::json!({
-                    "after": {
-                        "repository": repo_id,
-                        "ref_name": ref_name,
-                        "head_sha": null
-                    }
-                });
-                sqlx::query(
-                    "INSERT INTO shardline_reliability_events
-                     (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-                     VALUES ('MetadataCommit', $1, $2, $3, $4)",
-                )
-                .bind(&operation_id)
-                .bind(sequence)
-                .bind(event_json)
-                .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
-                .execute(&mut *tx)
-                .await?;
-            }
-            sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1)")
-                .bind(repo_id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM shardline_hub_refs WHERE repo_id = $1")
-                .bind(repo_id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM shardline_hub_revisions WHERE repo_id = $1")
-                .bind(repo_id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM shardline_hub_repos WHERE repo_id = $1")
-                .bind(repo_id)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await
-        }
-        .await;
-        if let Err(e) = cleanup_result {
-            eprintln!("cleanup: failed to remove repository {repo_id}: {e}");
-        }
-        if let Err(e) = sqlx::query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'MetadataCommit'
-               AND operation_id LIKE $1 || '%'",
-        )
-        .bind(format!("{}:{repo_id}", repo_id.len()))
-        .execute(store.pool())
-        .await
-        {
-            eprintln!("cleanup: failed to delete repository evidence for {repo_id}: {e}");
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1608,7 +1520,6 @@ mod tests {
             return;
         };
         let store = make_store(pool);
-        cleanup_repo(&store, "pg-create-get").await;
 
         let repo = store
             .create_repo(HubRepoType::Model, "pg-create-get", false)
@@ -1642,8 +1553,6 @@ mod tests {
             before, after,
             "duplicate creation must not append ref evidence"
         );
-
-        cleanup_repo(&store, "pg-create-get").await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1654,7 +1563,6 @@ mod tests {
         };
         let store = make_store(pool);
         let repo = "pg-create-race";
-        cleanup_repo(&store, repo).await;
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let mut creators = Vec::new();
         for attempt in 0..8 {
@@ -1680,7 +1588,6 @@ mod tests {
             store.get_repo(repo).unwrap().unwrap().private,
             winner.unwrap()
         );
-        cleanup_repo(&store, repo).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1691,7 +1598,6 @@ mod tests {
         };
         let store = make_store(pool.clone());
         let repo_id = "pg-mixed-version-ref";
-        cleanup_repo(&store, repo_id).await;
         let original = store
             .create_repo(HubRepoType::Model, repo_id, false)
             .expect("create repo");
@@ -1713,7 +1619,6 @@ mod tests {
             store.get_repo(repo_id).expect("read after rejected write"),
             Some(original)
         );
-        cleanup_repo(&store, repo_id).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1724,7 +1629,6 @@ mod tests {
         };
         let store = make_store(pool.clone());
         let repo_id = "pg-list-search-tampered";
-        cleanup_repo(&store, repo_id).await;
 
         store
             .create_repo(HubRepoType::Model, repo_id, false)
@@ -1758,7 +1662,6 @@ mod tests {
         assert!(store.list_refs(repo_id).is_err());
         assert!(store.list_repos().is_err());
         assert!(store.search_repos(None, repo_id, 10).is_err());
-        cleanup_repo(&store, repo_id).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1781,7 +1684,6 @@ mod tests {
             return;
         };
         let store = make_store(pool);
-        cleanup_repo(&store, "pg-rev-resolve").await;
 
         store
             .create_repo(HubRepoType::Model, "pg-rev-resolve", false)
@@ -1836,8 +1738,6 @@ mod tests {
 
         let sha = store.resolve_revision("pg-rev-resolve", "").unwrap();
         assert_eq!(sha.as_deref(), Some("rev2"));
-
-        cleanup_repo(&store, "pg-rev-resolve").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1848,7 +1748,6 @@ mod tests {
         };
         let store = make_store(pool);
         let repo_id = "pg-delete-ref";
-        cleanup_repo(&store, repo_id).await;
 
         store
             .create_repo(HubRepoType::Model, repo_id, false)
@@ -1886,8 +1785,6 @@ mod tests {
             "deleting a ref must not remove the commit"
         );
         assert!(store.delete_ref(repo_id, "main", initial_sha).is_err());
-
-        cleanup_repo(&store, repo_id).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1951,14 +1848,6 @@ mod tests {
         assert!(!retrieved[0].is_lfs);
         assert_eq!(retrieved[1].path, "b.bin");
         assert!(retrieved[1].is_lfs);
-
-        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha = $1")
-            .bind("pg-commit-files")
-            .execute(store.pool())
-            .await
-        {
-            eprintln!("cleanup: failed to delete file entries for pg-commit-files: {e}");
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1968,7 +1857,6 @@ mod tests {
             return;
         };
         let store = make_store(pool);
-        cleanup_repo(&store, "pg-concurrency").await;
 
         store
             .create_repo(HubRepoType::Model, "pg-concurrency", false)
@@ -1987,8 +1875,6 @@ mod tests {
             "stale",
         );
         assert!(result.is_err());
-
-        cleanup_repo(&store, "pg-concurrency").await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2001,7 +1887,6 @@ mod tests {
         let second_store = make_store(pool.clone());
         let verifier = make_store(pool);
         let repo_id = "pg-concurrent-ref-cas";
-        cleanup_repo(&first_store, repo_id).await;
         first_store
             .create_repo(HubRepoType::Model, repo_id, false)
             .unwrap();
@@ -2031,7 +1916,6 @@ mod tests {
                 "second-sha"
             }
         );
-        cleanup_repo(&verifier, repo_id).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2044,7 +1928,6 @@ mod tests {
         let delete_store = make_store(pool.clone());
         let verifier = make_store(pool.clone());
         let repo_id = "pg-delete-push-race";
-        cleanup_repo(&push_store, repo_id).await;
         push_store
             .create_repo(HubRepoType::Model, repo_id, false)
             .unwrap();
@@ -2081,7 +1964,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(dangling_files, 0);
-        cleanup_repo(&verifier, repo_id).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2091,7 +1973,6 @@ mod tests {
             return;
         };
         let store = make_store(pool);
-        cleanup_repo(&store, "pg-boxed").await;
 
         let boxed = BoxedHubStore::from_store(store);
 
@@ -2114,8 +1995,7 @@ mod tests {
         assert!(sha.is_some());
 
         // The initial empty-tree revision is shared by every new repository.
-        // Use a repository-specific revision for file entries so this test does
-        // not collide with cleanup performed by other Postgres tests.
+        // Give file entries their own revision to exercise revision publication.
         let initial_sha = sha.unwrap();
         let file_commit_sha = "pg-boxed-files";
         boxed
@@ -2149,7 +2029,6 @@ mod tests {
         };
         let store = make_store(pool.clone());
         let repo = "pg-strict-delete-lock";
-        cleanup_repo(&store, repo).await;
         store.create_repo(HubRepoType::Model, repo, true).unwrap();
         store
             .create_revision(repo, Some(EMPTY_HUB_REVISION), "old", "selected", "old")
@@ -2231,7 +2110,6 @@ mod tests {
                 .unwrap(),
             HubRefUpdateOutcome::Updated(_)
         ));
-        cleanup_repo(&store, repo).await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pg_atomic_webhook_registration_handles_boundary_and_concurrency() {
@@ -2244,26 +2122,8 @@ mod tests {
             return;
         };
         let store = make_store(pool);
-        for repo in [
-            "bounded/case",
-            "bounded/Case",
-            "bounded/cap",
-            "bounded/duplicate",
-            "atomic-secret/target",
-        ] {
-            cleanup_repo(&store, repo).await;
-        }
         crate::hub::assert_atomic_webhook_registration(&store);
         crate::hub::assert_atomic_webhook_secret_upgrade(&store);
         eprintln!("PostgreSQL atomic webhook boundary and concurrency checks executed");
-        for repo in [
-            "bounded/case",
-            "bounded/Case",
-            "bounded/cap",
-            "bounded/duplicate",
-            "atomic-secret/target",
-        ] {
-            cleanup_repo(&store, repo).await;
-        }
     }
 }
