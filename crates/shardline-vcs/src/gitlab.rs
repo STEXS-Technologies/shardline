@@ -280,6 +280,27 @@ mod tests {
         ))
     }
 
+    fn parse_event(
+        hook: &str,
+        delivery: &str,
+        payload: &serde_json::Value,
+    ) -> crate::RepositoryWebhookEvent {
+        let adapter = adapter().unwrap();
+        let body = serde_json::to_vec(payload).unwrap();
+        let result =
+            adapter.parse_webhook(WebhookRequest::new(hook, delivery, Some("token"), &body));
+        assert!(
+            matches!(&result, Ok(Some(_))),
+            "hook {hook}, delivery {delivery}, payload {payload}: {result:?}"
+        );
+        let event = result.unwrap().unwrap();
+        assert_eq!(event.delivery_id().as_str(), delivery);
+        assert_eq!(event.repository().provider(), ProviderKind::GitLab);
+        assert_eq!(event.repository().owner(), "group");
+        assert_eq!(event.repository().name(), "assets");
+        event
+    }
+
     #[test]
     fn gitlab_adapter_denies_unconfigured_write_access() {
         let adapter = adapter().unwrap();
@@ -295,68 +316,91 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_adapter_parses_push_hook() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"push",
-            "ref":"refs/heads/main",
-            "project":{"path_with_namespace":"group/assets"}
-        }"#;
-        let request = WebhookRequest::new("Push Hook", "delivery-1", Some("token"), body);
-
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        let revision = RevisionRef::new("refs/heads/main").unwrap();
-        assert_eq!(event.repository().owner(), "group");
-        assert_eq!(
-            event.kind(),
-            &RepositoryWebhookEventKind::RevisionPushed { revision }
-        );
+    fn gitlab_revision_push_hooks_require_matching_events() {
+        for (hook, delivery, event_name, revision) in [
+            ("Push Hook", "delivery-1", "push", "refs/heads/main"),
+            (
+                "System Hook",
+                "delivery-5",
+                "repository_update",
+                "refs/heads/main",
+            ),
+            ("Push Hook", "delivery-push2", "push", "refs/heads/feature"),
+            (
+                "Some Unknown Hook",
+                "delivery-unk",
+                "push",
+                "refs/heads/main",
+            ),
+            (
+                "Some Unknown Hook",
+                "delivery-repo",
+                "repository_update",
+                "refs/heads/main",
+            ),
+        ] {
+            let mut payload = serde_json::json!({
+                "event_name": event_name,
+                "project": {"path_with_namespace": "group/assets"},
+            });
+            if event_name == "repository_update" {
+                payload["refs"] = serde_json::json!([revision]);
+            } else {
+                payload["ref"] = serde_json::json!(revision);
+            }
+            let event = parse_event(hook, delivery, &payload);
+            let revision = RevisionRef::new(revision).unwrap();
+            assert_eq!(
+                event.kind(),
+                &RepositoryWebhookEventKind::RevisionPushed { revision }
+            );
+        }
     }
 
     #[test]
-    fn gitlab_adapter_parses_project_destroy_hook() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_destroy",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("Project Hook", "delivery-2", Some("token"), body);
-
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        assert_eq!(event.delivery_id().as_str(), "delivery-2");
-        assert_eq!(event.repository().owner(), "group");
-        assert_eq!(event.repository().name(), "assets");
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
+    fn gitlab_delete_hooks_require_matching_events() {
+        for (hook, delivery) in [
+            ("Project Hook", "delivery-2"),
+            ("System Hook", "delivery-destroy"),
+            ("System Hook", "delivery-sys3"),
+            ("Some Unknown Hook", "delivery-destroy"),
+        ] {
+            let event = parse_event(
+                hook,
+                delivery,
+                &serde_json::json!({
+                    "event_name": "project_destroy",
+                    "path_with_namespace": "group/assets",
+                }),
+            );
+            assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
+        }
     }
 
     #[test]
-    fn gitlab_adapter_parses_project_rename_system_hook() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_rename",
-            "path_with_namespace":"group/new-assets",
-            "old_path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-3", Some("token"), body);
-
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        let new_repository =
-            RepositoryRef::new(ProviderKind::GitLab, "group", "new-assets").unwrap();
-        assert_eq!(event.repository().owner(), "group");
-        assert_eq!(event.repository().name(), "assets");
-        assert_eq!(
-            event.kind(),
-            &RepositoryWebhookEventKind::RepositoryRenamed { new_repository }
-        );
+    fn gitlab_rename_hooks_require_matching_events() {
+        for (hook, delivery, event_name) in [
+            ("System Hook", "delivery-3", "project_rename"),
+            ("System Hook", "delivery-transfer", "project_transfer"),
+            ("Some Unknown Hook", "delivery-ren", "project_rename"),
+            ("Some Unknown Hook", "delivery-trans", "project_transfer"),
+        ] {
+            let event = parse_event(
+                hook,
+                delivery,
+                &serde_json::json!({
+                    "event_name": event_name,
+                    "path_with_namespace": "group/new-assets",
+                    "old_path_with_namespace": "group/assets",
+                }),
+            );
+            let new_repository =
+                RepositoryRef::new(ProviderKind::GitLab, "group", "new-assets").unwrap();
+            assert_eq!(
+                event.kind(),
+                &RepositoryWebhookEventKind::RepositoryRenamed { new_repository }
+            );
+        }
     }
 
     #[test]
@@ -370,46 +414,16 @@ mod tests {
             ("Some Unknown Hook", "project_update", "delivery-upd"),
             ("System Hook", "project_update", "delivery-upd2"),
         ] {
-            let adapter = adapter().unwrap();
-            let body = serde_json::to_vec(&serde_json::json!({
-                "event_name": event_name,
-                "path_with_namespace": "group/assets",
-            }))
-            .unwrap();
-            let request = WebhookRequest::new(hook, delivery, Some("token"), &body);
-            let result = adapter.parse_webhook(request);
-            assert!(
-                matches!(&result, Ok(Some(_))),
-                "hook {hook}, event {event_name}, delivery {delivery}: {result:?}"
+            let event = parse_event(
+                hook,
+                delivery,
+                &serde_json::json!({
+                    "event_name": event_name,
+                    "path_with_namespace": "group/assets",
+                }),
             );
-            let event = result.unwrap().unwrap();
-            assert_eq!(event.delivery_id().as_str(), delivery);
-            assert_eq!(event.repository().provider(), ProviderKind::GitLab);
-            assert_eq!(event.repository().owner(), "group");
-            assert_eq!(event.repository().name(), "assets");
             assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
         }
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_repository_update_system_hook_with_single_ref() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"repository_update",
-            "project":{"path_with_namespace":"group/assets"},
-            "refs":["refs/heads/main"]
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-5", Some("token"), body);
-
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        let revision = RevisionRef::new("refs/heads/main").unwrap();
-        assert_eq!(
-            event.kind(),
-            &RepositoryWebhookEventKind::RevisionPushed { revision }
-        );
     }
 
     #[test]
@@ -590,40 +604,6 @@ mod tests {
                 "case {case}: {result:?}"
             );
         }
-    }
-
-    #[test]
-    fn gitlab_adapter_system_hook_project_destroy_returns_deleted() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_destroy",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-destroy", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
-    }
-
-    #[test]
-    fn gitlab_adapter_system_hook_project_transfer_returns_rename() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_transfer",
-            "path_with_namespace":"group/new-assets",
-            "old_path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-transfer", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
-        assert!(matches!(
-            event.kind(),
-            RepositoryWebhookEventKind::RepositoryRenamed { .. }
-        ));
     }
 
     #[test]
@@ -812,121 +792,6 @@ mod tests {
         let repository = RepositoryRef::new(ProviderKind::GitLab, "unknown", "repo").unwrap();
         let result = adapter.repository_metadata(&repository);
         assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_push_hook_with_event_name_field() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"push",
-            "ref":"refs/heads/feature",
-            "project":{"path_with_namespace":"group/assets"}
-        }"#;
-        let request = WebhookRequest::new("Push Hook", "delivery-push2", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        let revision = RevisionRef::new("refs/heads/feature").unwrap();
-        assert_eq!(
-            event.kind(),
-            &RepositoryWebhookEventKind::RevisionPushed { revision }
-        );
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_system_hook_project_destroy_as_deleted() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_destroy",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-sys3", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_unknown_hook_with_push_event_name_inline() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"push",
-            "ref":"refs/heads/main",
-            "project":{"path_with_namespace":"group/assets"}
-        }"#;
-        let request = WebhookRequest::new("Some Unknown Hook", "delivery-unk", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert!(matches!(
-            event.kind(),
-            RepositoryWebhookEventKind::RevisionPushed { .. }
-        ));
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_unknown_hook_with_project_destroy_inline() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_destroy",
-            "path_with_namespace":"group/assets"
-        }"#;
-        let request =
-            WebhookRequest::new("Some Unknown Hook", "delivery-destroy", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_unknown_hook_with_project_rename_inline() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_rename",
-            "path_with_namespace":"group/new-assets",
-            "old_path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("Some Unknown Hook", "delivery-ren", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert!(matches!(
-            event.kind(),
-            RepositoryWebhookEventKind::RepositoryRenamed { .. }
-        ));
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_unknown_hook_with_project_transfer_inline() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_transfer",
-            "path_with_namespace":"group/new-assets",
-            "old_path_with_namespace":"group/assets"
-        }"#;
-        let request =
-            WebhookRequest::new("Some Unknown Hook", "delivery-trans", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert!(matches!(
-            event.kind(),
-            RepositoryWebhookEventKind::RepositoryRenamed { .. }
-        ));
-    }
-
-    #[test]
-    fn gitlab_adapter_parses_unknown_hook_with_repository_update_inline() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"repository_update",
-            "project":{"path_with_namespace":"group/assets"},
-            "refs":["refs/heads/main"]
-        }"#;
-        let request =
-            WebhookRequest::new("Some Unknown Hook", "delivery-repo", Some("token"), body);
-        let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
-        assert!(matches!(
-            event.kind(),
-            RepositoryWebhookEventKind::RevisionPushed { .. }
-        ));
     }
 
     #[test]
