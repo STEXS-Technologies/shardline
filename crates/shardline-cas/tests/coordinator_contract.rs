@@ -1,20 +1,15 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    num::NonZeroU64,
-    time::Duration,
-};
+use std::{cell::RefCell, collections::HashMap, num::NonZeroU64, time::Duration};
 
 use async_trait::async_trait;
 use shardline_cas::paths::xorb_key;
 use shardline_cas::{CasCoordinator, CasError, CasLimits};
 use shardline_index::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore, LocalIndexStore,
-    ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, ReconstructionTerm,
-    RetentionHold, StoredObjectId, UploadIntent, UploadIntentState, UploadIntentStore,
-    WebhookDelivery, xet_hash_hex_string,
+    MemoryIndexStore, ProviderRepositoryState, QuarantineCandidate, ReconstructionStore,
+    ReconstructionTerm, RetentionHold, StoredObjectId, UploadIntent, UploadIntentState,
+    UploadIntentStore, WebhookDelivery, xet_hash_hex_string,
 };
 use shardline_protocol::{ByteRange, ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::{
@@ -30,10 +25,6 @@ enum MemoryObjectError {
     #[error("memory object was missing")]
     Missing,
 }
-
-#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
-#[error("memory index operation failed")]
-struct MemoryIndexError;
 
 #[derive(Debug, Default)]
 struct MemoryObjectStore {
@@ -132,278 +123,6 @@ impl ObjectStore for MemoryObjectStore {
         }
 
         Ok(DeleteOutcome::NotFound)
-    }
-}
-
-#[derive(Debug, Default)]
-struct MemoryIndexStore {
-    reconstructions: RefCell<HashMap<FileId, FileReconstruction>>,
-    quarantine_candidates: RefCell<HashMap<ObjectKey, QuarantineCandidate>>,
-    retention_holds: RefCell<HashMap<ObjectKey, RetentionHold>>,
-    webhook_deliveries: RefCell<HashMap<(String, String, String, String), WebhookDelivery>>,
-    provider_repository_states: RefCell<HashMap<(String, String, String), ProviderRepositoryState>>,
-    objects: RefCell<HashSet<StoredObjectId>>,
-    dedupe_shards: RefCell<HashMap<ShardlineHash, DedupeShardMapping>>,
-}
-
-impl MemoryIndexStore {
-    fn insert_reconstruction(&self, file_id: FileId, reconstruction: FileReconstruction) {
-        self.reconstructions
-            .borrow_mut()
-            .insert(file_id, reconstruction);
-    }
-
-    fn insert_object(&self, object_id: StoredObjectId) {
-        self.objects.borrow_mut().insert(object_id);
-    }
-}
-
-impl ReconstructionStore for MemoryIndexStore {
-    type Error = MemoryIndexError;
-
-    fn reconstruction(&self, file_id: &FileId) -> Result<Option<FileReconstruction>, Self::Error> {
-        Ok(self.reconstructions.borrow().get(file_id).cloned())
-    }
-
-    fn list_reconstruction_file_ids(&self) -> Result<Vec<FileId>, Self::Error> {
-        let mut file_ids = self
-            .reconstructions
-            .borrow()
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        file_ids.sort_by(|left, right| {
-            xet_hash_hex_string(left.hash()).cmp(&xet_hash_hex_string(right.hash()))
-        });
-        Ok(file_ids)
-    }
-
-    fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error> {
-        Ok(self.reconstructions.borrow_mut().remove(file_id).is_some())
-    }
-
-    fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error> {
-        Ok(self.objects.borrow().contains(object_id))
-    }
-}
-
-impl DedupeStore for MemoryIndexStore {
-    type Error = MemoryIndexError;
-
-    fn dedupe_shard_mapping(
-        &self,
-        chunk_hash: &ShardlineHash,
-    ) -> Result<Option<DedupeShardMapping>, Self::Error> {
-        Ok(self.dedupe_shards.borrow().get(chunk_hash).cloned())
-    }
-
-    fn list_dedupe_shard_mappings(&self) -> Result<Vec<DedupeShardMapping>, Self::Error> {
-        let mut mappings = self
-            .dedupe_shards
-            .borrow()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        mappings.sort_by(|left, right| {
-            xet_hash_hex_string(left.chunk_hash()).cmp(&xet_hash_hex_string(right.chunk_hash()))
-        });
-        Ok(mappings)
-    }
-
-    fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error> {
-        Ok(self.dedupe_shards.borrow_mut().remove(chunk_hash).is_some())
-    }
-}
-
-impl LifecycleStore for MemoryIndexStore {
-    type Error = MemoryIndexError;
-
-    fn quarantine_candidate(
-        &self,
-        object_key: &ObjectKey,
-    ) -> Result<Option<QuarantineCandidate>, Self::Error> {
-        Ok(self.quarantine_candidates.borrow().get(object_key).cloned())
-    }
-
-    fn list_quarantine_candidates(&self) -> Result<Vec<QuarantineCandidate>, Self::Error> {
-        let mut candidates = self
-            .quarantine_candidates
-            .borrow()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        candidates
-            .sort_by(|left, right| left.object_key().as_str().cmp(right.object_key().as_str()));
-        Ok(candidates)
-    }
-
-    fn upsert_quarantine_candidate(
-        &self,
-        candidate: &QuarantineCandidate,
-    ) -> Result<(), Self::Error> {
-        self.quarantine_candidates
-            .borrow_mut()
-            .insert(candidate.object_key().clone(), candidate.clone());
-        Ok(())
-    }
-
-    fn delete_quarantine_candidate(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        Ok(self
-            .quarantine_candidates
-            .borrow_mut()
-            .remove(object_key)
-            .is_some())
-    }
-
-    fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
-        Ok(self.retention_holds.borrow().get(object_key).cloned())
-    }
-
-    fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error> {
-        let mut holds = self
-            .retention_holds
-            .borrow()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        holds.sort_by(|left, right| left.object_key().as_str().cmp(right.object_key().as_str()));
-        Ok(holds)
-    }
-
-    fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
-        self.retention_holds
-            .borrow_mut()
-            .insert(hold.object_key().clone(), hold.clone());
-        Ok(())
-    }
-
-    fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        Ok(self
-            .retention_holds
-            .borrow_mut()
-            .remove(object_key)
-            .is_some())
-    }
-
-    fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
-        Ok(self
-            .webhook_deliveries
-            .borrow_mut()
-            .insert(
-                (
-                    format!("{:?}", delivery.provider()),
-                    delivery.owner().to_owned(),
-                    delivery.repo().to_owned(),
-                    delivery.delivery_id().to_owned(),
-                ),
-                delivery.clone(),
-            )
-            .is_none())
-    }
-
-    fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error> {
-        let mut deliveries = self
-            .webhook_deliveries
-            .borrow()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        deliveries.sort_by(|left, right| {
-            format!("{:?}", left.provider())
-                .cmp(&format!("{:?}", right.provider()))
-                .then_with(|| left.owner().cmp(right.owner()))
-                .then_with(|| left.repo().cmp(right.repo()))
-                .then_with(|| left.delivery_id().cmp(right.delivery_id()))
-        });
-        Ok(deliveries)
-    }
-
-    fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
-        Ok(self
-            .webhook_deliveries
-            .borrow_mut()
-            .remove(&(
-                format!("{:?}", delivery.provider()),
-                delivery.owner().to_owned(),
-                delivery.repo().to_owned(),
-                delivery.delivery_id().to_owned(),
-            ))
-            .is_some())
-    }
-
-    fn provider_repository_state(
-        &self,
-        provider: RepositoryProvider,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Option<ProviderRepositoryState>, Self::Error> {
-        Ok(self
-            .provider_repository_states
-            .borrow()
-            .get(&(
-                provider_key(provider).to_owned(),
-                owner.to_owned(),
-                repo.to_owned(),
-            ))
-            .cloned())
-    }
-
-    fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error> {
-        let mut states = self
-            .provider_repository_states
-            .borrow()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        states.sort_by(|left, right| {
-            provider_key(left.provider())
-                .cmp(provider_key(right.provider()))
-                .then_with(|| left.owner().cmp(right.owner()))
-                .then_with(|| left.repo().cmp(right.repo()))
-        });
-        Ok(states)
-    }
-
-    fn upsert_provider_repository_state(
-        &self,
-        state: &ProviderRepositoryState,
-    ) -> Result<(), Self::Error> {
-        self.provider_repository_states.borrow_mut().insert(
-            (
-                provider_key(state.provider()).to_owned(),
-                state.owner().to_owned(),
-                state.repo().to_owned(),
-            ),
-            state.clone(),
-        );
-        Ok(())
-    }
-
-    fn delete_provider_repository_state(
-        &self,
-        provider: RepositoryProvider,
-        owner: &str,
-        repo: &str,
-    ) -> Result<bool, Self::Error> {
-        Ok(self
-            .provider_repository_states
-            .borrow_mut()
-            .remove(&(
-                provider_key(provider).to_owned(),
-                owner.to_owned(),
-                repo.to_owned(),
-            ))
-            .is_some())
-    }
-}
-
-const fn provider_key(provider: RepositoryProvider) -> &'static str {
-    match provider {
-        RepositoryProvider::GitHub => "github",
-        RepositoryProvider::GitLab => "gitlab",
-        RepositoryProvider::Gitea => "gitea",
-        RepositoryProvider::Codeberg => "codeberg",
-        RepositoryProvider::Generic => "generic",
     }
 }
 
@@ -514,29 +233,30 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
     let term = ReconstructionTerm::new(object_id, chunk_range, 4);
     let reconstruction = FileReconstruction::new(vec![term]);
 
-    coordinator.index().insert_object(object_id);
+    coordinator.index().insert_object(&object_id).unwrap();
     coordinator
         .index()
-        .insert_reconstruction(file_id, reconstruction.clone());
+        .insert_reconstruction(&file_id, &reconstruction)
+        .unwrap();
 
     let candidate = QuarantineCandidate::new(key.clone(), 4, 10, 20).unwrap();
-    assert_eq!(
-        coordinator.index().upsert_quarantine_candidate(&candidate),
-        Ok(())
-    );
+    coordinator
+        .index()
+        .upsert_quarantine_candidate(&candidate)
+        .unwrap();
 
-    assert_eq!(coordinator.index().contains_object(&object_id), Ok(true));
+    assert!(coordinator.index().contains_object(&object_id).unwrap());
     assert_eq!(
-        coordinator.index().reconstruction(&file_id),
-        Ok(Some(reconstruction))
+        coordinator.index().reconstruction(&file_id).unwrap(),
+        Some(reconstruction)
     );
     assert_eq!(
-        coordinator.index().quarantine_candidate(&key),
-        Ok(Some(candidate.clone()))
+        coordinator.index().quarantine_candidate(&key).unwrap(),
+        Some(candidate.clone())
     );
     assert_eq!(
-        coordinator.index().list_quarantine_candidates(),
-        Ok(vec![candidate])
+        coordinator.index().list_quarantine_candidates().unwrap(),
+        vec![candidate]
     );
     assert_eq!(
         coordinator.object_store().delete_if_present(&key),
@@ -546,13 +266,17 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
         coordinator.object_store().delete_if_present(&key),
         Ok(DeleteOutcome::NotFound)
     );
-    assert_eq!(
-        coordinator.index().delete_quarantine_candidate(&key),
-        Ok(true)
+    assert!(
+        coordinator
+            .index()
+            .delete_quarantine_candidate(&key)
+            .unwrap()
     );
-    assert_eq!(
-        coordinator.index().delete_quarantine_candidate(&key),
-        Ok(false)
+    assert!(
+        !coordinator
+            .index()
+            .delete_quarantine_candidate(&key)
+            .unwrap()
     );
 
     let hold = RetentionHold::new(
@@ -562,14 +286,17 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
         Some(90),
     )
     .unwrap();
-    assert_eq!(coordinator.index().upsert_retention_hold(&hold), Ok(()));
+    coordinator.index().upsert_retention_hold(&hold).unwrap();
     assert_eq!(
-        coordinator.index().retention_hold(&key),
-        Ok(Some(hold.clone()))
+        coordinator.index().retention_hold(&key).unwrap(),
+        Some(hold.clone())
     );
-    assert_eq!(coordinator.index().list_retention_holds(), Ok(vec![hold]));
-    assert_eq!(coordinator.index().delete_retention_hold(&key), Ok(true));
-    assert_eq!(coordinator.index().delete_retention_hold(&key), Ok(false));
+    assert_eq!(
+        coordinator.index().list_retention_holds().unwrap(),
+        vec![hold]
+    );
+    assert!(coordinator.index().delete_retention_hold(&key).unwrap());
+    assert!(!coordinator.index().delete_retention_hold(&key).unwrap());
 }
 
 #[test]
@@ -724,12 +451,12 @@ fn dedupe_shard_mapping_persists_and_retrieves_mapping() {
     let shard_key = ObjectKey::parse("shards/aa/example.shard").unwrap();
     let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
 
-    index
-        .dedupe_shards
-        .borrow_mut()
-        .insert(chunk_hash, mapping.clone());
+    index.upsert_dedupe_shard_mapping(&mapping).unwrap();
 
-    assert_eq!(index.dedupe_shard_mapping(&chunk_hash), Ok(Some(mapping)));
+    assert_eq!(
+        index.dedupe_shard_mapping(&chunk_hash).unwrap(),
+        Some(mapping)
+    );
 }
 
 #[test]
@@ -737,13 +464,13 @@ fn dedupe_shard_mapping_returns_none_for_missing_hash() {
     let index = MemoryIndexStore::default();
     let chunk_hash = ShardlineHash::from_bytes([5; 32]);
 
-    assert_eq!(index.dedupe_shard_mapping(&chunk_hash), Ok(None));
+    assert_eq!(index.dedupe_shard_mapping(&chunk_hash).unwrap(), None);
 }
 
 #[test]
 fn list_dedupe_shard_mappings_empty_initially() {
     let index = MemoryIndexStore::default();
-    assert_eq!(index.list_dedupe_shard_mappings(), Ok(vec![]));
+    assert_eq!(index.list_dedupe_shard_mappings().unwrap(), vec![]);
 }
 
 #[test]
@@ -756,14 +483,8 @@ fn list_dedupe_shard_mappings_returns_inserted_mappings() {
     let map_a = DedupeShardMapping::new(hash_a, key_a);
     let map_b = DedupeShardMapping::new(hash_b, key_b);
 
-    index
-        .dedupe_shards
-        .borrow_mut()
-        .insert(hash_a, map_a.clone());
-    index
-        .dedupe_shards
-        .borrow_mut()
-        .insert(hash_b, map_b.clone());
+    index.upsert_dedupe_shard_mapping(&map_a).unwrap();
+    index.upsert_dedupe_shard_mapping(&map_b).unwrap();
 
     let mut all = index.list_dedupe_shard_mappings().unwrap();
     all.sort_by(|left, right| {
@@ -778,12 +499,11 @@ fn delete_dedupe_shard_mapping_removes_existing() {
     let chunk_hash = ShardlineHash::from_bytes([6; 32]);
     let key = ObjectKey::parse("shards/aa/del.shard").unwrap();
     index
-        .dedupe_shards
-        .borrow_mut()
-        .insert(chunk_hash, DedupeShardMapping::new(chunk_hash, key));
+        .upsert_dedupe_shard_mapping(&DedupeShardMapping::new(chunk_hash, key))
+        .unwrap();
 
-    assert_eq!(index.delete_dedupe_shard_mapping(&chunk_hash), Ok(true));
-    assert_eq!(index.dedupe_shard_mapping(&chunk_hash), Ok(None));
+    assert!(index.delete_dedupe_shard_mapping(&chunk_hash).unwrap());
+    assert_eq!(index.dedupe_shard_mapping(&chunk_hash).unwrap(), None);
 }
 
 #[test]
@@ -791,7 +511,7 @@ fn delete_dedupe_shard_mapping_returns_false_for_missing() {
     let index = MemoryIndexStore::default();
     let chunk_hash = ShardlineHash::from_bytes([7; 32]);
 
-    assert_eq!(index.delete_dedupe_shard_mapping(&chunk_hash), Ok(false));
+    assert!(!index.delete_dedupe_shard_mapping(&chunk_hash).unwrap());
 }
 
 // ── LifecycleStore webhook methods ────────────────────────────────────
@@ -808,7 +528,7 @@ fn record_webhook_delivery_inserts_new_delivery() {
     )
     .unwrap();
 
-    assert_eq!(index.record_webhook_delivery(&delivery), Ok(true));
+    assert!(index.record_webhook_delivery(&delivery).unwrap());
 }
 
 #[test]
@@ -824,13 +544,13 @@ fn record_webhook_delivery_returns_false_on_duplicate() {
     .unwrap();
 
     index.record_webhook_delivery(&delivery).unwrap();
-    assert_eq!(index.record_webhook_delivery(&delivery), Ok(false));
+    assert!(!index.record_webhook_delivery(&delivery).unwrap());
 }
 
 #[test]
 fn list_webhook_deliveries_empty_initially() {
     let index = MemoryIndexStore::default();
-    assert_eq!(index.list_webhook_deliveries(), Ok(vec![]));
+    assert_eq!(index.list_webhook_deliveries().unwrap(), vec![]);
 }
 
 #[test]
@@ -876,8 +596,8 @@ fn delete_webhook_delivery_removes_existing() {
     .unwrap();
 
     index.record_webhook_delivery(&delivery).unwrap();
-    assert_eq!(index.delete_webhook_delivery(&delivery), Ok(true));
-    assert_eq!(index.list_webhook_deliveries(), Ok(vec![]));
+    assert!(index.delete_webhook_delivery(&delivery).unwrap());
+    assert_eq!(index.list_webhook_deliveries().unwrap(), vec![]);
 }
 
 #[test]
@@ -892,7 +612,7 @@ fn delete_webhook_delivery_returns_false_for_missing() {
     )
     .unwrap();
 
-    assert_eq!(index.delete_webhook_delivery(&delivery), Ok(false));
+    assert!(!index.delete_webhook_delivery(&delivery).unwrap());
 }
 
 // ── LifecycleStore provider repository state methods ─────────────────
@@ -911,8 +631,10 @@ fn upsert_provider_repository_state_inserts_and_can_be_retrieved() {
 
     index.upsert_provider_repository_state(&state).unwrap();
     assert_eq!(
-        index.provider_repository_state(RepositoryProvider::GitHub, "owner", "repo"),
-        Ok(Some(state))
+        index
+            .provider_repository_state(RepositoryProvider::GitHub, "owner", "repo")
+            .unwrap(),
+        Some(state)
     );
 }
 
@@ -920,15 +642,17 @@ fn upsert_provider_repository_state_inserts_and_can_be_retrieved() {
 fn provider_repository_state_returns_none_for_missing() {
     let index = MemoryIndexStore::default();
     assert_eq!(
-        index.provider_repository_state(RepositoryProvider::GitHub, "missing", "repo"),
-        Ok(None)
+        index
+            .provider_repository_state(RepositoryProvider::GitHub, "missing", "repo")
+            .unwrap(),
+        None
     );
 }
 
 #[test]
 fn list_provider_repository_states_empty_initially() {
     let index = MemoryIndexStore::default();
-    assert_eq!(index.list_provider_repository_states(), Ok(vec![]));
+    assert_eq!(index.list_provider_repository_states().unwrap(), vec![]);
 }
 
 #[test]
@@ -978,22 +702,26 @@ fn delete_provider_repository_state_removes_existing() {
     );
 
     index.upsert_provider_repository_state(&state).unwrap();
-    assert_eq!(
-        index.delete_provider_repository_state(RepositoryProvider::GitHub, "owner", "repo"),
-        Ok(true)
+    assert!(
+        index
+            .delete_provider_repository_state(RepositoryProvider::GitHub, "owner", "repo")
+            .unwrap()
     );
     assert_eq!(
-        index.provider_repository_state(RepositoryProvider::GitHub, "owner", "repo"),
-        Ok(None)
+        index
+            .provider_repository_state(RepositoryProvider::GitHub, "owner", "repo")
+            .unwrap(),
+        None
     );
 }
 
 #[test]
 fn delete_provider_repository_state_returns_false_for_missing() {
     let index = MemoryIndexStore::default();
-    assert_eq!(
-        index.delete_provider_repository_state(RepositoryProvider::GitHub, "missing", "repo"),
-        Ok(false)
+    assert!(
+        !index
+            .delete_provider_repository_state(RepositoryProvider::GitHub, "missing", "repo")
+            .unwrap()
     );
 }
 
