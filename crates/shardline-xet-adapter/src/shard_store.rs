@@ -1392,10 +1392,8 @@ mod tests {
         let hash = "ab".repeat(32);
         let key = shard_object_key(&hash);
 
-        assert!(key.is_ok());
-        if let Ok(key) = key {
-            assert_eq!(key.as_str(), format!("shards/ab/{hash}.shard"));
-        }
+        let key = key.expect("expected valid key");
+        assert_eq!(key.as_str(), format!("shards/ab/{hash}.shard"));
     }
 
     #[test]
@@ -1412,10 +1410,8 @@ mod tests {
         let key = key.expect("expected valid key");
         let extracted = shard_hash_from_object_key_if_present(&key);
 
-        assert!(extracted.is_ok());
-        if let Ok(extracted) = extracted {
-            assert_eq!(extracted, Some(hash.as_str()));
-        }
+        let extracted = extracted.expect("expected valid extracted");
+        assert_eq!(extracted, Some(hash.as_str()));
     }
 
     #[test]

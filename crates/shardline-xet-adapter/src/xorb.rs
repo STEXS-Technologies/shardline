@@ -1908,14 +1908,11 @@ mod tests {
             Vec::new(),
             CompressionScheme::None,
         );
-        // serialized_xorb_object_from_components with 0 chunks might produce
-        // an invalid xorb - just test that any errors are caught
-        if let Ok(serialized) = serialized {
-            let hash = ShardlineHash::from_bytes([0; 32]);
-            let mut reader = Cursor::new(serialized.serialized_data);
-            let result = validate_serialized_xorb(&mut reader, hash);
-            assert!(result.is_err(), "expected error for empty chunks xorb");
-        }
+        let serialized = serialized.expect("expected serialized zero-chunk fixture");
+        let hash = ShardlineHash::from_bytes([0; 32]);
+        let mut reader = Cursor::new(serialized.serialized_data);
+        let result = validate_serialized_xorb(&mut reader, hash);
+        assert!(result.is_err(), "expected error for empty chunks xorb");
     }
 
     // ── XorbVisitError display and source ──────────────────────────────
@@ -2171,13 +2168,12 @@ mod tests {
             vec![],
             CompressionScheme::None,
         );
-        if let Ok(s) = serialized {
-            assert_eq!(s.num_chunks, 0);
-            let hash_to_check = ShardlineHash::from_bytes([0xab; 32]);
-            let mut reader = Cursor::new(s.serialized_data);
-            let result = validate_serialized_xorb(&mut reader, hash_to_check);
-            assert!(result.is_err(), "zero-chunk xorb should fail validation");
-        }
+        let serialized = serialized.expect("expected serialized zero-chunk fixture");
+        assert_eq!(serialized.num_chunks, 0);
+        let hash_to_check = ShardlineHash::from_bytes([0xab; 32]);
+        let mut reader = Cursor::new(serialized.serialized_data);
+        let result = validate_serialized_xorb(&mut reader, hash_to_check);
+        assert!(result.is_err(), "zero-chunk xorb should fail validation");
     }
 
     // ── validate_serialized_xorb with reconstructed seek after validation ─

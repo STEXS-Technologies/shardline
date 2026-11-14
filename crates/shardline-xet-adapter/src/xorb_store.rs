@@ -640,10 +640,8 @@ mod tests {
         let key = key.expect("expected valid key");
         let extracted = xorb_hash_from_object_key_if_present(&key);
 
-        assert!(extracted.is_ok());
-        if let Ok(extracted) = extracted {
-            assert_eq!(extracted, Some(hash.as_str()));
-        }
+        let extracted = extracted.expect("expected valid extracted");
+        assert_eq!(extracted, Some(hash.as_str()));
     }
 
     // ── xorb_hash_from_object_key_if_present edge cases ──────────────────
