@@ -448,17 +448,8 @@ async fn index_rebuild_restores_repository_scoped_latest_records() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn index_rebuild_scans_large_repository_metadata_inventory() {
-    let result = exercise_index_rebuild_scans_large_repository_metadata_inventory().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "large metadata inventory index rebuild failed: {error:?}"
-    );
-}
-
-async fn exercise_index_rebuild_scans_large_repository_metadata_inventory()
--> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn index_rebuild_scans_large_repository_metadata_inventory() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let mut records = Vec::with_capacity(LARGE_METADATA_RECORD_COUNT);

@@ -40,160 +40,9 @@ struct QuarantineRecord {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_dry_run_reports_orphan_chunks_without_mutating_quarantine() {
-    let result = exercise_gc_dry_run_reports_orphan_chunks_without_mutating_quarantine().await;
-    if let Err(ref e) = result {
-        eprintln!("GC error: {e:?}");
-    }
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc dry run reports orphan chunks without mutating quarantine failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mark_only_creates_quarantine_candidates() {
-    let result = exercise_gc_mark_only_creates_quarantine_candidates().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc mark only creates quarantine candidates failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mark_only_reaches_a_fixed_point_on_second_run() {
-    let result = exercise_gc_mark_only_reaches_a_fixed_point_on_second_run().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc mark-only fixed-point behavior failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_diagnostics_include_retention_and_orphan_state() {
-    let result = exercise_gc_diagnostics_include_retention_and_orphan_state().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc diagnostics include retention and orphan state failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_sweep_only_deletes_expired_quarantine_candidates() {
-    let result = exercise_gc_sweep_only_deletes_expired_quarantine_candidates().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc sweep only deletes expired quarantine candidates failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_releases_quarantine_candidates_when_chunk_becomes_reachable() {
-    let result = exercise_gc_releases_quarantine_candidates_when_chunk_becomes_reachable().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc releases quarantine candidates when chunk becomes reachable failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mark_and_sweep_with_zero_retention_deletes_new_candidates() {
-    let result = exercise_gc_mark_and_sweep_with_zero_retention_deletes_new_candidates().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc mark and sweep with zero retention deletes new candidates failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_active_retention_holds_exclude_chunks_from_orphans() {
-    let result = exercise_gc_active_retention_holds_exclude_chunks_from_orphans().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc active retention holds exclude chunks from orphans failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_dry_run_keeps_expired_retention_holds() {
-    let result = exercise_gc_dry_run_keeps_expired_retention_holds().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc dry run expired retention hold contract failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mutating_run_prunes_expired_retention_holds() {
-    let result = exercise_gc_mutating_run_prunes_expired_retention_holds().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc mutating expired retention hold pruning failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mark_and_sweep_deletes_orphan_native_xorb_object() {
-    let result = exercise_gc_mark_and_sweep_deletes_orphan_native_xorb_object().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc mark and sweep deletes orphan native xorb object failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mark_and_sweep_deletes_orphan_retained_shard_object() {
-    let result = exercise_gc_mark_and_sweep_deletes_orphan_retained_shard_object().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc mark and sweep deletes orphan retained shard object failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_stale_dedupe_mapping_does_not_keep_retained_shard_alive() {
-    let result = exercise_gc_stale_dedupe_mapping_does_not_keep_retained_shard_alive().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc stale dedupe mapping should not keep retained shard alive failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_live_native_xet_record_keeps_retained_shard_reachable() {
-    let result = exercise_gc_live_native_xet_record_keeps_retained_shard_reachable().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc live native xet record should keep retained shard reachable failed: {error:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_fails_closed_on_corrupt_webhook_delivery_metadata() {
-    let result = exercise_gc_fails_closed_on_corrupt_webhook_delivery_metadata().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc should fail closed on corrupt webhook delivery metadata: {error:?}"
-    );
-}
-
-async fn exercise_gc_dry_run_reports_orphan_chunks_without_mutating_quarantine()
--> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_dry_run_reports_orphan_chunks_without_mutating_quarantine() -> Result<(), Box<dyn Error>>
+{
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
@@ -265,7 +114,9 @@ async fn exercise_gc_dry_run_reports_orphan_chunks_without_mutating_quarantine()
     Ok(())
 }
 
-async fn exercise_gc_mark_only_creates_quarantine_candidates() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mark_only_creates_quarantine_candidates() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
@@ -326,7 +177,9 @@ async fn exercise_gc_mark_only_creates_quarantine_candidates() -> Result<(), Box
     Ok(())
 }
 
-async fn exercise_gc_mark_only_reaches_a_fixed_point_on_second_run() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mark_only_reaches_a_fixed_point_on_second_run() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "de".repeat(32);
     write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
@@ -371,8 +224,9 @@ async fn exercise_gc_mark_only_reaches_a_fixed_point_on_second_run() -> Result<(
     Ok(())
 }
 
-async fn exercise_gc_diagnostics_include_retention_and_orphan_state() -> Result<(), Box<dyn Error>>
-{
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_diagnostics_include_retention_and_orphan_state() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "de".repeat(32);
     write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
@@ -440,8 +294,9 @@ async fn exercise_gc_diagnostics_include_retention_and_orphan_state() -> Result<
     Ok(())
 }
 
-async fn exercise_gc_sweep_only_deletes_expired_quarantine_candidates() -> Result<(), Box<dyn Error>>
-{
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_sweep_only_deletes_expired_quarantine_candidates() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "de".repeat(32);
     let orphan_path = write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
@@ -482,7 +337,9 @@ async fn exercise_gc_sweep_only_deletes_expired_quarantine_candidates() -> Resul
     Ok(())
 }
 
-async fn exercise_gc_releases_quarantine_candidates_when_chunk_becomes_reachable()
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_releases_quarantine_candidates_when_chunk_becomes_reachable()
 -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     // Use a payload smaller than CDC min_chunk (16) so it stays pending and
@@ -567,8 +424,10 @@ async fn exercise_gc_releases_quarantine_candidates_when_chunk_becomes_reachable
     Ok(())
 }
 
-async fn exercise_gc_mark_and_sweep_with_zero_retention_deletes_new_candidates()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mark_and_sweep_with_zero_retention_deletes_new_candidates() -> Result<(), Box<dyn Error>>
+{
     let storage = tempfile::tempdir()?;
     let orphan_hash = "de".repeat(32);
     let orphan_path = write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
@@ -606,8 +465,9 @@ async fn exercise_gc_mark_and_sweep_with_zero_retention_deletes_new_candidates()
     Ok(())
 }
 
-async fn exercise_gc_active_retention_holds_exclude_chunks_from_orphans()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_active_retention_holds_exclude_chunks_from_orphans() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "de".repeat(32);
     let orphan_path = write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
@@ -665,7 +525,9 @@ async fn exercise_gc_active_retention_holds_exclude_chunks_from_orphans()
     Ok(())
 }
 
-async fn exercise_gc_dry_run_keeps_expired_retention_holds() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_dry_run_keeps_expired_retention_holds() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "ef".repeat(32);
     write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
@@ -706,7 +568,9 @@ async fn exercise_gc_dry_run_keeps_expired_retention_holds() -> Result<(), Box<d
     Ok(())
 }
 
-async fn exercise_gc_mutating_run_prunes_expired_retention_holds() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mutating_run_prunes_expired_retention_holds() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "ef".repeat(32);
     write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
@@ -743,8 +607,9 @@ async fn exercise_gc_mutating_run_prunes_expired_retention_holds() -> Result<(),
     Ok(())
 }
 
-async fn exercise_gc_mark_and_sweep_deletes_orphan_native_xorb_object() -> Result<(), Box<dyn Error>>
-{
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mark_and_sweep_deletes_orphan_native_xorb_object() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let xorb_key = xorb_object_key(&"ab".repeat(32))?;
     let xorb_path =
@@ -776,18 +641,10 @@ async fn exercise_gc_mark_and_sweep_deletes_orphan_native_xorb_object() -> Resul
 
 /// An orphan xorb with a chunk-hash cache sidecar is swept with both
 /// files deleted together.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent() {
-    let result = exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc mark and sweep must delete xorb cache sidecar with parent: {error:?}"
-    );
-}
 
-async fn exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let hash = "ab".repeat(32);
     let xorb_key = xorb_object_key(&hash)?;
@@ -829,8 +686,9 @@ async fn exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent()
     Ok(())
 }
 
-async fn exercise_gc_mark_and_sweep_deletes_orphan_retained_shard_object()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_mark_and_sweep_deletes_orphan_retained_shard_object() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let shard_key = shard_object_key(&"cd".repeat(32))?;
     let shard_path =
@@ -860,8 +718,10 @@ async fn exercise_gc_mark_and_sweep_deletes_orphan_retained_shard_object()
     Ok(())
 }
 
-async fn exercise_gc_stale_dedupe_mapping_does_not_keep_retained_shard_alive()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_stale_dedupe_mapping_does_not_keep_retained_shard_alive() -> Result<(), Box<dyn Error>>
+{
     let storage = tempfile::tempdir()?;
     let chunk_hash = "de".repeat(32);
     let shard_key = shard_object_key(&"cd".repeat(32))?;
@@ -896,8 +756,9 @@ async fn exercise_gc_stale_dedupe_mapping_does_not_keep_retained_shard_alive()
     Ok(())
 }
 
-async fn exercise_gc_live_native_xet_record_keeps_retained_shard_reachable()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_live_native_xet_record_keeps_retained_shard_reachable() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
@@ -949,8 +810,9 @@ async fn exercise_gc_live_native_xet_record_keeps_retained_shard_reachable()
     Ok(())
 }
 
-async fn exercise_gc_fails_closed_on_corrupt_webhook_delivery_metadata()
--> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_fails_closed_on_corrupt_webhook_delivery_metadata() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
     let delivery = WebhookDelivery::new(
@@ -1008,17 +870,8 @@ async fn exercise_gc_fails_closed_on_corrupt_webhook_delivery_metadata()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_fails_closed_on_missing_quarantined_object_metadata() {
-    let result = exercise_gc_fails_closed_on_missing_quarantined_object_metadata().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc should fail closed on missing quarantined object metadata: {error:?}"
-    );
-}
-
-async fn exercise_gc_fails_closed_on_missing_quarantined_object_metadata()
--> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_fails_closed_on_missing_quarantined_object_metadata() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
     let object_key = chunk_object_key(&"ab".repeat(32))?;
@@ -1036,16 +889,8 @@ async fn exercise_gc_fails_closed_on_missing_quarantined_object_metadata()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_repairs_active_hold_quarantine_conflict() {
-    let result = exercise_gc_repairs_active_hold_quarantine_conflict().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc should repair the active hold/quarantine conflict: {error:?}"
-    );
-}
-
-async fn exercise_gc_repairs_active_hold_quarantine_conflict() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_repairs_active_hold_quarantine_conflict() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
     let object_key = chunk_object_key(&"cd".repeat(32))?;
@@ -1146,16 +991,8 @@ async fn write_quarantine_manifest(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_reads_legacy_quarantine_manifest_format() {
-    let result = exercise_gc_reads_legacy_quarantine_manifest_format().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "gc reads legacy quarantine manifest format failed: {error:?}"
-    );
-}
-
-async fn exercise_gc_reads_legacy_quarantine_manifest_format() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_reads_legacy_quarantine_manifest_format() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let orphan_hash = "de".repeat(32);
     let orphan_path = write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
@@ -1205,16 +1042,8 @@ fn quarantine_record_path_matches_chunk_object_key_layout() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn gc_concurrent_upload_interleaving() {
-    let result = exercise_gc_concurrent_upload_interleaving().await;
-    if let Err(ref e) = result {
-        eprintln!("GC concurrent upload error: {e:?}");
-    }
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "GC concurrent upload test: {error:?}");
-}
-
-async fn exercise_gc_concurrent_upload_interleaving() -> Result<(), Box<dyn Error>> {
+#[allow(clippy::panic_in_result_fn)]
+async fn gc_concurrent_upload_interleaving() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let backend = std::sync::Arc::new(
         LocalBackend::new(
