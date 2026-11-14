@@ -536,15 +536,78 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_adapter_push_hook_missing_project_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{"ref":"refs/heads/main"}"#;
-        let request = WebhookRequest::new("Push Hook", "delivery-no-proj", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
+    fn gitlab_webhook_invalid_repository_payloads() {
+        for (case, hook, delivery, body) in [
+            (
+                "adapter_push_hook_missing_project_errors",
+                "Push Hook",
+                "delivery-no-proj",
+                br#"{"ref":"refs/heads/main"}"#.as_slice(),
+            ),
+            (
+                "system_hook_repository_update_missing_project_errors",
+                "System Hook",
+                "delivery-no-proj",
+                br#"{"event_name":"repository_update","refs":["refs/heads/main"]}"#.as_slice(),
+            ),
+            (
+                "push_hook_missing_project_path_with_namespace_errors",
+                "Push Hook",
+                "delivery-miss",
+                br#"{
+            "event_name":"push",
+            "ref":"refs/heads/main",
+            "project":{}
+        }"#
+                .as_slice(),
+            ),
+            (
+                "project_hook_missing_path_with_namespace_errors",
+                "Project Hook",
+                "delivery-miss2",
+                br#"{
+            "event_name":"project_destroy"
+        }"#
+                .as_slice(),
+            ),
+            (
+                "project_rename_missing_old_path_errors",
+                "System Hook",
+                "delivery-noold",
+                br#"{
+            "event_name":"project_rename",
+            "path_with_namespace":"group/new-assets"
+        }"#
+                .as_slice(),
+            ),
+            (
+                "project_rename_missing_new_path_errors",
+                "System Hook",
+                "delivery-nonew",
+                br#"{
+            "event_name":"project_rename",
+            "old_path_with_namespace":"group/assets"
+        }"#
+                .as_slice(),
+            ),
+            (
+                "project_update_missing_path_with_namespace_errors",
+                "System Hook",
+                "delivery-no-path",
+                br#"{
+            "event_name":"project_update"
+        }"#
+                .as_slice(),
+            ),
+        ] {
+            let adapter = adapter().unwrap();
+            let request = WebhookRequest::new(hook, delivery, Some("token"), body);
+            let result = adapter.parse_webhook(request);
+            assert!(
+                matches!(result, Err(BuiltInProviderError::InvalidRepositoryPayload)),
+                "case {case}: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -595,27 +658,36 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_system_hook_repository_update_missing_project_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{"event_name":"repository_update","refs":["refs/heads/main"]}"#;
-        let request = WebhookRequest::new("System Hook", "delivery-no-proj", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
-    }
-
-    #[test]
-    fn gitlab_system_hook_repository_update_invalid_refs_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{"event_name":"repository_update","project":{"path_with_namespace":"group/assets"},"refs":[""]}"#;
-        let request = WebhookRequest::new("System Hook", "delivery-bad-ref", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRevisionPayload)
-        ));
+    fn gitlab_webhook_invalid_revision_payloads() {
+        for (case, hook, delivery, body) in [
+            ("system_hook_repository_update_invalid_refs_errors", "System Hook", "delivery-bad-ref", br#"{"event_name":"repository_update","project":{"path_with_namespace":"group/assets"},"refs":[""]}"#.as_slice()),
+            ("system_hook_repository_update_missing_refs_errors", "System Hook", "delivery-no-refs", br#"{
+            "event_name":"repository_update",
+            "project":{"path_with_namespace":"group/assets"}
+        }"#.as_slice()),
+            ("system_hook_repository_update_non_array_refs_errors", "System Hook", "delivery-badrefs", br#"{
+            "event_name":"repository_update",
+            "project":{"path_with_namespace":"group/assets"},
+            "refs":"not_an_array"
+        }"#.as_slice()),
+            ("system_hook_repository_update_non_string_ref_errors", "System Hook", "delivery-int-ref", br#"{
+            "event_name":"repository_update",
+            "project":{"path_with_namespace":"group/assets"},
+            "refs":[42]
+        }"#.as_slice()),
+            ("adapter_push_hook_no_ref_errors", "Push Hook", "delivery-noref", br#"{
+            "event_name":"push",
+            "project":{"path_with_namespace":"group/assets"}
+        }"#.as_slice()),
+        ] {
+            let adapter = adapter().unwrap();
+            let request = WebhookRequest::new(hook, delivery, Some("token"), body);
+            let result = adapter.parse_webhook(request);
+            assert!(
+                matches!(result, Err(BuiltInProviderError::InvalidRevisionPayload)),
+                "case {case}: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -929,36 +1001,6 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_push_hook_missing_project_path_with_namespace_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"push",
-            "ref":"refs/heads/main",
-            "project":{}
-        }"#;
-        let request = WebhookRequest::new("Push Hook", "delivery-miss", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
-    }
-
-    #[test]
-    fn gitlab_project_hook_missing_path_with_namespace_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_destroy"
-        }"#;
-        let request = WebhookRequest::new("Project Hook", "delivery-miss2", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
-    }
-
-    #[test]
     fn gitlab_project_hook_unknown_event_name_returns_none() {
         let adapter = adapter().unwrap();
         let body = br#"{
@@ -968,37 +1010,6 @@ mod tests {
         let request = WebhookRequest::new("Project Hook", "delivery-unk", Some("token"), body);
         let event = adapter.parse_webhook(request).unwrap();
         assert!(event.is_none());
-    }
-
-    #[test]
-    fn gitlab_system_hook_repository_update_missing_refs_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"repository_update",
-            "project":{"path_with_namespace":"group/assets"}
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-no-refs", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRevisionPayload)
-        ));
-    }
-
-    #[test]
-    fn gitlab_system_hook_repository_update_non_array_refs_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"repository_update",
-            "project":{"path_with_namespace":"group/assets"},
-            "refs":"not_an_array"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-badrefs", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRevisionPayload)
-        ));
     }
 
     #[test]
@@ -1013,52 +1024,6 @@ mod tests {
             WebhookRequest::new("System Hook", "delivery-empty-refs", Some("token"), body);
         let event = adapter.parse_webhook(request).unwrap();
         assert!(event.is_none());
-    }
-
-    #[test]
-    fn gitlab_system_hook_repository_update_non_string_ref_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"repository_update",
-            "project":{"path_with_namespace":"group/assets"},
-            "refs":[42]
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-int-ref", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRevisionPayload)
-        ));
-    }
-
-    #[test]
-    fn gitlab_project_rename_missing_old_path_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_rename",
-            "path_with_namespace":"group/new-assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-noold", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
-    }
-
-    #[test]
-    fn gitlab_project_rename_missing_new_path_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_rename",
-            "old_path_with_namespace":"group/assets"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-nonew", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
     }
 
     #[test]
@@ -1169,21 +1134,6 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_adapter_push_hook_no_ref_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"push",
-            "project":{"path_with_namespace":"group/assets"}
-        }"#;
-        let request = WebhookRequest::new("Push Hook", "delivery-noref", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRevisionPayload)
-        ));
-    }
-
-    #[test]
     fn gitlab_system_hook_unknown_event_name_returns_none() {
         let adapter = adapter().unwrap();
         let body = br#"{
@@ -1257,20 +1207,6 @@ mod tests {
         let request = WebhookRequest::new("Project Hook", "delivery-unk3", Some("token"), body);
         let event = adapter.parse_webhook(request).unwrap();
         assert!(event.is_none());
-    }
-
-    #[test]
-    fn gitlab_project_update_missing_path_with_namespace_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "event_name":"project_update"
-        }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-no-path", Some("token"), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
     }
 
     #[test]
