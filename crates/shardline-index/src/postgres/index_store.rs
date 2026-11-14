@@ -51,6 +51,42 @@ pub(super) struct PostgresEvidenceHead {
     pub(super) merkle_commit_json: Option<serde_json::Value>,
 }
 
+fn verify_postgres_evidence_head(
+    row: &PgRow,
+    operation_kind: OperationKind,
+    operation_id: &str,
+    sequence: i64,
+) -> Result<PostgresEvidenceHead, PostgresMetadataStoreError> {
+    let sequence = u64::try_from(sequence).map_err(|error| {
+        PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
+    })?;
+    let event_json: serde_json::Value = row.try_get("event_json")?;
+    if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
+        return Err(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::Merkle(
+                "reliability row sequence does not match its event".into(),
+            ),
+        ));
+    }
+    let identity = persisted_event_identity(operation_kind, event_json.clone())?;
+    if identity.operation_id != operation_id {
+        return Err(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
+        ));
+    }
+    let merkle_commit_json: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
+    verify_persisted_merkle_commit_with_previous(
+        operation_kind,
+        event_json.clone(),
+        merkle_commit_json.clone(),
+        row.try_get("previous_merkle_commit_json")?,
+    )?;
+    Ok(PostgresEvidenceHead {
+        event_json,
+        merkle_commit_json,
+    })
+}
+
 /// Loads the verified event and its commitment from the same database snapshot.
 pub(super) async fn load_postgres_latest_evidence_head(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
@@ -90,34 +126,8 @@ pub(super) async fn load_postgres_latest_evidence_head(
     let Some(row) = row else {
         return Ok(None);
     };
-    let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-        PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
-    })?;
-    let event_json: serde_json::Value = row.try_get("event_json")?;
-    if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
-        return Err(PostgresMetadataStoreError::Reliability(
-            shardline_reliability::ReliabilityError::Merkle(
-                "reliability row sequence does not match its event".into(),
-            ),
-        ));
-    }
-    let identity = persisted_event_identity(operation_kind, event_json.clone())?;
-    if identity.operation_id != operation_id {
-        return Err(PostgresMetadataStoreError::Reliability(
-            shardline_reliability::ReliabilityError::OperationMismatch,
-        ));
-    }
-    let merkle_commit_json: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
-    verify_persisted_merkle_commit_with_previous(
-        operation_kind,
-        event_json.clone(),
-        merkle_commit_json.clone(),
-        row.try_get("previous_merkle_commit_json")?,
-    )?;
-    Ok(Some(PostgresEvidenceHead {
-        event_json,
-        merkle_commit_json,
-    }))
+    verify_postgres_evidence_head(&row, operation_kind, operation_id, row.try_get("sequence")?)
+        .map(Some)
 }
 
 /// Loads and verifies the current evidence boundary for many operations in a
@@ -177,31 +187,9 @@ pub(crate) async fn load_postgres_latest_evidence_heads(
         let Some(sequence) = row.try_get::<Option<i64>, _>("sequence")? else {
             continue;
         };
-        let sequence = u64::try_from(sequence).map_err(|error| {
-            PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
-        })?;
         let operation_id: String = row.try_get("operation_id")?;
-        let event_json: serde_json::Value = row.try_get("event_json")?;
-        if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
-            return Err(PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::Merkle(
-                    "reliability row sequence does not match its event".into(),
-                ),
-            ));
-        }
-        let identity = persisted_event_identity(operation_kind, event_json.clone())?;
-        if identity.operation_id != operation_id {
-            return Err(PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::OperationMismatch,
-            ));
-        }
-        verify_persisted_merkle_commit_with_previous(
-            operation_kind,
-            event_json.clone(),
-            row.try_get("merkle_commit_json")?,
-            row.try_get("previous_merkle_commit_json")?,
-        )?;
-        heads.insert(operation_id, event_json);
+        let head = verify_postgres_evidence_head(&row, operation_kind, &operation_id, sequence)?;
+        heads.insert(operation_id, head.event_json);
     }
     Ok(heads)
 }
