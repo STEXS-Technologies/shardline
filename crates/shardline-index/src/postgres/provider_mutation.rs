@@ -196,56 +196,67 @@ impl super::PostgresIndexStore {
             upsert_provider_repository_state(&mut transaction, state).await?;
         }
         for key in &mutation.state_deletes {
-            let operation_id =
-                ProviderRepositoryOperationId::new(key.provider.as_str(), &key.owner, &key.repo);
-            query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind(operation_id.as_str())
-                .execute(&mut *transaction)
+            delete_provider_repository_state(&mut transaction, key.provider, &key.owner, &key.repo)
                 .await?;
-            let current = query(
-                "SELECT provider,
-                        owner,
-                        repo,
-                        last_access_changed_at_unix_seconds,
-                        last_revision_pushed_at_unix_seconds,
-                        last_pushed_revision,
-                        last_cache_invalidated_at_unix_seconds,
-                        last_authorization_rechecked_at_unix_seconds,
-                        last_drift_checked_at_unix_seconds
-                 FROM shardline_provider_repository_states
-                 WHERE provider = $1 AND owner = $2 AND repo = $3
-                 FOR UPDATE",
-            )
-            .bind(key.provider.as_str())
-            .bind(&key.owner)
-            .bind(&key.repo)
-            .fetch_optional(&mut *transaction)
-            .await?;
-            if let Some(row) = current {
-                let state = super::index_store::provider_repository_state_from_row(&row)?;
-                verify_provider_repository_state_evidence(&mut transaction, &state).await?;
-            }
-            query(
-                "DELETE FROM shardline_provider_repository_states
-                 WHERE provider = $1 AND owner = $2 AND repo = $3",
-            )
-            .bind(key.provider.as_str())
-            .bind(&key.owner)
-            .bind(&key.repo)
-            .execute(&mut *transaction)
-            .await?;
-            query(
-                "DELETE FROM shardline_reliability_events
-                 WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
-            )
-            .bind(operation_id.as_str())
-            .execute(&mut *transaction)
-            .await?;
         }
 
         transaction.commit().await?;
         Ok(PostgresProviderMutationOutcome::Applied)
     }
+}
+
+/// Removes repository state and its verified evidence under the same transaction lock.
+pub(super) async fn delete_provider_repository_state(
+    transaction: &mut Transaction<'_, Postgres>,
+    provider: RepositoryProvider,
+    owner: &str,
+    repo: &str,
+) -> Result<bool, PostgresMetadataStoreError> {
+    let operation_id = ProviderRepositoryOperationId::new(provider.as_str(), owner, repo);
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(operation_id.as_str())
+        .execute(&mut **transaction)
+        .await?;
+    let current = query(
+        "SELECT provider,
+                owner,
+                repo,
+                last_access_changed_at_unix_seconds,
+                last_revision_pushed_at_unix_seconds,
+                last_pushed_revision,
+                last_cache_invalidated_at_unix_seconds,
+                last_authorization_rechecked_at_unix_seconds,
+                last_drift_checked_at_unix_seconds
+         FROM shardline_provider_repository_states
+         WHERE provider = $1 AND owner = $2 AND repo = $3
+         FOR UPDATE",
+    )
+    .bind(provider.as_str())
+    .bind(owner)
+    .bind(repo)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some(row) = current {
+        let state = super::index_store::provider_repository_state_from_row(&row)?;
+        verify_provider_repository_state_evidence(transaction, &state).await?;
+    }
+    let result = query(
+        "DELETE FROM shardline_provider_repository_states
+         WHERE provider = $1 AND owner = $2 AND repo = $3",
+    )
+    .bind(provider.as_str())
+    .bind(owner)
+    .bind(repo)
+    .execute(&mut **transaction)
+    .await?;
+    query(
+        "DELETE FROM shardline_reliability_events
+         WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+    )
+    .bind(operation_id.as_str())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub(super) async fn record_webhook_delivery(
