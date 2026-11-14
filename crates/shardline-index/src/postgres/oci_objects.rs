@@ -1476,31 +1476,6 @@ mod tests {
             "oci-tombstone-pg-{}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         );
-        query("DELETE FROM shardline_oci_object_tombstones WHERE scope_namespace = $1")
-            .bind(&scope_namespace)
-            .execute(&pool)
-            .await
-            .unwrap();
-        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
-            .bind(&scope_namespace)
-            .execute(&pool)
-            .await
-            .unwrap();
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Visibility'
-               AND operation_id = $1",
-        )
-        .bind(format!(
-            "{}:{}:{}:{}",
-            scope_namespace,
-            "team/assets",
-            OciObjectKind::Manifest.as_str(),
-            "a".repeat(64)
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
         let store = PostgresIndexStore::new(pool);
         let manifest = object(&scope_namespace);
         let current = tag(&scope_namespace, "latest", 'a');
@@ -1667,32 +1642,6 @@ mod tests {
             kind: OciObjectKind::Blob,
             digest_hex: "f".repeat(64),
         };
-        query(
-            "DELETE FROM shardline_oci_object_tombstones
-             WHERE scope_namespace = $1 AND repository = $2
-               AND object_kind = $3 AND digest_hex = $4",
-        )
-        .bind(&key.scope_namespace)
-        .bind(&key.repository)
-        .bind(key.kind.as_str())
-        .bind(&key.digest_hex)
-        .execute(&pool)
-        .await
-        .unwrap();
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Visibility' AND operation_id = $1",
-        )
-        .bind(format!(
-            "{}:{}:{}:{}",
-            key.scope_namespace,
-            key.repository,
-            key.kind.as_str(),
-            key.digest_hex
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
         store.delete_oci_object(&key).await.unwrap();
         let tombstone = store
             .list_oci_object_tombstones()
@@ -1738,20 +1687,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((count, minimum, maximum), (2, 0, 1));
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'Visibility' AND operation_id = $1",
-        )
-        .bind(format!(
-            "{}:{}:{}:{}",
-            key.scope_namespace,
-            key.repository,
-            key.kind.as_str(),
-            key.digest_hex
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
