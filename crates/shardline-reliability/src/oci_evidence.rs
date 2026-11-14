@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain};
+use crate::snapshot_event::{
+    SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain, verify_snapshot_chain_for,
+};
 use crate::snapshot_log::SnapshotEvidenceLog;
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
@@ -244,12 +246,7 @@ pub fn verify_oci_object_lifecycle_events(
     events: &[OciObjectLifecycleEvent],
     expected: &OciObjectSnapshot,
 ) -> Result<(), ReliabilityError> {
-    verify_oci_object_lifecycle_chain(events)?;
-    if events.last().is_some_and(|event| event.after == *expected) {
-        Ok(())
-    } else {
-        Err(ReliabilityError::StateMismatch)
-    }
+    verify_snapshot_chain_for(events, expected)
 }
 
 pub type OciObjectEvidenceLog = SnapshotEvidenceLog<OciObjectSnapshot>;

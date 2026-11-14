@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain};
+use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain_for};
 use crate::snapshot_log::SnapshotEvidenceLog;
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
@@ -97,12 +97,7 @@ pub fn verify_hub_ref_events(
     events: &[HubRefLifecycleEvent],
     expected: &HubRefSnapshot,
 ) -> Result<(), ReliabilityError> {
-    verify_snapshot_chain(events)?;
-    if events.last().is_some_and(|event| event.after == *expected) {
-        Ok(())
-    } else {
-        Err(ReliabilityError::StateMismatch)
-    }
+    verify_snapshot_chain_for(events, expected)
 }
 
 #[cfg(test)]

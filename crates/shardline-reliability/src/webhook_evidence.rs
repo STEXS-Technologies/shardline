@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain};
+use crate::snapshot_event::{
+    SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain, verify_snapshot_chain_for,
+};
 use crate::snapshot_log::{SnapshotEvidenceLog, verify_and_append_snapshot_transition};
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
@@ -217,12 +219,7 @@ pub fn verify_webhook_delivery_events(
     events: &[WebhookDeliveryLifecycleEvent],
     expected: &WebhookDeliverySnapshot,
 ) -> Result<(), ReliabilityError> {
-    verify_webhook_delivery_chain(events)?;
-    if events.last().is_some_and(|event| event.after == *expected) {
-        Ok(())
-    } else {
-        Err(ReliabilityError::StateMismatch)
-    }
+    verify_snapshot_chain_for(events, expected)
 }
 
 /// Reclaims a delivery whose failed application released its deduplication

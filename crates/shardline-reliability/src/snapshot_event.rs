@@ -162,6 +162,19 @@ pub fn verify_snapshot_chain<S: SnapshotEvidence>(
     Ok(())
 }
 
+/// Verifies a full history and binds its latest snapshot to materialized state.
+pub(crate) fn verify_snapshot_chain_for<S: SnapshotEvidence>(
+    events: &[SnapshotEvidenceEvent<S>],
+    expected: &S,
+) -> Result<(), ReliabilityError> {
+    verify_snapshot_chain(events)?;
+    if events.last().is_some_and(|event| event.after == *expected) {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
 /// Verifies one latest materialized-state boundary without loading its full
 /// historical chain. Normal paginated listings use this bounded check;
 /// explicit fsck/recovery paths use [`verify_snapshot_chain`] as well.

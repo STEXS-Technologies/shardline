@@ -2,7 +2,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     ReliabilityError,
-    snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain},
+    snapshot_event::{
+        SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain, verify_snapshot_chain_for,
+    },
 };
 
 /// One canonical log container for every durable snapshot state machine.
@@ -148,16 +150,7 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
                 .ok_or(ReliabilityError::OperationMismatch)?;
             return super::snapshot_event::verify_snapshot_event(event, expected);
         }
-        verify_snapshot_chain(&self.events)?;
-        if self
-            .events
-            .last()
-            .is_some_and(|event| event.after == *expected)
-        {
-            Ok(())
-        } else {
-            Err(ReliabilityError::StateMismatch)
-        }
+        verify_snapshot_chain_for(&self.events, expected)
     }
 
     /// Returns the ordered evidence events.
