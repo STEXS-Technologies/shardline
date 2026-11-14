@@ -77,3 +77,20 @@ tests = [
   { file = "crates/shardline-index/src/memory.rs", name = "memory_upsert_quarantine_candidate_preserves_tampered_evidence", backend = "memory" },
   { file = "crates/shardline-index/src/memory.rs", name = "memory_retention_hold_read_rejects_tampered_evidence", backend = "memory" },
 ]
+
+[[invariant]]
+id = "I-OBJECT-INVENTORY"
+guarantee = "Object enumeration preserves prefix filtering, empty results and page limits across metadata adapters."
+owners = ["crates/shardline-server/src/backend.rs", "crates/shardline-server/src/object_store.rs"]
+failure_boundaries = ["empty store", "no matching prefix", "nested matching keys", "bounded page", "local blocking dispatch", "direct PostgreSQL dispatch"]
+# These adapter tests use local object fixtures. They do not qualify remote SQL or S3 behavior.
+tests = [
+  { file = "crates/shardline-server/src/local_backend/objects.rs", name = "visit_object_prefix_returns_ok_with_empty_store", backend = "local" },
+  { file = "crates/shardline-server/src/local_backend/objects.rs", name = "visit_object_prefix_lists_stored_objects", backend = "local" },
+  { file = "crates/shardline-server/src/local_backend/objects.rs", name = "list_object_flat_namespace_page_returns_paginated_results", backend = "local" },
+  { file = "crates/shardline-server/src/postgres_backend/read.rs", name = "visit_object_prefix_returns_matching_objects", backend = "postgres-adapter/local-objects" },
+  { file = "crates/shardline-server/src/postgres_backend/read.rs", name = "visit_object_prefix_empty_when_no_match", backend = "postgres-adapter/local-objects" },
+  { file = "crates/shardline-server/src/postgres_backend/read.rs", name = "visit_object_prefix_empty_store", backend = "postgres-adapter/local-objects" },
+  { file = "crates/shardline-server/src/postgres_backend/read.rs", name = "list_object_flat_namespace_page_returns_at_most_limit", backend = "postgres-adapter/local-objects" },
+  { file = "crates/shardline-server/src/postgres_backend/read.rs", name = "list_object_flat_namespace_page_with_limit", backend = "postgres-adapter/local-objects" },
+]

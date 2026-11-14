@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use shardline_index::{FileRecord, PostgresMetadataStoreError, RecordTraversal};
 use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
+use shardline_storage::{AsyncObjectStore, DeleteOutcome, ObjectKey};
 #[cfg(test)]
-use shardline_storage::ObjectStore;
-use shardline_storage::{AsyncObjectStore, DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix};
+use shardline_storage::{ObjectPrefix, ObjectStore};
 use sqlx::{PgPool, query_scalar};
 
 use crate::{
@@ -15,7 +15,6 @@ use crate::{
         object_byte_range_stream, object_byte_stream,
     },
     error::IndexError,
-    object_store::visit_object_prefix,
     record_store::{parse_stored_file_record_bytes, repository_references_hash_in_scope},
     validation::ensure_directory,
     xet_adapter::{FileReconstructionResponse, build_reconstruction_response, xorb_object_key},
@@ -350,28 +349,6 @@ impl super::PostgresBackend {
         }
 
         object_byte_stream(object_store, object_key.clone(), total_length).await
-    }
-
-    pub(crate) fn visit_object_prefix<Visitor>(
-        &self,
-        prefix: &ObjectPrefix,
-        visitor: Visitor,
-    ) -> Result<(), ServerError>
-    where
-        Visitor: FnMut(ObjectMetadata) -> Result<(), ServerError>,
-    {
-        visit_object_prefix(&self.object_store(), prefix, visitor)
-    }
-
-    pub(crate) fn list_object_flat_namespace_page(
-        &self,
-        prefix: &ObjectPrefix,
-        start_after: Option<&ObjectKey>,
-        limit: usize,
-    ) -> Result<Vec<ObjectMetadata>, ServerError> {
-        Ok(self
-            .object_store()
-            .list_flat_namespace_page(prefix, start_after, limit)?)
     }
 
     pub(crate) async fn delete_object_if_present(
@@ -1080,7 +1057,7 @@ mod tests {
 
         let prefix = ObjectPrefix::parse("test/prefix").unwrap();
         let mut found: Vec<String> = Vec::new();
-        backend
+        crate::ServerBackend::Postgres(backend)
             .visit_object_prefix(&prefix, |meta| {
                 found.push(meta.key().as_str().to_owned());
                 Ok(())
@@ -1101,7 +1078,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let prefix = ObjectPrefix::parse("no/such/prefix").unwrap();
         let mut count = 0_u64;
-        backend
+        crate::ServerBackend::Postgres(backend)
             .visit_object_prefix(&prefix, |_| {
                 count += 1;
                 Ok(())
@@ -1115,7 +1092,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let prefix = ObjectPrefix::parse("test").unwrap();
         let mut count = 0_u64;
-        backend
+        crate::ServerBackend::Postgres(backend)
             .visit_object_prefix(&prefix, |_| {
                 count += 1;
                 Ok(())
@@ -1134,7 +1111,7 @@ mod tests {
             store_object(&backend.object_store(), &key, b"page data");
         }
         let prefix = ObjectPrefix::parse("test/page").unwrap();
-        let page = backend
+        let page = crate::ServerBackend::Postgres(backend)
             .list_object_flat_namespace_page(&prefix, None, 4)
             .expect("list page");
         assert_eq!(page.len(), 4);
@@ -1150,7 +1127,7 @@ mod tests {
         let prefix = ObjectPrefix::parse("test/page2").unwrap();
         // Request 2 items; the local store may or may not support start_after,
         // but should at least respect the limit.
-        let page = backend
+        let page = crate::ServerBackend::Postgres(backend)
             .list_object_flat_namespace_page(&prefix, None, 2)
             .expect("list with limit");
         assert!(!page.is_empty());

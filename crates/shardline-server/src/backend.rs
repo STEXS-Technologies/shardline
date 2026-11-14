@@ -1689,9 +1689,11 @@ impl ServerBackend {
     where
         Visitor: FnMut(ObjectMetadata) -> Result<(), ServerError>,
     {
+        let visit =
+            || crate::object_store::visit_object_prefix(&self.object_store(), prefix, visitor);
         match self {
-            Self::Local(backend) => backend.visit_object_prefix(prefix, visitor),
-            Self::Postgres(backend) => backend.visit_object_prefix(prefix, visitor),
+            Self::Local(_) => tokio::task::block_in_place(visit),
+            Self::Postgres(_) => visit(),
         }
     }
 
@@ -1701,13 +1703,14 @@ impl ServerBackend {
         start_after: Option<&ObjectKey>,
         limit: usize,
     ) -> Result<Vec<ObjectMetadata>, ServerError> {
+        let list = || {
+            Ok(self
+                .object_store()
+                .list_flat_namespace_page(prefix, start_after, limit)?)
+        };
         match self {
-            Self::Local(backend) => {
-                backend.list_object_flat_namespace_page(prefix, start_after, limit)
-            }
-            Self::Postgres(backend) => {
-                backend.list_object_flat_namespace_page(prefix, start_after, limit)
-            }
+            Self::Local(_) => tokio::task::block_in_place(list),
+            Self::Postgres(_) => list(),
         }
     }
 
