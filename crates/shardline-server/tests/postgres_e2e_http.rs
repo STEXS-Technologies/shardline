@@ -1515,141 +1515,25 @@ async fn test_oci_push_manifest_with_nonexistent_blob() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_verify_object() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"verify-me-content";
-    let oid = sha256_hex(content);
-
-    // Upload
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    // Verify
-    let verify_resp = client
-        .post(server.url(&format!("/v1/lfs/objects/{oid}/verify")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        verify_resp.status(),
-        200,
-        "verify existing object should return 200, got {}",
-        verify_resp.status()
-    );
+    http_contracts::lfs::verify_existing(&server, b"verify-me-content").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_verify_nonexistent_object() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let fake_oid = "f".repeat(64);
-
-    let verify_resp = client
-        .post(server.url(&format!("/v1/lfs/objects/{fake_oid}/verify")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        verify_resp.status(),
-        404,
-        "verify non-existent should return 404, got {}",
-        verify_resp.status()
-    );
+    http_contracts::lfs::verify_missing(&server, &"f".repeat(64)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_batch_mixed_existing_missing() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let existing_content = b"existing-batch-content";
-    let existing_oid = sha256_hex(existing_content);
-
-    // Upload existing object
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{existing_oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(existing_content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    let missing_oid = "c".repeat(64);
-
-    // Batch with mixed
-    let batch_req = serde_json::json!({
-        "operation": "download",
-        "objects": [
-            {"oid": existing_oid, "size": existing_content.len() as u64},
-            {"oid": missing_oid, "size": 42}
-        ]
-    });
-    let batch_resp = client
-        .post(server.url("/v1/lfs/objects/batch"))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/vnd.git-lfs+json")
-        .json(&batch_req)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(batch_resp.status(), 200);
-    let json: serde_json::Value = batch_resp.json().await.unwrap();
-    let objects = json["objects"].as_array().unwrap();
-    assert_eq!(objects.len(), 2);
-    // Existing object should not have error
-    assert!(
-        objects[0].get("error").is_none() || objects[0]["error"].is_null(),
-        "existing object should have no error: {:?}",
-        objects[0]
-    );
-    // Missing object should have error
-    assert!(
-        objects[1].get("error").is_some(),
-        "missing object should have error: {:?}",
-        objects[1]
-    );
+    http_contracts::lfs::batch_mixed(&server, b"existing-batch-content", &"c".repeat(64), 42).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lfs_upload_empty_file() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-
-    let content = b"";
-    let oid = sha256_hex(content);
-
-    let put_resp = client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        put_resp.status().is_success(),
-        "empty file upload should succeed"
-    );
-
-    let get_resp = client
-        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get_resp.status(), 200);
-    let body = get_resp.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), content);
+    http_contracts::lfs::upload_empty(&server).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1246,100 +1246,25 @@ async fn test_s3_oci_push_manifest_with_nonexistent_blob() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_lfs_verify_object() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-    let content = b"s3-verify-content";
-    let oid = sha256_hex(content);
-
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    let verify = client
-        .post(server.url(&format!("/v1/lfs/objects/{oid}/verify")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(verify.status(), 200);
+    http_contracts::lfs::verify_existing(&server, b"s3-verify-content").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_lfs_verify_nonexistent() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-    let verify = client
-        .post(server.url(&format!("/v1/lfs/objects/{}/verify", "f".repeat(64))))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(verify.status(), 404);
+    http_contracts::lfs::verify_missing(&server, &"f".repeat(64)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_lfs_batch_mixed() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-    let existing = b"s3-mixed-existing";
-    let eoid = sha256_hex(existing);
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{eoid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(existing.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    let batch_resp = client
-        .post(server.url("/v1/lfs/objects/batch"))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/vnd.git-lfs+json")
-        .json(&serde_json::json!({"operation":"download","objects":[
-            {"oid":eoid,"size":existing.len() as u64},
-            {"oid":"d".repeat(64),"size":99}
-        ]}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(batch_resp.status(), 200);
-    let j: serde_json::Value = batch_resp.json().await.unwrap();
-    assert_eq!(j["objects"].as_array().unwrap().len(), 2);
-    assert!(
-        j["objects"][1].get("error").is_some(),
-        "missing object should have error"
-    );
+    http_contracts::lfs::batch_mixed(&server, b"s3-mixed-existing", &"d".repeat(64), 99).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_lfs_upload_empty() {
     let server = TestServer::start(&[ServerFrontend::Lfs]).await;
-    let client = reqwest::Client::new();
-    let content = b"";
-    let oid = sha256_hex(content);
-
-    client
-        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    let get = client
-        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", format!("Bearer {}", server.auth_header()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get.status(), 200);
-    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+    http_contracts::lfs::upload_empty(&server).await;
 }
 
 // ===========================================================================
