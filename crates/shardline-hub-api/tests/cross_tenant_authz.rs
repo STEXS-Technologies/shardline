@@ -34,49 +34,6 @@ use tower::ServiceExt;
 // Test harness
 // ---------------------------------------------------------------------------
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
-                repo_id TEXT PRIMARY KEY,
-                repo_type TEXT NOT NULL CHECK (repo_type IN ('model', 'dataset', 'space')),
-                private INTEGER NOT NULL DEFAULT 0 CHECK (private IN (0, 1)),
-                default_branch TEXT NOT NULL,
-                created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-                updated_at_unix_seconds INTEGER NOT NULL CHECK (updated_at_unix_seconds >= 0)
-            );
-            CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
-                repo_id TEXT NOT NULL,
-                ref_name TEXT NOT NULL,
-                sha TEXT NOT NULL,
-                parent_sha TEXT,
-                message TEXT,
-                created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-                PRIMARY KEY (repo_id, sha),
-                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS shardline_hub_refs (
-                repo_id TEXT NOT NULL,
-                ref_name TEXT NOT NULL,
-                sha TEXT NOT NULL,
-                PRIMARY KEY (repo_id, ref_name)
-            );
-            CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
-                commit_sha TEXT NOT NULL,
-                path TEXT NOT NULL,
-                size INTEGER NOT NULL CHECK (size >= 0),
-                sha TEXT NOT NULL,
-                is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
-                PRIMARY KEY (commit_sha, path)
-            );
-            CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
-                id TEXT PRIMARY KEY,
-                repo_id TEXT NOT NULL,
-                url TEXT NOT NULL,
-                events TEXT NOT NULL DEFAULT 'push',
-                secret TEXT,
-                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-                created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-            );";
-
 /// Mock provider that round-trips an `owner:name:scope` token string so we can
 /// mint two distinct tokens for `alice/own` and `bob/own`.
 struct RepoTokenProvider;
@@ -117,13 +74,7 @@ impl AuthProvider for RepoTokenProvider {
 fn build_state() -> (TempDir, HubState) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
-    let db_path = root.join("metadata.sqlite3");
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute_batch(SCHEMA).unwrap();
-    drop(conn);
-    shardline_index::hub::ensure_hub_tables(&root).unwrap();
-
-    let store = LocalIndexStore::open(root.clone());
+    let store = LocalIndexStore::new(root.clone()).unwrap();
     let boxed = BoxedHubStore::from_store(store);
     let object_store = shardline_server_core::ServerObjectStore::local(root.join("lfs"))
         .expect("local object store");
