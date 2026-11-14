@@ -12,14 +12,31 @@ use super::{
     load_postgres_latest_evidence_heads, next_reliability_sequence, u64_to_i64,
 };
 use crate::{
-    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumablePartRange,
-    ResumableSession, ResumableSessionError, ResumableSessionGcInventory, ResumableSessionPart,
-    ResumableSessionProtocol, ResumableSessionState,
+    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumableCompletionFence,
+    ResumablePartRange, ResumableSession, ResumableSessionError, ResumableSessionGcInventory,
+    ResumableSessionPart, ResumableSessionProtocol, ResumableSessionState,
 };
 
 const SESSION_ACCOUNTING_LOCK_ID: i64 = 0x5348_5244_5345_5353;
 
 mod listing_snapshot;
+
+/// Locks a live completion claim until the caller commits or rolls back publication.
+pub(super) async fn lock_completion_identity(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: &ResumableCompletionFence,
+) -> Result<Option<(String, String)>, PostgresMetadataStoreError> {
+    Ok(sqlx::query_as(
+        "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
+         WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
+         AND expires_at > clock_timestamp()
+         FOR UPDATE",
+    )
+    .bind(fence.session_id())
+    .bind(u64_to_i64(fence.epoch().get())?)
+    .fetch_optional(&mut **transaction)
+    .await?)
+}
 
 fn session_from_row(
     row: &sqlx::postgres::PgRow,

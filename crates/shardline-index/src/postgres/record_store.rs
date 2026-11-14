@@ -325,22 +325,13 @@ impl super::PostgresRecordStore {
         )
         .await?;
         let completion_identity = if let Some(fence) = completion_fence {
-            let owns_completion = query(
-                "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
-                 WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
-                 AND expires_at > clock_timestamp()
-                 FOR UPDATE",
-            )
-            .bind(fence.session_id())
-            .bind(super::u64_to_i64(fence.epoch().get())?)
-            .fetch_optional(&mut *transaction)
-            .await?;
-            let Some(owns_completion) = owns_completion else {
+            let completion_identity =
+                super::resumable_sessions::lock_completion_identity(&mut transaction, fence)
+                    .await?;
+            let Some((scope_namespace, target_key)) = completion_identity else {
                 transaction.rollback().await?;
                 return Ok(false);
             };
-            let scope_namespace: String = owns_completion.try_get("scope_namespace")?;
-            let target_key: String = owns_completion.try_get("target_key")?;
             Some((scope_namespace, target_key))
         } else {
             None

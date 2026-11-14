@@ -352,25 +352,15 @@ impl PostgresIndexStore {
         fence: &ResumableCompletionFence,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
-        let owns_completion = query(
-            "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
-             WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
-             AND expires_at > clock_timestamp()
-             FOR UPDATE",
-        )
-        .bind(fence.session_id())
-        .bind(super::u64_to_i64(fence.epoch().get())?)
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let Some(owns_completion) = owns_completion else {
+        let completion_identity =
+            super::resumable_sessions::lock_completion_identity(&mut transaction, fence).await?;
+        let Some((scope_namespace, target_key)) = completion_identity else {
             transaction.rollback().await?;
             return Ok(false);
         };
         // Tag rows and their integrity-checked pointer histories share this
         // completion transaction, so a published manifest cannot expose an
         // unjournaled retarget.
-        let scope_namespace: String = owns_completion.try_get("scope_namespace")?;
-        let target_key: String = owns_completion.try_get("target_key")?;
         query(
             "DELETE FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
