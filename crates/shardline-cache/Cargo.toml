@@ -20,11 +20,11 @@ redis = { workspace = true, features = ["tokio-rustls-comp", "connection-manager
 rustls.workspace = true
 shardline-protocol.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 shardline-test-support = { workspace = true, features = ["docker"] }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 
 [lints]
