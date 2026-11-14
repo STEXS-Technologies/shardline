@@ -206,6 +206,7 @@ const fn provider_token(provider: RepositoryProvider) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
@@ -215,10 +216,7 @@ mod tests {
     fn cache_key_keeps_version_and_scope_components() {
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
 
         let latest = ReconstructionCacheKey::latest("asset.bin", Some(&scope));
         let version = ReconstructionCacheKey::version("asset.bin", "deadbeef", Some(&scope));
@@ -227,10 +225,7 @@ mod tests {
         assert_eq!(latest.content_hash(), None);
         assert_eq!(version.content_hash(), Some("deadbeef"));
         let latest_scope = latest.repository_scope();
-        assert!(latest_scope.is_some());
-        let Some(latest_scope) = latest_scope else {
-            return;
-        };
+        let latest_scope = latest_scope.unwrap();
         assert_eq!(latest_scope.owner(), "team");
         assert_eq!(latest_scope.repo(), "assets");
         assert_eq!(latest_scope.provider(), "github");
@@ -272,10 +267,7 @@ mod tests {
     #[test]
     fn cache_key_scope_without_revision() {
         let scope = RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let latest = ReconstructionCacheKey::latest("doc.pdf", Some(&scope));
         let scope_key = latest.repository_scope().unwrap();
         assert_eq!(scope_key.provider(), "gitlab");
@@ -289,10 +281,7 @@ mod tests {
     #[test]
     fn repository_scope_cache_key_from_scope() {
         let scope = RepositoryScope::new(RepositoryProvider::Codeberg, "user", "repo", Some("v1"));
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
         assert_eq!(scope_key.provider(), "codeberg");
         assert_eq!(scope_key.owner(), "user");
@@ -488,10 +477,7 @@ mod tests {
     #[test]
     fn cache_key_repository_scope_accessors() {
         let scope = RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("dev"));
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
         assert_eq!(scope_key.provider(), "github");
         assert_eq!(scope_key.owner(), "org");

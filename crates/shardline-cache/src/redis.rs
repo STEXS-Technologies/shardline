@@ -561,6 +561,7 @@ fn encode_component(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::{env::var as env_var, error::Error as StdError, num::NonZeroU64, time::Duration};
 
@@ -664,10 +665,7 @@ mod tests {
             return;
         };
         let cache = RedisReconstructionCache::new(&url, NonZeroU64::MIN);
-        assert!(cache.is_ok());
-        let Ok(cache) = cache else {
-            return;
-        };
+        let cache = cache.unwrap();
         let original = cache.get_connection().await;
         assert!(original.is_ok());
         let Ok(mut original) = original else {
@@ -700,10 +698,7 @@ mod tests {
             return;
         };
         let cache = RedisReconstructionCache::new(&url, NonZeroU64::MIN);
-        assert!(cache.is_ok());
-        let Ok(cache) = cache else {
-            return;
-        };
+        let cache = cache.unwrap();
         let original = cache.get_connection().await;
         assert!(original.is_ok());
         let Ok(mut original) = original else {
@@ -717,10 +712,7 @@ mod tests {
         assert_ne!(old_id, 0);
         // Close only this test's managed connection, through a separate controller.
         let controller = redis::Client::open(url);
-        assert!(controller.is_ok());
-        let Ok(controller_client) = controller else {
-            return;
-        };
+        let controller_client = controller.unwrap();
         let connection = controller_client.get_multiplexed_async_connection().await;
         assert!(connection.is_ok());
         let Ok(mut controller_connection) = connection else {
@@ -765,10 +757,7 @@ mod tests {
             "redis://:cache-secret@cache.example.test:6379/0",
             ttl_seconds,
         );
-        assert!(cache.is_ok());
-        let Ok(cache) = cache else {
-            return;
-        };
+        let cache = cache.unwrap();
 
         let rendered = format!("{cache:?}");
 
@@ -803,15 +792,9 @@ mod tests {
     #[tokio::test]
     async fn redis_cache_bounds_stalled_connection_operations() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await;
-        assert!(listener.is_ok());
-        let Ok(listener) = listener else {
-            return;
-        };
+        let listener = listener.unwrap();
         let address = listener.local_addr();
-        assert!(address.is_ok());
-        let Ok(address) = address else {
-            return;
-        };
+        let address = address.unwrap();
         let stalled_peer = tokio::spawn(async move {
             let accepted = listener.accept().await;
             if accepted.is_ok() {
@@ -824,10 +807,7 @@ mod tests {
             RedisTlsConfig::default(),
             Duration::from_millis(50),
         );
-        assert!(cache.is_ok());
-        let Ok(cache) = cache else {
-            return;
-        };
+        let cache = cache.unwrap();
 
         let result = cache.ready().await;
         stalled_peer.abort();
@@ -878,10 +858,7 @@ mod tests {
 
         let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
         let cache = RedisReconstructionCache::new(&redis_url, ttl_seconds);
-        assert!(cache.is_ok());
-        let Ok(cache) = cache else {
-            return;
-        };
+        let cache = cache.unwrap();
         let initial_flush = flush_matching_keys(&redis_url).await;
         assert!(initial_flush.is_ok());
         let key = ReconstructionCacheKey::latest("asset.bin", None);
@@ -933,10 +910,7 @@ mod tests {
             "my-repo",
             Some("main"),
         );
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let key = ReconstructionCacheKey::latest("file.bin", Some(&scope));
         let redis_key = RedisReconstructionCache::redis_key(&key);
         // The provider ("github") is NOT hex-encoded (comes from provider_token directly).
@@ -972,10 +946,7 @@ mod tests {
     #[test]
     fn redis_key_format_with_scope_no_revision() {
         let scope = RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let key = ReconstructionCacheKey::latest("doc.pdf", Some(&scope));
         let redis_key = RedisReconstructionCache::redis_key(&key);
         let owner_hex = hex::encode("group");
@@ -991,10 +962,7 @@ mod tests {
     fn redis_key_format_gitea_provider() {
         let scope =
             RepositoryScope::new(RepositoryProvider::Gitea, "gitea-org", "gitea-repo", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let key = ReconstructionCacheKey::version("f1.bin", "hash1", Some(&scope));
         let redis_key = RedisReconstructionCache::redis_key(&key);
         let owner_hex = hex::encode("gitea-org");
@@ -1009,10 +977,7 @@ mod tests {
     #[test]
     fn redis_key_format_codeberg_provider() {
         let scope = RepositoryScope::new(RepositoryProvider::Codeberg, "user", "repo", Some("v2"));
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let key = ReconstructionCacheKey::latest("data.bin", Some(&scope));
         let redis_key = RedisReconstructionCache::redis_key(&key);
         let owner_hex = hex::encode("user");
@@ -1025,10 +990,7 @@ mod tests {
     #[test]
     fn redis_key_format_generic_provider() {
         let scope = RepositoryScope::new(RepositoryProvider::Generic, "ns", "repo-name", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let key = ReconstructionCacheKey::latest("generic.bin", Some(&scope));
         let redis_key = RedisReconstructionCache::redis_key(&key);
         let owner_hex = hex::encode("ns");
@@ -1047,10 +1009,7 @@ mod tests {
             "asset.repo_v2",
             Some("feature/branch"),
         );
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let key = ReconstructionCacheKey::latest("my file (1).bin", Some(&scope));
         let redis_key = RedisReconstructionCache::redis_key(&key);
         let owner_hex = hex::encode("my-org/team");
