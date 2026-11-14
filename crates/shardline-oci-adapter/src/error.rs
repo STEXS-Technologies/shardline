@@ -69,152 +69,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn not_found_display_message() {
-        assert_eq!(OciAdapterError::NotFound.to_string(), "content not found");
-    }
-
-    #[test]
-    fn overflow_display_message() {
-        assert_eq!(OciAdapterError::Overflow.to_string(), "arithmetic overflow");
-    }
-
-    #[test]
-    fn invalid_content_hash_display_message() {
-        assert_eq!(
-            OciAdapterError::InvalidContentHash.to_string(),
-            "content hash must be 64 hexadecimal characters"
-        );
-    }
-
-    #[test]
-    fn invalid_digest_display_message() {
-        assert_eq!(
-            OciAdapterError::InvalidDigest.to_string(),
-            "digest must use sha256:<64 lowercase hex> format"
-        );
-    }
-
-    #[test]
-    fn invalid_repository_name_display_message() {
-        assert_eq!(
-            OciAdapterError::InvalidRepositoryName.to_string(),
-            "repository name was invalid"
-        );
-    }
-
-    #[test]
-    fn invalid_manifest_reference_display_message() {
-        assert_eq!(
-            OciAdapterError::InvalidManifestReference.to_string(),
-            "manifest reference was invalid"
-        );
-    }
-
-    #[test]
-    fn invalid_upload_session_display_message() {
-        assert_eq!(
-            OciAdapterError::InvalidUploadSession.to_string(),
-            "upload session identifier was invalid"
-        );
-    }
-
-    #[test]
-    fn too_many_upload_sessions_display_message() {
-        assert_eq!(
-            OciAdapterError::TooManyUploadSessions.to_string(),
-            "too many active oci upload sessions"
-        );
-    }
-
-    #[test]
-    fn expected_body_hash_mismatch_display_message() {
-        assert_eq!(
-            OciAdapterError::ExpectedBodyHashMismatch.to_string(),
-            "uploaded body hash did not match the expected sha256"
-        );
-    }
-
-    #[test]
-    fn io_error_display_message() {
-        let io_err = std::io::Error::other("test");
-        assert_eq!(
-            OciAdapterError::Io(io_err).to_string(),
-            "local storage operation failed"
-        );
-    }
-
-    #[allow(clippy::unwrap_used)]
-    #[test]
-    fn json_error_display_message() {
-        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
-        assert_eq!(
-            OciAdapterError::Json(json_err).to_string(),
-            "json operation failed"
-        );
-    }
-
-    #[allow(clippy::unwrap_used)]
-    #[test]
-    fn numeric_conversion_error_display_message() {
-        let err: TryFromIntError = u8::try_from(-1i32).unwrap_err();
-        assert_eq!(
-            OciAdapterError::NumericConversion(err).to_string(),
-            "numeric conversion exceeded supported bounds"
-        );
-    }
-
-    #[test]
-    fn error_variant_debug_format() {
-        // Ensure all variants implement Debug (they derive it)
-        let variants = [
-            format!("{:?}", OciAdapterError::NotFound),
-            format!("{:?}", OciAdapterError::Overflow),
-            format!("{:?}", OciAdapterError::InvalidContentHash),
-            format!("{:?}", OciAdapterError::InvalidDigest),
-            format!("{:?}", OciAdapterError::InvalidRepositoryName),
-            format!("{:?}", OciAdapterError::InvalidManifestReference),
-            format!("{:?}", OciAdapterError::InvalidUploadSession),
-            format!("{:?}", OciAdapterError::TooManyUploadSessions),
-            format!("{:?}", OciAdapterError::ExpectedBodyHashMismatch),
-        ];
-        for v in &variants {
-            assert!(!v.is_empty());
+    fn error_display_messages() {
+        for (error, expected) in [
+            (OciAdapterError::NotFound, "content not found"),
+            (OciAdapterError::Overflow, "arithmetic overflow"),
+            (
+                OciAdapterError::InvalidContentHash,
+                "content hash must be 64 hexadecimal characters",
+            ),
+            (
+                OciAdapterError::InvalidDigest,
+                "digest must use sha256:<64 lowercase hex> format",
+            ),
+            (
+                OciAdapterError::InvalidRepositoryName,
+                "repository name was invalid",
+            ),
+            (
+                OciAdapterError::InvalidManifestReference,
+                "manifest reference was invalid",
+            ),
+            (
+                OciAdapterError::InvalidUploadSession,
+                "upload session identifier was invalid",
+            ),
+            (
+                OciAdapterError::TooManyUploadSessions,
+                "too many active oci upload sessions",
+            ),
+            (
+                OciAdapterError::ExpectedBodyHashMismatch,
+                "uploaded body hash did not match the expected sha256",
+            ),
+            (
+                OciAdapterError::ObjectStore(
+                    shardline_server_core::ServerObjectStoreError::NotFound,
+                ),
+                "object storage adapter operation failed",
+            ),
+            (
+                OciAdapterError::S3ObjectStore(shardline_storage::S3ObjectStoreError::Io(
+                    std::io::Error::other("test"),
+                )),
+                "s3 object storage adapter operation failed",
+            ),
+            (
+                OciAdapterError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
+                    std::io::Error::other("test"),
+                )),
+                "local object storage adapter operation failed",
+            ),
+            (
+                OciAdapterError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath),
+                "object storage prefix validation failed",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+            assert!(!format!("{error:?}").is_empty());
         }
-    }
-
-    #[test]
-    fn object_store_error_display_message() {
-        let err =
-            OciAdapterError::ObjectStore(shardline_server_core::ServerObjectStoreError::NotFound);
-        assert_eq!(err.to_string(), "object storage adapter operation failed");
-    }
-
-    #[test]
-    fn s3_object_store_error_display_message() {
-        let err = OciAdapterError::S3ObjectStore(shardline_storage::S3ObjectStoreError::Io(
-            std::io::Error::other("test"),
-        ));
-        assert_eq!(
-            err.to_string(),
-            "s3 object storage adapter operation failed"
-        );
-    }
-
-    #[test]
-    fn local_object_store_error_display_message() {
-        let err = OciAdapterError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
-            std::io::Error::other("test"),
-        ));
-        assert_eq!(
-            err.to_string(),
-            "local object storage adapter operation failed"
-        );
-    }
-
-    #[test]
-    fn object_prefix_error_display_message() {
-        let err = OciAdapterError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath);
-        assert_eq!(err.to_string(), "object storage prefix validation failed");
     }
 
     #[allow(clippy::unwrap_used)]
@@ -237,74 +149,27 @@ mod tests {
         // Verify From<IoError>
         let io_err = std::io::Error::other("test");
         let err: OciAdapterError = io_err.into();
+        assert_eq!(err.to_string(), "local storage operation failed");
         assert!(matches!(err, OciAdapterError::Io(_)));
 
         // Verify From<serde_json::Error>
         let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
         let err: OciAdapterError = json_err.into();
+        assert_eq!(err.to_string(), "json operation failed");
         assert!(matches!(err, OciAdapterError::Json(_)));
 
         // Verify From<TryFromIntError>
         let int_err = u8::try_from(-1i32).unwrap_err();
         let err: OciAdapterError = int_err.into();
+        assert_eq!(
+            err.to_string(),
+            "numeric conversion exceeded supported bounds"
+        );
         assert!(matches!(err, OciAdapterError::NumericConversion(_)));
 
         // Verify From<ObjectPrefixError>
         let prefix_err = shardline_storage::ObjectPrefixError::UnsafePath;
         let err: OciAdapterError = prefix_err.into();
         assert!(matches!(err, OciAdapterError::ObjectPrefix(_)));
-    }
-
-    #[allow(clippy::unwrap_used, clippy::let_underscore_must_use)]
-    #[test]
-    fn error_variant_display_messages_all_variants() {
-        // Test that every variant has a non-empty Display message
-        let variants: Vec<OciAdapterError> = vec![
-            OciAdapterError::Io(std::io::Error::other("test")),
-            OciAdapterError::Json(serde_json::from_str::<serde_json::Value>("bad").unwrap_err()),
-            OciAdapterError::NumericConversion(u8::try_from(-1i32).unwrap_err()),
-            OciAdapterError::ObjectStore(shardline_server_core::ServerObjectStoreError::NotFound),
-            OciAdapterError::S3ObjectStore(shardline_storage::S3ObjectStoreError::Io(
-                std::io::Error::other("test"),
-            )),
-            OciAdapterError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
-                std::io::Error::other("test"),
-            )),
-            OciAdapterError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath),
-            OciAdapterError::NotFound,
-            OciAdapterError::Overflow,
-            OciAdapterError::InvalidContentHash,
-            OciAdapterError::InvalidDigest,
-            OciAdapterError::InvalidRepositoryName,
-            OciAdapterError::InvalidManifestReference,
-            OciAdapterError::InvalidUploadSession,
-            OciAdapterError::TooManyUploadSessions,
-            OciAdapterError::ExpectedBodyHashMismatch,
-        ];
-
-        for variant in &variants {
-            let msg = variant.to_string();
-            assert!(
-                !msg.is_empty(),
-                "Display message was empty for: {variant:?}"
-            );
-        }
-
-        // BlockingTask variant needs a real JoinError, verify Display non-empty
-        let captured = std::panic::catch_unwind(|| {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let handle = tokio::spawn(async { 42i32 });
-                let join_err = handle.await.unwrap_err();
-                let err = OciAdapterError::BlockingTask(join_err);
-                let msg = err.to_string();
-                assert!(
-                    !msg.is_empty(),
-                    "Display message was empty for BlockingTask"
-                );
-            });
-        });
-        // If spawning fails in test context, that's OK — we tested the other variants
-        let _ = captured;
     }
 }
