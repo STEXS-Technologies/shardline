@@ -805,47 +805,24 @@ fn temporary_upload_location_without_prefix() {
 // ── normalize_prefix edge cases ───────────────────────────────────────
 
 #[test]
-fn normalize_prefix_multi_slash() {
-    assert_eq!(normalize_prefix("///a///b///"), Some("a///b".to_owned()));
-}
-
-#[test]
-fn normalize_prefix_already_clean() {
-    assert_eq!(normalize_prefix("a/b/c"), Some("a/b/c".to_owned()));
-}
-
-#[test]
-fn normalize_prefix_preserves_single_component() {
-    assert_eq!(normalize_prefix("prefix"), Some("prefix".to_owned()));
-}
-
-// ── normalize_prefix ─────────────────────────────────────────────────
-
-#[test]
-fn normalize_prefix_trims_trailing_slashes() {
-    assert_eq!(normalize_prefix("prefix/"), Some("prefix".to_owned()));
-}
-
-#[test]
-fn normalize_prefix_trims_leading_slashes() {
-    assert_eq!(normalize_prefix("/prefix"), Some("prefix".to_owned()));
-}
-
-#[test]
-fn normalize_prefix_trims_both_slashes() {
-    assert_eq!(normalize_prefix("/prefix/"), Some("prefix".to_owned()));
-}
-
-#[test]
-fn normalize_prefix_returns_none_for_empty_after_trim() {
-    assert_eq!(normalize_prefix(""), None);
-    assert_eq!(normalize_prefix("/"), None);
-    assert_eq!(normalize_prefix("///"), None);
-}
-
-#[test]
-fn normalize_prefix_preserves_inner_slashes() {
-    assert_eq!(normalize_prefix("/a/b/c/"), Some("a/b/c".to_owned()));
+fn normalize_prefix_contract() {
+    for (prefix, expected) in [
+        ("///a///b///", Some("a///b")),
+        ("a/b/c", Some("a/b/c")),
+        ("prefix", Some("prefix")),
+        ("prefix/", Some("prefix")),
+        ("/prefix", Some("prefix")),
+        ("/prefix/", Some("prefix")),
+        ("", None),
+        ("/", None),
+        ("///", None),
+        ("/a/b/c/", Some("a/b/c")),
+        ("//", None),
+        ("///////", None),
+        ("plain", Some("plain")),
+    ] {
+        assert_eq!(normalize_prefix(prefix).as_deref(), expected, "{prefix:?}");
+    }
 }
 
 // ── validate_config ───────────────────────────────────────────────────
@@ -927,84 +904,51 @@ fn chunk_hash_handles_empty_input() {
 // ── Error variant Display ─────────────────────────────────────────────
 
 #[test]
-fn s3_error_display_incomplete_credentials() {
-    let err = S3ObjectStoreError::IncompleteCredentials;
-    assert_eq!(
-        err.to_string(),
-        "s3 object store credentials must include both access key id and secret access key"
-    );
-}
-
-#[test]
-fn s3_error_display_empty_bucket() {
-    let err = S3ObjectStoreError::EmptyBucket;
-    assert_eq!(err.to_string(), "s3 object store bucket must not be empty");
-}
-
-#[test]
-fn s3_error_display_empty_region() {
-    let err = S3ObjectStoreError::EmptyRegion;
-    assert_eq!(err.to_string(), "s3 object store region must not be empty");
-}
-
-#[test]
-fn s3_error_display_integrity_length_mismatch() {
-    let err = S3ObjectStoreError::IntegrityLengthMismatch;
-    assert_eq!(
-        err.to_string(),
-        "object body length did not match expected integrity"
-    );
-}
-
-#[test]
-fn s3_error_display_integrity_hash_mismatch() {
-    let err = S3ObjectStoreError::IntegrityHashMismatch;
-    assert_eq!(
-        err.to_string(),
-        "object body hash did not match expected integrity"
-    );
-}
-
-#[test]
-fn s3_error_display_existing_object_conflict() {
-    let err = S3ObjectStoreError::ExistingObjectConflict;
-    assert_eq!(
-        err.to_string(),
-        "object key already exists with conflicting bytes"
-    );
-}
-
-#[test]
-fn s3_error_display_range_out_of_bounds() {
-    let err = S3ObjectStoreError::RangeOutOfBounds;
-    assert_eq!(
-        err.to_string(),
-        "requested byte range exceeded stored object length"
-    );
-}
-
-#[test]
-fn s3_error_display_invalid_listed_key() {
-    let err = S3ObjectStoreError::InvalidListedKey;
-    assert_eq!(
-        err.to_string(),
-        "s3 listed an object outside the configured key prefix"
-    );
-}
-
-#[test]
-fn s3_error_display_invalid_upload_parts() {
-    let err = S3ObjectStoreError::InvalidUploadParts;
-    assert_eq!(
-        err.to_string(),
-        "upload parts list has invalid part numbering"
-    );
-}
-
-#[test]
-fn s3_error_display_runtime_unavailable() {
-    let err = S3ObjectStoreError::RuntimeUnavailable;
-    assert_eq!(err.to_string(), "s3 object store runtime is unavailable");
+fn s3_error_display_messages() {
+    for (error, message) in [
+        (
+            S3ObjectStoreError::IncompleteCredentials,
+            "s3 object store credentials must include both access key id and secret access key",
+        ),
+        (
+            S3ObjectStoreError::EmptyBucket,
+            "s3 object store bucket must not be empty",
+        ),
+        (
+            S3ObjectStoreError::EmptyRegion,
+            "s3 object store region must not be empty",
+        ),
+        (
+            S3ObjectStoreError::IntegrityLengthMismatch,
+            "object body length did not match expected integrity",
+        ),
+        (
+            S3ObjectStoreError::IntegrityHashMismatch,
+            "object body hash did not match expected integrity",
+        ),
+        (
+            S3ObjectStoreError::ExistingObjectConflict,
+            "object key already exists with conflicting bytes",
+        ),
+        (
+            S3ObjectStoreError::RangeOutOfBounds,
+            "requested byte range exceeded stored object length",
+        ),
+        (
+            S3ObjectStoreError::InvalidListedKey,
+            "s3 listed an object outside the configured key prefix",
+        ),
+        (
+            S3ObjectStoreError::InvalidUploadParts,
+            "upload parts list has invalid part numbering",
+        ),
+        (
+            S3ObjectStoreError::RuntimeUnavailable,
+            "s3 object store runtime is unavailable",
+        ),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
 }
 
 #[test]
@@ -1979,12 +1923,6 @@ mod minio_tests {
 // ── Additional pure function edge cases ──────────────────────────────
 
 #[test]
-fn normalize_prefix_empty_input_chain() {
-    assert_eq!(normalize_prefix("//"), None);
-    assert_eq!(normalize_prefix("///////"), None);
-}
-
-#[test]
 fn location_for_key_without_prefix() {
     let store = S3ObjectStore::new(
         S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
@@ -2237,18 +2175,6 @@ fn s3_config_debug_without_endpoint_shows_none() {
 fn s3_multipart_upload_writer_debug_not_available() {
     // The writer type doesn't implement Debug, but we can
     // verify the wrapper compiles and works.
-}
-
-// ── normalize_prefix coverage edge cases ─────────────────────────────
-
-#[test]
-fn normalize_prefix_single_slash_only() {
-    assert_eq!(normalize_prefix("/"), None);
-}
-
-#[test]
-fn normalize_prefix_no_trim_needed() {
-    assert_eq!(normalize_prefix("plain"), Some("plain".to_owned()));
 }
 
 // ── location_for_prefix with non-empty prefix, no key prefix ─────────
