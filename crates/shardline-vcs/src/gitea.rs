@@ -413,35 +413,54 @@ mod tests {
     }
 
     #[test]
-    fn gitea_repository_name_only_missing_owner_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
+    fn gitea_repository_invalid_payloads() {
+        for (case, delivery, body) in [
+            (
+                "repository_name_only_missing_owner",
+                "delivery-noowner",
+                br#"{
             "ref":"refs/heads/main",
             "repository":{"name":"assets"}
-        }"#;
-        let signature = signature(body);
-        let request = WebhookRequest::new("push", "delivery-noowner", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
-    }
-
-    #[test]
-    fn gitea_repository_missing_full_name_and_name_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
+        }"#
+                .as_slice(),
+            ),
+            (
+                "repository_missing_full_name_and_name",
+                "delivery-noname",
+                br#"{
             "ref":"refs/heads/main",
             "repository":{"owner":{"username":"team"}}
-        }"#;
-        let signature = signature(body);
-        let request = WebhookRequest::new("push", "delivery-noname", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
+        }"#
+                .as_slice(),
+            ),
+            (
+                "repository_missing_owner_fields",
+                "delivery-nofields",
+                br#"{
+            "ref":"refs/heads/main",
+            "repository":{"name":"assets","owner":{}}
+        }"#
+                .as_slice(),
+            ),
+            (
+                "adapter_push_with_ref_but_no_repository_name",
+                "delivery-norepo",
+                br#"{
+            "ref":"refs/heads/main",
+            "repository":{"owner":{"username":"team"}}
+        }"#
+                .as_slice(),
+            ),
+        ] {
+            let adapter = adapter().unwrap();
+            let signature = signature(body);
+            let request = WebhookRequest::new("push", delivery, signature.as_deref(), body);
+            let result = adapter.parse_webhook(request);
+            assert!(
+                matches!(result, Err(BuiltInProviderError::InvalidRepositoryPayload)),
+                "case {case}: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -548,38 +567,6 @@ mod tests {
         let request = WebhookRequest::new("repository", "delivery-ren", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
         assert!(event.is_none());
-    }
-
-    #[test]
-    fn gitea_repository_missing_owner_fields_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "ref":"refs/heads/main",
-            "repository":{"name":"assets","owner":{}}
-        }"#;
-        let signature = signature(body);
-        let request = WebhookRequest::new("push", "delivery-nofields", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
-    }
-
-    #[test]
-    fn gitea_adapter_push_with_ref_but_no_repository_name_errors() {
-        let adapter = adapter().unwrap();
-        let body = br#"{
-            "ref":"refs/heads/main",
-            "repository":{"owner":{"username":"team"}}
-        }"#;
-        let signature = signature(body);
-        let request = WebhookRequest::new("push", "delivery-norepo", signature.as_deref(), body);
-        let event = adapter.parse_webhook(request);
-        assert!(matches!(
-            event,
-            Err(BuiltInProviderError::InvalidRepositoryPayload)
-        ));
     }
 
     #[test]
