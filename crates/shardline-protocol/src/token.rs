@@ -964,23 +964,19 @@ mod tests {
             RepositoryProvider::Generic,
         ] {
             let scope = RepositoryScope::new(provider, "owner", "repo", Some("main"));
-            assert!(scope.is_ok(), "failed for {provider:?}");
-            if let Ok(scope) = scope {
-                assert_eq!(scope.provider(), provider);
-                assert_eq!(scope.owner(), "owner");
-                assert_eq!(scope.name(), "repo");
-                assert_eq!(scope.revision(), Some("main"));
-            }
+            let scope = scope.expect("expected valid scope for supported provider");
+            assert_eq!(scope.provider(), provider);
+            assert_eq!(scope.owner(), "owner");
+            assert_eq!(scope.name(), "repo");
+            assert_eq!(scope.revision(), Some("main"));
         }
     }
 
     #[test]
     fn repository_scope_accepts_missing_revision() {
         let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None);
-        assert!(scope.is_ok());
-        if let Ok(scope) = scope {
-            assert_eq!(scope.revision(), None);
-        }
+        let scope = scope.expect("expected repository scope without revision");
+        assert_eq!(scope.revision(), None);
     }
 
     #[test]
@@ -1096,9 +1092,7 @@ mod tests {
         let claims = claims.expect("expected valid claims");
         let token = signer.sign(&claims);
         let token = token.expect("expected valid token");
-        let Some((payload, _signature)) = token.split_once('.') else {
-            return;
-        };
+        let (payload, _signature) = token.split_once('.').expect("expected signed token parts");
         let tampered = format!("{payload}.{}", "00".repeat(32));
 
         assert!(matches!(
