@@ -3213,10 +3213,8 @@ mod tests {
 
     // ── Postgres UploadIntentStore integration tests ──────────────────────
 
+    use super::super::connect_isolated_postgres as connect_postgres;
     use crate::upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore};
-    async fn connect_postgres() -> Option<sqlx::PgPool> {
-        super::super::connect_isolated_postgres().await
-    }
 
     fn postgres_upstream(database_url: &str) -> Option<String> {
         let parsed = url::Url::parse(database_url).ok()?;

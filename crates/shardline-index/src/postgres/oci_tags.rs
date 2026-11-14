@@ -557,9 +557,7 @@ mod tests {
 
     use super::*;
 
-    async fn connect_postgres() -> Option<sqlx::PgPool> {
-        super::super::connect_isolated_postgres().await
-    }
+    use super::super::connect_isolated_postgres as connect_postgres;
 
     fn entry(digest: &str) -> OciTagEntry {
         OciTagEntry {

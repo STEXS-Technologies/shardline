@@ -786,9 +786,7 @@ mod tests {
     use super::*;
     use sqlx::query_scalar;
 
-    async fn connect_postgres() -> Option<sqlx::PgPool> {
-        super::super::connect_isolated_postgres().await
-    }
+    use super::super::connect_isolated_postgres as connect_postgres;
 
     fn entry(scope_namespace: &str, object_key: &str, file_id: &str) -> S3ObjectEntry {
         S3ObjectEntry {

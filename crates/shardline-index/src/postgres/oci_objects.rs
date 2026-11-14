@@ -719,9 +719,7 @@ mod tests {
     use sqlx::query_as;
     use std::time::Duration;
 
-    async fn connect_postgres() -> Option<sqlx::PgPool> {
-        super::super::connect_isolated_postgres().await
-    }
+    use super::super::connect_isolated_postgres as connect_postgres;
 
     fn object(scope_namespace: &str) -> OciObjectKey {
         OciObjectKey {

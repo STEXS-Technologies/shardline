@@ -642,9 +642,7 @@ mod tests {
 
     use super::*;
 
-    async fn connect_postgres() -> Option<PgPool> {
-        super::super::connect_isolated_postgres().await
-    }
+    use super::super::connect_isolated_postgres as connect_postgres;
 
     fn delivery(owner: &str, repo: &str, id: &str) -> WebhookDelivery {
         WebhookDelivery::new(

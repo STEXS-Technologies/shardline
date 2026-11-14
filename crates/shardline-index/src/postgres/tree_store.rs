@@ -534,10 +534,8 @@ impl TreeStore for PostgresIndexStore {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+    use super::super::connect_isolated_postgres as connect_postgres;
     use super::*;
-    async fn connect_postgres() -> Option<sqlx::PgPool> {
-        super::super::connect_isolated_postgres().await
-    }
 
     fn tree_key(revision: &str) -> TreeKey {
         TreeKey::new("github", "owner", "repo", revision)
@@ -1015,12 +1013,6 @@ mod tests {
         let names: Vec<&str> = remaining.iter().map(|r| r.revision.as_str()).collect();
         // Only the two newest-created rows survive regardless of name order.
         assert_eq!(names, vec!["rev-b", "rev-c"]);
-        // Clean up so the shared test database stays tidy for other runs.
-        for name in names {
-            let _ = TreeStore::delete_revision(&store, &repo_key(), name)
-                .await
-                .expect("cleanup");
-        }
     }
 
     /// The prune is a no-op at/below the cap and does not touch other repos.
@@ -1068,15 +1060,6 @@ mod tests {
         assert_eq!(removed, 0);
         // The other repo is untouched.
         assert_eq!(TreeStore::count_revisions(&store, &other).await.unwrap(), 1);
-        // Clean up.
-        for n in 0..3u8 {
-            let _ = TreeStore::delete_revision(&store, &repo_key(), &format!("rev-{n:02}"))
-                .await
-                .expect("cleanup");
-        }
-        let _ = TreeStore::delete_revision(&store, &other, "main")
-            .await
-            .expect("cleanup other");
     }
 
     /// Lists the distinct repos present in the revision registry.
@@ -1121,13 +1104,6 @@ mod tests {
             .expect("list repo keys");
         assert!(keys.contains(&repo));
         assert!(keys.contains(&other));
-        // Clean up.
-        let _ = TreeStore::delete_revision(&store, &repo, "main")
-            .await
-            .expect("cleanup");
-        let _ = TreeStore::delete_revision(&store, &other, "main")
-            .await
-            .expect("cleanup other");
     }
 
     /// Counts tree-entry rows per repo (F-103 cap gate) across revisions.
@@ -1181,11 +1157,5 @@ mod tests {
                 .expect("count other"),
             0
         );
-        // Clean up so the shared test database stays tidy for other runs.
-        for revision in ["main", "feature"] {
-            let _ = TreeStore::delete_revision(&store, &repo, revision)
-                .await
-                .expect("cleanup");
-        }
     }
 }
