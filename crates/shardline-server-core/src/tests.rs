@@ -2,9 +2,7 @@ mod denied_s3;
 
 use proptest::prelude::*;
 use shardline_index::{LocalRecordStore, RecordTraversal};
-use shardline_protocol::{
-    ByteRange, RepositoryProvider, RepositoryScope, TokenClaims, TokenCodecError, TokenScope,
-};
+use shardline_protocol::{ByteRange, RepositoryProvider};
 use shardline_storage::{
     DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome,
     S3ObjectStoreConfig,
@@ -1013,96 +1011,6 @@ fn parse_stored_file_record_oversized_returns_too_large_error() {
         msg.contains("bounded parser ceiling"),
         "expected StoredFileMetadataTooLarge, got: {err}"
     );
-}
-
-// ── AuthContext ──────────────────────────────────────────────────────
-
-#[test]
-fn auth_context_new_and_accessors() {
-    let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
-    let claims = TokenClaims::new("iss", "sub", TokenScope::Read, repo, 100).unwrap();
-    let ctx = AuthContext::new(claims.clone());
-
-    assert_eq!(ctx.claims(), &claims);
-    assert_eq!(ctx.subject(), "sub");
-    assert_eq!(ctx.scope(), TokenScope::Read);
-}
-
-// ── ShardMetadataLimits ──────────────────────────────────────────────
-
-// ── AuthError Display ────────────────────────────────────────────────
-
-#[test]
-fn auth_error_display_invalid_token() {
-    assert_eq!(AuthError::InvalidToken.to_string(), "invalid token");
-}
-
-#[test]
-fn auth_error_display_expired_token() {
-    assert_eq!(AuthError::ExpiredToken.to_string(), "expired token");
-}
-
-#[test]
-fn auth_error_display_insufficient_scope() {
-    let msg = AuthError::InsufficientScope.to_string();
-    assert_eq!(msg, "insufficient scope");
-}
-
-#[test]
-fn auth_error_display_provider_error() {
-    let msg = AuthError::ProviderError("oops".to_owned()).to_string();
-    assert_eq!(msg, "provider error: oops");
-}
-
-#[test]
-fn auth_error_from_token_codec_error_expired() {
-    let err: AuthError = TokenCodecError::Expired.into();
-    assert!(matches!(err, AuthError::ExpiredToken));
-}
-
-#[test]
-fn auth_error_from_token_codec_error_invalid_signature() {
-    let err: AuthError = TokenCodecError::InvalidSignature.into();
-    assert!(matches!(err, AuthError::InvalidToken));
-}
-
-#[test]
-fn auth_error_from_token_codec_error_invalid_format() {
-    let err: AuthError = TokenCodecError::InvalidFormat.into();
-    assert!(matches!(err, AuthError::InvalidToken));
-}
-
-#[test]
-fn auth_error_from_token_codec_error_invalid_hex() {
-    let hex_err = hex::FromHexError::InvalidStringLength;
-    let err: AuthError = TokenCodecError::InvalidHex(hex_err).into();
-    assert!(matches!(err, AuthError::InvalidToken));
-}
-
-#[test]
-fn auth_error_from_token_codec_error_claims() {
-    let err: AuthError =
-        TokenCodecError::Claims(shardline_protocol::TokenClaimsError::EmptyIssuer).into();
-    assert!(matches!(err, AuthError::InvalidToken));
-}
-
-#[test]
-fn auth_error_from_token_codec_error_empty_key() {
-    let err: AuthError = TokenCodecError::EmptySigningKey("test".to_owned()).into();
-    assert!(matches!(err, AuthError::ProviderError(_)));
-}
-
-#[test]
-fn auth_error_from_token_codec_error_key_too_short() {
-    let err: AuthError = TokenCodecError::SigningKeyTooShort { actual_bytes: 4 }.into();
-    assert!(matches!(err, AuthError::ProviderError(_)));
-}
-
-#[test]
-fn auth_error_from_token_codec_error_json() {
-    let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
-    let err: AuthError = TokenCodecError::Json(json_err).into();
-    assert!(matches!(err, AuthError::ProviderError(_)));
 }
 
 // ── ServerObjectStoreError Display ──────────────────────────────────

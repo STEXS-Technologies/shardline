@@ -504,12 +504,22 @@ fn local_store_put_overwrite_then_read() {
     assert_eq!(contents, updated);
 }
 
-// The owning validation crate tests every error fixture. This crate promises
+// The owning crates test every fixture. This crate promises
 // backward-compatible public re-exports of the same types, not wrapper types.
 #[test]
-fn validation_error_reexports_preserve_type_identity() {
+fn shared_reexports_preserve_type_identity() {
     use std::any::TypeId;
     for (name, public, owning) in [
+        (
+            "AuthContext",
+            TypeId::of::<shardline_server_core::AuthContext>(),
+            TypeId::of::<shardline_auth::AuthContext>(),
+        ),
+        (
+            "AuthError",
+            TypeId::of::<shardline_server_core::AuthError>(),
+            TypeId::of::<shardline_auth::AuthError>(),
+        ),
         (
             "InvalidLifecycleMetadataError",
             TypeId::of::<shardline_server_core::InvalidLifecycleMetadataError>(),
