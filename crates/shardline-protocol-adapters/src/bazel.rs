@@ -110,29 +110,4 @@ mod tests {
         assert!(!key.as_str().contains("global"));
         assert!(key.as_str().contains("/ac/"));
     }
-
-    #[test]
-    fn bazel_cache_object_key_invalid_hash_too_short() {
-        assert!(matches!(
-            bazel_cache_object_key(BazelCacheKind::Cas, "short", &test_capability(None)),
-            Err(ProtocolError::InvalidContentHash)
-        ));
-    }
-
-    #[test]
-    fn bazel_cache_object_key_invalid_hash_uppercase() {
-        let uppercase = "A".repeat(64);
-        assert!(matches!(
-            bazel_cache_object_key(BazelCacheKind::Cas, &uppercase, &test_capability(None)),
-            Err(ProtocolError::InvalidContentHash)
-        ));
-    }
-
-    #[test]
-    fn bazel_cache_object_key_invalid_hash_empty() {
-        assert!(matches!(
-            bazel_cache_object_key(BazelCacheKind::Ac, "", &test_capability(None)),
-            Err(ProtocolError::InvalidContentHash)
-        ));
-    }
 }

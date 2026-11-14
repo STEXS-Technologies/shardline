@@ -259,19 +259,6 @@ mod tests {
         assert!(key.as_str().ends_with(&oid));
     }
 
-    #[test]
-    fn lfs_object_key_invalid_too_short() {
-        let result = lfs_object_key("abc123", &test_capability(None));
-        assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
-    }
-
-    #[test]
-    fn lfs_object_key_invalid_uppercase() {
-        let uppercase_oid = "A".repeat(64);
-        let result = lfs_object_key(&uppercase_oid, &test_capability(None));
-        assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
-    }
-
     // --- LfsBatchRequest deserialization ---
 
     #[test]

@@ -92,11 +92,6 @@ fn lfs_object_key_valid() {
 }
 
 #[test]
-fn lfs_object_key_invalid_hash() {
-    assert!(lfs_object_key("not-a-hash", &test_capability(None)).is_err());
-}
-
-#[test]
 fn lfs_object_key_with_scope() {
     let hash = "a".repeat(64);
     let scope = test_scope();
@@ -144,36 +139,6 @@ fn object_key_invalid_empty() {
 #[test]
 fn object_key_invalid_unsafe_path() {
     assert!(object_key("../unsafe").is_err());
-}
-
-// --- validate_content_hash() ---
-
-#[test]
-fn validate_content_hash_valid() {
-    let hash = "a".repeat(64);
-    assert!(validate_content_hash(&hash).is_ok());
-}
-
-#[test]
-fn validate_content_hash_too_short() {
-    assert!(validate_content_hash("short").is_err());
-}
-
-#[test]
-fn validate_content_hash_uppercase() {
-    let hash = "A".repeat(64);
-    assert!(validate_content_hash(&hash).is_err());
-}
-
-#[test]
-fn validate_content_hash_empty() {
-    assert!(validate_content_hash("").is_err());
-}
-
-#[test]
-fn validate_content_hash_non_hex_chars() {
-    let hash = format!("{}g{}", "a".repeat(32), "a".repeat(31));
-    assert!(validate_content_hash(&hash).is_err());
 }
 
 // --- LFS_CONTENT_TYPE ---
@@ -309,78 +274,40 @@ fn scope_isolation_bazel_with_vs_without_scope() {
     assert_ne!(key_with, key_without);
 }
 
-// --- Cross-protocol hash format consistency ---
-
+// Shared validation must agree across both Bazel kinds and LFS.
 #[test]
-fn cross_protocol_hash_consistency_valid() {
-    let hash = "a".repeat(64);
-    assert!(lfs_object_key(&hash, &test_capability(None)).is_ok());
-    assert!(bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None)).is_ok());
-}
-
-#[test]
-fn cross_protocol_hash_consistency_empty_rejected() {
-    assert!(lfs_object_key("", &test_capability(None)).is_err());
-    assert!(bazel_cache_object_key(BazelCacheKind::Cas, "", &test_capability(None)).is_err());
-}
-
-#[test]
-fn cross_protocol_hash_consistency_short_rejected() {
-    assert!(lfs_object_key("short", &test_capability(None)).is_err());
-    assert!(bazel_cache_object_key(BazelCacheKind::Cas, "short", &test_capability(None)).is_err());
-}
-
-#[test]
-fn cross_protocol_hash_consistency_uppercase_rejected() {
-    let uppercase = "A".repeat(64);
-    assert!(lfs_object_key(&uppercase, &test_capability(None)).is_err());
-    assert!(
-        bazel_cache_object_key(BazelCacheKind::Cas, &uppercase, &test_capability(None)).is_err()
-    );
-}
-
-#[test]
-fn cross_protocol_hash_consistency_non_hex_rejected() {
-    let non_hex = format!("{}g{}", "a".repeat(32), "a".repeat(31));
-    assert!(lfs_object_key(&non_hex, &test_capability(None)).is_err());
-    assert!(bazel_cache_object_key(BazelCacheKind::Cas, &non_hex, &test_capability(None)).is_err());
-}
-
-#[test]
-fn cross_protocol_validate_content_hash_used_consistently() {
-    let hash = "a".repeat(64);
-    assert!(validate_content_hash(&hash).is_ok());
-
-    let uppercase = "A".repeat(64);
-    assert!(validate_content_hash("").is_err());
-    assert!(validate_content_hash("short").is_err());
-    assert!(validate_content_hash(&uppercase).is_err());
-}
-
-// ── Null byte rejection ────────────────────────────────────────────────
-
-#[test]
-fn lfs_oid_with_null_byte_rejected() {
-    // Null byte is not a valid hex character → rejected by validate_content_hash.
-    let oid_with_null = format!("{}aa\0", "a".repeat(61));
-    assert!(lfs_object_key(&oid_with_null, &test_capability(None)).is_err());
-}
-
-#[test]
-fn bazel_hash_with_null_byte_rejected() {
-    let hash_with_null = format!("{}aa\0", "a".repeat(61));
-    assert!(
-        bazel_cache_object_key(BazelCacheKind::Cas, &hash_with_null, &test_capability(None))
-            .is_err()
-    );
-    assert!(
-        bazel_cache_object_key(BazelCacheKind::Ac, &hash_with_null, &test_capability(None))
-            .is_err()
-    );
-}
-
-#[test]
-fn validate_content_hash_rejects_null_byte() {
-    let hash_with_null = format!("{}aa\0", "a".repeat(61));
-    assert!(validate_content_hash(&hash_with_null).is_err());
+fn content_hash_validation_agrees_across_protocols() {
+    let auth = test_capability(None);
+    for (hash, valid) in [
+        ("a".repeat(64), true),
+        (String::new(), false),
+        ("short".to_owned(), false),
+        ("abc123".to_owned(), false),
+        ("not-a-hash".to_owned(), false),
+        ("A".repeat(64), false),
+        (format!("{}g{}", "a".repeat(32), "a".repeat(31)), false),
+        (format!("{}aa\0", "a".repeat(61)), false),
+    ] {
+        for (protocol, result) in [
+            ("validator", validate_content_hash(&hash)),
+            ("lfs", lfs_object_key(&hash, &auth).map(|_| ())),
+            (
+                "bazel-cas",
+                bazel_cache_object_key(BazelCacheKind::Cas, &hash, &auth).map(|_| ()),
+            ),
+            (
+                "bazel-ac",
+                bazel_cache_object_key(BazelCacheKind::Ac, &hash, &auth).map(|_| ()),
+            ),
+        ] {
+            if valid {
+                assert!(result.is_ok(), "{protocol}: {hash:?}: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(ProtocolError::InvalidContentHash)),
+                    "{protocol}: {hash:?}: {result:?}"
+                );
+            }
+        }
+    }
 }
