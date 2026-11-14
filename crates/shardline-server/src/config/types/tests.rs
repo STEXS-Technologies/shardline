@@ -10,6 +10,24 @@ use crate::route_policy::{RouteAuthPolicy, RoutePolicyRegistry, register_route_p
 use crate::server_frontend::ServerFrontend;
 use crate::server_role::ServerRole;
 
+fn test_config() -> ServerConfig {
+    ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+}
+
+fn ephemeral_bind_config() -> ServerConfig {
+    ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+}
+
 #[test]
 fn auth_provider_kind_parse_local() {
     assert_eq!(
@@ -193,14 +211,9 @@ fn server_config_new_constructs_with_defaults() {
 
 #[test]
 fn server_config_builder_with_max_revisions_per_repo() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_max_revisions_per_repo(NonZeroUsize::new(4).unwrap())
-    .unwrap();
+    let config = test_config()
+        .with_max_revisions_per_repo(NonZeroUsize::new(4).unwrap())
+        .unwrap();
     assert_eq!(
         config.max_revisions_per_repo(),
         NonZeroUsize::new(4).unwrap()
@@ -209,14 +222,9 @@ fn server_config_builder_with_max_revisions_per_repo() {
 
 #[test]
 fn server_config_builder_with_max_tree_entries_per_repo() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_max_tree_entries_per_repo(NonZeroUsize::new(4).unwrap())
-    .unwrap();
+    let config = test_config()
+        .with_max_tree_entries_per_repo(NonZeroUsize::new(4).unwrap())
+        .unwrap();
     assert_eq!(
         config.max_tree_entries_per_repo(),
         NonZeroUsize::new(4).unwrap()
@@ -225,14 +233,9 @@ fn server_config_builder_with_max_tree_entries_per_repo() {
 
 #[test]
 fn server_config_builder_with_s3_part_file_cap() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_s3_upload_max_active_part_files(NonZeroUsize::new(16).unwrap())
-    .unwrap();
+    let config = test_config()
+        .with_s3_upload_max_active_part_files(NonZeroUsize::new(16).unwrap())
+        .unwrap();
     assert_eq!(
         config.s3_upload_max_active_part_files(),
         NonZeroUsize::new(16).unwrap()
@@ -241,20 +244,15 @@ fn server_config_builder_with_s3_part_file_cap() {
 
 #[test]
 fn server_config_builder_with_lfs_patch_limits() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_lfs_patch_ttl_seconds(NonZeroU64::new(60).unwrap())
-    .unwrap()
-    .with_lfs_patch_max_active_sessions(NonZeroUsize::new(8).unwrap())
-    .unwrap()
-    .with_lfs_patch_total_max_bytes(NonZeroU64::new(1 << 30).unwrap())
-    .unwrap()
-    .with_lfs_patch_max_seek_ahead_bytes(NonZeroU64::new(1 << 20).unwrap())
-    .unwrap();
+    let config = test_config()
+        .with_lfs_patch_ttl_seconds(NonZeroU64::new(60).unwrap())
+        .unwrap()
+        .with_lfs_patch_max_active_sessions(NonZeroUsize::new(8).unwrap())
+        .unwrap()
+        .with_lfs_patch_total_max_bytes(NonZeroU64::new(1 << 30).unwrap())
+        .unwrap()
+        .with_lfs_patch_max_seek_ahead_bytes(NonZeroU64::new(1 << 20).unwrap())
+        .unwrap();
     assert_eq!(config.lfs_patch_ttl_seconds(), NonZeroU64::new(60).unwrap());
     assert_eq!(
         config.lfs_patch_max_active_sessions(),
@@ -284,49 +282,25 @@ fn server_config_builder_with_chunk_size() {
 
 #[test]
 fn server_config_builder_with_server_role() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_server_role(ServerRole::Transfer);
+    let config = test_config().with_server_role(ServerRole::Transfer);
     assert_eq!(config.server_role(), ServerRole::Transfer);
 }
 
 #[test]
 fn server_config_builder_with_root_dir() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_root_dir(PathBuf::from("/var/lib/shardline"));
+    let config = test_config().with_root_dir(PathBuf::from("/var/lib/shardline"));
     assert_eq!(config.root_dir(), Path::new("/var/lib/shardline"));
 }
 
 #[test]
 fn server_config_builder_with_object_storage() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_object_storage(ObjectStorageAdapter::S3, None);
+    let config = test_config().with_object_storage(ObjectStorageAdapter::S3, None);
     assert_eq!(config.object_storage_adapter(), ObjectStorageAdapter::S3);
 }
 
 #[test]
 fn server_config_builder_with_max_request_body_bytes() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_max_request_body_bytes(NonZeroUsize::new(1_000_000).unwrap());
+    let config = test_config().with_max_request_body_bytes(NonZeroUsize::new(1_000_000).unwrap());
     assert_eq!(
         config.max_request_body_bytes(),
         NonZeroUsize::new(1_000_000).unwrap()
@@ -342,26 +316,16 @@ fn server_config_builder_with_max_request_body_bytes() {
 
 #[test]
 fn default_xorb_limit_includes_serialized_framing() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     assert_eq!(config.max_request_body_bytes().get(), 64 * 1024 * 1024);
     assert_eq!(config.max_xorb_body_bytes().get(), 128 * 1024 * 1024);
 }
 
 #[test]
 fn server_config_builder_with_s3_max_part_bytes() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_s3_max_part_bytes(NonZeroU64::new(1_073_741_824).unwrap())
-    .expect("default-size s3 max part bytes are accepted");
+    let config = test_config()
+        .with_s3_max_part_bytes(NonZeroU64::new(1_073_741_824).unwrap())
+        .expect("default-size s3 max part bytes are accepted");
     assert_eq!(
         config.s3_max_part_bytes(),
         NonZeroU64::new(1_073_741_824).unwrap()
@@ -370,14 +334,9 @@ fn server_config_builder_with_s3_max_part_bytes() {
 
 #[test]
 fn server_config_builder_with_s3_max_part_bytes_accepts_one_mib_boundary() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
-    .expect("exactly one MiB is the minimum accepted part size");
+    let config = test_config()
+        .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
+        .expect("exactly one MiB is the minimum accepted part size");
     assert_eq!(
         config.s3_max_part_bytes(),
         NonZeroU64::new(1_048_576).unwrap()
@@ -386,12 +345,7 @@ fn server_config_builder_with_s3_max_part_bytes_accepts_one_mib_boundary() {
 
 #[test]
 fn server_config_builder_with_s3_max_part_bytes_rejects_below_one_mib() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_s3_max_part_bytes(NonZeroU64::new(1_048_575).unwrap());
     assert!(matches!(
         result,
@@ -409,24 +363,13 @@ fn server_config_builder_with_shard_metadata_limits() {
         NonZeroUsize::new(500).unwrap(),
         NonZeroUsize::new(500).unwrap(),
     );
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_shard_metadata_limits(limits);
+    let config = test_config().with_shard_metadata_limits(limits);
     assert_eq!(config.shard_metadata_limits(), limits);
 }
 
 #[test]
 fn server_config_builder_with_server_frontends_rejects_empty() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_server_frontends([]);
     assert!(matches!(
         result,
@@ -436,26 +379,15 @@ fn server_config_builder_with_server_frontends_rejects_empty() {
 
 #[test]
 fn server_config_builder_with_server_frontends_deduplicates() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_server_frontends([ServerFrontend::Xet, ServerFrontend::Xet])
-    .unwrap();
+    let config = test_config()
+        .with_server_frontends([ServerFrontend::Xet, ServerFrontend::Xet])
+        .unwrap();
     assert_eq!(config.server_frontends(), &[ServerFrontend::Xet]);
 }
 
 #[test]
 fn server_config_builder_with_upload_max_in_flight_chunks() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_upload_max_in_flight_chunks(NonZeroUsize::new(128).unwrap());
+    let config = test_config().with_upload_max_in_flight_chunks(NonZeroUsize::new(128).unwrap());
     assert_eq!(
         config.upload_max_in_flight_chunks(),
         NonZeroUsize::new(128).unwrap()
@@ -464,13 +396,7 @@ fn server_config_builder_with_upload_max_in_flight_chunks() {
 
 #[test]
 fn server_config_builder_with_transfer_max_in_flight_chunks() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_transfer_max_in_flight_chunks(NonZeroUsize::new(256).unwrap());
+    let config = test_config().with_transfer_max_in_flight_chunks(NonZeroUsize::new(256).unwrap());
     assert_eq!(
         config.transfer_max_in_flight_chunks(),
         NonZeroUsize::new(256).unwrap()
@@ -479,13 +405,7 @@ fn server_config_builder_with_transfer_max_in_flight_chunks() {
 
 #[test]
 fn server_config_builder_with_reconstruction_cache_disabled() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_reconstruction_cache_disabled();
+    let config = test_config().with_reconstruction_cache_disabled();
     assert_eq!(
         config.reconstruction_cache_adapter(),
         ReconstructionCacheAdapter::Disabled
@@ -494,13 +414,7 @@ fn server_config_builder_with_reconstruction_cache_disabled() {
 
 #[test]
 fn server_config_builder_with_reconstruction_cache_memory() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_reconstruction_cache_memory(
+    let config = test_config().with_reconstruction_cache_memory(
         NonZeroU64::new(300).unwrap(),
         NonZeroUsize::new(5000).unwrap(),
     );
@@ -520,12 +434,7 @@ fn server_config_builder_with_reconstruction_cache_memory() {
 
 #[test]
 fn server_config_builder_with_reconstruction_cache_redis_rejects_empty_url() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result =
         config.with_reconstruction_cache_redis(String::new(), NonZeroU64::new(300).unwrap());
     assert!(matches!(
@@ -536,17 +445,12 @@ fn server_config_builder_with_reconstruction_cache_redis_rejects_empty_url() {
 
 #[test]
 fn server_config_builder_with_reconstruction_cache_redis_accepts_url() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_reconstruction_cache_redis(
-        "redis://localhost:6379".to_owned(),
-        NonZeroU64::new(300).unwrap(),
-    )
-    .unwrap();
+    let config = test_config()
+        .with_reconstruction_cache_redis(
+            "redis://localhost:6379".to_owned(),
+            NonZeroU64::new(300).unwrap(),
+        )
+        .unwrap();
     assert_eq!(
         config.reconstruction_cache_adapter(),
         ReconstructionCacheAdapter::Redis
@@ -555,13 +459,7 @@ fn server_config_builder_with_reconstruction_cache_redis_accepts_url() {
 
 #[test]
 fn server_config_builder_with_oci_upload_session_ttl() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_oci_upload_session_ttl_seconds(NonZeroU64::new(7200).unwrap());
+    let config = test_config().with_oci_upload_session_ttl_seconds(NonZeroU64::new(7200).unwrap());
     assert_eq!(
         config.oci_upload_session_ttl_seconds(),
         NonZeroU64::new(7200).unwrap()
@@ -570,13 +468,7 @@ fn server_config_builder_with_oci_upload_session_ttl() {
 
 #[test]
 fn server_config_builder_with_oci_upload_max_active_sessions() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_oci_upload_max_active_sessions(NonZeroUsize::new(500).unwrap());
+    let config = test_config().with_oci_upload_max_active_sessions(NonZeroUsize::new(500).unwrap());
     assert_eq!(
         config.oci_upload_max_active_sessions(),
         NonZeroUsize::new(500).unwrap()
@@ -585,12 +477,7 @@ fn server_config_builder_with_oci_upload_max_active_sessions() {
 
 #[test]
 fn server_config_builder_with_index_postgres_url_rejects_empty() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_index_postgres_url(String::new());
     assert!(matches!(
         result,
@@ -600,14 +487,9 @@ fn server_config_builder_with_index_postgres_url_rejects_empty() {
 
 #[test]
 fn server_config_builder_with_index_postgres_url_accepts_valid_url() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_index_postgres_url("postgres://localhost/shardline".to_owned())
-    .unwrap();
+    let config = test_config()
+        .with_index_postgres_url("postgres://localhost/shardline".to_owned())
+        .unwrap();
     assert_eq!(
         config.index_postgres_url(),
         Some("postgres://localhost/shardline")
@@ -616,12 +498,7 @@ fn server_config_builder_with_index_postgres_url_accepts_valid_url() {
 
 #[test]
 fn server_config_builder_with_token_signing_key_rejects_empty() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_token_signing_key(vec![]);
     assert!(matches!(
         result,
@@ -631,14 +508,9 @@ fn server_config_builder_with_token_signing_key_rejects_empty() {
 
 #[test]
 fn server_config_builder_with_token_signing_key_accepts_valid_key() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
-    .unwrap();
+    let config = test_config()
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap();
     assert!(config.token_signing_key().is_some());
     assert_eq!(
         config.token_signing_key().unwrap(),
@@ -648,12 +520,7 @@ fn server_config_builder_with_token_signing_key_accepts_valid_key() {
 
 #[test]
 fn server_config_builder_with_ed25519_private_key_rejects_empty() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_ed25519_private_key(vec![]);
     assert!(matches!(
         result,
@@ -663,12 +530,7 @@ fn server_config_builder_with_ed25519_private_key_rejects_empty() {
 
 #[test]
 fn server_config_builder_with_ed25519_public_key_rejects_empty() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_ed25519_public_key(vec![]);
     assert!(matches!(
         result,
@@ -678,53 +540,31 @@ fn server_config_builder_with_ed25519_public_key_rejects_empty() {
 
 #[test]
 fn server_config_builder_with_ed25519_private_key_accepts_valid_key() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_ed25519_private_key(vec![0u8; 32])
-    .unwrap();
+    let config = test_config()
+        .with_ed25519_private_key(vec![0u8; 32])
+        .unwrap();
     assert!(config.ed25519_private_key().is_some());
     assert_eq!(config.ed25519_private_key().unwrap(), &[0u8; 32]);
 }
 
 #[test]
 fn server_config_builder_with_ed25519_public_key_accepts_valid_key() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_ed25519_public_key(vec![0u8; 32])
-    .unwrap();
+    let config = test_config()
+        .with_ed25519_public_key(vec![0u8; 32])
+        .unwrap();
     assert!(config.ed25519_public_key().is_some());
     assert_eq!(config.ed25519_public_key().unwrap(), &[0u8; 32]);
 }
 
 #[test]
 fn server_config_builder_with_auth_provider() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_provider(AuthProviderKind::Oidc);
+    let config = test_config().with_auth_provider(AuthProviderKind::Oidc);
     assert_eq!(config.auth_provider(), AuthProviderKind::Oidc);
 }
 
 #[test]
 fn server_config_builder_with_auth_oidc_issuer() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_oidc_issuer("https://accounts.example.com".to_owned());
+    let config = test_config().with_auth_oidc_issuer("https://accounts.example.com".to_owned());
     assert_eq!(
         config.auth_oidc_issuer(),
         Some("https://accounts.example.com")
@@ -733,33 +573,16 @@ fn server_config_builder_with_auth_oidc_issuer() {
 
 #[test]
 fn server_config_builder_with_auth_oidc_audience() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_oidc_audience("shardline-web".to_owned());
+    let config = test_config().with_auth_oidc_audience("shardline-web".to_owned());
     assert_eq!(config.auth_oidc_audience(), Some("shardline-web"));
     // Unset by default.
-    let default = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let default = test_config();
     assert_eq!(default.auth_oidc_audience(), None);
 }
 
 #[test]
 fn server_config_builder_with_auth_oidc_jwks_host_allowlist() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_oidc_jwks_host_allowlist(vec![
+    let config = test_config().with_auth_oidc_jwks_host_allowlist(vec![
         "www.googleapis.com".to_owned(),
         "api.example.com".to_owned(),
     ]);
@@ -773,24 +596,14 @@ fn server_config_builder_with_auth_oidc_jwks_host_allowlist() {
         )
     );
     // Unset by default.
-    let default = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let default = test_config();
     assert_eq!(default.auth_oidc_jwks_host_allowlist(), None);
 }
 
 #[test]
 fn server_config_builder_with_auth_jwks_url() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_jwks_url("https://example.com/.well-known/jwks".to_owned());
+    let config =
+        test_config().with_auth_jwks_url("https://example.com/.well-known/jwks".to_owned());
     assert_eq!(
         config.auth_jwks_url(),
         Some("https://example.com/.well-known/jwks")
@@ -799,52 +612,31 @@ fn server_config_builder_with_auth_jwks_url() {
 
 #[test]
 fn server_config_builder_with_auth_jwks_issuer() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_jwks_issuer("https://example.com".to_owned());
+    let config = test_config().with_auth_jwks_issuer("https://example.com".to_owned());
     assert_eq!(config.auth_jwks_issuer(), Some("https://example.com"));
 }
 
 #[test]
 fn server_config_builder_with_metrics_token_rejects_empty() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_metrics_token(vec![]);
     assert!(matches!(result, Err(ServerConfigError::EmptyMetricsToken)));
 }
 
 #[test]
 fn server_config_builder_with_metrics_token_accepts_valid() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_metrics_token(b"metrics-token".to_vec())
-    .unwrap();
+    let config = test_config()
+        .with_metrics_token(b"metrics-token".to_vec())
+        .unwrap();
     assert!(config.metrics_token().is_some());
     assert_eq!(config.metrics_token().unwrap(), b"metrics-token");
 }
 
 #[test]
 fn server_config_builder_with_provider_runtime_rejects_empty_api_key() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
-    .unwrap();
+    let config = test_config()
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap();
     let result = config.with_provider_runtime(
         PathBuf::from("/tmp/provider.yaml"),
         vec![],
@@ -859,14 +651,9 @@ fn server_config_builder_with_provider_runtime_rejects_empty_api_key() {
 
 #[test]
 fn server_config_builder_with_provider_runtime_rejects_empty_issuer() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
-    .unwrap();
+    let config = test_config()
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap();
     let result = config.with_provider_runtime(
         PathBuf::from("/tmp/provider.yaml"),
         b"valid-api-key".to_vec(),
@@ -881,12 +668,7 @@ fn server_config_builder_with_provider_runtime_rejects_empty_issuer() {
 
 #[test]
 fn server_config_builder_with_provider_runtime_rejects_missing_signing_key() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_provider_runtime(
         PathBuf::from("/tmp/provider.yaml"),
         b"valid-api-key".to_vec(),
@@ -901,21 +683,16 @@ fn server_config_builder_with_provider_runtime_rejects_missing_signing_key() {
 
 #[test]
 fn server_config_builder_with_provider_runtime_accepts_valid_config() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
-    .unwrap()
-    .with_provider_runtime(
-        PathBuf::from("/tmp/provider.yaml"),
-        b"valid-api-key".to_vec(),
-        "shardline".to_owned(),
-        NonZeroU64::new(3600).unwrap(),
-    )
-    .unwrap();
+    let config = test_config()
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap()
+        .with_provider_runtime(
+            PathBuf::from("/tmp/provider.yaml"),
+            b"valid-api-key".to_vec(),
+            "shardline".to_owned(),
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .unwrap();
     assert_eq!(
         config.provider_config_path(),
         Some(Path::new("/tmp/provider.yaml"))
@@ -930,13 +707,7 @@ fn server_config_builder_with_provider_runtime_accepts_valid_config() {
 
 #[test]
 fn server_config_validate_runtime_requirements_rejects_missing_signing_key_for_api_role() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated);
+    let config = test_config().with_deployment_mode(DeploymentMode::Authenticated);
     let result = config.validate_runtime_requirements();
     assert!(matches!(
         result,
@@ -946,14 +717,9 @@ fn server_config_validate_runtime_requirements_rejects_missing_signing_key_for_a
 
 #[test]
 fn server_config_validate_runtime_requirements_accepts_signing_key_for_api_role() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
-    .unwrap();
+    let config = test_config()
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
@@ -977,15 +743,10 @@ fn server_config_validate_runtime_requirements_rejects_passthrough_on_non_loopba
 
 #[test]
 fn server_config_validate_runtime_requirements_accepts_passthrough_on_loopback() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
-    .unwrap()
-    .with_auth_provider(AuthProviderKind::Passthrough);
+    let config = test_config()
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap()
+        .with_auth_provider(AuthProviderKind::Passthrough);
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
@@ -1011,12 +772,7 @@ fn default_insecure_mode_rejects_non_loopback_bind_without_auth() {
 fn default_insecure_mode_accepts_loopback_bind_without_auth() {
     // Local dev / test servers bind loopback: the implicit Insecure default
     // stays valid there.
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
@@ -1053,15 +809,10 @@ fn default_insecure_mode_accepts_non_loopback_bind_with_auth_provider() {
 #[test]
 fn server_config_validate_runtime_requirements_accepts_ed25519_without_hmac_key() {
     // Ed25519 provider should NOT require the HMAC signing key.
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_provider(AuthProviderKind::Ed25519)
-    .with_ed25519_private_key(vec![0u8; 32])
-    .unwrap();
+    let config = test_config()
+        .with_auth_provider(AuthProviderKind::Ed25519)
+        .with_ed25519_private_key(vec![0u8; 32])
+        .unwrap();
     assert!(
         config.validate_runtime_requirements().is_ok(),
         "Ed25519 provider should not require HMAC signing key"
@@ -1070,13 +821,7 @@ fn server_config_validate_runtime_requirements_accepts_ed25519_without_hmac_key(
 
 #[test]
 fn server_config_validate_runtime_requirements_rejects_ed25519_without_key() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_provider(AuthProviderKind::Ed25519);
+    let config = test_config().with_auth_provider(AuthProviderKind::Ed25519);
 
     assert!(matches!(
         config.validate_runtime_requirements(),
@@ -1086,17 +831,12 @@ fn server_config_validate_runtime_requirements_rejects_ed25519_without_key() {
 
 #[test]
 fn server_config_validate_runtime_requirements_accepts_ed25519_rotation_keyring() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_auth_provider(AuthProviderKind::Ed25519)
-    .with_ed25519_private_key(vec![1_u8; 32])
-    .unwrap()
-    .with_ed25519_public_key(vec![2_u8; 32])
-    .unwrap();
+    let config = test_config()
+        .with_auth_provider(AuthProviderKind::Ed25519)
+        .with_ed25519_private_key(vec![1_u8; 32])
+        .unwrap()
+        .with_ed25519_public_key(vec![2_u8; 32])
+        .unwrap();
 
     assert!(config.validate_runtime_requirements().is_ok());
 }
@@ -1125,18 +865,13 @@ fn server_config_non_existent_root_dir_does_not_fail_construction() {
 fn server_config_debug_redacts_secrets() {
     const ED25519_PRIVATE_KEY: &[u8] = b"ed25519-private-key-material";
     const ED25519_PUBLIC_KEY: &[u8] = b"ed25519-public-key-material";
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_token_signing_key(b"super-secret-key-here-32-bytes!!".to_vec())
-    .unwrap()
-    .with_ed25519_private_key(ED25519_PRIVATE_KEY.to_vec())
-    .unwrap()
-    .with_ed25519_public_key(ED25519_PUBLIC_KEY.to_vec())
-    .unwrap();
+    let config = test_config()
+        .with_token_signing_key(b"super-secret-key-here-32-bytes!!".to_vec())
+        .unwrap()
+        .with_ed25519_private_key(ED25519_PRIVATE_KEY.to_vec())
+        .unwrap()
+        .with_ed25519_public_key(ED25519_PUBLIC_KEY.to_vec())
+        .unwrap();
     let debug = format!("{config:?}");
     assert!(!debug.contains("super-secret-key-here-32-bytes!!"));
     assert!(!debug.contains(std::str::from_utf8(ED25519_PRIVATE_KEY).unwrap()));
@@ -1146,12 +881,7 @@ fn server_config_debug_redacts_secrets() {
 
 #[test]
 fn server_config_accessors_return_expected_values() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     assert_eq!(
         config.bind_addr(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)
@@ -1245,584 +975,461 @@ fn adaptive_default_in_flight_chunks_for_parallelism_scales_within_bounds() {
 }
 
 #[test]
-fn server_config_error_display_bind_address() {
-    let err = ServerConfigError::BindAddress("127.0.0.1".parse::<SocketAddr>().unwrap_err());
-    let display = err.to_string();
-    assert_eq!(display, "invalid bind address");
-}
-
-#[test]
-fn server_config_error_display_invalid_server_role() {
-    let err = ServerConfigError::InvalidServerRole;
-    assert_eq!(err.to_string(), "invalid server role");
-}
-
-#[test]
-fn server_config_error_display_invalid_server_frontend() {
-    let err = ServerConfigError::InvalidServerFrontend;
-    assert_eq!(err.to_string(), "invalid server frontend");
-}
-
-#[test]
-fn server_config_error_display_missing_server_frontends() {
-    let err = ServerConfigError::MissingServerFrontends;
-    assert_eq!(
-        err.to_string(),
-        "at least one server frontend must be enabled"
-    );
-}
-
-#[test]
-fn server_config_error_display_invalid_auth_provider() {
-    let err = ServerConfigError::InvalidAuthProvider;
-    assert_eq!(err.to_string(), "invalid auth provider");
-}
-
-#[test]
-fn server_config_error_display_invalid_object_storage_adapter() {
-    let err = ServerConfigError::InvalidObjectStorageAdapter;
-    assert_eq!(err.to_string(), "invalid object storage adapter");
-}
-
-#[test]
-fn server_config_error_display_missing_s3_bucket() {
-    let err = ServerConfigError::MissingS3Bucket;
-    assert_eq!(
-        err.to_string(),
-        "s3 object storage requires SHARDLINE_S3_BUCKET"
-    );
-}
-
-#[test]
-fn server_config_error_display_zero_chunk_size() {
-    let err = ServerConfigError::ZeroChunkSize;
-    assert_eq!(err.to_string(), "chunk size must be greater than zero");
-}
-
-#[test]
-fn server_config_error_display_passthrough_provider_requires_loopback_bind() {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-    let err = ServerConfigError::PassthroughProviderRequiresLoopbackBind { bind_addr: addr };
-    let display = err.to_string();
-    assert!(display.contains("passthrough auth provider requires a loopback bind address"));
-    assert!(display.contains("10.0.0.1"));
-}
-
-#[test]
-fn server_config_error_display_s3_credential_source_conflict() {
-    let err = ServerConfigError::S3CredentialSourceConflict {
-        env: "AWS_ACCESS_KEY_ID",
-        file_env: "AWS_ACCESS_KEY_ID_FILE",
-    };
-    let display = err.to_string();
-    assert!(display.contains("AWS_ACCESS_KEY_ID"));
-    assert!(display.contains("AWS_ACCESS_KEY_ID_FILE"));
-}
-
-#[test]
-fn server_config_error_display_empty_token_signing_key() {
-    let err = ServerConfigError::EmptyTokenSigningKey;
-    assert_eq!(err.to_string(), "token signing key must not be empty");
-}
-
-#[test]
-fn server_config_error_display_missing_token_signing_key_for_routes() {
-    let err = ServerConfigError::MissingTokenSigningKeyForServedRoutes;
-    assert_eq!(
-        err.to_string(),
-        "served shardline routes require shardline token signing key configuration"
-    );
-}
-
-#[test]
-fn server_config_error_display_empty_provider_api_key() {
-    let err = ServerConfigError::EmptyProviderApiKey;
-    assert_eq!(err.to_string(), "provider bootstrap key must not be empty");
-}
-
-#[test]
-fn server_config_error_display_empty_provider_token_issuer() {
-    let err = ServerConfigError::EmptyProviderTokenIssuer;
-    assert_eq!(err.to_string(), "provider token issuer must not be empty");
-}
-
-#[test]
-fn server_config_error_display_provider_tokens_require_signing_key() {
-    let err = ServerConfigError::ProviderTokensRequireSigningKey;
-    assert_eq!(
-        err.to_string(),
-        "provider token issuance requires shardline token signing key configuration"
-    );
-}
-
-#[test]
-fn server_config_error_display_chunk_size_too_large() {
-    let err = ServerConfigError::ChunkSizeTooLarge;
-    assert_eq!(err.to_string(), "chunk size must not exceed 1 GB");
-}
-
-#[test]
-fn server_config_error_display_s3_max_part_bytes_parse() {
-    let err = ServerConfigError::S3MaxPartBytes("not-a-number".parse::<u64>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid s3 max part bytes");
-}
-
-#[test]
-fn server_config_error_display_zero_s3_max_part_bytes() {
-    let err = ServerConfigError::ZeroS3MaxPartBytes;
-    assert_eq!(
-        err.to_string(),
-        "s3 max part bytes must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_s3_max_part_bytes_too_small() {
-    let err = ServerConfigError::S3MaxPartBytesTooSmall {
-        minimum_bytes: 1_048_576,
-    };
-    assert_eq!(
-        err.to_string(),
-        "s3 max part bytes must be at least 1048576 bytes"
-    );
-}
-
-#[test]
-fn server_config_error_display_hub_requires_auth() {
-    let err = ServerConfigError::HubRequiresAuth;
-    assert!(err.to_string().contains("hub frontend requires auth"));
-}
-
-#[test]
 fn server_config_error_debug_round_trip() {
     let err = ServerConfigError::InvalidServerRole;
     let debug = format!("{err:?}");
     assert!(!debug.is_empty());
 }
 
+#[test]
+fn server_config_error_display_exact_messages() {
+    let cases = [
+        (
+            ServerConfigError::BindAddress("127.0.0.1".parse::<SocketAddr>().unwrap_err()),
+            "invalid bind address",
+        ),
+        (ServerConfigError::InvalidServerRole, "invalid server role"),
+        (
+            ServerConfigError::InvalidServerFrontend,
+            "invalid server frontend",
+        ),
+        (
+            ServerConfigError::MissingServerFrontends,
+            "at least one server frontend must be enabled",
+        ),
+        (
+            ServerConfigError::InvalidAuthProvider,
+            "invalid auth provider",
+        ),
+        (
+            ServerConfigError::InvalidObjectStorageAdapter,
+            "invalid object storage adapter",
+        ),
+        (
+            ServerConfigError::MissingS3Bucket,
+            "s3 object storage requires SHARDLINE_S3_BUCKET",
+        ),
+        (
+            ServerConfigError::ZeroChunkSize,
+            "chunk size must be greater than zero",
+        ),
+        (
+            ServerConfigError::EmptyTokenSigningKey,
+            "token signing key must not be empty",
+        ),
+        (
+            ServerConfigError::MissingTokenSigningKeyForServedRoutes,
+            "served shardline routes require shardline token signing key configuration",
+        ),
+        (
+            ServerConfigError::EmptyProviderApiKey,
+            "provider bootstrap key must not be empty",
+        ),
+        (
+            ServerConfigError::EmptyProviderTokenIssuer,
+            "provider token issuer must not be empty",
+        ),
+        (
+            ServerConfigError::ProviderTokensRequireSigningKey,
+            "provider token issuance requires shardline token signing key configuration",
+        ),
+        (
+            ServerConfigError::ChunkSizeTooLarge,
+            "chunk size must not exceed 1 GB",
+        ),
+        (
+            ServerConfigError::S3MaxPartBytes("not-a-number".parse::<u64>().unwrap_err()),
+            "invalid s3 max part bytes",
+        ),
+        (
+            ServerConfigError::ZeroS3MaxPartBytes,
+            "s3 max part bytes must be greater than zero",
+        ),
+        (
+            ServerConfigError::S3MaxPartBytesTooSmall {
+                minimum_bytes: 1_048_576,
+            },
+            "s3 max part bytes must be at least 1048576 bytes",
+        ),
+        (
+            ServerConfigError::RootDir(std::io::Error::other("permission denied")),
+            "invalid local deployment root",
+        ),
+        (
+            ServerConfigError::InvalidS3AllowHttp,
+            "invalid s3 allow-http flag",
+        ),
+        (
+            ServerConfigError::InvalidS3VirtualHostedStyleRequest,
+            "invalid s3 virtual-hosted-style request flag",
+        ),
+        (
+            ServerConfigError::ChunkSize("not-a-number".parse::<usize>().unwrap_err()),
+            "invalid chunk size",
+        ),
+        (
+            ServerConfigError::MaxRequestBodyBytes("not-a-number".parse::<usize>().unwrap_err()),
+            "invalid max request body size",
+        ),
+        (
+            ServerConfigError::ZeroMaxRequestBodyBytes,
+            "max request body size must be greater than zero",
+        ),
+        (
+            ServerConfigError::MaxShardFiles("not-a-number".parse::<usize>().unwrap_err()),
+            "invalid max shard file section count",
+        ),
+        (
+            ServerConfigError::ZeroMaxShardFiles,
+            "max shard file section count must be greater than zero",
+        ),
+        (
+            ServerConfigError::MaxShardXorbs("not-a-number".parse::<usize>().unwrap_err()),
+            "invalid max shard xorb section count",
+        ),
+        (
+            ServerConfigError::ZeroMaxShardXorbs,
+            "max shard xorb section count must be greater than zero",
+        ),
+        (
+            ServerConfigError::MaxShardReconstructionTerms(
+                "not-a-number".parse::<usize>().unwrap_err(),
+            ),
+            "invalid max shard reconstruction term count",
+        ),
+        (
+            ServerConfigError::ZeroMaxShardReconstructionTerms,
+            "max shard reconstruction term count must be greater than zero",
+        ),
+        (
+            ServerConfigError::MaxShardXorbChunks("not-a-number".parse::<usize>().unwrap_err()),
+            "invalid max shard xorb chunk record count",
+        ),
+        (
+            ServerConfigError::ZeroMaxShardXorbChunks,
+            "max shard xorb chunk record count must be greater than zero",
+        ),
+        (
+            ServerConfigError::MaxRevisionsPerRepo("not-a-number".parse::<usize>().unwrap_err()),
+            "invalid max revisions per repo",
+        ),
+        (
+            ServerConfigError::ZeroMaxRevisionsPerRepo,
+            "max revisions per repo must be greater than zero",
+        ),
+        (
+            ServerConfigError::MaxTreeEntriesPerRepo("not-a-number".parse::<usize>().unwrap_err()),
+            "invalid max tree entries per repo",
+        ),
+        (
+            ServerConfigError::ZeroMaxTreeEntriesPerRepo,
+            "max tree entries per repo must be greater than zero",
+        ),
+        (
+            ServerConfigError::UploadMaxInFlightChunks(
+                "not-a-number".parse::<usize>().unwrap_err(),
+            ),
+            "invalid upload max in-flight chunks",
+        ),
+        (
+            ServerConfigError::ZeroUploadMaxInFlightChunks,
+            "upload max in-flight chunks must be greater than zero",
+        ),
+        (
+            ServerConfigError::TransferMaxInFlightChunks(
+                "not-a-number".parse::<usize>().unwrap_err(),
+            ),
+            "invalid transfer max in-flight chunks",
+        ),
+        (
+            ServerConfigError::ZeroTransferMaxInFlightChunks,
+            "transfer max in-flight chunks must be greater than zero",
+        ),
+        (
+            ServerConfigError::InvalidReconstructionCacheAdapter,
+            "invalid reconstruction cache adapter",
+        ),
+        (
+            ServerConfigError::ReconstructionCacheTtl("not-a-number".parse::<u64>().unwrap_err()),
+            "invalid reconstruction cache ttl",
+        ),
+        (
+            ServerConfigError::ZeroReconstructionCacheTtlSeconds,
+            "reconstruction cache ttl must be greater than zero",
+        ),
+        (
+            ServerConfigError::ReconstructionCacheMemoryMaxEntries(
+                "not-a-number".parse::<usize>().unwrap_err(),
+            ),
+            "invalid reconstruction cache memory max entries",
+        ),
+        (
+            ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries,
+            "reconstruction cache memory max entries must be greater than zero",
+        ),
+        (
+            ServerConfigError::OciUploadSessionTtl("not-a-number".parse::<u64>().unwrap_err()),
+            "invalid oci upload session ttl",
+        ),
+        (
+            ServerConfigError::ZeroOciUploadSessionTtlSeconds,
+            "oci upload session ttl must be greater than zero",
+        ),
+        (
+            ServerConfigError::OciUploadMaxActiveSessions(
+                "not-a-number".parse::<usize>().unwrap_err(),
+            ),
+            "invalid oci upload max active sessions",
+        ),
+        (
+            ServerConfigError::ZeroOciUploadMaxActiveSessions,
+            "oci upload max active sessions must be greater than zero",
+        ),
+        (
+            ServerConfigError::OciRegistryTokenTtl("not-a-number".parse::<u64>().unwrap_err()),
+            "invalid oci registry token ttl",
+        ),
+        (
+            ServerConfigError::ZeroOciRegistryTokenTtlSeconds,
+            "oci registry token ttl must be greater than zero",
+        ),
+        (
+            ServerConfigError::OciRegistryTokenMaxInFlightRequests(
+                "not-a-number".parse::<usize>().unwrap_err(),
+            ),
+            "invalid oci registry token max in-flight requests",
+        ),
+        (
+            ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests,
+            "oci registry token max in-flight requests must be greater than zero",
+        ),
+        (
+            ServerConfigError::EmptyReconstructionCacheRedisUrl,
+            "reconstruction cache redis url must not be empty",
+        ),
+        (
+            ServerConfigError::MissingReconstructionCacheRedisUrl,
+            "redis reconstruction cache requires SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL",
+        ),
+        (
+            ServerConfigError::EmptyIndexPostgresUrl,
+            "postgres metadata url must not be empty",
+        ),
+        (
+            ServerConfigError::TokenSigningKey(std::io::Error::other("file error")),
+            "token signing key could not be read",
+        ),
+        (
+            ServerConfigError::ProviderTokenTtl,
+            "invalid provider token ttl",
+        ),
+        (
+            ServerConfigError::MetricsToken(std::io::Error::other("file error")),
+            "metrics token could not be read",
+        ),
+        (
+            ServerConfigError::EmptyMetricsToken,
+            "metrics token must not be empty",
+        ),
+        (
+            ServerConfigError::ProviderApiKey(std::io::Error::other("file error")),
+            "provider bootstrap key could not be read",
+        ),
+        (
+            ServerConfigError::ZeroProviderTokenTtl,
+            "provider token ttl must be greater than zero",
+        ),
+        (
+            ServerConfigError::IncompleteProviderTokenConfig,
+            "provider token issuance requires both provider config and provider api key files",
+        ),
+        (
+            ServerConfigError::MissingOidcIssuer,
+            "oidc auth provider requires SHARDLINE_AUTH_OIDC_ISSUER",
+        ),
+        (
+            ServerConfigError::MissingJwksUrl,
+            "jwks auth provider requires SHARDLINE_AUTH_JWKS_URL",
+        ),
+        (
+            ServerConfigError::EmptyEd25519PrivateKey,
+            "ed25519 private key must not be empty",
+        ),
+        (
+            ServerConfigError::EmptyEd25519PublicKey,
+            "ed25519 public key must not be empty",
+        ),
+        (
+            ServerConfigError::Ed25519PrivateKey(std::io::Error::other("file error")),
+            "ed25519 private key could not be read",
+        ),
+        (
+            ServerConfigError::Ed25519PublicKey(std::io::Error::other("file error")),
+            "ed25519 public key could not be read",
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected, "{error:?}");
+    }
+}
+
+#[test]
+fn server_config_error_display_contains_messages() {
+    let cases: &[(ServerConfigError, &[&str])] = &[
+        (
+            ServerConfigError::PassthroughProviderRequiresLoopbackBind {
+                bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080),
+            },
+            &[
+                "passthrough auth provider requires a loopback bind address",
+                "10.0.0.1",
+            ],
+        ),
+        (
+            ServerConfigError::S3CredentialSourceConflict {
+                env: "AWS_ACCESS_KEY_ID",
+                file_env: "AWS_ACCESS_KEY_ID_FILE",
+            },
+            &["AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID_FILE"],
+        ),
+        (
+            ServerConfigError::HubRequiresAuth,
+            &["hub frontend requires auth"],
+        ),
+        (
+            ServerConfigError::S3CredentialFile {
+                name: "AWS_ACCESS_KEY_ID_FILE",
+                source: std::io::Error::other("file not found"),
+            },
+            &["s3 credential file", "AWS_ACCESS_KEY_ID_FILE"],
+        ),
+        (
+            ServerConfigError::S3CredentialTooLarge {
+                name: "AWS_SECRET_ACCESS_KEY_FILE",
+                observed_bytes: 5000,
+                maximum_bytes: 4096,
+            },
+            &["exceeded", "AWS_SECRET_ACCESS_KEY_FILE"],
+        ),
+        (
+            ServerConfigError::S3CredentialLengthMismatch {
+                name: "AWS_SESSION_TOKEN_FILE",
+                expected_bytes: 100,
+                observed_bytes: 200,
+            },
+            &["changed during bounded read"],
+        ),
+        (
+            ServerConfigError::S3CredentialUtf8 {
+                name: "AWS_SECRET_ACCESS_KEY_FILE",
+            },
+            &["not valid utf-8"],
+        ),
+        (
+            ServerConfigError::SecretSourceConflict {
+                env: "SHARDLINE_TOKEN_SIGNING_KEY",
+                file_env: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
+            },
+            &["secret source conflict"],
+        ),
+        (
+            ServerConfigError::TokenSigningKeyTooLarge {
+                observed_bytes: 2_000_000,
+                maximum_bytes: 1_048_576,
+            },
+            &["exceeded"],
+        ),
+        (
+            ServerConfigError::TokenSigningKeyLengthMismatch {
+                expected_bytes: 100,
+                observed_bytes: 200,
+            },
+            &["changed during bounded read"],
+        ),
+        (
+            ServerConfigError::MetricsTokenTooLarge {
+                observed_bytes: 5000,
+                maximum_bytes: 4096,
+            },
+            &["exceeded"],
+        ),
+        (
+            ServerConfigError::MetricsTokenLengthMismatch {
+                expected_bytes: 100,
+                observed_bytes: 200,
+            },
+            &["changed during bounded read"],
+        ),
+        (
+            ServerConfigError::ProviderApiKeyTooLarge {
+                observed_bytes: 5000,
+                maximum_bytes: 4096,
+            },
+            &["exceeded"],
+        ),
+        (
+            ServerConfigError::ProviderApiKeyLengthMismatch {
+                expected_bytes: 100,
+                observed_bytes: 200,
+            },
+            &["changed during bounded read"],
+        ),
+        (
+            ServerConfigError::InvalidPublicBaseUrl("not-a-url".to_owned()),
+            &["not a valid URL"],
+        ),
+        (
+            ServerConfigError::MissingEd25519Key,
+            &["ed25519 auth provider requires", "at least one"],
+        ),
+        (
+            ServerConfigError::SecretSourceConflict {
+                env: "SHARDLINE_ED25519_PRIVATE_KEY",
+                file_env: "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
+            },
+            &["secret source conflict", "SHARDLINE_ED25519_PRIVATE_KEY"],
+        ),
+        (
+            ServerConfigError::Ed25519PrivateKeyTooLarge {
+                observed_bytes: 2_000_000,
+                maximum_bytes: 1_048_576,
+            },
+            &["exceeded"],
+        ),
+        (
+            ServerConfigError::Ed25519PublicKeyTooLarge {
+                observed_bytes: 2_000_000,
+                maximum_bytes: 1_048_576,
+            },
+            &["exceeded"],
+        ),
+        (
+            ServerConfigError::Ed25519PrivateKeyLengthMismatch {
+                expected_bytes: 100,
+                observed_bytes: 200,
+            },
+            &["changed during bounded read"],
+        ),
+        (
+            ServerConfigError::Ed25519PublicKeyLengthMismatch {
+                expected_bytes: 100,
+                observed_bytes: 200,
+            },
+            &["changed during bounded read"],
+        ),
+    ];
+    for (error, expected) in cases {
+        let display = error.to_string();
+        for expected in *expected {
+            assert!(
+                display.contains(expected),
+                "{error:?}: missing {expected:?} in {display:?}"
+            );
+        }
+    }
+}
+
 // ── Remaining ServerConfigError Display tests ──────────────────────────
-
-#[test]
-fn server_config_error_display_root_dir() {
-    let io_err = std::io::Error::other("permission denied");
-    let err = ServerConfigError::RootDir(io_err);
-    assert_eq!(err.to_string(), "invalid local deployment root");
-}
-
-#[test]
-fn server_config_error_display_invalid_s3_allow_http() {
-    let err = ServerConfigError::InvalidS3AllowHttp;
-    assert_eq!(err.to_string(), "invalid s3 allow-http flag");
-}
-
-#[test]
-fn server_config_error_display_invalid_s3_virtual_hosted_style_request() {
-    let err = ServerConfigError::InvalidS3VirtualHostedStyleRequest;
-    assert_eq!(
-        err.to_string(),
-        "invalid s3 virtual-hosted-style request flag"
-    );
-}
-
-#[test]
-fn server_config_error_display_s3_credential_file() {
-    let io_err = std::io::Error::other("file not found");
-    let err = ServerConfigError::S3CredentialFile {
-        name: "AWS_ACCESS_KEY_ID_FILE",
-        source: io_err,
-    };
-    let display = err.to_string();
-    assert!(display.contains("s3 credential file"));
-    assert!(display.contains("AWS_ACCESS_KEY_ID_FILE"));
-}
-
-#[test]
-fn server_config_error_display_s3_credential_too_large() {
-    let err = ServerConfigError::S3CredentialTooLarge {
-        name: "AWS_SECRET_ACCESS_KEY_FILE",
-        observed_bytes: 5000,
-        maximum_bytes: 4096,
-    };
-    let display = err.to_string();
-    assert!(display.contains("exceeded"));
-    assert!(display.contains("AWS_SECRET_ACCESS_KEY_FILE"));
-}
-
-#[test]
-fn server_config_error_display_s3_credential_length_mismatch() {
-    let err = ServerConfigError::S3CredentialLengthMismatch {
-        name: "AWS_SESSION_TOKEN_FILE",
-        expected_bytes: 100,
-        observed_bytes: 200,
-    };
-    let display = err.to_string();
-    assert!(display.contains("changed during bounded read"));
-}
-
-#[test]
-fn server_config_error_display_s3_credential_utf8() {
-    let err = ServerConfigError::S3CredentialUtf8 {
-        name: "AWS_SECRET_ACCESS_KEY_FILE",
-    };
-    let display = err.to_string();
-    assert!(display.contains("not valid utf-8"));
-}
-
-#[test]
-fn server_config_error_display_chunk_size_parse() {
-    let err = ServerConfigError::ChunkSize("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid chunk size");
-}
-
-#[test]
-fn server_config_error_display_max_request_body_bytes() {
-    let err = ServerConfigError::MaxRequestBodyBytes("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid max request body size");
-}
-
-#[test]
-fn server_config_error_display_zero_max_request_body_bytes() {
-    let err = ServerConfigError::ZeroMaxRequestBodyBytes;
-    assert_eq!(
-        err.to_string(),
-        "max request body size must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_max_shard_files() {
-    let err = ServerConfigError::MaxShardFiles("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid max shard file section count");
-}
-
-#[test]
-fn server_config_error_display_zero_max_shard_files() {
-    let err = ServerConfigError::ZeroMaxShardFiles;
-    assert_eq!(
-        err.to_string(),
-        "max shard file section count must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_max_shard_xorbs() {
-    let err = ServerConfigError::MaxShardXorbs("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid max shard xorb section count");
-}
-
-#[test]
-fn server_config_error_display_zero_max_shard_xorbs() {
-    let err = ServerConfigError::ZeroMaxShardXorbs;
-    assert_eq!(
-        err.to_string(),
-        "max shard xorb section count must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_max_shard_reconstruction_terms() {
-    let err = ServerConfigError::MaxShardReconstructionTerms(
-        "not-a-number".parse::<usize>().unwrap_err(),
-    );
-    assert_eq!(
-        err.to_string(),
-        "invalid max shard reconstruction term count"
-    );
-}
-
-#[test]
-fn server_config_error_display_zero_max_shard_reconstruction_terms() {
-    let err = ServerConfigError::ZeroMaxShardReconstructionTerms;
-    assert_eq!(
-        err.to_string(),
-        "max shard reconstruction term count must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_max_shard_xorb_chunks() {
-    let err = ServerConfigError::MaxShardXorbChunks("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid max shard xorb chunk record count");
-}
-
-#[test]
-fn server_config_error_display_zero_max_shard_xorb_chunks() {
-    let err = ServerConfigError::ZeroMaxShardXorbChunks;
-    assert_eq!(
-        err.to_string(),
-        "max shard xorb chunk record count must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_max_revisions_per_repo() {
-    let err = ServerConfigError::MaxRevisionsPerRepo("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid max revisions per repo");
-}
-
-#[test]
-fn server_config_error_display_zero_max_revisions_per_repo() {
-    let err = ServerConfigError::ZeroMaxRevisionsPerRepo;
-    assert_eq!(
-        err.to_string(),
-        "max revisions per repo must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_max_tree_entries_per_repo() {
-    let err =
-        ServerConfigError::MaxTreeEntriesPerRepo("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid max tree entries per repo");
-}
-
-#[test]
-fn server_config_error_display_zero_max_tree_entries_per_repo() {
-    let err = ServerConfigError::ZeroMaxTreeEntriesPerRepo;
-    assert_eq!(
-        err.to_string(),
-        "max tree entries per repo must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_upload_max_in_flight_chunks() {
-    let err =
-        ServerConfigError::UploadMaxInFlightChunks("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid upload max in-flight chunks");
-}
-
-#[test]
-fn server_config_error_display_zero_upload_max_in_flight_chunks() {
-    let err = ServerConfigError::ZeroUploadMaxInFlightChunks;
-    assert_eq!(
-        err.to_string(),
-        "upload max in-flight chunks must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_transfer_max_in_flight_chunks() {
-    let err =
-        ServerConfigError::TransferMaxInFlightChunks("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid transfer max in-flight chunks");
-}
-
-#[test]
-fn server_config_error_display_zero_transfer_max_in_flight_chunks() {
-    let err = ServerConfigError::ZeroTransferMaxInFlightChunks;
-    assert_eq!(
-        err.to_string(),
-        "transfer max in-flight chunks must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_invalid_reconstruction_cache_adapter() {
-    let err = ServerConfigError::InvalidReconstructionCacheAdapter;
-    assert_eq!(err.to_string(), "invalid reconstruction cache adapter");
-}
-
-#[test]
-fn server_config_error_display_reconstruction_cache_ttl() {
-    let err = ServerConfigError::ReconstructionCacheTtl("not-a-number".parse::<u64>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid reconstruction cache ttl");
-}
-
-#[test]
-fn server_config_error_display_zero_reconstruction_cache_ttl() {
-    let err = ServerConfigError::ZeroReconstructionCacheTtlSeconds;
-    assert_eq!(
-        err.to_string(),
-        "reconstruction cache ttl must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_reconstruction_cache_memory_max_entries() {
-    let err = ServerConfigError::ReconstructionCacheMemoryMaxEntries(
-        "not-a-number".parse::<usize>().unwrap_err(),
-    );
-    assert_eq!(
-        err.to_string(),
-        "invalid reconstruction cache memory max entries"
-    );
-}
-
-#[test]
-fn server_config_error_display_zero_reconstruction_cache_memory_max_entries() {
-    let err = ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries;
-    assert_eq!(
-        err.to_string(),
-        "reconstruction cache memory max entries must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_oci_upload_session_ttl() {
-    let err = ServerConfigError::OciUploadSessionTtl("not-a-number".parse::<u64>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid oci upload session ttl");
-}
-
-#[test]
-fn server_config_error_display_zero_oci_upload_session_ttl() {
-    let err = ServerConfigError::ZeroOciUploadSessionTtlSeconds;
-    assert_eq!(
-        err.to_string(),
-        "oci upload session ttl must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_oci_upload_max_active_sessions() {
-    let err =
-        ServerConfigError::OciUploadMaxActiveSessions("not-a-number".parse::<usize>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid oci upload max active sessions");
-}
-
-#[test]
-fn server_config_error_display_zero_oci_upload_max_active_sessions() {
-    let err = ServerConfigError::ZeroOciUploadMaxActiveSessions;
-    assert_eq!(
-        err.to_string(),
-        "oci upload max active sessions must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_oci_registry_token_ttl() {
-    let err = ServerConfigError::OciRegistryTokenTtl("not-a-number".parse::<u64>().unwrap_err());
-    assert_eq!(err.to_string(), "invalid oci registry token ttl");
-}
-
-#[test]
-fn server_config_error_display_zero_oci_registry_token_ttl() {
-    let err = ServerConfigError::ZeroOciRegistryTokenTtlSeconds;
-    assert_eq!(
-        err.to_string(),
-        "oci registry token ttl must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_oci_registry_token_max_in_flight_requests() {
-    let err = ServerConfigError::OciRegistryTokenMaxInFlightRequests(
-        "not-a-number".parse::<usize>().unwrap_err(),
-    );
-    assert_eq!(
-        err.to_string(),
-        "invalid oci registry token max in-flight requests"
-    );
-}
-
-#[test]
-fn server_config_error_display_zero_oci_registry_token_max_in_flight_requests() {
-    let err = ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests;
-    assert_eq!(
-        err.to_string(),
-        "oci registry token max in-flight requests must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_empty_reconstruction_cache_redis_url() {
-    let err = ServerConfigError::EmptyReconstructionCacheRedisUrl;
-    assert_eq!(
-        err.to_string(),
-        "reconstruction cache redis url must not be empty"
-    );
-}
-
-#[test]
-fn server_config_error_display_missing_reconstruction_cache_redis_url() {
-    let err = ServerConfigError::MissingReconstructionCacheRedisUrl;
-    assert_eq!(
-        err.to_string(),
-        "redis reconstruction cache requires SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL"
-    );
-}
-
-#[test]
-fn server_config_error_display_empty_index_postgres_url() {
-    let err = ServerConfigError::EmptyIndexPostgresUrl;
-    assert_eq!(err.to_string(), "postgres metadata url must not be empty");
-}
-
-#[test]
-fn server_config_error_display_token_signing_key() {
-    let io_err = std::io::Error::other("file error");
-    let err = ServerConfigError::TokenSigningKey(io_err);
-    assert_eq!(err.to_string(), "token signing key could not be read");
-}
-
-#[test]
-fn server_config_error_display_token_signing_key_source_conflict() {
-    let err = ServerConfigError::SecretSourceConflict {
-        env: "SHARDLINE_TOKEN_SIGNING_KEY",
-        file_env: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
-    };
-    let display = err.to_string();
-    assert!(display.contains("secret source conflict"));
-}
-
-#[test]
-fn server_config_error_display_token_signing_key_too_large() {
-    let err = ServerConfigError::TokenSigningKeyTooLarge {
-        observed_bytes: 2_000_000,
-        maximum_bytes: 1_048_576,
-    };
-    let display = err.to_string();
-    assert!(display.contains("exceeded"));
-}
-
-#[test]
-fn server_config_error_display_token_signing_key_length_mismatch() {
-    let err = ServerConfigError::TokenSigningKeyLengthMismatch {
-        expected_bytes: 100,
-        observed_bytes: 200,
-    };
-    let display = err.to_string();
-    assert!(display.contains("changed during bounded read"));
-}
-
-#[test]
-fn server_config_error_display_provider_token_ttl() {
-    let err = ServerConfigError::ProviderTokenTtl;
-    assert_eq!(err.to_string(), "invalid provider token ttl");
-}
-
-#[test]
-fn server_config_error_display_metrics_token() {
-    let io_err = std::io::Error::other("file error");
-    let err = ServerConfigError::MetricsToken(io_err);
-    assert_eq!(err.to_string(), "metrics token could not be read");
-}
-
-#[test]
-fn server_config_error_display_empty_metrics_token() {
-    let err = ServerConfigError::EmptyMetricsToken;
-    assert_eq!(err.to_string(), "metrics token must not be empty");
-}
-
-#[test]
-fn server_config_error_display_metrics_token_too_large() {
-    let err = ServerConfigError::MetricsTokenTooLarge {
-        observed_bytes: 5000,
-        maximum_bytes: 4096,
-    };
-    let display = err.to_string();
-    assert!(display.contains("exceeded"));
-}
-
-#[test]
-fn server_config_error_display_metrics_token_length_mismatch() {
-    let err = ServerConfigError::MetricsTokenLengthMismatch {
-        expected_bytes: 100,
-        observed_bytes: 200,
-    };
-    let display = err.to_string();
-    assert!(display.contains("changed during bounded read"));
-}
 
 #[test]
 fn server_config_error_display_admin_read_token_variants() {
@@ -1859,67 +1466,6 @@ fn server_config_error_display_admin_read_token_variants() {
 }
 
 #[test]
-fn server_config_error_display_provider_api_key() {
-    let io_err = std::io::Error::other("file error");
-    let err = ServerConfigError::ProviderApiKey(io_err);
-    assert_eq!(err.to_string(), "provider bootstrap key could not be read");
-}
-
-#[test]
-fn server_config_error_display_provider_api_key_too_large() {
-    let err = ServerConfigError::ProviderApiKeyTooLarge {
-        observed_bytes: 5000,
-        maximum_bytes: 4096,
-    };
-    let display = err.to_string();
-    assert!(display.contains("exceeded"));
-}
-
-#[test]
-fn server_config_error_display_provider_api_key_length_mismatch() {
-    let err = ServerConfigError::ProviderApiKeyLengthMismatch {
-        expected_bytes: 100,
-        observed_bytes: 200,
-    };
-    let display = err.to_string();
-    assert!(display.contains("changed during bounded read"));
-}
-
-#[test]
-fn server_config_error_display_zero_provider_token_ttl() {
-    let err = ServerConfigError::ZeroProviderTokenTtl;
-    assert_eq!(
-        err.to_string(),
-        "provider token ttl must be greater than zero"
-    );
-}
-
-#[test]
-fn server_config_error_display_incomplete_provider_token_config() {
-    let err = ServerConfigError::IncompleteProviderTokenConfig;
-    assert_eq!(
-        err.to_string(),
-        "provider token issuance requires both provider config and provider api key files"
-    );
-}
-
-#[test]
-fn server_config_error_display_invalid_public_base_url() {
-    let err = ServerConfigError::InvalidPublicBaseUrl("not-a-url".to_owned());
-    let display = err.to_string();
-    assert!(display.contains("not a valid URL"));
-}
-
-#[test]
-fn server_config_error_display_missing_oidc_issuer() {
-    let err = ServerConfigError::MissingOidcIssuer;
-    assert_eq!(
-        err.to_string(),
-        "oidc auth provider requires SHARDLINE_AUTH_OIDC_ISSUER"
-    );
-}
-
-#[test]
 fn server_config_error_display_oidc_issuer_must_use_https() {
     let err = ServerConfigError::OidcIssuerMustUseHttps {
         issuer: "http://accounts.example.com".to_owned(),
@@ -1929,15 +1475,6 @@ fn server_config_error_display_oidc_issuer_must_use_https() {
     assert!(
         display.contains("http://accounts.example.com"),
         "message: {display}"
-    );
-}
-
-#[test]
-fn server_config_error_display_missing_jwks_url() {
-    let err = ServerConfigError::MissingJwksUrl;
-    assert_eq!(
-        err.to_string(),
-        "jwks auth provider requires SHARDLINE_AUTH_JWKS_URL"
     );
 }
 
@@ -1954,101 +1491,11 @@ fn server_config_error_display_jwks_url_must_use_https() {
     );
 }
 
-#[test]
-fn server_config_error_display_missing_ed25519_key() {
-    let err = ServerConfigError::MissingEd25519Key;
-    assert!(err.to_string().contains("ed25519 auth provider requires"));
-    assert!(err.to_string().contains("at least one"));
-}
-
-#[test]
-fn server_config_error_display_empty_ed25519_private_key() {
-    let err = ServerConfigError::EmptyEd25519PrivateKey;
-    assert_eq!(err.to_string(), "ed25519 private key must not be empty");
-}
-
-#[test]
-fn server_config_error_display_empty_ed25519_public_key() {
-    let err = ServerConfigError::EmptyEd25519PublicKey;
-    assert_eq!(err.to_string(), "ed25519 public key must not be empty");
-}
-
-#[test]
-fn server_config_error_display_ed25519_private_key() {
-    let io_err = std::io::Error::other("file error");
-    let err = ServerConfigError::Ed25519PrivateKey(io_err);
-    assert_eq!(err.to_string(), "ed25519 private key could not be read");
-}
-
-#[test]
-fn server_config_error_display_ed25519_public_key() {
-    let io_err = std::io::Error::other("file error");
-    let err = ServerConfigError::Ed25519PublicKey(io_err);
-    assert_eq!(err.to_string(), "ed25519 public key could not be read");
-}
-
-#[test]
-fn server_config_error_display_secret_source_conflict() {
-    let err = ServerConfigError::SecretSourceConflict {
-        env: "SHARDLINE_ED25519_PRIVATE_KEY",
-        file_env: "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
-    };
-    let display = err.to_string();
-    assert!(display.contains("secret source conflict"));
-    assert!(display.contains("SHARDLINE_ED25519_PRIVATE_KEY"));
-}
-
-#[test]
-fn server_config_error_display_ed25519_private_key_too_large() {
-    let err = ServerConfigError::Ed25519PrivateKeyTooLarge {
-        observed_bytes: 2_000_000,
-        maximum_bytes: 1_048_576,
-    };
-    let display = err.to_string();
-    assert!(display.contains("exceeded"));
-}
-
-#[test]
-fn server_config_error_display_ed25519_public_key_too_large() {
-    let err = ServerConfigError::Ed25519PublicKeyTooLarge {
-        observed_bytes: 2_000_000,
-        maximum_bytes: 1_048_576,
-    };
-    let display = err.to_string();
-    assert!(display.contains("exceeded"));
-}
-
-#[test]
-fn server_config_error_display_ed25519_private_key_length_mismatch() {
-    let err = ServerConfigError::Ed25519PrivateKeyLengthMismatch {
-        expected_bytes: 100,
-        observed_bytes: 200,
-    };
-    let display = err.to_string();
-    assert!(display.contains("changed during bounded read"));
-}
-
-#[test]
-fn server_config_error_display_ed25519_public_key_length_mismatch() {
-    let err = ServerConfigError::Ed25519PublicKeyLengthMismatch {
-        expected_bytes: 100,
-        observed_bytes: 200,
-    };
-    let display = err.to_string();
-    assert!(display.contains("changed during bounded read"));
-}
-
 // ── Remaining builder method tests ─────────────────────────────────────
 
 #[test]
 fn server_config_builder_with_oci_registry_token_ttl_seconds() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_oci_registry_token_ttl_seconds(NonZeroU64::new(600).unwrap());
+    let config = test_config().with_oci_registry_token_ttl_seconds(NonZeroU64::new(600).unwrap());
     assert_eq!(
         config.oci_registry_token_ttl_seconds(),
         NonZeroU64::new(600).unwrap()
@@ -2057,13 +1504,8 @@ fn server_config_builder_with_oci_registry_token_ttl_seconds() {
 
 #[test]
 fn server_config_builder_with_oci_registry_token_max_in_flight_requests() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_oci_registry_token_max_in_flight_requests(NonZeroUsize::new(128).unwrap());
+    let config = test_config()
+        .with_oci_registry_token_max_in_flight_requests(NonZeroUsize::new(128).unwrap());
     assert_eq!(
         config.oci_registry_token_max_in_flight_requests(),
         NonZeroUsize::new(128).unwrap()
@@ -2072,23 +1514,13 @@ fn server_config_builder_with_oci_registry_token_max_in_flight_requests() {
 
 #[test]
 fn server_config_reconstruction_cache_redis_url_returns_none_when_not_configured() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     assert!(config.reconstruction_cache_redis_url().is_none());
 }
 
 #[test]
 fn server_config_builder_with_metrics_token_rejects_too_large() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_metrics_token(vec![0u8; 5000]);
     assert!(matches!(
         result,
@@ -2098,12 +1530,7 @@ fn server_config_builder_with_metrics_token_rejects_too_large() {
 
 #[test]
 fn server_config_builder_with_admin_read_token_rejects_too_large() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_admin_read_token(vec![0_u8; 5000]);
     assert!(matches!(
         result,
@@ -2113,12 +1540,7 @@ fn server_config_builder_with_admin_read_token_rejects_too_large() {
 
 #[test]
 fn server_config_transfer_max_in_flight_chunks_accessor() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     assert!(config.transfer_max_in_flight_chunks().get() > 0);
 }
 
@@ -2142,23 +1564,13 @@ fn adaptive_default_in_flight_chunks_for_parallelism_zero_parallelism() {
 #[test]
 fn server_config_upload_max_in_flight_chunks_default_is_positive() {
     // Use ServerConfig::new to verify the default is greater than zero
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     assert!(config.upload_max_in_flight_chunks().get() > 0);
 }
 
 #[test]
 fn server_config_with_token_signing_key_rejects_too_large() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     // The bounded Ed25519 key parser rejects unreasonably large input.
     let result = config.with_token_signing_key(vec![0u8; 2_000_000]);
     assert!(matches!(
@@ -2169,12 +1581,7 @@ fn server_config_with_token_signing_key_rejects_too_large() {
 
 #[test]
 fn server_config_with_ed25519_private_key_rejects_too_large() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     // MAX_TOKEN_SIGNING_KEY_BYTES is 1_048_576; exceed it
     let result = config.with_ed25519_private_key(vec![0u8; 2_000_000]);
     assert!(matches!(
@@ -2185,12 +1592,7 @@ fn server_config_with_ed25519_private_key_rejects_too_large() {
 
 #[test]
 fn server_config_with_ed25519_public_key_rejects_too_large() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     let result = config.with_ed25519_public_key(vec![0u8; 2_000_000]);
     assert!(matches!(
         result,
@@ -2200,14 +1602,9 @@ fn server_config_with_ed25519_public_key_rejects_too_large() {
 
 #[test]
 fn server_config_with_provider_runtime_rejects_api_key_too_large() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
-    .unwrap();
+    let config = test_config()
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap();
     // MAX_PROVIDER_API_KEY_BYTES is 4096; exceed it
     let result = config.with_provider_runtime(
         PathBuf::from("/tmp/provider.yaml"),
@@ -2258,13 +1655,7 @@ fn take_secret_file_read_hook_returns_none_for_non_matching_path() {
 
 #[test]
 fn strict_mode_rejects_passthrough_auth() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Strict);
+    let config = ephemeral_bind_config().with_deployment_mode(DeploymentMode::Strict);
     // Passthrough is the default when SHARDLINE_AUTH_PROVIDER=passthrough
     // But without setting it explicitly, the default is "local" which has no signing key
     // if token_signing_key is None and Strict mode, validation should fail
@@ -2275,13 +1666,7 @@ fn strict_mode_rejects_passthrough_auth() {
 
 #[test]
 fn insecure_mode_allows_no_auth() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Insecure);
+    let config = ephemeral_bind_config().with_deployment_mode(DeploymentMode::Insecure);
     let result = config.validate_runtime_requirements();
     // Should succeed because insecure allows everything
     assert!(result.is_ok());
@@ -2289,17 +1674,12 @@ fn insecure_mode_allows_no_auth() {
 
 #[test]
 fn strict_mode_succeeds_with_all_required() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Strict)
-    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap()
-    .with_metrics_token(b"metrics-token".to_vec())
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Strict)
+        .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
+        .with_metrics_token(b"metrics-token".to_vec())
+        .unwrap();
     let result = config.validate_runtime_requirements();
     // With the signing key AND metrics token set, strict mode should succeed
     assert!(result.is_ok());
@@ -2405,17 +1785,12 @@ fn strict_mode_accepts_metrics_token() {
 
 #[test]
 fn authenticated_mode_rejects_plaintext_hub_webhook_secrets() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated)
-    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap()
-    .with_server_frontends([ServerFrontend::Hub])
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Authenticated)
+        .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap();
     let result = config.validate_runtime_requirements();
     assert!(matches!(
         result,
@@ -2425,32 +1800,22 @@ fn authenticated_mode_rejects_plaintext_hub_webhook_secrets() {
 
 #[test]
 fn authenticated_mode_allows_plaintext_secrets_with_explicit_override() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated)
-    .with_allow_plaintext_secrets_in_production(true)
-    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap()
-    .with_server_frontends([ServerFrontend::Hub])
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Authenticated)
+        .with_allow_plaintext_secrets_in_production(true)
+        .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
 #[test]
 fn insecure_mode_allows_plaintext_hub_webhook_secrets() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Insecure)
-    .with_server_frontends([ServerFrontend::Hub])
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Insecure)
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
@@ -2459,14 +1824,9 @@ fn default_insecure_mode_rejects_plaintext_hub_webhook_secrets_without_key() {
     // The DEFAULT (unset) mode is Insecure, but that implicit default must NOT
     // disarm the plaintext-secret gate: secrets configured without an
     // encryption key and without an explicit mode/override choice fail loud.
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_server_frontends([ServerFrontend::Hub])
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap();
     let result = config.validate_runtime_requirements();
     assert!(matches!(
         result,
@@ -2476,15 +1836,10 @@ fn default_insecure_mode_rejects_plaintext_hub_webhook_secrets_without_key() {
 
 #[test]
 fn default_insecure_mode_allows_plaintext_secrets_with_explicit_override() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_allow_plaintext_secrets_in_production(true)
-    .with_server_frontends([ServerFrontend::Hub])
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_allow_plaintext_secrets_in_production(true)
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
@@ -2492,15 +1847,10 @@ fn default_insecure_mode_allows_plaintext_secrets_with_explicit_override() {
 fn explicit_insecure_mode_allows_plaintext_hub_webhook_secrets() {
     // An EXPLICITLY selected Insecure mode is the operator's informed choice
     // and disarms the plaintext gate, matching the pre-existing behavior.
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Insecure)
-    .with_server_frontends([ServerFrontend::Hub])
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Insecure)
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
@@ -2508,13 +1858,7 @@ fn explicit_insecure_mode_allows_plaintext_hub_webhook_secrets() {
 fn authenticated_mode_without_auth_provider_is_a_startup_error() {
     // Authenticated mode with no auth provider configured would fail open to
     // anonymous full access; the mode must be rejected at startup.
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated);
+    let config = ephemeral_bind_config().with_deployment_mode(DeploymentMode::Authenticated);
     assert!(
         config.validate_runtime_requirements().is_err(),
         "authenticated mode without an auth provider must fail startup"
@@ -2537,14 +1881,9 @@ fn authenticated_mode_with_passthrough_is_accepted_as_trusted_proxy_carve_out() 
     // "requires a configured auth provider" check must not fire, because the
     // loopback-bind requirement (enforced in validate_runtime_requirements) is
     // what actually controls a passthrough deployment.
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated)
-    .with_auth_provider(AuthProviderKind::Passthrough);
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Authenticated)
+        .with_auth_provider(AuthProviderKind::Passthrough);
     assert!(
         config.validate_runtime_requirements().is_ok(),
         "authenticated mode with passthrough must be accepted on a loopback bind"
@@ -2556,27 +1895,16 @@ fn insecure_mode_anonymous_warning_only_fires_without_auth_provider() {
     // The "all requests are allowed without authentication" warning is gated on
     // there being NO configured auth provider: with a provider present,
     // authorize() enforces authentication despite the insecure mode.
-    let no_provider = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Insecure);
+    let no_provider = ephemeral_bind_config().with_deployment_mode(DeploymentMode::Insecure);
     assert!(
         !no_provider.auth_provider_is_configured(),
         "Local provider without a signing key is permissive mode"
     );
 
-    let with_provider = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Insecure)
-    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap();
+    let with_provider = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Insecure)
+        .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap();
     assert!(
         with_provider.auth_provider_is_configured(),
         "a signing key configures a real auth provider"
@@ -2589,14 +1917,9 @@ fn auth_provider_is_configured_is_false_for_passthrough() {
     // Passthrough trusts every inbound token (authenticated in name only), so
     // it must NOT count as a configured auth provider for the Authenticated
     // mode requirement. The real control is the loopback-bind requirement.
-    let passthrough = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Insecure)
-    .with_auth_provider(AuthProviderKind::Passthrough);
+    let passthrough = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Insecure)
+        .with_auth_provider(AuthProviderKind::Passthrough);
     assert!(
         !passthrough.auth_provider_is_configured(),
         "passthrough must not count as a configured auth provider"
@@ -2605,56 +1928,41 @@ fn auth_provider_is_configured_is_false_for_passthrough() {
 
 #[test]
 fn authenticated_mode_without_hub_or_provider_needs_no_encryption_keys() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated)
-    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap()
-    .with_server_frontends([ServerFrontend::Xet])
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Authenticated)
+        .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
+        .with_server_frontends([ServerFrontend::Xet])
+        .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
 #[test]
 fn authenticated_mode_accepts_hub_webhook_encryption_key() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated)
-    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap()
-    .with_server_frontends([ServerFrontend::Hub])
-    .unwrap()
-    .with_hub_webhook_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Authenticated)
+        .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
+        .with_server_frontends([ServerFrontend::Hub])
+        .unwrap()
+        .with_hub_webhook_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
 #[test]
 fn authenticated_mode_rejects_plaintext_provider_config_secrets() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated)
-    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap()
-    .with_provider_runtime(
-        PathBuf::from("/tmp/provider.yaml"),
-        b"valid-api-key".to_vec(),
-        "issuer".to_owned(),
-        NonZeroU64::new(3600).unwrap(),
-    )
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Authenticated)
+        .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
+        .with_provider_runtime(
+            PathBuf::from("/tmp/provider.yaml"),
+            b"valid-api-key".to_vec(),
+            "issuer".to_owned(),
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .unwrap();
     let result = config.validate_runtime_requirements();
     assert!(matches!(
         result,
@@ -2664,24 +1972,19 @@ fn authenticated_mode_rejects_plaintext_provider_config_secrets() {
 
 #[test]
 fn authenticated_mode_accepts_provider_config_encryption_key() {
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        PathBuf::from("/tmp"),
-        NonZeroUsize::new(65536).unwrap(),
-    )
-    .with_deployment_mode(DeploymentMode::Authenticated)
-    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap()
-    .with_config_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .unwrap()
-    .with_provider_runtime(
-        PathBuf::from("/tmp/provider.yaml"),
-        b"valid-api-key".to_vec(),
-        "issuer".to_owned(),
-        NonZeroU64::new(3600).unwrap(),
-    )
-    .unwrap();
+    let config = ephemeral_bind_config()
+        .with_deployment_mode(DeploymentMode::Authenticated)
+        .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
+        .with_config_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
+        .with_provider_runtime(
+            PathBuf::from("/tmp/provider.yaml"),
+            b"valid-api-key".to_vec(),
+            "issuer".to_owned(),
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
@@ -2832,16 +2135,11 @@ fn byte_unit_rejects_unknown() {
 
 #[test]
 fn server_config_builder_with_s3_upload_session_ttl_and_max_active() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_s3_upload_session_ttl_seconds(NonZeroU64::new(7200).unwrap())
-    .expect("s3 upload session ttl")
-    .with_s3_upload_max_active_sessions(NonZeroUsize::new(64).unwrap())
-    .expect("s3 upload max active sessions");
+    let config = test_config()
+        .with_s3_upload_session_ttl_seconds(NonZeroU64::new(7200).unwrap())
+        .expect("s3 upload session ttl")
+        .with_s3_upload_max_active_sessions(NonZeroUsize::new(64).unwrap())
+        .expect("s3 upload max active sessions");
     assert_eq!(
         config.s3_upload_session_ttl_seconds(),
         NonZeroU64::new(7200).unwrap()
@@ -2854,30 +2152,20 @@ fn server_config_builder_with_s3_upload_session_ttl_and_max_active() {
 
 #[test]
 fn server_config_defaults_for_s3_upload_sessions() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     assert_eq!(config.s3_upload_session_ttl_seconds().get(), 3600);
     assert_eq!(config.s3_upload_max_active_sessions().get(), 1024);
 }
 
 #[test]
 fn server_config_s3_min_part_bytes_and_quotas() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    )
-    .with_s3_min_part_bytes(NonZeroU64::new(5_242_880).unwrap())
-    .expect("s3 min part bytes")
-    .with_s3_upload_session_max_bytes(NonZeroU64::new(1_099_511_627_776).unwrap())
-    .expect("s3 session max bytes")
-    .with_s3_upload_total_max_bytes(NonZeroU64::new(4_398_046_511_104).unwrap())
-    .expect("s3 total max bytes");
+    let config = test_config()
+        .with_s3_min_part_bytes(NonZeroU64::new(5_242_880).unwrap())
+        .expect("s3 min part bytes")
+        .with_s3_upload_session_max_bytes(NonZeroU64::new(1_099_511_627_776).unwrap())
+        .expect("s3 session max bytes")
+        .with_s3_upload_total_max_bytes(NonZeroU64::new(4_398_046_511_104).unwrap())
+        .expect("s3 total max bytes");
     assert_eq!(config.s3_min_part_bytes().get(), 5_242_880);
     assert_eq!(
         config.s3_upload_session_max_bytes().get(),
@@ -2888,12 +2176,7 @@ fn server_config_s3_min_part_bytes_and_quotas() {
 
 #[test]
 fn server_config_s3_defaults_min_part_and_quotas() {
-    let config = ServerConfig::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        "http://localhost:8080".to_owned(),
-        PathBuf::from("/tmp/test"),
-        NonZeroUsize::new(4096).unwrap(),
-    );
+    let config = test_config();
     assert_eq!(
         config.s3_min_part_bytes().get(),
         5_242_880,
