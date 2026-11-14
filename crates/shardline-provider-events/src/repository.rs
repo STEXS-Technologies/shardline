@@ -11,9 +11,8 @@ use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent};
 use super::{
     DEFAULT_LOCAL_GC_RETENTION_SECONDS, ProviderWebhookOutcome, ProviderWebhookOutcomeKind,
     records::{
-        DeletedRepositoryReferences, collect_deleted_repository_references,
-        ensure_absent_or_matching_record, parse_record_entry, record_belongs_to_repository,
-        renamed_file_record, repository_record_scope,
+        DeletedRepositoryReferences, collect_deleted_repository_references, parse_record_entry,
+        prepare_renamed_records, record_belongs_to_repository, repository_record_scope,
     },
     state::{migrate_provider_repository_state, planned_provider_repository_state_migration},
 };
@@ -40,25 +39,8 @@ where
     } = collect_repository_records(record_store, event.repository()).await?;
     let mut file_versions = 0_u64;
     let mut chunk_hashes = HashSet::new();
-    let renamed_records = version_records
-        .iter()
-        .map(|record| renamed_file_record(record, new_repository))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for renamed_record in &renamed_records {
-        ensure_absent_or_matching_record(
-            record_store,
-            &RecordTraversal::version_record_locator(record_store, renamed_record),
-            renamed_record,
-        )
-        .await?;
-        ensure_absent_or_matching_record(
-            record_store,
-            &RecordTraversal::latest_record_locator(record_store, renamed_record),
-            renamed_record,
-        )
-        .await?;
-    }
+    let renamed_records =
+        prepare_renamed_records(record_store, &version_records, new_repository).await?;
 
     for renamed_record in renamed_records {
         RecordMutation::write_version_record(record_store, &renamed_record)
@@ -107,25 +89,8 @@ pub(super) async fn plan_postgres_repository_renamed(
     } = collect_repository_records(record_store, event.repository()).await?;
     let mut file_versions = 0_u64;
     let mut chunk_hashes = HashSet::new();
-    let renamed_records = version_records
-        .iter()
-        .map(|record| renamed_file_record(record, new_repository))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for renamed_record in &renamed_records {
-        ensure_absent_or_matching_record(
-            record_store,
-            &RecordTraversal::version_record_locator(record_store, renamed_record),
-            renamed_record,
-        )
-        .await?;
-        ensure_absent_or_matching_record(
-            record_store,
-            &RecordTraversal::latest_record_locator(record_store, renamed_record),
-            renamed_record,
-        )
-        .await?;
-    }
+    let renamed_records =
+        prepare_renamed_records(record_store, &version_records, new_repository).await?;
     for renamed_record in renamed_records {
         file_versions = file_versions
             .checked_add(1)

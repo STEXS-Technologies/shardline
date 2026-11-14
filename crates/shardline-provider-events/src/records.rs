@@ -36,6 +36,30 @@ where
     Err(ProviderEventsError::ConflictingRenameTargetRecord)
 }
 
+pub(super) async fn prepare_renamed_records<RecordAdapter>(
+    record_store: &RecordAdapter,
+    version_records: &[FileRecord],
+    new_repository: &RepositoryRef,
+) -> Result<Vec<FileRecord>, ProviderEventsError>
+where
+    RecordAdapter: RecordStore + Sync,
+    RecordAdapter::Error: Into<ProviderEventsError>,
+{
+    let renamed_records = version_records
+        .iter()
+        .map(|record| renamed_file_record(record, new_repository))
+        .collect::<Result<Vec<_>, _>>()?;
+    for record in &renamed_records {
+        for locator in [
+            RecordTraversal::version_record_locator(record_store, record),
+            RecordTraversal::latest_record_locator(record_store, record),
+        ] {
+            ensure_absent_or_matching_record(record_store, &locator, record).await?;
+        }
+    }
+    Ok(renamed_records)
+}
+
 pub(super) struct DeletedRepositoryReferences {
     pub file_versions: u64,
     pub chunk_hashes: HashSet<String>,
