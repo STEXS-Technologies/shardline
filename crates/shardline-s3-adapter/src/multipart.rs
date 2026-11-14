@@ -2337,6 +2337,21 @@ mod tests {
         .unwrap()
     }
 
+    async fn store_default_part(root: &Path, upload_id: &str, part: u32, size: u64) {
+        store_part(
+            root,
+            upload_id,
+            part,
+            size,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+            cap(200_000),
+        )
+        .await
+        .unwrap();
+    }
+
     fn session_at(root: &Path, upload_id: &str) -> MultipartUploadSession {
         // Reads the session json directly for assertions.
         let bytes = std::fs::read(session_metadata_path(root, upload_id).unwrap()).unwrap();
@@ -2654,18 +2669,7 @@ mod tests {
             )
             .await
             .unwrap();
-            store_part(
-                root.path(),
-                &upload_id,
-                part,
-                size,
-                ttl(3600),
-                quota(1 << 40),
-                quota(1 << 40),
-                cap(200_000),
-            )
-            .await
-            .unwrap();
+            store_default_part(root.path(), &upload_id, part, size).await;
         }
 
         let session = read_session(root.path(), &upload_id, ttl(3600))
@@ -2900,18 +2904,7 @@ mod tests {
         let upload_id = create_default_session(root.path(), "history.bin").await;
         let part_path = part_file_path(root.path(), &upload_id, 1).unwrap();
         fs::write(&part_path, vec![0_u8; 4]).await.unwrap();
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            4,
-            ttl(3600),
-            quota(1 << 40),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
+        store_default_part(root.path(), &upload_id, 1, 4).await;
         let path = session_metadata_path(root.path(), &upload_id).unwrap();
         let (_session, _evidence, snapshot_evidence) =
             load_session_with_snapshot(path.parent().unwrap())
@@ -2923,18 +2916,7 @@ mod tests {
         assert_eq!(persisted.journal_evidence_sequence, Some(2));
         assert_eq!(persisted.journal_snapshot_sequence, Some(1));
 
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            4,
-            ttl(3600),
-            quota(1 << 40),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
+        store_default_part(root.path(), &upload_id, 1, 4).await;
         let (_session, _evidence, snapshot_evidence) =
             load_session_with_snapshot(path.parent().unwrap())
                 .await
@@ -2949,30 +2931,8 @@ mod tests {
     async fn store_part_overwrites_existing_part_size() {
         let root = make_root().await;
         let upload_id = create_default_session(root.path(), "k").await;
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            100,
-            ttl(3600),
-            quota(1 << 40),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            200,
-            ttl(3600),
-            quota(1 << 40),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
+        store_default_part(root.path(), &upload_id, 1, 100).await;
+        store_default_part(root.path(), &upload_id, 1, 200).await;
         let session = read_session(root.path(), &upload_id, ttl(3600))
             .await
             .unwrap();
@@ -2997,18 +2957,7 @@ mod tests {
     async fn delete_session_removes_parts_and_is_idempotent() {
         let root = make_root().await;
         let upload_id = create_default_session(root.path(), "k").await;
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            10,
-            ttl(3600),
-            quota(1 << 40),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
+        store_default_part(root.path(), &upload_id, 1, 10).await;
 
         let dir = session_dir(root.path(), &upload_id).unwrap();
         assert!(dir.exists());
@@ -3358,18 +3307,7 @@ mod tests {
         // A keep-alive part refreshes last_touched but NOT the creation-based
         // expiry anchor; backdating created_at makes the session expire even
         // though last_touched is fresh.
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            10,
-            ttl(3600),
-            quota(1 << 40),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
+        store_default_part(root.path(), &upload_id, 1, 10).await;
         let mut session = session_at(root.path(), &upload_id);
         session.created_at_unix_seconds = 1;
         persist_session(root.path(), &upload_id, &session)
