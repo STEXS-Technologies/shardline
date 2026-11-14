@@ -841,122 +841,72 @@ mod tests {
     }
 
     #[test]
-    fn map_record_store_error_sqlx() {
-        let error = PostgresMetadataStoreError::Sqlx(Box::new(sqlx::Error::PoolClosed));
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_json() {
-        let error =
-            PostgresMetadataStoreError::Json(serde_json::from_str::<()>("invalid").unwrap_err());
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_hash_parse() {
-        let error = PostgresMetadataStoreError::HashParse(
-            shardline_protocol::HashParseError::InvalidLength,
-        );
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_object_key() {
-        let error = PostgresMetadataStoreError::ObjectKey(shardline_storage::ObjectKeyError::Empty);
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_range() {
-        let error = PostgresMetadataStoreError::Range(shardline_protocol::RangeError::Inverted);
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_retention_hold() {
-        let error = PostgresMetadataStoreError::RetentionHold(
-            shardline_index::RetentionHoldError::EmptyReason,
-        );
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_quarantine_candidate() {
-        let error = PostgresMetadataStoreError::QuarantineCandidate(
-            shardline_index::QuarantineCandidateError::InvertedTimeline,
-        );
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_webhook_delivery() {
-        let error = PostgresMetadataStoreError::WebhookDelivery(
-            shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
-        );
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_integer_out_of_range() {
-        let error = PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned());
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_invalid_record_kind() {
-        let error = PostgresMetadataStoreError::InvalidRecordKind;
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
-    }
-
-    #[test]
-    fn map_record_store_error_invalid_repo_type() {
-        let error = PostgresMetadataStoreError::InvalidRepoType("unknown".to_owned());
-        let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
+    fn map_record_store_error_preserves_storage_failures() {
+        let cases = [
+            (
+                "sqlx",
+                PostgresMetadataStoreError::Sqlx(Box::new(sqlx::Error::PoolClosed)),
+            ),
+            (
+                "json",
+                PostgresMetadataStoreError::Json(
+                    serde_json::from_str::<()>("invalid").unwrap_err(),
+                ),
+            ),
+            (
+                "hash_parse",
+                PostgresMetadataStoreError::HashParse(
+                    shardline_protocol::HashParseError::InvalidLength,
+                ),
+            ),
+            (
+                "object_key",
+                PostgresMetadataStoreError::ObjectKey(shardline_storage::ObjectKeyError::Empty),
+            ),
+            (
+                "range",
+                PostgresMetadataStoreError::Range(shardline_protocol::RangeError::Inverted),
+            ),
+            (
+                "retention_hold",
+                PostgresMetadataStoreError::RetentionHold(
+                    shardline_index::RetentionHoldError::EmptyReason,
+                ),
+            ),
+            (
+                "quarantine_candidate",
+                PostgresMetadataStoreError::QuarantineCandidate(
+                    shardline_index::QuarantineCandidateError::InvertedTimeline,
+                ),
+            ),
+            (
+                "webhook_delivery",
+                PostgresMetadataStoreError::WebhookDelivery(
+                    shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
+                ),
+            ),
+            (
+                "integer_out_of_range",
+                PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned()),
+            ),
+            (
+                "invalid_record_kind",
+                PostgresMetadataStoreError::InvalidRecordKind,
+            ),
+            (
+                "invalid_repo_type",
+                PostgresMetadataStoreError::InvalidRepoType("unknown".to_owned()),
+            ),
+        ];
+        for (name, error) in cases {
+            let expected = format!("{error:?}");
+            let result = map_record_store_error(error);
+            assert!(
+                matches!(&result, ServerError::Index(IndexError::PostgresMetadata(original))
+                    if format!("{original:?}") == expected),
+                "{name}: storage error was not preserved: {result:?}"
+            );
+        }
     }
 
     #[test]
