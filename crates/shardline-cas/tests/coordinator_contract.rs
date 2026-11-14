@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use std::{cell::RefCell, collections::HashMap, num::NonZeroU64, time::Duration};
+use std::{num::NonZeroU64, time::Duration};
 
 use async_trait::async_trait;
 use shardline_cas::paths::xorb_key;
@@ -13,118 +13,9 @@ use shardline_index::{
 };
 use shardline_protocol::{ByteRange, ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::{
-    DeleteOutcome, LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
+    DeleteOutcome, LocalObjectStore, LocalObjectStoreError, ObjectBody, ObjectIntegrity, ObjectKey,
     ObjectPrefix, ObjectStore, PutOutcome, SyncObjectStoreBridge,
 };
-use thiserror::Error;
-
-#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
-enum MemoryObjectError {
-    #[error("memory object integrity mismatch")]
-    IntegrityMismatch,
-    #[error("memory object was missing")]
-    Missing,
-}
-
-#[derive(Debug, Default)]
-struct MemoryObjectStore {
-    objects: RefCell<HashMap<ObjectKey, Vec<u8>>>,
-}
-
-impl ObjectStore for MemoryObjectStore {
-    type Error = MemoryObjectError;
-
-    fn put_if_absent(
-        &self,
-        key: &ObjectKey,
-        body: ObjectBody<'_>,
-        integrity: &ObjectIntegrity,
-    ) -> Result<PutOutcome, Self::Error> {
-        let Ok(body_length) = u64::try_from(body.as_slice().len()) else {
-            return Err(MemoryObjectError::IntegrityMismatch);
-        };
-        if body_length != integrity.length() {
-            return Err(MemoryObjectError::IntegrityMismatch);
-        }
-
-        let mut objects = self.objects.borrow_mut();
-        if let Some(existing) = objects.get(key) {
-            if existing.as_slice() == body.as_slice() {
-                return Ok(PutOutcome::AlreadyExists);
-            }
-
-            return Err(MemoryObjectError::IntegrityMismatch);
-        }
-
-        objects.insert(key.clone(), body.as_slice().to_vec());
-        Ok(PutOutcome::Inserted)
-    }
-
-    fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
-        let objects = self.objects.borrow();
-        let Some(object) = objects.get(key) else {
-            return Err(MemoryObjectError::Missing);
-        };
-        let Ok(start) = usize::try_from(range.start()) else {
-            return Err(MemoryObjectError::Missing);
-        };
-        let Some(length) = range.len() else {
-            return Err(MemoryObjectError::Missing);
-        };
-        let Ok(length) = usize::try_from(length) else {
-            return Err(MemoryObjectError::Missing);
-        };
-
-        let bytes = object
-            .iter()
-            .copied()
-            .skip(start)
-            .take(length)
-            .collect::<Vec<u8>>();
-        Ok(bytes)
-    }
-
-    fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-        Ok(self.objects.borrow().contains_key(key))
-    }
-
-    fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
-        Ok(self.objects.borrow().get(key).map(|object| {
-            ObjectMetadata::new(
-                key.clone(),
-                u64::try_from(object.len()).unwrap_or(u64::MAX),
-                None,
-            )
-        }))
-    }
-
-    fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
-        let mut objects = self
-            .objects
-            .borrow()
-            .iter()
-            .filter(|(key, _object)| key.as_str().starts_with(prefix.as_str()))
-            .map(|(key, object)| {
-                ObjectMetadata::new(
-                    key.clone(),
-                    u64::try_from(object.len()).unwrap_or(u64::MAX),
-                    None,
-                )
-            })
-            .collect::<Vec<_>>();
-        objects.sort_by(|left, right| left.key().as_str().cmp(right.key().as_str()));
-        Ok(objects)
-    }
-
-    fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
-        let removed = self.objects.borrow_mut().remove(key);
-        if removed.is_some() {
-            return Ok(DeleteOutcome::Deleted);
-        }
-
-        Ok(DeleteOutcome::NotFound)
-    }
-}
 
 // ── Mock upload-intent store for error-injection tests ─────────────
 
@@ -183,7 +74,8 @@ impl UploadIntentStore for FailingIntentStore {
 #[test]
 fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
     let index = MemoryIndexStore::default();
-    let object_store = MemoryObjectStore::default();
+    let storage = tempfile::tempdir().unwrap();
+    let object_store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
     let coordinator = CasCoordinator::new(index, object_store, (), limits);
 
@@ -191,7 +83,7 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
     let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
 
     let body = [10, 20, 30, 40];
-    let integrity = ObjectIntegrity::new(hash, 4);
+    let integrity = ObjectIntegrity::new(blake3_hash(&body), 4);
     let first =
         coordinator
             .object_store()
@@ -201,15 +93,16 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
             .object_store()
             .put_if_absent(&key, ObjectBody::from_slice(&body), &integrity);
 
-    assert_eq!(first, Ok(PutOutcome::Inserted));
-    assert_eq!(second, Ok(PutOutcome::AlreadyExists));
-    assert_eq!(coordinator.object_store().contains(&key), Ok(true));
+    assert_eq!(first.unwrap(), PutOutcome::Inserted);
+    assert_eq!(second.unwrap(), PutOutcome::AlreadyExists);
+    assert!(coordinator.object_store().contains(&key).unwrap());
     assert_eq!(
         coordinator
             .object_store()
             .metadata(&key)
-            .map(|value| value.map(|metadata| metadata.length())),
-        Ok(Some(4))
+            .unwrap()
+            .map(|metadata| metadata.length()),
+        Some(4)
     );
 
     let prefix = ObjectPrefix::parse("xorbs/default/").unwrap();
@@ -223,8 +116,8 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
 
     let range = ByteRange::new(1, 2).unwrap();
     assert_eq!(
-        coordinator.object_store().read_range(&key, range),
-        Ok(vec![20, 30])
+        coordinator.object_store().read_range(&key, range).unwrap(),
+        vec![20, 30]
     );
 
     let file_id = FileId::new(hash);
@@ -259,12 +152,12 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
         vec![candidate]
     );
     assert_eq!(
-        coordinator.object_store().delete_if_present(&key),
-        Ok(DeleteOutcome::Deleted)
+        coordinator.object_store().delete_if_present(&key).unwrap(),
+        DeleteOutcome::Deleted
     );
     assert_eq!(
-        coordinator.object_store().delete_if_present(&key),
-        Ok(DeleteOutcome::NotFound)
+        coordinator.object_store().delete_if_present(&key).unwrap(),
+        DeleteOutcome::NotFound
     );
     assert!(
         coordinator
@@ -361,66 +254,81 @@ fn coordinator_local_filesystem_adapters_support_lifecycle_and_reconstruction_co
     ));
 }
 
-// ── MemoryObjectStore error paths ─────────────────────────────────────
+// ── LocalObjectStore error paths ─────────────────────────────────────
 
 #[test]
-fn memory_object_store_put_if_absent_rejects_wrong_body_length() {
-    let store = MemoryObjectStore::default();
+fn local_object_store_put_if_absent_rejects_wrong_body_length() {
+    let storage = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
     let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
 
-    // Body has 5 bytes but integrity declares 4 → IntegrityMismatch
+    // Body has 5 bytes but integrity declares 4.
     let result = store.put_if_absent(
         &key,
         ObjectBody::from_slice(&[10, 20, 30, 40, 50]),
         &integrity,
     );
-    assert_eq!(result, Err(MemoryObjectError::IntegrityMismatch));
+    assert!(matches!(
+        result,
+        Err(LocalObjectStoreError::IntegrityLengthMismatch)
+    ));
 }
 
 #[test]
-fn memory_object_store_put_if_absent_rejects_existing_different_content() {
-    let store = MemoryObjectStore::default();
+fn local_object_store_put_if_absent_rejects_existing_different_content() {
+    let storage = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
-    let hash = ShardlineHash::from_bytes([2; 32]);
+    let hash = blake3_hash(&[10, 20, 30, 40]);
 
     let first = store.put_if_absent(
         &key,
         ObjectBody::from_slice(&[10, 20, 30, 40]),
         &ObjectIntegrity::new(hash, 4),
     );
-    assert_eq!(first, Ok(PutOutcome::Inserted));
+    assert_eq!(first.unwrap(), PutOutcome::Inserted);
 
-    // Same key, different content → IntegrityMismatch
+    // Both bodies have valid integrity, but the immutable key already has different bytes.
     let second = store.put_if_absent(
         &key,
         ObjectBody::from_slice(&[50, 60, 70, 80]),
-        &ObjectIntegrity::new(hash, 4),
+        &ObjectIntegrity::new(blake3_hash(&[50, 60, 70, 80]), 4),
     );
-    assert_eq!(second, Err(MemoryObjectError::IntegrityMismatch));
+    assert!(matches!(
+        second,
+        Err(LocalObjectStoreError::IntegrityHashMismatch)
+    ));
+    assert_eq!(
+        store
+            .read_range(&key, ByteRange::new(0, 3).unwrap())
+            .unwrap(),
+        vec![10, 20, 30, 40]
+    );
 }
 
 #[test]
-fn memory_object_store_read_range_returns_missing_for_unknown_key() {
-    let store = MemoryObjectStore::default();
+fn local_object_store_read_range_returns_missing_for_unknown_key() {
+    let storage = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
     let range = ByteRange::new(0, 0).unwrap();
 
-    assert_eq!(
-        store.read_range(&key, range),
-        Err(MemoryObjectError::Missing)
+    assert!(
+        matches!(store.read_range(&key, range), Err(LocalObjectStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
     );
 }
 
 #[test]
-fn memory_object_store_read_range_returns_missing_for_unrepresentable_length() {
-    let store = MemoryObjectStore::default();
+fn local_object_store_read_range_rejects_unrepresentable_length() {
+    let storage = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
     store
         .put_if_absent(
             &key,
             ObjectBody::from_slice(&[10, 20, 30, 40]),
-            &ObjectIntegrity::new(ShardlineHash::from_bytes([3; 32]), 4),
+            &ObjectIntegrity::new(blake3_hash(&[10, 20, 30, 40]), 4),
         )
         .unwrap();
 
@@ -428,18 +336,19 @@ fn memory_object_store_read_range_returns_missing_for_unrepresentable_length() {
     let range = ByteRange::new(0, u64::MAX).unwrap();
     assert_eq!(range.len(), None);
 
-    assert_eq!(
+    assert!(matches!(
         store.read_range(&key, range),
-        Err(MemoryObjectError::Missing)
-    );
+        Err(LocalObjectStoreError::RangeOutOfBounds)
+    ));
 }
 
 #[test]
-fn memory_object_store_metadata_returns_none_for_missing_key() {
-    let store = MemoryObjectStore::default();
+fn local_object_store_metadata_returns_none_for_missing_key() {
+    let storage = tempfile::tempdir().unwrap();
+    let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
 
-    assert_eq!(store.metadata(&key), Ok(None));
+    assert_eq!(store.metadata(&key).unwrap(), None);
 }
 
 // ── DedupeStore trait methods ─────────────────────────────────────────
@@ -764,14 +673,15 @@ fn cas_limits_default_bounds_use_provided_constants() {
 #[test]
 fn cas_coordinator_constructs_and_exposes_adapters_and_limits() {
     let index = MemoryIndexStore::default();
-    let object_store = MemoryObjectStore::default();
+    let storage = tempfile::tempdir().unwrap();
+    let object_store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
     let coordinator = CasCoordinator::new(index, object_store, (), limits);
 
     // index() returns the stored index adapter
     let _index_ref: &MemoryIndexStore = coordinator.index();
     // object_store() returns the stored object store adapter
-    let _store_ref: &MemoryObjectStore = coordinator.object_store();
+    let _store_ref: &LocalObjectStore = coordinator.object_store();
     // limits() returns the configured limits
     assert_eq!(coordinator.limits(), limits);
 }
