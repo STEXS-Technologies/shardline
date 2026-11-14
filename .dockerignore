@@ -20,3 +20,7 @@ graphify-out
 .graphifyignore
 AGENTS.md
 TODO_*.md
+
+# Documentation and CI workflows do not contribute to the runtime binary.
+docs
+.github
