@@ -136,6 +136,46 @@ pub(crate) fn load_verified_event_json(
     Ok(events)
 }
 
+fn verify_latest_event_json(
+    operation_kind: OperationKind,
+    operation_id: &str,
+    sequence: i64,
+    event_json: &str,
+    merkle_commit_json: Option<String>,
+    previous_merkle_json: Option<String>,
+) -> Result<Value, LocalIndexStoreError> {
+    let sequence = u64::try_from(sequence).map_err(|error| {
+        LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(format!(
+            "persisted row sequence is out of range: {error}"
+        )))
+    })?;
+    let event_json = from_str::<Value>(event_json)?;
+    if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
+        return Err(LocalIndexStoreError::Reliability(
+            shardline_reliability::ReliabilityError::Merkle(
+                "persisted row sequence does not match its event".into(),
+            ),
+        ));
+    }
+    let identity = persisted_event_identity(operation_kind, event_json.clone())?;
+    if identity.operation_id != operation_id {
+        return Err(LocalIndexStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
+        ));
+    }
+    verify_persisted_merkle_commit_with_previous(
+        operation_kind,
+        event_json.clone(),
+        merkle_commit_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?,
+        previous_merkle_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?,
+    )?;
+    Ok(event_json)
+}
+
 /// Loads and verifies only the latest event for one operation. Full-chain
 /// replay remains available through [`load_verified_event_json`] for fsck and
 /// repair; current-state reads use this bounded boundary.
@@ -184,36 +224,15 @@ pub(crate) fn load_latest_verified_event_json(
     let Some((sequence, event_json, merkle_commit_json, previous_merkle_json)) = row else {
         return Ok(None);
     };
-    let sequence = u64::try_from(sequence).map_err(|error| {
-        LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(format!(
-            "persisted row sequence is out of range: {error}"
-        )))
-    })?;
-    let event_json = from_str::<Value>(&event_json)?;
-    if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
-        return Err(LocalIndexStoreError::Reliability(
-            shardline_reliability::ReliabilityError::Merkle(
-                "persisted row sequence does not match its event".into(),
-            ),
-        ));
-    }
-    let identity = persisted_event_identity(operation_kind, event_json.clone())?;
-    if identity.operation_id != operation_id {
-        return Err(LocalIndexStoreError::Reliability(
-            shardline_reliability::ReliabilityError::OperationMismatch,
-        ));
-    }
-    verify_persisted_merkle_commit_with_previous(
+    verify_latest_event_json(
         operation_kind,
-        event_json.clone(),
-        merkle_commit_json
-            .map(|json| from_str::<Value>(&json))
-            .transpose()?,
-        previous_merkle_json
-            .map(|json| from_str::<Value>(&json))
-            .transpose()?,
-    )?;
-    Ok(Some(event_json))
+        operation_id,
+        sequence,
+        &event_json,
+        merkle_commit_json,
+        previous_merkle_json,
+    )
+    .map(Some)
 }
 
 pub(crate) fn load_latest_verified_event_json_batch(
@@ -304,34 +323,13 @@ fn load_latest_verified_event_json_chunk(
     let mut heads = HashMap::with_capacity(operation_ids.len());
     for row in rows {
         let (operation_id, sequence, event_json, merkle_commit_json, previous_merkle_json) = row?;
-        let sequence = u64::try_from(sequence).map_err(|error| {
-            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
-                format!("persisted row sequence is out of range: {error}"),
-            ))
-        })?;
-        let event_json = from_str::<Value>(&event_json)?;
-        if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
-            return Err(LocalIndexStoreError::Reliability(
-                shardline_reliability::ReliabilityError::Merkle(
-                    "persisted row sequence does not match its event".into(),
-                ),
-            ));
-        }
-        let identity = persisted_event_identity(operation_kind, event_json.clone())?;
-        if identity.operation_id != operation_id {
-            return Err(LocalIndexStoreError::Reliability(
-                shardline_reliability::ReliabilityError::OperationMismatch,
-            ));
-        }
-        verify_persisted_merkle_commit_with_previous(
+        let event_json = verify_latest_event_json(
             operation_kind,
-            event_json.clone(),
-            merkle_commit_json
-                .map(|json| from_str::<Value>(&json))
-                .transpose()?,
-            previous_merkle_json
-                .map(|json| from_str::<Value>(&json))
-                .transpose()?,
+            &operation_id,
+            sequence,
+            &event_json,
+            merkle_commit_json,
+            previous_merkle_json,
         )?;
         heads.insert(operation_id, event_json);
     }
