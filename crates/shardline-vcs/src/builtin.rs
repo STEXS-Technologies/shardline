@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use crate::{
     AuthorizationDecision, CanonicalCloneUrl, ProviderKind, ProviderSubject, RepositoryAccess,
-    RepositoryMetadata, RepositoryRef, RepositoryVisibility, RevisionRef, VcsReferenceError,
-    WebhookDeliveryId,
+    RepositoryMetadata, RepositoryRef, RepositoryVisibility, RepositoryWebhookEvent,
+    RepositoryWebhookEventKind, RevisionRef, VcsReferenceError, WebhookDeliveryId,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -250,6 +250,29 @@ pub(crate) fn normalize_default_revision(value: &str) -> Result<RevisionRef, Vcs
     }
 
     RevisionRef::new(&format!("refs/heads/{value}"))
+}
+
+// GitHub and Gitea-compatible providers use the same rename change fields.
+pub(crate) fn parse_repository_rename(
+    payload: &Value,
+    repository: RepositoryRef,
+    delivery_id: WebhookDeliveryId,
+) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
+    let Some(previous_name) = value_str(payload, &["changes", "repository", "name", "from"])
+        .or_else(|| value_str(payload, &["changes", "name", "from"]))
+    else {
+        return Ok(None);
+    };
+    let previous = RepositoryRef::new(repository.provider(), repository.owner(), previous_name)
+        .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)?;
+
+    Ok(Some(RepositoryWebhookEvent::new(
+        previous,
+        delivery_id,
+        RepositoryWebhookEventKind::RepositoryRenamed {
+            new_repository: repository,
+        },
+    )))
 }
 
 pub(crate) fn parse_delivery_id(value: &str) -> Result<WebhookDeliveryId, BuiltInProviderError> {

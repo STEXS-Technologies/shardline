@@ -6,8 +6,8 @@ use crate::{
     ProviderAdapter, ProviderKind, RepositoryMetadata, RepositoryRef, RepositoryWebhookEvent,
     RepositoryWebhookEventKind, WebhookRequest,
     builtin::{
-        parse_delivery_id, parse_repository_from_full_name, parse_revision, parse_webhook_json,
-        value_str, verify_prefixed_hmac_sha256,
+        parse_delivery_id, parse_repository_from_full_name, parse_repository_rename,
+        parse_revision, parse_webhook_json, value_str, verify_prefixed_hmac_sha256,
     },
 };
 
@@ -111,22 +111,7 @@ fn parse_repository_event(
             delivery_id,
             RepositoryWebhookEventKind::RepositoryDeleted,
         ))),
-        "renamed" => {
-            let Some(previous_name) = github_previous_name(&payload) else {
-                return Ok(None);
-            };
-            let previous =
-                RepositoryRef::new(ProviderKind::GitHub, repository.owner(), previous_name)
-                    .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)?;
-
-            Ok(Some(RepositoryWebhookEvent::new(
-                previous,
-                delivery_id,
-                RepositoryWebhookEventKind::RepositoryRenamed {
-                    new_repository: repository,
-                },
-            )))
-        }
+        "renamed" => parse_repository_rename(&payload, repository, delivery_id),
         "edited" | "privatized" | "publicized" | "transferred" => {
             Ok(Some(RepositoryWebhookEvent::new(
                 repository,
@@ -144,11 +129,6 @@ fn github_repository(payload: &Value) -> Result<RepositoryRef, BuiltInProviderEr
     };
 
     parse_repository_from_full_name(ProviderKind::GitHub, full_name)
-}
-
-fn github_previous_name(payload: &Value) -> Option<&str> {
-    value_str(payload, &["changes", "repository", "name", "from"])
-        .or_else(|| value_str(payload, &["changes", "name", "from"]))
 }
 
 #[cfg(test)]
