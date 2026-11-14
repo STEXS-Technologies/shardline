@@ -517,9 +517,7 @@ mod tests {
     use super::*;
     use crate::error::IndexError;
     use crate::object_store::ServerObjectStore;
-    use crate::record_store::stored_record_references_hash;
-    use serde_json::to_vec;
-    use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore, RecordMutation};
+    use shardline_index::{FileRecord, LocalRecordStore, RecordMutation};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use shardline_storage::{ObjectBody, ObjectIntegrity};
     use tempfile::TempDir;
@@ -538,27 +536,6 @@ mod tests {
 
     fn make_hash(ch: char) -> String {
         std::iter::repeat_n(ch, 64).collect()
-    }
-
-    fn file_record_json_bytes(scope: &RepositoryScope, chunk_hash: &str) -> Vec<u8> {
-        let record = FileRecord {
-            file_id: "test/file.bin".into(),
-            content_hash: make_hash('f'),
-            total_bytes: 1024,
-            chunk_size: 256,
-            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-            repository_scope: Some(scope.clone()),
-            chunks: vec![FileChunkRecord {
-                hash: chunk_hash.to_owned(),
-                offset: 0,
-                length: 256,
-                range_start: 0,
-                range_end: 1,
-                packed_start: 0,
-                packed_end: 256,
-            }],
-        };
-        to_vec(&record).unwrap()
     }
 
     async fn make_backend() -> (super::super::PostgresBackend, TempDir) {
@@ -613,100 +590,6 @@ mod tests {
     }
 
     // ===== Pure function tests =====
-
-    #[test]
-    fn stored_record_references_hash_matching() {
-        let scope = test_scope();
-        let hash = make_hash('b');
-        let bytes = file_record_json_bytes(&scope, &hash);
-
-        assert!(stored_record_references_hash(&bytes, &hash, &scope).unwrap());
-    }
-
-    #[test]
-    fn stored_record_references_hash_different() {
-        let scope = test_scope();
-        let stored_hash = make_hash('b');
-        let queried_hash = make_hash('q');
-        let bytes = file_record_json_bytes(&scope, &stored_hash);
-
-        assert!(!stored_record_references_hash(&bytes, &queried_hash, &scope).unwrap());
-    }
-
-    #[test]
-    fn stored_record_references_hash_different_scope() {
-        let record_scope = test_scope();
-        let other_scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "other", "other-repo", None).unwrap();
-        let hash = make_hash('b');
-        let bytes = file_record_json_bytes(&record_scope, &hash);
-
-        assert!(!stored_record_references_hash(&bytes, &hash, &other_scope).unwrap());
-    }
-
-    #[test]
-    fn stored_record_references_hash_invalid_json() {
-        let scope = test_scope();
-        let bytes = b"!!! not valid json !!!";
-
-        assert!(stored_record_references_hash(bytes, &make_hash('a'), &scope).is_err());
-    }
-
-    #[test]
-    fn stored_record_references_hash_null_scope() {
-        // A record with `repository_scope: None` should never match any scope.
-        let scope = test_scope();
-        let hash = make_hash('b');
-        let bytes = {
-            let record = FileRecord {
-                file_id: "test/file.bin".into(),
-                content_hash: make_hash('f'),
-                total_bytes: 1024,
-                chunk_size: 256,
-                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-                repository_scope: None,
-                chunks: vec![FileChunkRecord {
-                    hash: hash.clone(),
-                    offset: 0,
-                    length: 256,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 256,
-                }],
-            };
-            to_vec(&record).unwrap()
-        };
-        assert!(!stored_record_references_hash(&bytes, &hash, &scope).unwrap());
-    }
-
-    #[test]
-    fn stored_record_references_hash_empty_chunks() {
-        let scope = test_scope();
-        let hash = make_hash('x');
-        let bytes = {
-            let record = FileRecord {
-                file_id: "test/file.bin".into(),
-                content_hash: make_hash('f'),
-                total_bytes: 0,
-                chunk_size: 0,
-                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-                repository_scope: Some(scope.clone()),
-                chunks: Vec::new(),
-            };
-            to_vec(&record).unwrap()
-        };
-        assert!(!stored_record_references_hash(&bytes, &hash, &scope).unwrap());
-    }
-
-    #[test]
-    fn stored_record_references_hash_hash_not_in_chunks() {
-        let scope = test_scope();
-        let stored_hash = make_hash('a');
-        let queried_hash = make_hash('z');
-        let bytes = file_record_json_bytes(&scope, &stored_hash);
-        assert!(!stored_record_references_hash(&bytes, &queried_hash, &scope).unwrap());
-    }
 
     #[test]
     fn map_record_store_error_not_found() {

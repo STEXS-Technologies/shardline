@@ -205,3 +205,61 @@ async fn derived_candidate_scope_never_grants_access() {
         "the failed probe and both forged hints must be checked against real metadata"
     );
 }
+
+#[test]
+fn stored_record_membership_requires_matching_scope_and_chunk() {
+    let scope = RepositoryScope::new(
+        RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let other_scope =
+        RepositoryScope::new(RepositoryProvider::GitHub, "other", "other-repo", None).unwrap();
+    let record = FileRecord {
+        file_id: "test/file.bin".into(),
+        content_hash: "f".repeat(64),
+        total_bytes: 1024,
+        chunk_size: 256,
+        storage_repr: StorageRepresentation::FixedChunkV1,
+        repository_scope: Some(scope.clone()),
+        chunks: vec![FileChunkRecord {
+            hash: "b".repeat(64),
+            offset: 0,
+            length: 256,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 256,
+        }],
+    };
+    let mut unscoped = record.clone();
+    unscoped.repository_scope = None;
+    let mut empty = record.clone();
+    empty.total_bytes = 0;
+    empty.chunk_size = 0;
+    empty.chunks.clear();
+    let mut other_hash = record.clone();
+    other_hash.chunks[0].hash = "a".repeat(64);
+    for (name, record, hash, scope, expected) in [
+        ("matching", &record, 'b', &scope, true),
+        ("different hash", &record, 'q', &scope, false),
+        ("different scope", &record, 'b', &other_scope, false),
+        ("missing scope", &unscoped, 'b', &scope, false),
+        ("empty chunks", &empty, 'x', &scope, false),
+        ("hash absent from chunks", &other_hash, 'z', &scope, false),
+    ] {
+        let bytes = serde_json::to_vec(record).unwrap();
+        let hash = hash.to_string().repeat(64);
+        assert_eq!(
+            super::stored_record_references_hash(&bytes, &hash, scope).unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+    assert!(
+        super::stored_record_references_hash(b"!!! not valid json !!!", &"a".repeat(64), &scope,)
+            .is_err()
+    );
+}

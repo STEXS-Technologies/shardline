@@ -3,8 +3,6 @@ use crate::ServerError;
 mod membership;
 mod xorb_range;
 pub(crate) use membership::repository_references_hash_in_scope;
-#[cfg(test)]
-pub(crate) use membership::stored_record_references_hash;
 pub(crate) use xorb_range::{
     Coverage as XorbRangeCoverage, first_xorb_coverage, repository_xorb_coverage,
 };
