@@ -8,6 +8,18 @@ use crate::{
     RetentionHold, StoredObjectId, TreeStore, WebhookDelivery,
 };
 
+// Keep task submission lazy: constructing or dropping an unpolled future must
+// not start a database operation. Preserve the adapter's join-error mapping.
+fn run_blocking<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, LocalIndexStoreError> + Send + 'static,
+) -> IndexStoreFuture<'static, T, LocalIndexStoreError> {
+    Box::pin(async move {
+        tokio::task::spawn_blocking(operation)
+            .await
+            .map_err(|error| LocalIndexStoreError::Io(std::io::Error::other(error)))?
+    })
+}
+
 // Fetch one bounded batch per blocking task. Borrowed visitors run after the
 // task completes, leaving even a single-worker blocking pool free for reentry.
 async fn visit_inventory<Entry, Visitor, VisitorError>(
@@ -83,13 +95,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, Option<FileReconstruction>, Self::Error> {
         let store = self.clone();
         let file_id = *file_id;
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                ReconstructionStore::reconstruction(&store, &file_id)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || ReconstructionStore::reconstruction(&store, &file_id))
     }
 
     fn insert_reconstruction<'operation>(
@@ -100,24 +106,14 @@ impl AsyncIndexStore for LocalIndexStore {
         let store = self.clone();
         let file_id = *file_id;
         let reconstruction = reconstruction.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LocalIndexStore::insert_reconstruction(&store, &file_id, &reconstruction)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        run_blocking(move || {
+            LocalIndexStore::insert_reconstruction(&store, &file_id, &reconstruction)
         })
     }
 
     fn list_reconstruction_file_ids(&self) -> IndexStoreFuture<'_, Vec<FileId>, Self::Error> {
         let store = self.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                ReconstructionStore::list_reconstruction_file_ids(&store)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || ReconstructionStore::list_reconstruction_file_ids(&store))
     }
 
     fn visit_reconstruction_file_ids<'operation, Visitor, VisitorError>(
@@ -139,13 +135,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         let store = self.clone();
         let file_id = *file_id;
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                ReconstructionStore::delete_reconstruction(&store, &file_id)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || ReconstructionStore::delete_reconstruction(&store, &file_id))
     }
 
     fn delete_reconstruction_if_matches<'operation>(
@@ -156,12 +146,8 @@ impl AsyncIndexStore for LocalIndexStore {
         let store = self.clone();
         let file_id = *file_id;
         let expected = expected.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                ReconstructionStore::delete_reconstruction_if_matches(&store, &file_id, &expected)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        run_blocking(move || {
+            ReconstructionStore::delete_reconstruction_if_matches(&store, &file_id, &expected)
         })
     }
 
@@ -171,13 +157,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         let store = self.clone();
         let object_id = *object_id;
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                ReconstructionStore::contains_object(&store, &object_id)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || ReconstructionStore::contains_object(&store, &object_id))
     }
 
     fn insert_object<'operation>(
@@ -186,11 +166,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         let store = self.clone();
         let object_id = *object_id;
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || LocalIndexStore::insert_object(&store, &object_id))
-                .await
-                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LocalIndexStore::insert_object(&store, &object_id))
     }
 
     fn dedupe_shard_mapping<'operation>(
@@ -216,11 +192,7 @@ impl AsyncIndexStore for LocalIndexStore {
         &self,
     ) -> IndexStoreFuture<'_, Vec<DedupeShardMapping>, Self::Error> {
         let store = self.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || DedupeStore::list_dedupe_shard_mappings(&store))
-                .await
-                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || DedupeStore::list_dedupe_shard_mappings(&store))
     }
 
     fn visit_dedupe_shard_mappings<'operation, Visitor, VisitorError>(
@@ -242,13 +214,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         let store = self.clone();
         let mapping = mapping.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LocalIndexStore::upsert_dedupe_shard_mapping(&store, &mapping)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LocalIndexStore::upsert_dedupe_shard_mapping(&store, &mapping))
     }
 
     fn delete_dedupe_shard_mapping<'operation>(
@@ -257,13 +223,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         let store = self.clone();
         let chunk_hash = *chunk_hash;
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                DedupeStore::delete_dedupe_shard_mapping(&store, &chunk_hash)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || DedupeStore::delete_dedupe_shard_mapping(&store, &chunk_hash))
     }
 
     fn delete_dedupe_shard_mapping_if_matches<'operation>(
@@ -272,13 +232,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         let store = self.clone();
         let expected = expected.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                DedupeStore::delete_dedupe_shard_mapping_if_matches(&store, &expected)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || DedupeStore::delete_dedupe_shard_mapping_if_matches(&store, &expected))
     }
 
     fn quarantine_candidate<'operation>(
@@ -287,24 +241,14 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, Option<QuarantineCandidate>, Self::Error> {
         let store = self.clone();
         let object_key = object_key.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::quarantine_candidate(&store, &object_key)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::quarantine_candidate(&store, &object_key))
     }
 
     fn list_quarantine_candidates(
         &self,
     ) -> IndexStoreFuture<'_, Vec<QuarantineCandidate>, Self::Error> {
         let store = self.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || LifecycleStore::list_quarantine_candidates(&store))
-                .await
-                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::list_quarantine_candidates(&store))
     }
 
     fn visit_quarantine_candidates<'operation, Visitor, VisitorError>(
@@ -326,13 +270,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         let store = self.clone();
         let candidate = candidate.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::upsert_quarantine_candidate(&store, &candidate))
     }
 
     fn delete_quarantine_candidate<'operation>(
@@ -341,13 +279,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         let store = self.clone();
         let object_key = object_key.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::delete_quarantine_candidate(&store, &object_key)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::delete_quarantine_candidate(&store, &object_key))
     }
 
     fn retention_hold<'operation>(
@@ -356,20 +288,12 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, Option<RetentionHold>, Self::Error> {
         let store = self.clone();
         let object_key = object_key.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || LifecycleStore::retention_hold(&store, &object_key))
-                .await
-                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::retention_hold(&store, &object_key))
     }
 
     fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error> {
         let store = self.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || LifecycleStore::list_retention_holds(&store))
-                .await
-                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::list_retention_holds(&store))
     }
 
     fn visit_retention_holds<'operation, Visitor, VisitorError>(
@@ -391,13 +315,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         let store = self.clone();
         let hold = hold.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::upsert_retention_hold(&store, &hold)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::upsert_retention_hold(&store, &hold))
     }
 
     fn delete_retention_hold<'operation>(
@@ -406,13 +324,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         let store = self.clone();
         let object_key = object_key.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::delete_retention_hold(&store, &object_key)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::delete_retention_hold(&store, &object_key))
     }
 
     fn record_webhook_delivery<'operation>(
@@ -421,22 +333,12 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         let store = self.clone();
         let delivery = delivery.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::record_webhook_delivery(&store, &delivery)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::record_webhook_delivery(&store, &delivery))
     }
 
     fn list_webhook_deliveries(&self) -> IndexStoreFuture<'_, Vec<WebhookDelivery>, Self::Error> {
         let store = self.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || LifecycleStore::list_webhook_deliveries(&store))
-                .await
-                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::list_webhook_deliveries(&store))
     }
 
     fn visit_webhook_deliveries<'operation, Visitor, VisitorError>(
@@ -458,13 +360,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         let store = self.clone();
         let delivery = delivery.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::delete_webhook_delivery(&store, &delivery)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::delete_webhook_delivery(&store, &delivery))
     }
 
     fn purge_webhook_deliveries_older_than<'operation>(
@@ -472,12 +368,8 @@ impl AsyncIndexStore for LocalIndexStore {
         older_than_unix_seconds: u64,
     ) -> IndexStoreFuture<'operation, u64, Self::Error> {
         let store = self.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::purge_webhook_deliveries_older_than(&store, older_than_unix_seconds)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        run_blocking(move || {
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, older_than_unix_seconds)
         })
     }
 
@@ -490,12 +382,8 @@ impl AsyncIndexStore for LocalIndexStore {
         let store = self.clone();
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::provider_repository_state(&store, provider, &owner, &repo)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        run_blocking(move || {
+            LifecycleStore::provider_repository_state(&store, provider, &owner, &repo)
         })
     }
 
@@ -503,13 +391,7 @@ impl AsyncIndexStore for LocalIndexStore {
         &self,
     ) -> IndexStoreFuture<'_, Vec<ProviderRepositoryState>, Self::Error> {
         let store = self.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::list_provider_repository_states(&store)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::list_provider_repository_states(&store))
     }
 
     fn visit_provider_repository_states<'operation, Visitor, VisitorError>(
@@ -533,13 +415,7 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         let store = self.clone();
         let state = state.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::upsert_provider_repository_state(&store, &state)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
-        })
+        run_blocking(move || LifecycleStore::upsert_provider_repository_state(&store, &state))
     }
 
     fn delete_provider_repository_state<'operation>(
@@ -551,12 +427,8 @@ impl AsyncIndexStore for LocalIndexStore {
         let store = self.clone();
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::delete_provider_repository_state(&store, provider, &owner, &repo)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        run_blocking(move || {
+            LifecycleStore::delete_provider_repository_state(&store, provider, &owner, &repo)
         })
     }
 
@@ -599,6 +471,39 @@ mod tests {
         AsyncIndexStore, ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm,
         RetentionHold, WebhookDelivery,
     };
+
+    #[test]
+    fn unpolled_blocking_operation_requires_no_runtime_and_does_not_run() {
+        drop(run_blocking::<()>(|| panic!("unpolled operation ran")));
+    }
+
+    #[tokio::test]
+    async fn blocking_operation_preserves_results_and_join_failures() {
+        assert_eq!(run_blocking(|| Ok(42)).await.unwrap(), 42);
+        let error =
+            run_blocking::<()>(|| Err(LocalIndexStoreError::Sqlite(rusqlite::Error::InvalidQuery)))
+                .await
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            LocalIndexStoreError::Sqlite(rusqlite::Error::InvalidQuery)
+        ));
+        let error = run_blocking::<()>(|| panic!("blocking operation failed"))
+            .await
+            .unwrap_err();
+        let LocalIndexStoreError::Io(error) = error else {
+            panic!("join failure lost its I/O error mapping");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<tokio::task::JoinError>()
+                .unwrap()
+                .is_panic()
+        );
+    }
 
     fn make_store() -> super::super::LocalIndexStore {
         let storage = shardline_test_support::TempStorage::new();
