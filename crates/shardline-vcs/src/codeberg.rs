@@ -1,14 +1,9 @@
-use serde_json::Value;
 use shardline_protocol::SecretString;
 
 use crate::{
     AuthorizationDecision, AuthorizationRequest, BuiltInProviderCatalog, BuiltInProviderError,
     ProviderAdapter, ProviderKind, RepositoryMetadata, RepositoryRef, RepositoryWebhookEvent,
-    RepositoryWebhookEventKind, WebhookRequest,
-    builtin::{
-        parse_delivery_id, parse_repository_from_full_name, parse_revision, parse_webhook_json,
-        value_str, verify_hex_hmac_sha256,
-    },
+    WebhookRequest, builtin::verify_hex_hmac_sha256,
 };
 
 /// Built-in Codeberg (Gitea-based) provider adapter.
@@ -71,95 +66,8 @@ impl ProviderAdapter for CodebergAdapter {
             );
         }
 
-        match request.event_name() {
-            "push" => parse_push_event(request),
-            "repository" => parse_repository_event(request),
-            "ping" => Ok(None),
-            _other => Ok(None),
-        }
+        crate::gitea::parse_gitea_webhook(self.kind(), request)
     }
-}
-
-fn parse_push_event(
-    request: WebhookRequest<'_>,
-) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
-    let payload = parse_webhook_json(request.body())?;
-    let repository = codeberg_repository(&payload)?;
-    let delivery_id = parse_delivery_id(request.delivery_id())?;
-    let revision = parse_revision(value_str(&payload, &["ref"]).unwrap_or_default())?;
-
-    Ok(Some(RepositoryWebhookEvent::new(
-        repository,
-        delivery_id,
-        RepositoryWebhookEventKind::RevisionPushed { revision },
-    )))
-}
-
-fn parse_repository_event(
-    request: WebhookRequest<'_>,
-) -> Result<Option<RepositoryWebhookEvent>, BuiltInProviderError> {
-    let payload = parse_webhook_json(request.body())?;
-    let action = value_str(&payload, &["action"]).unwrap_or_default();
-    let delivery_id = parse_delivery_id(request.delivery_id())?;
-    let repository = codeberg_repository(&payload)?;
-
-    match action {
-        "deleted" => Ok(Some(RepositoryWebhookEvent::new(
-            repository,
-            delivery_id,
-            RepositoryWebhookEventKind::RepositoryDeleted,
-        ))),
-        "renamed" => {
-            let Some(previous_name) = codeberg_previous_name(&payload) else {
-                return Ok(None);
-            };
-            let previous =
-                RepositoryRef::new(ProviderKind::Codeberg, repository.owner(), previous_name)
-                    .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)?;
-
-            Ok(Some(RepositoryWebhookEvent::new(
-                previous,
-                delivery_id,
-                RepositoryWebhookEventKind::RepositoryRenamed {
-                    new_repository: repository,
-                },
-            )))
-        }
-        "edited" | "privatized" | "publicized" | "transferred" | "archived" | "unarchived" => {
-            Ok(Some(RepositoryWebhookEvent::new(
-                repository,
-                delivery_id,
-                RepositoryWebhookEventKind::AccessChanged,
-            )))
-        }
-        _other => Ok(None),
-    }
-}
-
-fn codeberg_repository(payload: &Value) -> Result<RepositoryRef, BuiltInProviderError> {
-    let Some(full_name) = value_str(payload, &["repository", "full_name"])
-        .or_else(|| value_str(payload, &["repository", "name"]))
-    else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
-
-    if full_name.contains('/') {
-        return parse_repository_from_full_name(ProviderKind::Codeberg, full_name);
-    }
-
-    let Some(owner) = value_str(payload, &["repository", "owner", "username"])
-        .or_else(|| value_str(payload, &["repository", "owner", "login"]))
-    else {
-        return Err(BuiltInProviderError::InvalidRepositoryPayload);
-    };
-
-    RepositoryRef::new(ProviderKind::Codeberg, owner, full_name)
-        .map_err(|_error| BuiltInProviderError::InvalidRepositoryPayload)
-}
-
-fn codeberg_previous_name(payload: &Value) -> Option<&str> {
-    value_str(payload, &["changes", "repository", "name", "from"])
-        .or_else(|| value_str(payload, &["changes", "name", "from"]))
 }
 
 #[cfg(test)]
@@ -224,9 +132,7 @@ mod tests {
         let request = WebhookRequest::new("push", "delivery-1", signature.as_deref(), body);
 
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         let revision = RevisionRef::new("refs/heads/main").unwrap();
         assert_eq!(event.repository().provider(), ProviderKind::Codeberg);
         assert_eq!(
@@ -246,9 +152,7 @@ mod tests {
         let request = WebhookRequest::new("repository", "delivery-2", signature.as_deref(), body);
 
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
     }
 
@@ -264,9 +168,7 @@ mod tests {
         let request = WebhookRequest::new("repository", "delivery-3", signature.as_deref(), body);
 
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         let new_repository =
             RepositoryRef::new(ProviderKind::Codeberg, "team", "new-assets").unwrap();
         assert_eq!(event.repository().owner(), "team");
@@ -288,9 +190,7 @@ mod tests {
         let request = WebhookRequest::new("repository", "delivery-4", signature.as_deref(), body);
 
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -377,9 +277,7 @@ mod tests {
         let request =
             WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -391,9 +289,7 @@ mod tests {
         let request =
             WebhookRequest::new("repository", "delivery-arch", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -417,9 +313,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-name", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.repository().owner(), "team");
         assert_eq!(event.repository().name(), "assets");
     }
@@ -459,9 +353,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-alt", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else {
-            return;
-        };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.repository().name(), "assets");
     }
 
@@ -552,7 +444,7 @@ mod tests {
         let request =
             WebhookRequest::new("repository", "delivery-priv", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -566,7 +458,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-pub", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -581,7 +473,7 @@ mod tests {
         let request =
             WebhookRequest::new("repository", "delivery-unarch", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -598,7 +490,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-login", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.repository().owner(), "team");
     }
 
@@ -710,7 +602,7 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-dot", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return };
+        let event = event.expect("expected webhook event");
         assert_eq!(event.repository().name(), "a.ssets");
     }
 
