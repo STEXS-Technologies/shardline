@@ -1327,185 +1327,56 @@ async fn test_auth_wrong_repo_scope_returns_403() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_upload_invalid_digest_algorithm() {
     let (app, token, _tmp) = oci_oneshot_app().await;
-    let repo = "test/test";
-    let content = b"some-content";
-
-    // Use sha512 (unsupported) as the digest algorithm
-    let req = axum::http::Request::builder()
-        .method("POST")
-        .uri(&format!(
-            "/v2/{repo}/blobs/uploads/?digest=sha512:{}",
-            sha256_hex(content)
-        ))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(axum::body::Body::from(content.to_vec()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        400,
-        "invalid digest algorithm should return 400, got {}",
-        resp.status()
-    );
+    http_contracts::oci::upload_invalid_digest_algorithm(
+        &app,
+        &token,
+        "test/test",
+        b"some-content",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_upload_body_hash_mismatch() {
     let (app, token, _tmp) = oci_oneshot_app().await;
-    let repo = "test/test";
-
-    // Content does not match the digest
-    let content = b"actual-content";
-    let wrong_digest = sha256_hex(b"different-content");
-
-    let req = axum::http::Request::builder()
-        .method("POST")
-        .uri(&format!(
-            "/v2/{repo}/blobs/uploads/?digest=sha256:{wrong_digest}"
-        ))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(axum::body::Body::from(content.to_vec()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        400,
-        "body hash mismatch should return 400, got {}",
-        resp.status()
-    );
+    http_contracts::oci::upload_body_hash_mismatch(
+        &app,
+        &token,
+        "test/test",
+        b"different-content",
+        b"actual-content",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_patch_nonexistent_session() {
     let (app, token, _tmp) = oci_oneshot_app().await;
-    let repo = "test/test";
-
-    let req = axum::http::Request::builder()
-        .method("PATCH")
-        .uri(&format!(
-            "/v2/{repo}/blobs/uploads/00000000-0000-0000-0000-000000000000"
-        ))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .header("Content-Range", "0-63/64")
-        .body(axum::body::Body::from(b"data".to_vec()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let body_str = String::from_utf8_lossy(&body_bytes);
-    assert_eq!(
-        status, 404,
-        "PATCH non-existent session: status={} body={}",
-        status, body_str
-    );
+    http_contracts::oci::patch_nonexistent_session(&app, &token, "test/test").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_put_finalize_without_digest() {
     let (app, token, _tmp) = oci_oneshot_app().await;
-    let repo = "test/test";
-
-    // PUT to blob uploads without ?digest= query parameter
-    let req = axum::http::Request::builder()
-        .method("PUT")
-        .uri(&format!(
-            "/v2/{repo}/blobs/uploads/00000000-0000-0000-0000-000000000000"
-        ))
-        .header("Authorization", format!("Bearer {token}"))
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        400,
-        "PUT without digest should return 400, got {}",
-        resp.status()
-    );
+    http_contracts::oci::put_finalize_without_digest(&app, &token, "test/test").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_get_nonexistent_blob() {
     let (app, token, _tmp) = oci_oneshot_app().await;
-    let repo = "test/test";
-    let fake_digest = "a".repeat(64);
-
-    let req = axum::http::Request::builder()
-        .method("GET")
-        .uri(&format!("/v2/{repo}/blobs/sha256:{fake_digest}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        404,
-        "GET non-existent blob should return 404, got {}",
-        resp.status()
-    );
+    http_contracts::oci::get_nonexistent_blob(&app, &token, "test/test").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_delete_nonexistent_manifest() {
     let (app, token, _tmp) = oci_oneshot_app().await;
-    let repo = "test/test";
-
-    let req = axum::http::Request::builder()
-        .method("DELETE")
-        .uri(&format!("/v2/{repo}/manifests/nonexistent-tag"))
-        .header("Authorization", format!("Bearer {token}"))
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        404,
-        "DELETE non-existent manifest should return 404, got {}",
-        resp.status()
-    );
+    http_contracts::oci::delete_nonexistent_manifest(&app, &token, "test/test").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_push_manifest_with_nonexistent_blob() {
     let (app, token, _tmp) = oci_oneshot_app().await;
-    let repo = "test/test";
-
-    let manifest_body = serde_json::json!({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "config": {
-            "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
-            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        },
-        "layers": [
-            {
-                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
-                "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-            }
-        ]
-    })
-    .to_string();
-
-    let req = axum::http::Request::builder()
-        .method("PUT")
-        .uri(&format!("/v2/{repo}/manifests/nonexistent-blob-ref"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(axum::body::Body::from(manifest_body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        400,
-        "manifest referencing non-existent blob should return 400, got {}",
-        resp.status()
-    );
+    http_contracts::oci::push_manifest_with_nonexistent_blob(&app, &token, "test/test").await;
 }
 
 // ===========================================================================
