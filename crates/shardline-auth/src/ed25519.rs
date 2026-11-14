@@ -430,22 +430,12 @@ mod tests {
     fn verify_rejects_malformed_token() {
         let seed = test_seed();
         let provider = Ed25519AuthProvider::new(&seed).expect("valid provider");
-        assert!(matches!(
-            provider.verify_token("not-a-token"),
-            Err(AuthError::InvalidToken)
-        ));
-        assert!(matches!(
-            provider.verify_token(""),
-            Err(AuthError::InvalidToken)
-        ));
-        assert!(matches!(
-            provider.verify_token("abc.def"),
-            Err(AuthError::InvalidToken)
-        ));
-        assert!(matches!(
-            provider.verify_token("aa.bb.cc"),
-            Err(AuthError::InvalidToken)
-        ));
+        for token in ["not-a-token", "", "abc.def", "aa.bb.cc"] {
+            assert!(
+                matches!(provider.verify_token(token), Err(AuthError::InvalidToken)),
+                "{token:?}"
+            );
+        }
     }
 
     #[test]
