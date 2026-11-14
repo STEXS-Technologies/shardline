@@ -1,7 +1,7 @@
 //! Connect raw-protocol ingest to the native deduplication machinery.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
-use shardline_index::FileChunkRecord;
+use shardline_index::{FileChunkRecord, MAX_XET_DESCRIPTOR_CHUNKS};
 use shardline_protocol::RepositoryScope;
 use shardline_xet_core::merklehash::compute_data_hash;
 
@@ -10,15 +10,15 @@ use crate::{ServerBackend, ServerError, ShardMetadataLimits, admission::blocking
 pub(super) struct ProtocolChunkReuse {
     backend: ServerBackend,
     scope: Option<RepositoryScope>,
-    members: HashMap<String, FileChunkRecord>,
+    members: VecDeque<HashMap<String, FileChunkRecord>>,
 }
 
 impl ProtocolChunkReuse {
-    pub(super) fn new(backend: ServerBackend, scope: Option<RepositoryScope>) -> Self {
+    pub(super) const fn new(backend: ServerBackend, scope: Option<RepositoryScope>) -> Self {
         Self {
             backend,
             scope,
-            members: HashMap::new(),
+            members: VecDeque::new(),
         }
     }
 
@@ -30,7 +30,11 @@ impl ProtocolChunkReuse {
     {
         Box::pin(async move {
             let hash = compute_data_hash(bytes).hex();
-            if !self.members.contains_key(&hash) {
+            if !self
+                .members
+                .iter()
+                .any(|members| members.contains_key(&hash))
+            {
                 let objects = self.backend.object_store();
                 let wanted = hash.clone();
                 let found = self
@@ -67,13 +71,12 @@ impl ProtocolChunkReuse {
                     .await;
                 match found {
                     Ok(Some((descriptor, visible))) => {
-                        // One native container bounds retained lookup metadata.
-                        self.members.clear();
+                        let mut members = HashMap::new();
                         for (index, (member, allowed)) in
                             descriptor.chunks.iter().zip(visible).enumerate()
                         {
                             if allowed {
-                                self.members.insert(
+                                members.insert(
                                     member.hash.clone(),
                                     FileChunkRecord {
                                         hash: descriptor.hash.clone(),
@@ -92,12 +95,32 @@ impl ProtocolChunkReuse {
                                 );
                             }
                         }
+                        // Retain alternating sources without increasing the former
+                        // one-descriptor member budget. The container cap also
+                        // bounds small maps and lookup work per chunk.
+                        while self.members.len() >= 8
+                            || self
+                                .members
+                                .iter()
+                                .map(HashMap::len)
+                                .sum::<usize>()
+                                .saturating_add(members.len())
+                                > MAX_XET_DESCRIPTOR_CHUNKS
+                        {
+                            self.members.pop_back();
+                        }
+                        self.members.push_front(members);
                     }
                     Ok(None) | Err(ServerError::NotFound) => return Ok(None),
                     Err(error) => return Err(error),
                 }
             }
-            let Some(mut record) = self.members.get(&hash).cloned() else {
+            let Some(mut record) = self
+                .members
+                .iter()
+                .find_map(|members| members.get(&hash))
+                .cloned()
+            else {
                 return Ok(None);
             };
             if record.length != u64::try_from(bytes.len())? {
@@ -136,8 +159,7 @@ mod tests {
     use shardline_protocol::RepositoryProvider;
     use std::num::NonZeroUsize;
 
-    #[tokio::test]
-    async fn reuse_obeys_native_member_scope_and_rejects_corrupt_source_bytes() {
+    async fn local_backend() -> (tempfile::TempDir, ServerBackend) {
         let root = tempfile::tempdir().unwrap();
         let local = crate::LocalBackend::new(
             root.path().to_owned(),
@@ -146,6 +168,69 @@ mod tests {
         )
         .await
         .unwrap();
+        (root, ServerBackend::Local(local))
+    }
+
+    #[tokio::test]
+    async fn alternating_sources_stay_verified_until_bounded_cache_eviction() {
+        let (root, backend) = local_backend().await;
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "alice", "repo", None).unwrap();
+        let ServerBackend::Local(local) = &backend else {
+            panic!("local fixture");
+        };
+        let mut reuse = ProtocolChunkReuse::new(backend.clone(), Some(scope.clone()));
+        let mut sources = Vec::new();
+        for index in 0..9 {
+            let bytes = Bytes::from(format!("independent immutable source container {index}"));
+            let file = format!("source-{index}");
+            let upload = local
+                .upload_file(&file, bytes.clone(), Some(&scope))
+                .await
+                .unwrap();
+            let record = local
+                .file_record(&file, Some(&upload.content_hash), Some(&scope))
+                .await
+                .unwrap();
+            let hash = record.chunks.first().unwrap().hash.clone();
+            reuse.register(&hash).await.unwrap();
+            assert_eq!(reuse.find(&bytes, 0).await.unwrap().unwrap().hash, hash);
+            sources.push((bytes, hash));
+            if index == 7 {
+                // Remove candidate rows, not immutable content. Subsequent hits
+                // must use verified upload-local entries rather than requerying
+                // and rereading alternating source containers.
+                let conn =
+                    rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+                conn.execute("DELETE FROM shardline_xet_chunks", [])
+                    .unwrap();
+                let mut fresh = ProtocolChunkReuse::new(backend.clone(), Some(scope.clone()));
+                assert!(fresh.find(&sources[0].0, 0).await.unwrap().is_none());
+                for (offset, (bytes, hash)) in sources.iter().enumerate() {
+                    let reused = reuse
+                        .find(bytes, u64::try_from(offset).unwrap())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(&reused.hash, hash);
+                    assert_eq!(reused.offset, u64::try_from(offset).unwrap());
+                }
+            }
+        }
+        assert_eq!(reuse.members.len(), 8);
+        assert!(reuse.members.iter().map(HashMap::len).sum::<usize>() <= MAX_XET_DESCRIPTOR_CHUNKS);
+        assert!(reuse.find(&sources[0].0, 0).await.unwrap().is_none());
+        for (bytes, hash) in sources.iter().skip(1) {
+            assert_eq!(&reuse.find(bytes, 0).await.unwrap().unwrap().hash, hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn reuse_obeys_native_member_scope_and_rejects_corrupt_source_bytes() {
+        let (_root, backend) = local_backend().await;
+        let ServerBackend::Local(local) = &backend else {
+            panic!("local fixture");
+        };
         let allowed =
             RepositoryScope::new(RepositoryProvider::GitHub, "alice", "repo", Some("main"))
                 .unwrap();
@@ -161,7 +246,6 @@ mod tests {
             .await
             .unwrap();
         let hash = record.chunks.first().unwrap().hash.clone();
-        let backend = ServerBackend::Local(local);
         let mut authorized = ProtocolChunkReuse::new(backend.clone(), Some(allowed.clone()));
         authorized.register(&hash).await.unwrap();
         let reused = authorized.find(&bytes, 123).await.unwrap().unwrap();
