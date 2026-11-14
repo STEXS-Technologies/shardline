@@ -1168,18 +1168,12 @@ mod tests {
 
     #[test]
     fn remove_if_present_io_error() {
-        // Create a directory (not a file) to trigger a non-NotFound error
         let dir = tempdir().unwrap();
         let dir_path = dir.path().join("a_directory");
         std::fs::create_dir(&dir_path).unwrap();
-        // Removing a non-empty directory with remove_file will fail
-        // (remove_file only works on files).  The error kind will be
-        // IsADirectory or PermissionDenied — not NotFound.
-        let result = remove_if_present(&dir_path);
-        // It might work if the dir is empty on some platforms, but on Linux
-        // remove_file on a directory returns EISDIR which is not NotFound.
-        // Just ensure we don't panic and the error path is exercised.
-        assert!(result.is_err() || result.is_ok());
+        let error = remove_if_present(&dir_path).unwrap_err();
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(dir_path.is_dir());
     }
 
     #[cfg(unix)]

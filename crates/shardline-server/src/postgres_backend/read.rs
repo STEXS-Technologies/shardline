@@ -679,11 +679,9 @@ mod tests {
 
     #[tokio::test]
     async fn connect_postgres_metadata_pool_very_small_connections_succeeds() {
-        // max_connections=1 should be accepted (lazy pool, no actual connect).
-        let result = connect_postgres_metadata_pool("postgres://localhost:5432/test", 1);
-        assert!(result.is_ok() || result.is_err());
-        // Drop the pool explicitly within the tokio context.
-        drop(result);
+        let pool = connect_postgres_metadata_pool("postgres://localhost:5432/test", 1).unwrap();
+        assert_eq!(pool.size(), 0, "lazy pool must not open a connection");
+        pool.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
