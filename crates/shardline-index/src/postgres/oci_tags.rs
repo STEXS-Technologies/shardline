@@ -244,31 +244,14 @@ async fn persist_tag_event(
         .transpose()?;
     let merkle_commit_json =
         reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
-    let result = query(
-        "INSERT INTO shardline_reliability_events
-            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
-             merkle_commit_json)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
-         SET merkle_commit_json = COALESCE(
-             shardline_reliability_events.merkle_commit_json,
-             EXCLUDED.merkle_commit_json
-         )
-         WHERE shardline_reliability_events.event_json = EXCLUDED.event_json",
+    super::index_store::insert_reliability_event_value(
+        connection,
+        &event.operation,
+        event.sequence,
+        to_value(event)?,
+        merkle_commit_json,
     )
-    .bind(event.operation.kind.as_str())
-    .bind(&event.operation.operation_id)
-    .bind(sequence)
-    .bind(to_value(event)?)
-    .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
-    .bind(merkle_commit_json)
-    .execute(&mut *connection)
     .await?;
-    if result.rows_affected() == 0 {
-        return Err(PostgresMetadataStoreError::ReliabilityEventConflict(
-            event.operation.operation_id.clone(),
-        ));
-    }
     Ok(())
 }
 

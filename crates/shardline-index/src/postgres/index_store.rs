@@ -2785,19 +2785,17 @@ async fn verify_existing_reliability_boundary(
     Ok(())
 }
 
-async fn insert_reliability_event_value(
+pub(super) async fn insert_reliability_event_value(
     connection: &mut PgConnection,
     operation: &shardline_reliability::OperationIdentity,
     event_sequence: u64,
     event_json: serde_json::Value,
     merkle_commit_json: serde_json::Value,
-) -> Result<(), PostgresMetadataStoreError>
-where
-{
+) -> Result<(), PostgresMetadataStoreError> {
     let sequence = i64::try_from(event_sequence).map_err(|_error| {
         PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
     })?;
-    let row = sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
              merkle_commit_json)
@@ -2808,8 +2806,7 @@ where
                  shardline_reliability_events.merkle_commit_json,
                  EXCLUDED.merkle_commit_json
              )
-         WHERE shardline_reliability_events.event_json = EXCLUDED.event_json
-         RETURNING event_json",
+         WHERE shardline_reliability_events.event_json = EXCLUDED.event_json",
     )
     .bind(operation.kind.as_str())
     .bind(&operation.operation_id)
@@ -2817,9 +2814,9 @@ where
     .bind(event_json)
     .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
     .bind(merkle_commit_json)
-    .fetch_optional(&mut *connection)
+    .execute(&mut *connection)
     .await?;
-    if row.is_none() {
+    if result.rows_affected() == 0 {
         return Err(PostgresMetadataStoreError::ReliabilityEventConflict(
             operation.operation_id.clone(),
         ));
