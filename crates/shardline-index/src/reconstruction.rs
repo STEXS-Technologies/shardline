@@ -130,10 +130,7 @@ mod tests {
         let xorb_id = XorbId::new(hash);
         let range = ChunkRange::new(2, 5);
 
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = range.unwrap();
         let term = ReconstructionTerm::new(xorb_id, range, 512);
 
         assert_eq!(term.object_id(), StoredObjectId::new(hash));

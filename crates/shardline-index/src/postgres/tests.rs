@@ -27,10 +27,7 @@ use crate::{
 fn postgres_reconstruction_record_roundtrips_domain_terms() {
     let hash = ShardlineHash::from_bytes([11; 32]);
     let range = ChunkRange::new(1, 4);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = range.unwrap();
     let reconstruction =
         FileReconstruction::new(vec![ReconstructionTerm::new(XorbId::new(hash), range, 256)]);
 
@@ -70,10 +67,7 @@ fn postgres_record_keys_distinguish_scope_file_and_kind_without_parsing() {
 #[test]
 fn postgres_latest_locator_ignores_content_hash_for_stable_head_keys() {
     let scope = RepositoryScope::new(RepositoryProvider::GitLab, "team", "assets", None);
-    assert!(scope.is_ok());
-    let Ok(scope) = scope else {
-        return;
-    };
+    let scope = scope.unwrap();
     let first = file_record(scope.clone(), "a");
     let second = file_record(scope, "b");
     let first_key = record_locator(RecordKind::Latest, &first, None);

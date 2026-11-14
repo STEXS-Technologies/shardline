@@ -2303,10 +2303,7 @@ mod tests {
     fn local_index_store_satisfies_index_store_lifecycle_contract() {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalIndexStore::new(storage.path_buf());
-        assert!(store.is_ok());
-        let Ok(store) = store else {
-            return;
-        };
+        let store = store.unwrap();
 
         assert_index_store_lifecycle_contract(&store, |store, file_id, reconstruction, xorb_id| {
             store.insert_reconstruction(file_id, reconstruction)?;
@@ -2318,10 +2315,7 @@ mod tests {
     async fn memory_record_store_satisfies_record_store_lifecycle_contract() {
         let store = MemoryRecordStore::new();
         let record = scoped_file_record();
-        assert!(record.is_some());
-        let Some(record) = record else {
-            return;
-        };
+        let record = record.unwrap();
 
         let inserted_version = store.insert_version_record(&record);
         assert!(inserted_version.is_ok());
@@ -2429,10 +2423,7 @@ mod tests {
         let file_id1 = FileId::new(hash1);
         let file_id2 = FileId::new(hash2);
         let range = ChunkRange::new(0, 1);
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = range.unwrap();
         let reconstruction1 =
             FileReconstruction::new(vec![ReconstructionTerm::new(XorbId::new(hash1), range, 64)]);
         let reconstruction2 = FileReconstruction::new(vec![ReconstructionTerm::new(
@@ -2460,10 +2451,7 @@ mod tests {
         let hash = ShardlineHash::from_bytes([12; 32]);
         let file_id = FileId::new(hash);
         let range = ChunkRange::new(0, 1);
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = range.unwrap();
         let reconstruction =
             FileReconstruction::new(vec![ReconstructionTerm::new(XorbId::new(hash), range, 64)]);
 
@@ -2497,10 +2485,7 @@ mod tests {
         let store = MemoryIndexStore::new();
         let hash = ShardlineHash::from_bytes([14; 32]);
         let key = ObjectKey::parse("shards/aa/example.shard");
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = key.unwrap();
         let mapping = DedupeShardMapping::new(hash, key);
 
         assert!(store.dedupe_shard_mapping(&hash).unwrap().is_none());
@@ -2937,10 +2922,7 @@ mod tests {
     async fn memory_record_store_visit_latest_records() {
         let store = MemoryRecordStore::new();
         let record = scoped_file_record();
-        assert!(record.is_some());
-        let Some(record) = record else {
-            return;
-        };
+        let record = record.unwrap();
         store.write_latest_record(&record).await.unwrap();
 
         let mut visited = Vec::new();
@@ -2958,10 +2940,7 @@ mod tests {
     async fn memory_record_store_visit_version_records() {
         let store = MemoryRecordStore::new();
         let record = scoped_file_record();
-        assert!(record.is_some());
-        let Some(record) = record else {
-            return;
-        };
+        let record = record.unwrap();
         store.insert_version_record(&record).unwrap();
 
         let mut visited = Vec::new();
@@ -2979,10 +2958,7 @@ mod tests {
     async fn memory_record_store_visit_latest_record_locators() {
         let store = MemoryRecordStore::new();
         let record = scoped_file_record();
-        assert!(record.is_some());
-        let Some(record) = record else {
-            return;
-        };
+        let record = record.unwrap();
         store.write_latest_record(&record).await.unwrap();
 
         let mut visited = Vec::new();
@@ -3001,10 +2977,7 @@ mod tests {
     async fn memory_record_store_visit_version_record_locators() {
         let store = MemoryRecordStore::new();
         let record = scoped_file_record();
-        assert!(record.is_some());
-        let Some(record) = record else {
-            return;
-        };
+        let record = record.unwrap();
         store.insert_version_record(&record).unwrap();
 
         let mut visited = Vec::new();
@@ -3024,10 +2997,7 @@ mod tests {
         let store = MemoryRecordStore::new();
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let record = file_record_with_scope(scope, "a");
         store.write_latest_record(&record).await.unwrap();
 
@@ -3057,10 +3027,7 @@ mod tests {
         let store = MemoryRecordStore::new();
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = scope.unwrap();
         let record = file_record_with_scope(scope, "a");
         store.insert_version_record(&record).unwrap();
 
@@ -3081,10 +3048,7 @@ mod tests {
     async fn memory_record_store_record_locator_exists_false() {
         let store = MemoryRecordStore::new();
         let record = scoped_file_record();
-        assert!(record.is_some());
-        let Some(record) = record else {
-            return;
-        };
+        let record = record.unwrap();
         let locator = store.version_record_locator(&record);
 
         let exists = store.record_locator_exists(&locator).await.unwrap();
@@ -3108,10 +3072,7 @@ mod tests {
         let file_id = FileId::new(hash);
         let xorb_id = XorbId::new(hash);
         let range = ChunkRange::new(2, 5);
-        assert!(range.is_ok());
-        let Ok(range) = range else {
-            return;
-        };
+        let range = range.unwrap();
         let reconstruction =
             FileReconstruction::new(vec![ReconstructionTerm::new(xorb_id, range, 128)]);
 
@@ -3129,15 +3090,9 @@ mod tests {
         assert!(matches!(contains_xorb, Ok(true)));
 
         let object_key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
-        assert!(object_key.is_ok());
-        let Ok(object_key) = object_key else {
-            return;
-        };
+        let object_key = object_key.unwrap();
         let candidate = QuarantineCandidate::new(object_key.clone(), 128, 10, 20);
-        assert!(candidate.is_ok());
-        let Ok(candidate) = candidate else {
-            return;
-        };
+        let candidate = candidate.unwrap();
 
         let missing_candidate = store.quarantine_candidate(&object_key);
         assert!(matches!(missing_candidate, Ok(None)));
@@ -3172,10 +3127,7 @@ mod tests {
             30,
             Some(90),
         );
-        assert!(hold.is_ok());
-        let Ok(hold) = hold else {
-            return;
-        };
+        let hold = hold.unwrap();
 
         let missing_hold = store.retention_hold(&object_key);
         assert!(matches!(missing_hold, Ok(None)));
@@ -3211,10 +3163,7 @@ mod tests {
             "delivery-1".to_owned(),
             100,
         );
-        assert!(webhook_delivery.is_ok());
-        let Ok(webhook_delivery) = webhook_delivery else {
-            return;
-        };
+        let webhook_delivery = webhook_delivery.unwrap();
         let recorded_delivery = store.record_webhook_delivery(&webhook_delivery);
         assert!(matches!(recorded_delivery, Ok(true)));
         let duplicate_delivery = store.record_webhook_delivery(&webhook_delivery);

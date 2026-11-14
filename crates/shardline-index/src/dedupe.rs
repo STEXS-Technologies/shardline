@@ -55,10 +55,7 @@ mod tests {
         let chunk_hash = ShardlineHash::from_bytes([5; 32]);
         let shard_object_key = ObjectKey::parse("shards/aa/example.shard");
 
-        assert!(shard_object_key.is_ok());
-        let Ok(shard_object_key) = shard_object_key else {
-            return;
-        };
+        let shard_object_key = shard_object_key.unwrap();
         let mapping = DedupeShardMapping::new(chunk_hash, shard_object_key.clone());
 
         assert_eq!(mapping.chunk_hash(), chunk_hash);
