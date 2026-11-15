@@ -198,9 +198,14 @@ impl RetryContext {
             match result {
                 Ok(value) => return Ok(value),
                 Err(error @ (TransferError::Unauthorized(_) | TransferError::Forbidden(_)))
-                    if self.tokens.is_some() && !refreshed && self.refresh_allowed(&error) =>
+                    if !refreshed
+                        && (self.refresh_on_forbidden
+                            || matches!(&error, TransferError::Unauthorized(_))) =>
                 {
-                    token = self.refresh_token().await?;
+                    let Some(tokens) = &self.tokens else {
+                        return Err(error);
+                    };
+                    token = self.refresh_token(tokens).await?;
                     refreshed = true;
                 }
                 Err(error)
@@ -215,29 +220,7 @@ impl RetryContext {
         }
     }
 
-    /// Whether a 401/403 should trigger a token refresh for this call kind.
-    const fn refresh_allowed(&self, error: &TransferError) -> bool {
-        match error {
-            // Only request kinds that opt in may refresh after a 403.
-            TransferError::Forbidden(_) => self.refresh_on_forbidden,
-            TransferError::Unauthorized(_) => true,
-            TransferError::BadRequest(_)
-            | TransferError::NotFound(_)
-            | TransferError::RangeNotSatisfiable(_)
-            | TransferError::TooManyRequests { .. }
-            | TransferError::HttpStatus { .. }
-            | TransferError::Transport(_)
-            | TransferError::InvalidResponse(_)
-            | TransferError::MalformedMultipart(_)
-            | TransferError::TokenRefresh(_) => false,
-        }
-    }
-
-    async fn refresh_token(&self) -> Result<String, TransferError> {
-        let tokens = self
-            .tokens
-            .as_ref()
-            .ok_or_else(|| TransferError::TokenRefresh("no token service configured".to_owned()))?;
+    async fn refresh_token(&self, tokens: &TokenService) -> Result<String, TransferError> {
         let scoped = match self.scope {
             RetryScope::Read => {
                 tokens.invalidate_read();
@@ -811,31 +794,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_forbidden_after_refresh_is_surfaced_loop_guarded() {
-        let server = Arc::new(MockServer::start().await);
-        Mock::given(method("GET"))
-            .and(path("/probe"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": "no scope"})))
-            .mount(&server)
-            .await;
-        mount_write_token(&server, "still-forbidden").await;
+    async fn forbidden_refresh_requires_tokens_and_opt_in_and_is_loop_guarded() {
+        for (has_tokens, refresh_on_forbidden, expected_requests) in [
+            (false, false, 1),
+            (false, true, 1),
+            (true, false, 1),
+            (true, true, 3), // Two probes and one token issuance; never refresh twice.
+        ] {
+            let server = Arc::new(MockServer::start().await);
+            Mock::given(method("GET"))
+                .and(path("/probe"))
+                .respond_with(
+                    ResponseTemplate::new(403).set_body_json(json!({"error": "no scope"})),
+                )
+                .mount(&server)
+                .await;
+            mount_write_token(&server, "still-forbidden").await;
 
-        let ctx = RetryContext {
-            policy: RetryPolicy::new().with_max_attempts(5),
-            tokens: Some(write_token_service(&server)),
-            scope: RetryScope::Write,
-            refresh_on_forbidden: true,
-        };
-        let result = ctx
-            .run("tok".to_owned(), |tok| {
-                let server = server.clone();
-                async move { probe(&server, &tok).await }
-            })
-            .await;
-        // Surfaced after exactly one re-issue (loop-guard): 2 probe requests
-        // + 1 token issuance, and the 403 is surfaced.
-        assert!(matches!(result, Err(TransferError::Forbidden(_))));
-        assert_eq!(request_count(&server).await, 3);
+            let ctx = RetryContext {
+                policy: RetryPolicy::new().with_max_attempts(5),
+                tokens: has_tokens.then(|| write_token_service(&server)),
+                scope: RetryScope::Write,
+                refresh_on_forbidden,
+            };
+            let result = ctx
+                .run("tok".to_owned(), |tok| {
+                    let server = server.clone();
+                    async move { probe(&server, &tok).await }
+                })
+                .await;
+            assert!(matches!(result, Err(TransferError::Forbidden(_))));
+            assert_eq!(request_count(&server).await, expected_requests);
+        }
     }
 
     #[tokio::test]
