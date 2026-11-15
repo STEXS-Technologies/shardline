@@ -4835,3 +4835,24 @@ This adds remote-storage split-role client evidence to the local fault gate.
 Both role servers are Tokio tasks in one test process; Docker supplies the real
 PostgreSQL and MinIO services. It does not establish independent server-process
 failure recovery, multi-host isolation, or production capacity.
+
+
+### FSCK MinIO regression qualification (2026-11-15)
+
+At cleanup commit `b0281c30`, all three ignored FSCK library tests passed
+against their owned Docker MinIO fixtures (Docker 29.2.1, Rust 1.99.0).
+Reproduce from the repository root:
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 RUSTC_WRAPPER= \
+  cargo +1.99.0 nextest run --offline --locked -p shardline-fsck --lib \
+  --run-ignored only --test-threads 1
+```
+
+The tests check bounded ordinary-chunk reads, native-container corruption and
+missing-member diagnostics, and multi-member snapshot turnover with asserted
+GET/HEAD counts. The turnover case checks 17, 16, 17 and 1 GETs across initial,
+repeated, changed-source and corrupted-source scans, with zero HEADs throughout.
+All three selected tests passed; 111 other library tests were excluded by the
+ignored-only selection. Fixtures were removed after the run. This qualifies
+these local MinIO regression scenarios, not production throughput or scale.
