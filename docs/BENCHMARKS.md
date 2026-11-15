@@ -3750,19 +3750,20 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`28c0f227e6d62b176b53f71c5aaf6dcf65091855`. It counts all tracked `.rs`
+`7ad0579ec88cb9a06ee69e2c48111c9037a568eb`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 585,951 | 17,698 (2.93%) |
-| Server | 220,570 | 213,869 | 6,701 (3.04%) |
+| Entire repository | 603,649 | 585,478 | 18,171 (3.01%) |
+| Server | 220,570 | 213,777 | 6,793 (3.08%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
 | S3 adapter | 10,954 | 10,300 | 654 (5.97%) |
+| Xet adapter | 17,801 | 15,986 | 1,815 (10.20%) |
 | OCI adapter | 7,700 | 7,056 | 644 (8.36%) |
 | Cache | 6,573 | 5,866 | 707 (10.76%) |
 | Index | 71,472 | 69,567 | 1,905 (2.67%) |
@@ -3777,14 +3778,24 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
+This refresh includes 473 fewer Rust lines since the previously measured
+`28c0f227` snapshot. Subsequent cleanup shares verified Xorb metadata and cache-hit
+decoding, removes repeated shard-test runtime/fixture setup, and consolidates
+boundary contracts while retaining their distinct input cases. Some changes add
+stronger assertions or avoid allocations without reducing lines.
+
+The inventory revision is not a release qualification stamp. The complete local
+distributed gate below remains pinned to `28c0f227`; later changes have targeted
+test and Clippy results, not a repeated full gate or independent hosted CI result.
+
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
 using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 28c0f227e6d62b176b53f71c5aaf6dcf65091855 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 28c0f227e6d62b176b53f71c5aaf6dcf65091855 -- '*.rs' | wc -l
+git grep -I -n '^' 7ad0579ec88cb9a06ee69e2c48111c9037a568eb -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 7ad0579ec88cb9a06ee69e2c48111c9037a568eb -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
