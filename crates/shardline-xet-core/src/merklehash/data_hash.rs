@@ -198,10 +198,8 @@ impl DataHash {
             return Err(DataHashBytesParseError);
         }
         let mut hash: DataHash = DataHash::default();
-        for i in 0..4 {
-            let start = i * 8;
-            hash.0[i] =
-                u64::from_le_bytes(value[start..start + 8].try_into().expect("slice len is 8"));
+        for (word, bytes) in hash.0.iter_mut().zip(value.as_chunks::<8>().0) {
+            *word = u64::from_le_bytes(*bytes);
         }
         Ok(hash)
     }
