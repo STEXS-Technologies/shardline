@@ -3661,62 +3661,26 @@ mod tests {
     // ── LifecycleStore: visit methods ──────────────────────────────────────
 
     #[test]
-    fn visit_quarantine_candidates_empty_store_does_not_call_visitor() {
-        let store = make_store();
-        let mut count = 0u32;
-        LifecycleStore::visit_quarantine_candidates(&store, |_| {
-            count += 1;
-            Ok::<(), LocalIndexStoreError>(())
-        })
-        .unwrap();
-        assert_eq!(count, 0);
-    }
+    fn empty_inventories_do_not_call_visitors() {
+        fn count_entries<Entry>(
+            count: &mut usize,
+        ) -> impl FnMut(Entry) -> Result<(), LocalIndexStoreError> + '_ {
+            move |_| {
+                *count += 1;
+                Ok(())
+            }
+        }
 
-    #[test]
-    fn visit_retention_holds_empty_store_does_not_call_visitor() {
         let store = make_store();
-        let mut count = 0u32;
-        LifecycleStore::visit_retention_holds(&store, |_| {
-            count += 1;
-            Ok::<(), LocalIndexStoreError>(())
-        })
-        .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn visit_webhook_deliveries_empty_store_does_not_call_visitor() {
-        let store = make_store();
-        let mut count = 0u32;
-        LifecycleStore::visit_webhook_deliveries(&store, |_| {
-            count += 1;
-            Ok::<(), LocalIndexStoreError>(())
-        })
-        .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn visit_provider_repository_states_empty_store_does_not_call_visitor() {
-        let store = make_store();
-        let mut count = 0u32;
-        LifecycleStore::visit_provider_repository_states(&store, |_| {
-            count += 1;
-            Ok::<(), LocalIndexStoreError>(())
-        })
-        .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn visit_dedupe_shard_mappings_empty_store_does_not_call_visitor() {
-        let store = make_store();
-        let mut count = 0u32;
-        DedupeStore::visit_dedupe_shard_mappings(&store, |_| {
-            count += 1;
-            Ok::<(), LocalIndexStoreError>(())
-        })
-        .unwrap();
+        let mut count = 0;
+        LifecycleStore::visit_quarantine_candidates(&store, count_entries(&mut count)).unwrap();
+        LifecycleStore::visit_retention_holds(&store, count_entries(&mut count)).unwrap();
+        LifecycleStore::visit_webhook_deliveries(&store, count_entries(&mut count)).unwrap();
+        LifecycleStore::visit_provider_repository_states(&store, count_entries(&mut count))
+            .unwrap();
+        DedupeStore::visit_dedupe_shard_mappings(&store, count_entries(&mut count)).unwrap();
+        ReconstructionStore::visit_reconstruction_file_ids(&store, count_entries(&mut count))
+            .unwrap();
         assert_eq!(count, 0);
     }
 
