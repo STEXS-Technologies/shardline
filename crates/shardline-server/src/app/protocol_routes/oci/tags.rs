@@ -289,28 +289,23 @@ mod tests {
     // ── oci_created_response ────────────────────────────────────────────
 
     #[test]
-    fn created_response_with_digest() {
-        let digest_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let response =
-            oci_created_response("/v2/team/assets/blobs/uploads/abc", Some(digest_hex)).unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        assert!(response.headers().get("Docker-Content-Digest").is_some());
-        assert_eq!(
-            response
+    fn created_response_preserves_location_and_optional_digest() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (location, digest) in [
+            ("/v2/team/assets/blobs/uploads/abc", Some(digest)),
+            ("/v2/team/assets/blobs/uploads/abc", None),
+            ("/v2/test/blob/uploads/123", None),
+        ] {
+            let response = oci_created_response(location, digest).unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert_eq!(response.headers()[axum::http::header::LOCATION], location);
+            let expected = digest.map(|digest| format!("sha256:{digest}"));
+            let actual = response
                 .headers()
                 .get("Docker-Content-Digest")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            format!("sha256:{digest_hex}")
-        );
-    }
-
-    #[test]
-    fn created_response_without_digest() {
-        let response = oci_created_response("/v2/team/assets/blobs/uploads/abc", None).unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        assert!(response.headers().get("Docker-Content-Digest").is_none());
+                .map(|value| value.to_str().unwrap());
+            assert_eq!(actual, expected.as_deref());
+        }
     }
 
     // ── validate_oci_tag in tags list (line 37) ──────────────────────────
@@ -322,20 +317,5 @@ mod tests {
         assert!(validate_oci_tag("").is_err());
         assert!(validate_oci_tag("tag with spaces").is_err());
         assert!(validate_oci_tag("tag\nnewline").is_err());
-    }
-
-    // ── oci_created_response edge cases ──────────────────────────────────
-
-    #[test]
-    fn created_response_includes_location_header() {
-        let response = oci_created_response("/v2/test/blob/uploads/123", None).unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/v2/test/blob/uploads/123"
-        );
     }
 }
