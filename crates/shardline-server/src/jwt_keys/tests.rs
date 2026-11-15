@@ -102,46 +102,26 @@ fn base64_decode_url_empty_string() {
 }
 
 #[test]
-fn build_decoding_key_rsa_missing_n() {
-    let mut jwk = sample_rsa_jwk();
-    jwk.n = None;
-    let result = build_decoding_key(&jwk, Algorithm::RS256);
-    assert!(result.is_err(), "expected Err for missing n");
-    if let Err(err) = result {
-        assert!(err.contains("missing n"), "error: {err}");
-    }
-}
+fn build_decoding_key_reports_missing_parameters() {
+    let mut missing_n = sample_rsa_jwk();
+    missing_n.n = None;
+    let mut missing_e = sample_rsa_jwk();
+    missing_e.e = None;
+    let mut missing_x = sample_ec_jwk();
+    missing_x.x_coord = None;
+    let mut missing_y = sample_ec_jwk();
+    missing_y.y_coord = None;
 
-#[test]
-fn build_decoding_key_rsa_missing_e() {
-    let mut jwk = sample_rsa_jwk();
-    jwk.e = None;
-    let result = build_decoding_key(&jwk, Algorithm::RS256);
-    assert!(result.is_err(), "expected Err for missing e");
-    if let Err(err) = result {
-        assert!(err.contains("missing e"), "error: {err}");
-    }
-}
-
-#[test]
-fn build_decoding_key_ec_missing_x() {
-    let mut jwk = sample_ec_jwk();
-    jwk.x_coord = None;
-    let result = build_decoding_key(&jwk, Algorithm::ES256);
-    assert!(result.is_err(), "expected Err for missing x");
-    if let Err(err) = result {
-        assert!(err.contains("missing x"), "error: {err}");
-    }
-}
-
-#[test]
-fn build_decoding_key_ec_missing_y() {
-    let mut jwk = sample_ec_jwk();
-    jwk.y_coord = None;
-    let result = build_decoding_key(&jwk, Algorithm::ES256);
-    assert!(result.is_err(), "expected Err for missing y");
-    if let Err(err) = result {
-        assert!(err.contains("missing y"), "error: {err}");
+    for (jwk, algorithm, expected) in [
+        (missing_n, Algorithm::RS256, "missing n"),
+        (missing_e, Algorithm::RS256, "missing e"),
+        (missing_x, Algorithm::ES256, "missing x"),
+        (missing_y, Algorithm::ES256, "missing y"),
+    ] {
+        let error = build_decoding_key(&jwk, algorithm)
+            .err()
+            .expect("missing key parameter must be rejected");
+        assert!(error.contains(expected), "expected {expected}, got {error}");
     }
 }
 
