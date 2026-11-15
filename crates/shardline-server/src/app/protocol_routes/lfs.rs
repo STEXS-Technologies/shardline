@@ -836,14 +836,17 @@ pub(crate) async fn lfs_batch(
     let supports_basic = request.transfers.iter().any(|transfer| transfer == "basic");
     // Authorization above is mandatory for every adapter. Only an internal
     // signing failure may fall back; token and permission failures stay errors.
-    let cas_token = if supports_xet && state.auth.is_some() && auth.claims().is_some() {
-        let claims = auth.claims().ok_or(ServerError::MissingAuthorization)?;
-        let server_auth = state
-            .auth
-            .as_ref()
-            .ok_or(ServerError::MissingAuthorization)?;
+    let cas_url = state.config.public_base_url().trim_end_matches('/');
+    let xet_action_header = if supports_xet
+        && let Some(server_auth) = &state.auth
+        && let Some(claims) = auth.claims()
+    {
         match server_auth.provider().mint_token(claims) {
-            Ok(token) => Some(token),
+            Ok(token) => Some(json!({
+                URL: cas_url,
+                ACCESS_TOKEN: token,
+                TOKEN_EXPIRATION: claims.expires_at_unix_seconds().to_string()
+            })),
             Err(shardline_server_core::AuthError::ProviderError(_)) if supports_basic => None,
             Err(shardline_server_core::AuthError::ProviderError(_)) => {
                 return Err(ServerError::SigningKeyError(
@@ -855,29 +858,24 @@ pub(crate) async fn lfs_batch(
     } else {
         None
     };
-    let transfer = if cas_token.is_some() {
+    let transfer = if xet_action_header.is_some() {
         "xet"
     } else if request.transfers.is_empty() || supports_basic {
         "basic"
     } else {
         return Ok(lfs_validation_response("unsupported transfer adapter"));
     };
-    let cas_url = state
-        .config
-        .public_base_url()
-        .trim_end_matches('/')
-        .to_owned();
-    let xet_action_header = cas_token.as_ref().map(|token| {
-        let expiration = auth
-            .claims()
-            .map(|c| c.expires_at_unix_seconds().to_string())
-            .unwrap_or_else(|| "0".to_owned());
-        json!({
-            URL: &cas_url,
-            ACCESS_TOKEN: token,
-            TOKEN_EXPIRATION: expiration
-        })
-    });
+    let transfer_action = |oid: &str| {
+        let mut action = serde_json::Map::new();
+        action.insert(
+            "href".to_owned(),
+            json!(format!("{cas_url}/v1/lfs/objects/{oid}")),
+        );
+        if let Some(header) = &xet_action_header {
+            action.insert("header".to_owned(), header.clone());
+        }
+        json!({ (operation.as_str()): action })
+    };
 
     let mut objects = Vec::with_capacity(request.objects.len());
     for object in request.objects {
@@ -892,26 +890,7 @@ pub(crate) async fn lfs_batch(
         match operation {
             LfsOperation::Download => match object_length {
                 Ok(length) => {
-                    let action = if let Some(ref header) = xet_action_header {
-                        json!({
-                            "download": {
-                                "href": format!(
-                                    "{}/v1/lfs/objects/{}",
-                                    cas_url, object.oid
-                                ),
-                                "header": header
-                            }
-                        })
-                    } else {
-                        json!({
-                            "download": {
-                                "href": format!(
-                                    "{}/v1/lfs/objects/{}",
-                                    cas_url, object.oid
-                                )
-                            }
-                        })
-                    };
+                    let action = transfer_action(&object.oid);
                     objects.push(LfsObjectResponse {
                         oid: object.oid,
                         size: length,
@@ -935,29 +914,7 @@ pub(crate) async fn lfs_batch(
             LfsOperation::Upload => {
                 let (size, actions) = match object_length {
                     Ok(length) => (length, None),
-                    Err(ServerError::NotFound) => {
-                        let action = if let Some(ref header) = xet_action_header {
-                            json!({
-                                "upload": {
-                                    "href": format!(
-                                        "{}/v1/lfs/objects/{}",
-                                        cas_url, object.oid
-                                    ),
-                                    "header": header
-                                }
-                            })
-                        } else {
-                            json!({
-                                "upload": {
-                                    "href": format!(
-                                        "{}/v1/lfs/objects/{}",
-                                        cas_url, object.oid
-                                    )
-                                }
-                            })
-                        };
-                        (object.size, Some(action))
-                    }
+                    Err(ServerError::NotFound) => (object.size, Some(transfer_action(&object.oid))),
                     Err(error) => return Err(error),
                 };
                 objects.push(LfsObjectResponse {
