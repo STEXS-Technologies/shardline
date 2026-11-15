@@ -249,13 +249,7 @@ pub(crate) async fn oci_delete_manifest(
         .await?;
     repository_guard.assert_current().await?;
 
-    Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .body(Body::empty())
-        .map_err(|e| {
-            tracing::warn!(error = %e, "failed to build delete manifest response body");
-            ServerError::Overflow
-        })
+    Ok(StatusCode::ACCEPTED.into_response())
 }
 
 async fn resolve_manifest_digest(

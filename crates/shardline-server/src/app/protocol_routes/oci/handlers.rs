@@ -239,13 +239,7 @@ async fn oci_delete_blob(
         .delete_oci_object_locked(&mut repository_guard, &index_key)
         .await?;
     repository_guard.assert_current().await?;
-    Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .body(Body::empty())
-        .map_err(|e| {
-            tracing::warn!(error = %e, "failed to build delete blob response");
-            ServerError::Overflow
-        })
+    Ok(StatusCode::ACCEPTED.into_response())
 }
 
 /// Returns `true` if the JSON document (OCI manifest or index) contains a
