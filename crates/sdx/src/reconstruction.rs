@@ -95,8 +95,8 @@ async fn fetch_reconstruction(
         fetch_reconstruction_response(transfer, retry, api_base, token, file_id, requested_range)
             .await?;
     match response {
-        ReconstructionResponse::V2(response) => Ok(Reconstruction::from_v2(response)?),
-        ReconstructionResponse::V1(response) => Ok(Reconstruction::from_v1(response)?),
+        ReconstructionResponse::V2(response) => Reconstruction::from_v2(response),
+        ReconstructionResponse::V1(response) => Reconstruction::from_v1(response),
     }
 }
 
@@ -125,29 +125,27 @@ pub(crate) async fn fetch_reconstruction_response(
     file_id: &str,
     requested_range: Option<ByteRange>,
 ) -> Result<ReconstructionResponse, SdxError> {
-    let v2: Result<ReconstructionResponse, SdxError> =
-        match run_with_retry(retry, token, |tok| async move {
-            transfer
-                .reconstruction_v2(api_base, &tok, file_id, requested_range)
-                .await
-        })
-        .await
-        {
-            Ok(response) => Ok(ReconstructionResponse::V2(response)),
-            Err(TransferError::NotFound(_) | TransferError::HttpStatus { status: 501, .. }) => {
-                // V2 not available on this frontend: fall back to V1
-                // (SDX_PLAN.md §7 item 7, cross-frontend M7).
-                let response = run_with_retry(retry, token, |tok| async move {
-                    transfer
-                        .reconstruction_v1(api_base, &tok, file_id, requested_range)
-                        .await
-                })
-                .await?;
-                Ok(ReconstructionResponse::V1(response))
-            }
-            Err(error) => Err(error.into()),
-        };
-    v2
+    match run_with_retry(retry, token, |tok| async move {
+        transfer
+            .reconstruction_v2(api_base, &tok, file_id, requested_range)
+            .await
+    })
+    .await
+    {
+        Ok(response) => Ok(ReconstructionResponse::V2(response)),
+        Err(TransferError::NotFound(_) | TransferError::HttpStatus { status: 501, .. }) => {
+            // V2 not available on this frontend: fall back to V1
+            // (SDX_PLAN.md §7 item 7, cross-frontend M7).
+            let response = run_with_retry(retry, token, |tok| async move {
+                transfer
+                    .reconstruction_v1(api_base, &tok, file_id, requested_range)
+                    .await
+            })
+            .await?;
+            Ok(ReconstructionResponse::V1(response))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Runs a reconstruction HTTP call through the retry context if present,
@@ -368,17 +366,15 @@ impl Reconstruction {
         let mut fetches: Vec<FetchEntry> = Vec::new();
         for mut group in groups.into_values() {
             group.sort_by_key(|fetch| (fetch.chunks.0, fetch.chunks.1));
-            let mut merged: Vec<FetchEntry> = Vec::new();
-            for fetch in group {
-                match merged.last_mut() {
-                    Some(entry) if entry.chunks.1 >= fetch.chunks.0 => {
-                        entry.chunks.1 = entry.chunks.1.max(fetch.chunks.1);
-                        entry.bytes.end = entry.bytes.end.max(fetch.bytes.end);
-                    }
-                    _ => merged.push(fetch),
+            group.dedup_by(|next, current| {
+                let overlaps = current.chunks.1 >= next.chunks.0;
+                if overlaps {
+                    current.chunks.1 = current.chunks.1.max(next.chunks.1);
+                    current.bytes.end = current.bytes.end.max(next.bytes.end);
                 }
-            }
-            fetches.extend(merged);
+                overlaps
+            });
+            fetches.extend(group);
         }
 
         let mut planned_terms = Vec::with_capacity(terms.len());
@@ -497,6 +493,8 @@ mod tests {
             XORB_HASH: [{
                 "url": format!("http://cas/transfer/xorb/default/{XORB_HASH}"),
                 "ranges": [
+                    {"chunks": {"start": 1, "end": 3}, "bytes": {"start": 50, "end": 149}},
+                    {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 49}},
                     {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 99}},
                     {"chunks": {"start": 2, "end": 4}, "bytes": {"start": 100, "end": 199}}
                 ]
