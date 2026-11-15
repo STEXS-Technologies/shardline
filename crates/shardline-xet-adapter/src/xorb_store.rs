@@ -1005,8 +1005,6 @@ mod tests {
         assert!(stored.stored_bytes > 0, "stored_bytes should be > 0");
     }
 
-    // ── store_uploaded_xorb unpacked_length sanity checks ────────────────
-
     // ── canonicalize_uploaded_xorb with complete error path ──────────────
 
     #[test]
@@ -1040,52 +1038,38 @@ mod tests {
 
     // ── store_uploaded_xorb with stored_bytes accumulation ─────────────
 
-    #[test]
-    fn store_uploaded_xorb_with_lz4_compression() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(3, ChunkSize::Fixed(768));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-
-        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok(), "lz4 xorb store failed: {result:?}");
-        let stored = result.unwrap();
-        assert!(stored.was_inserted);
-
-        // Verify stored xorb can be retrieved via chunk hashes
-        let key = xorb_object_key(&hash).unwrap();
-        let mut count = 0_usize;
-        let visit = visit_stored_xorb_chunk_hashes(&object_store, &key, |h| {
-            assert_eq!(h.len(), 64);
-            count += 1;
-            Ok(())
-        });
-        assert!(visit.is_ok());
-        assert_eq!(count, 3);
-    }
-
-    #[test]
-    fn store_uploaded_xorb_with_bg4lz4_compression() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(256));
-        let serialized = SerializedXorbObject::from_xorb_with_compression(
-            raw,
-            CompressionScheme::ByteGrouping4LZ4,
-            true,
-        )
-        .unwrap();
-        let hash = serialized.hash.hex();
-
-        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok(), "bg4lz4 xorb store failed: {result:?}");
-        let stored = result.unwrap();
-        assert!(stored.was_inserted);
+    #[tokio::test]
+    async fn store_uploaded_xorb_round_trips_compressions_and_footerless_input() {
+        for (num_chunks, chunk_bytes, compression, footer) in [
+            (3, 768, CompressionScheme::LZ4, true),
+            (2, 256, CompressionScheme::ByteGrouping4LZ4, true),
+            (1, 64, CompressionScheme::None, true),
+            (2, 64, CompressionScheme::None, true),
+            (10, 32, CompressionScheme::None, true),
+            (2, 512, CompressionScheme::LZ4, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+            let raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(chunk_bytes));
+            let serialized =
+                SerializedXorbObject::from_xorb_with_compression(raw, compression, footer).unwrap();
+            assert_eq!(serialized.footer_start.is_some(), footer);
+            let hash = serialized.hash.hex();
+            let stored =
+                super::store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data)
+                    .await
+                    .unwrap();
+            assert!(stored.was_inserted);
+            let key = xorb_object_key(&hash).unwrap();
+            let mut count = 0;
+            visit_stored_xorb_chunk_hashes(&object_store, &key, |hash| {
+                assert_eq!(hash.len(), 64);
+                count += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(count, num_chunks);
+        }
     }
 
     // ── canonicalize_uploaded_xorb with footerless + wrong hash ────────
@@ -1106,8 +1090,6 @@ mod tests {
             "expected error for wrong hash on normalized xorb"
         );
     }
-
-    // ── store_uploaded_xorb with edge cases ───────────────────────────
 
     // ── store_uploaded_xorb_with_metrics full round-trip ─────────────────
 
@@ -1140,35 +1122,6 @@ mod tests {
     }
 
     // ── store_uploaded_xorb with footerless + LZ4 ───────────────────────
-
-    #[test]
-    fn store_uploaded_xorb_footerless_lz4_normalization() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false)
-                .unwrap();
-        assert!(serialized.footer_start.is_none());
-        let hash = serialized.hash.hex();
-
-        // Store footerless bytes -> triggers normalization
-        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok(), "footerless store failed: {result:?}");
-        let stored = result.unwrap();
-        assert!(stored.was_inserted);
-
-        // The stored bytes now have a footer, verify via visit
-        let key = xorb_object_key(&hash).unwrap();
-        let mut count = 0_usize;
-        let visit = visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
-            count += 1;
-            Ok(())
-        });
-        assert!(visit.is_ok());
-        assert_eq!(count, 2);
-    }
 
     #[test]
     fn xorb_hash_from_object_key_with_uppercase_hash_returns_err() {
@@ -1235,57 +1188,6 @@ mod tests {
     }
 
     // ── store_uploaded_xorb with varied setup ────────────────────────────
-
-    #[test]
-    fn store_uploaded_xorb_with_none_compression_single_chunk() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let raw = build_raw_xorb(1, ChunkSize::Fixed(64));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let result = async_store_xorb(
-            &object_store,
-            &serialized.hash.hex(),
-            &serialized.serialized_data,
-        );
-        assert!(result.is_ok());
-        assert!(result.unwrap().was_inserted);
-    }
-
-    #[test]
-    fn store_uploaded_xorb_with_none_compression_two_chunks() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(64));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let result = async_store_xorb(
-            &object_store,
-            &serialized.hash.hex(),
-            &serialized.serialized_data,
-        );
-        assert!(result.is_ok());
-        assert!(result.unwrap().was_inserted);
-    }
-
-    #[test]
-    fn store_uploaded_xorb_with_none_compression_many_chunks() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let raw = build_raw_xorb(10, ChunkSize::Fixed(32));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let result = async_store_xorb(
-            &object_store,
-            &serialized.hash.hex(),
-            &serialized.serialized_data,
-        );
-        assert!(result.is_ok());
-        assert!(result.unwrap().was_inserted);
-    }
 
     // ── store_uploaded_xorb_with_metrics round trip with verify ─────────
 
@@ -1444,8 +1346,6 @@ mod tests {
         assert_eq!(visited, 0);
     }
 
-    // ── store_uploaded_xorb with LZ4 and footer ─────────────────────────
-
     // ── canonicalize_uploaded_xorb with LZ4 footerless bytes ──────────
 
     #[test]
@@ -1461,8 +1361,6 @@ mod tests {
         assert!(matches!(cow, Cow::Owned(_)));
         assert_eq!(validated.hash(), expected_hash);
     }
-
-    // ── Container persistence accounting ─────────────────────────────
 
     // ── idempotent store with visit verification ────────────────────────
 
