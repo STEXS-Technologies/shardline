@@ -1083,18 +1083,27 @@ async fn put_update_existing_no_eviction() {
     assert_eq!(result, Some(b"second".to_vec()));
 }
 
-// ── PartialOrd implementation for EvictionKey ────────────────────────
-
 #[test]
-fn eviction_key_partial_cmp() {
+fn eviction_key_orders_by_age_then_sequence() {
     use super::inner::EvictionKey;
     use tokio::time::Instant;
 
-    let a = EvictionKey(Instant::now(), 1);
-    let b = EvictionKey(Instant::now(), 2);
-    // partial_cmp delegates to cmp
-    let ordering = a.partial_cmp(&b);
-    assert!(ordering.is_some());
+    let now = Instant::now();
+    let later = now + Duration::from_millis(1);
+    let mut keys = [
+        EvictionKey(later, 0),
+        EvictionKey(now, 2),
+        EvictionKey(now, 1),
+    ];
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            EvictionKey(now, 1),
+            EvictionKey(now, 2),
+            EvictionKey(later, 0)
+        ]
+    );
 }
 
 // ── get: race to hit no-loading / re-check paths ─────────────────────

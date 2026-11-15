@@ -149,35 +149,33 @@ impl MemoryReconstructionCache {
             // Check if someone else is already loading this key. The loading
             // map lives behind a synchronous mutex so the loader's Drop guard
             // can release a latch synchronously on caller cancellation
-            // (F-112). Use separate branches on contains_key() to avoid the
-            // clippy option_if_let_else lint.
+            // (F-112).
             let mut loading = self
                 .loading
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if loading.contains_key(key) {
-                // SAFETY: contains_key was just checked — get() returns Some.
-                // Use unwrap_or_else with a non-panicking default to avoid
-                // denied lints while satisfying the type system.
-                let dummy = LoadingEntry::new(Arc::new(Notify::new()));
-                let existing = loading.get(key).unwrap_or(&dummy);
-                (
-                    false,
-                    Arc::clone(&existing.notify),
-                    Arc::clone(&existing.last_seen_alive),
-                )
-            } else {
-                let new = LoadingEntry::new(Arc::new(Notify::new()));
-                let notify = Arc::clone(&new.notify);
-                let last_seen_alive = Arc::clone(&new.last_seen_alive);
-                loading.insert(key.clone(), new);
-                // Clean up any expired entry so the loader can store fresh data.
-                if let Some(entry) = inner.entries.get(key)
-                    && !entry.is_live(now, self.ttl)
-                {
-                    inner.remove(key);
+            match loading.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    let existing = entry.get();
+                    (
+                        false,
+                        Arc::clone(&existing.notify),
+                        Arc::clone(&existing.last_seen_alive),
+                    )
                 }
-                (true, notify, last_seen_alive)
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    let new = LoadingEntry::new(Arc::new(Notify::new()));
+                    let notify = Arc::clone(&new.notify);
+                    let last_seen_alive = Arc::clone(&new.last_seen_alive);
+                    slot.insert(new);
+                    // Clean up any expired entry so the loader can store fresh data.
+                    if let Some(entry) = inner.entries.get(key)
+                        && !entry.is_live(now, self.ttl)
+                    {
+                        inner.remove(key);
+                    }
+                    (true, notify, last_seen_alive)
+                }
             }
         };
 

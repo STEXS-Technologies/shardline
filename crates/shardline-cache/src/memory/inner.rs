@@ -21,20 +21,8 @@ impl MemoryEntry {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) struct EvictionKey(pub(super) Instant, pub(super) u64);
-
-impl Ord for EvictionKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
-    }
-}
-
-impl PartialOrd for EvictionKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 /// A registered in-flight loading latch for one key.
 #[derive(Debug)]
@@ -136,10 +124,8 @@ impl CacheInner {
 
     pub(super) fn evict_oldest(&mut self) {
         while let Some((_eviction_key, key)) = self.eviction_order.pop_first() {
-            if self.entries.contains_key(&key) {
-                if let Some(entry) = self.entries.remove(&key) {
-                    self.total_bytes = self.total_bytes.saturating_sub(entry.payload.len());
-                }
+            if let Some(entry) = self.entries.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.payload.len());
                 return;
             }
         }
