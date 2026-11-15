@@ -84,17 +84,14 @@ where
     let mut newest_stored: Option<u64> = None;
     index_store
         .visit_quarantine_candidates(|candidate| {
-            let candidate_newest = candidate.first_seen_unreachable_at_unix_seconds();
             newest_stored =
-                Some(newest_stored.map_or(candidate_newest, |newest| newest.max(candidate_newest)));
+                newest_stored.max(Some(candidate.first_seen_unreachable_at_unix_seconds()));
             Ok::<(), GcError>(())
         })
         .await?;
     index_store
         .visit_retention_holds(|hold| {
-            let hold_newest = hold.held_at_unix_seconds();
-            newest_stored =
-                Some(newest_stored.map_or(hold_newest, |newest| newest.max(hold_newest)));
+            newest_stored = newest_stored.max(Some(hold.held_at_unix_seconds()));
             Ok::<(), GcError>(())
         })
         .await?;
