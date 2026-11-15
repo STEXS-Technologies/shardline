@@ -125,7 +125,7 @@ struct UploadStreamHandleInner {
     operation: Mutex<()>,
     pipeline: StdMutex<Option<FileUploadPipeline>>,
     cancellation: CancellationToken,
-    result: Arc<OnceLock<UploadFileInfo>>,
+    result: OnceLock<UploadFileInfo>,
     task_id: u64,
     started: AtomicBool,
     finished: AtomicBool,
@@ -237,8 +237,7 @@ impl UploadStreamHandle {
     #[cfg(not(target_family = "wasm"))]
     pub fn write_blocking(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
         let data = data.into();
-        let handle = self.clone();
-        crate::stream::global_blocking_runtime()?.block_on(async move { handle.write(data).await })
+        crate::stream::global_blocking_runtime()?.block_on(self.write(data))
     }
 
     /// Finalizes this file's ingest: flushes the pending tail into a xorb,
@@ -559,7 +558,7 @@ impl FileUploadPipeline {
                 xorb_hash: location.xorb_hash,
                 chunk_index: location.chunk_index,
             });
-            self.account_chunk(len);
+            self.total_bytes = self.total_bytes.saturating_add(len);
             return Ok(());
         }
 
@@ -627,7 +626,7 @@ impl FileUploadPipeline {
                     xorb_hash: xorb.xorb_hash,
                     chunk_index: index,
                 });
-                self.account_chunk(len);
+                self.total_bytes = self.total_bytes.saturating_add(len);
                 return Ok(());
             }
         }
@@ -641,16 +640,12 @@ impl FileUploadPipeline {
         self.pending.push((chunk, file_offset));
         self.pending_bytes = self.pending_bytes.saturating_add(chunk_len);
         self.placements.push(Placement::New { hash, len });
-        self.account_chunk(len);
+        self.total_bytes = self.total_bytes.saturating_add(len);
         {
             let mut state = self.session.inner.state.lock().await;
             state.global_chunk_index = state.global_chunk_index.saturating_add(1);
         }
         Ok(())
-    }
-
-    const fn account_chunk(&mut self, len: u64) {
-        self.total_bytes = self.total_bytes.saturating_add(len);
     }
 
     /// Cuts the pending buffer into a xorb: HEAD-probe, streaming POST (or
@@ -1032,7 +1027,7 @@ impl UploadSession {
                 operation: Mutex::new(()),
                 pipeline: StdMutex::new(Some(FileUploadPipeline::new(self.clone()))),
                 cancellation: CancellationToken::new(),
-                result: Arc::new(OnceLock::new()),
+                result: OnceLock::new(),
                 task_id: id,
                 started: AtomicBool::new(false),
                 finished: AtomicBool::new(false),
