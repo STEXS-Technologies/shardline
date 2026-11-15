@@ -3786,10 +3786,10 @@ PostgreSQL setup failures fail tests rather than silently skip qualification.
 Some changes add diagnostics or avoid allocations without reducing lines.
 
 The inventory revision is not a release qualification stamp. The complete local
-distributed gate below passed at the earlier `7e3c77a5` revision. Later changes
-have targeted test and lint results; that full gate has not been repeated for
-this inventory revision. Independent hosted CI and a multi-host PostgreSQL/S3
-split-role topology remain separate qualification requirements.
+distributed gate below was repeated successfully at `6823c999`, after this source
+snapshot, including the later protocol fixture and OCI/S3 handler cleanup.
+Independent hosted CI and a multi-host PostgreSQL/S3 split-role topology remain
+separate qualification requirements.
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
@@ -4066,6 +4066,33 @@ It retains the earlier scope limits: the split-role servers share local SQLite
 and filesystem storage, some compatibility cases use local storage, and the
 result does not establish a multi-host PostgreSQL/S3 topology, optimized-release
 performance, independent hosted CI, or production capacity.
+
+### Distributed-integrity gate after protocol cleanup (2026-11-15)
+
+Repeated the complete gate at clean commit `6823c999a2c09270e33d8cb254557cc1632ad8ae`,
+including the shared protocol/PostgreSQL fixtures, bounded LFS stream handling,
+S3 bucket dispatch, and OCI read/upload-response consolidation.
+
+| Stage | Result | Test elapsed time |
+| --- | --- | ---: |
+| Deployment faults and compatibility | 50 passed, 0 skipped | 491.222 s |
+| Split-role traffic and probe contracts | 8 passed, 0 skipped | 22.555 s |
+
+Total driver time was 552.597 seconds. The all-features dev executable was
+frozen before testing and its SHA-256 remained
+`4695b202a047e49164aa5911ad60b757e6c46cdf294f41967bc59a8f1a0ec7c3`.
+The gate script checksum remained
+`3e417512287358e0a0db9614418de1e265206341aa18b3cbfb758e89fee9d312`.
+The run used Rust 1.99.0, four build jobs, disabled dev/test debug information,
+and no compiler wrapper. Source revision, build artifacts, executable checksums,
+client versions, and complete logs were retained. Reproduce using the earlier
+gate command at this pinned revision.
+
+The gate rejected runtime skip and panic markers. Its scope remains the same:
+local deployment faults include PostgreSQL/MinIO cases, while the multinode
+suite uses in-process roles with local SQLite/filesystem storage. This does not
+establish a multi-host PostgreSQL/S3 deployment, independent hosted CI,
+optimized-release performance, or production capacity.
 
 ### PostgreSQL/MinIO GC recovery qualification (2026-11-15)
 
