@@ -28,7 +28,7 @@ use crate::{
     error::SdxError,
     hash::parse_xet_hash_hex,
     reconstruction,
-    retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope},
+    retry::{RetryContext, RetryPolicy, RetryScope},
     stream::{
         BufferSemaphore, DownloadStream, FileReconstructor, StreamContext, StreamLimits,
         UnorderedDownloadStream,
@@ -67,7 +67,7 @@ impl DownloadSessionInner {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Read,
-            markers: RetryMarkers::default(),
+            refresh_on_forbidden: false,
         }
     }
 

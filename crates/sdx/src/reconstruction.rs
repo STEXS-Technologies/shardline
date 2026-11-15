@@ -416,7 +416,7 @@ mod tests {
     use super::Reconstruction;
     use crate::error::SdxError;
     use crate::hash::compute_chunk_hash;
-    use crate::retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope};
+    use crate::retry::{RetryContext, RetryPolicy, RetryScope};
     use crate::transfer::TransferClient;
 
     const FILE_ID: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -882,7 +882,7 @@ mod tests {
                 .with_jitter(false),
             tokens: None,
             scope: RetryScope::Read,
-            markers: RetryMarkers::default(),
+            refresh_on_forbidden: false,
         };
         let transfer = transfer_client();
         let file = super::reconstruct(

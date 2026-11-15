@@ -73,7 +73,7 @@ use crate::{
     error::{SdxError, TransferError},
     hash::parse_xet_hash_hex,
     reconstruction::{ReconstructionResponse, fetch_reconstruction_response},
-    retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope},
+    retry::{RetryContext, RetryPolicy, RetryScope},
     transfer::{ByteRange, TransferClient},
     xorb::XorbReader,
 };
@@ -169,7 +169,7 @@ impl StreamContext {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Read,
-            markers: RetryMarkers::refresh_on_forbidden(),
+            refresh_on_forbidden: true,
         }
     }
 }

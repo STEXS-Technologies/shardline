@@ -28,7 +28,7 @@ use crate::{
     auth::{RepositoryId, TokenService},
     client::XetClient,
     error::SdxError,
-    retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope},
+    retry::{RetryContext, RetryPolicy, RetryScope},
     session::DownloadSessionInner,
     transfer::TransferClient,
 };
@@ -161,7 +161,7 @@ impl<'session> MetadataClient<'session> {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Read,
-            markers: RetryMarkers::refresh_on_forbidden(),
+            refresh_on_forbidden: true,
         }
     }
 
@@ -170,7 +170,7 @@ impl<'session> MetadataClient<'session> {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Write,
-            markers: RetryMarkers::refresh_on_forbidden(),
+            refresh_on_forbidden: true,
         }
     }
 

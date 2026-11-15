@@ -59,7 +59,7 @@ use crate::chunker::{Chunk, Chunker};
 use crate::dedup::{DedupClient, DedupOutcome, is_global_dedup_eligible};
 use crate::error::{SdxError, TransferError};
 use crate::hash::{parse_xet_hash_hex, xet_hash_hex_string};
-use crate::retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope};
+use crate::retry::{RetryContext, RetryPolicy, RetryScope};
 use crate::session::DownloadSessionInner;
 use crate::shard::{
     MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG, ShardFileEntry, ShardSegment, ShardXorb, ShardXorbChunk,
@@ -377,7 +377,7 @@ impl UploadSessionInner {
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Write,
             // 403 on an upload re-issues the write token once (loop-guarded).
-            markers: RetryMarkers::refresh_on_forbidden(),
+            refresh_on_forbidden: true,
         }
     }
 
@@ -385,10 +385,10 @@ impl UploadSessionInner {
     /// miss, 429 fail-fast).
     fn dedup_retry_context(&self) -> RetryContext {
         RetryContext {
-            policy: self.retry_policy.clone(),
+            policy: self.retry_policy.clone().with_retry_on_429(false),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Write,
-            markers: RetryMarkers::dedup(),
+            refresh_on_forbidden: false,
         }
     }
 

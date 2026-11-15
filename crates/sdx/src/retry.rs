@@ -4,7 +4,7 @@
 //! [`RetryPolicy`] is the user-configurable retry configuration (mirroring the
 //! reference client's `RetryWrapper` defaults: 5 attempts, 3 s base delay,
 //! 6 min max duration, exponential + jitter). [`RetryContext`] bundles a policy
-//! with the token service + scope and per-call markers, and drives an attempt
+//! with the token service, scope, and refresh behavior, and drives an attempt
 //! closure through backoff and 401/403 token refresh.
 //!
 //! # Error classification (exact)
@@ -15,7 +15,7 @@
 //! - **401/403 are refresh triggers, not plain retries** (sdx delta vs upstream,
 //!   which treats them fatal except the ranged-fetch 403 URL refresh): a 401
 //!   refreshes the read token; a 403 on uploads re-issues the write token (or
-//!   refreshes the URL for signed-URL ranged fetches when `retry_on_403` is
+//!   refreshes the URL for signed-URL ranged fetches when `refresh_on_forbidden` is
 //!   set). The request is retried once after the refresh; a repeated 401/403 is
 //!   surfaced (loop-guarded), never re-issued infinitely.
 //!
@@ -145,41 +145,7 @@ pub(crate) enum RetryScope {
     Write,
 }
 
-/// Per-call markers that tune retry behavior for a specific request kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RetryMarkers {
-    /// Whether 429 responses are retried (override of the policy default).
-    pub retry_on_429: bool,
-    /// Whether a 403 triggers token refresh and one retry for this request kind.
-    pub retry_on_403: bool,
-}
-
-impl Default for RetryMarkers {
-    fn default() -> Self {
-        Self {
-            retry_on_429: true,
-            retry_on_403: false,
-        }
-    }
-}
-
-impl RetryMarkers {
-    pub(crate) const fn dedup() -> Self {
-        Self {
-            retry_on_429: false,
-            retry_on_403: false,
-        }
-    }
-
-    pub(crate) const fn refresh_on_forbidden() -> Self {
-        Self {
-            retry_on_429: true,
-            retry_on_403: true,
-        }
-    }
-}
-
-/// Bundle of policy + token service + scope + markers for a retryable request.
+/// Policy, token service, scope, and refresh behavior for a retryable request.
 ///
 /// Cheap to clone: the policy is owned and the token service is an `Arc`ed
 /// handle. When `tokens` is `None`, no 401/403 refresh happens (the initial
@@ -194,7 +160,8 @@ pub struct RetryContext {
     pub(crate) policy: RetryPolicy,
     pub(crate) tokens: Option<TokenService>,
     pub(crate) scope: RetryScope,
-    pub(crate) markers: RetryMarkers,
+    /// Whether a 403 triggers token refresh and one retry for this request kind.
+    pub(crate) refresh_on_forbidden: bool,
 }
 
 impl RetryContext {
@@ -237,7 +204,7 @@ impl RetryContext {
                     refreshed = true;
                 }
                 Err(error)
-                    if is_retryable(&error, self.markers.retry_on_429)
+                    if is_retryable(&error, self.policy.retry_on_429)
                         && requests < max_requests =>
                 {
                     let delay = self.backoff_delay(requests.saturating_sub(1), &error);
@@ -252,7 +219,7 @@ impl RetryContext {
     const fn refresh_allowed(&self, error: &TransferError) -> bool {
         match error {
             // Only request kinds that opt in may refresh after a 403.
-            TransferError::Forbidden(_) => self.markers.retry_on_403,
+            TransferError::Forbidden(_) => self.refresh_on_forbidden,
             TransferError::Unauthorized(_) => true,
             TransferError::BadRequest(_)
             | TransferError::NotFound(_)
@@ -357,7 +324,7 @@ mod tests {
 
     use crate::auth::TokenService;
 
-    use super::{RetryContext, RetryMarkers, RetryPolicy, RetryScope, is_retryable, jitter_factor};
+    use super::{RetryContext, RetryPolicy, RetryScope, is_retryable, jitter_factor};
     use crate::error::TransferError;
 
     fn transient_error() -> TransferError {
@@ -544,17 +511,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_markers_default_and_dedup() {
-        let markers = RetryMarkers::default();
-        assert!(markers.retry_on_429);
-        assert!(!markers.retry_on_403);
-        let dedup = RetryMarkers::dedup();
-        assert!(!dedup.retry_on_429);
-        let xorb = RetryMarkers::refresh_on_forbidden();
-        assert!(xorb.retry_on_403);
-    }
-
-    #[test]
     fn jitter_is_bounded() {
         for attempt in 0..200 {
             let factor = jitter_factor(attempt);
@@ -622,7 +578,7 @@ mod tests {
             policy,
             tokens,
             scope: RetryScope::Read,
-            markers: RetryMarkers::default(),
+            refresh_on_forbidden: false,
         }
     }
 
@@ -782,29 +738,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_on_429_disabled_surfaces_immediately() {
-        let server = Arc::new(MockServer::start().await);
-        Mock::given(method("GET"))
-            .and(path("/probe"))
-            .respond_with(ResponseTemplate::new(429).set_body_json(json!({"error": "overloaded"})))
-            .mount(&server)
-            .await;
-        let mut ctx = retry_context(
-            RetryPolicy::new()
-                .with_max_attempts(5)
-                .with_base_delay(Duration::from_millis(1)),
-            None,
-        );
-        ctx.markers.retry_on_429 = false;
-        let result = ctx
-            .run("tok".to_owned(), |tok| {
-                let server = server.clone();
-                async move { probe(&server, &tok).await }
-            })
-            .await;
-        assert!(matches!(result, Err(TransferError::TooManyRequests { .. })));
-        // 429 fail-fast: exactly one request.
-        assert_eq!(request_count(&server).await, 1);
+    async fn retry_policy_controls_429_request_count() {
+        for (policy, expected_requests) in [
+            (RetryPolicy::new().with_retry_on_429(false), 1),
+            (RetryPolicy::dedup(), 1),
+            (RetryPolicy::new(), 3),
+        ] {
+            let server = Arc::new(MockServer::start().await);
+            Mock::given(method("GET"))
+                .and(path("/probe"))
+                .respond_with(
+                    ResponseTemplate::new(429).set_body_json(json!({"error": "overloaded"})),
+                )
+                .mount(&server)
+                .await;
+            let ctx = retry_context(
+                policy.with_max_attempts(2).with_base_delay(Duration::ZERO),
+                None,
+            );
+            let result = ctx
+                .run("tok".to_owned(), |tok| {
+                    let server = server.clone();
+                    async move { probe(&server, &tok).await }
+                })
+                .await;
+            assert!(matches!(result, Err(TransferError::TooManyRequests { .. })));
+            assert_eq!(request_count(&server).await, expected_requests);
+        }
     }
 
     #[tokio::test]
@@ -828,7 +788,7 @@ mod tests {
             policy: RetryPolicy::new().with_max_attempts(5),
             tokens: Some(write_token_service(&server)),
             scope: RetryScope::Write,
-            markers: RetryMarkers::default(),
+            refresh_on_forbidden: false,
         };
         let result = ctx
             .run("old-token".to_owned(), |tok| {
@@ -864,10 +824,7 @@ mod tests {
             policy: RetryPolicy::new().with_max_attempts(5),
             tokens: Some(write_token_service(&server)),
             scope: RetryScope::Write,
-            markers: RetryMarkers {
-                retry_on_403: true,
-                ..RetryMarkers::default()
-            },
+            refresh_on_forbidden: true,
         };
         let result = ctx
             .run("tok".to_owned(), |tok| {
