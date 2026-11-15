@@ -170,3 +170,43 @@ impl PostgresFixture {
         self.admin.close().await;
     }
 }
+
+/// Create and migrate an independent protocol-test schema.
+pub(crate) async fn isolated_postgres_url(prefix: &str) -> Option<String> {
+    let database_url = shardline_test_support::postgres_fixture_url("DATABASE_URL")?;
+    let schema = format!(
+        "{prefix}_fixture_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("configured PostgreSQL fixture");
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    let mut scoped = url::Url::parse(&database_url).unwrap();
+    let options = scoped
+        .query_pairs()
+        .find(|(key, _)| key == "options")
+        .map_or_else(String::new, |(_, value)| value.into_owned());
+    let parameters: Vec<_> = scoped
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    scoped.set_query(None);
+    scoped
+        .query_pairs_mut()
+        .extend_pairs(parameters)
+        .append_pair("options", &format!("{options} -csearch_path={schema}"));
+    let pool = sqlx::PgPool::connect(scoped.as_str()).await.unwrap();
+    crate::apply_database_migrations(&pool).await.unwrap();
+    pool.close().await;
+    Some(scoped.into())
+}

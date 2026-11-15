@@ -18,6 +18,7 @@
     clippy::string_add
 )]
 
+use crate::test_support::postgres_fixture::isolated_postgres_url;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
@@ -64,51 +65,12 @@ const KEY: &str = "data/model.pt";
 /// Builds the same S3 router over Postgres metadata so multipart uses the
 /// durable object-store session path. Returns `None` outside the Postgres CI job.
 async fn build_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
-    let database_url = isolated_postgres_url().await?;
+    let database_url = isolated_postgres_url("s3").await?;
     let tmp = TempDir::new().expect("configured PostgreSQL fixture scratch directory");
     let object_store = crate::object_store::ServerObjectStore::local(tmp.path().join("objects"))
         .expect("configured PostgreSQL fixture object store");
     let state = build_postgres_state(&database_url, tmp.path(), object_store).await?;
     Some((state, tmp))
-}
-
-async fn isolated_postgres_url() -> Option<String> {
-    let database_url = shardline_test_support::postgres_fixture_url("DATABASE_URL")?;
-    let schema = format!(
-        "s3_fixture_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let admin = sqlx::PgPool::connect(&database_url)
-        .await
-        .expect("configured PostgreSQL fixture");
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
-    let mut scoped = url::Url::parse(&database_url).unwrap();
-    let options = scoped
-        .query_pairs()
-        .find(|(key, _)| key == "options")
-        .map_or_else(String::new, |(_, value)| value.into_owned());
-    let parameters: Vec<_> = scoped
-        .query_pairs()
-        .filter(|(key, _)| key != "options")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    scoped.set_query(None);
-    scoped
-        .query_pairs_mut()
-        .extend_pairs(parameters)
-        .append_pair("options", &format!("{options} -csearch_path={schema}"));
-    let pool = sqlx::PgPool::connect(scoped.as_str()).await.unwrap();
-    crate::apply_database_migrations(&pool).await.unwrap();
-    pool.close().await;
-    Some(scoped.into())
 }
 
 async fn build_postgres_state(
@@ -2416,7 +2378,7 @@ async fn s3_postgres_multipart_rejects_wrong_key_before_claiming_completion() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_multipart_resumes_across_nodes_without_shared_rwx() {
-    let Some(database_url) = isolated_postgres_url().await else {
+    let Some(database_url) = isolated_postgres_url("s3").await else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -2472,7 +2434,7 @@ async fn s3_postgres_multipart_resumes_across_nodes_without_shared_rwx() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_delete_and_put_are_one_cross_replica_order() {
-    let Some(database_url) = isolated_postgres_url().await else {
+    let Some(database_url) = isolated_postgres_url("s3").await else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -4902,7 +4864,7 @@ async fn s3_read_conditions_and_if_range_preserve_representation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_corrupt_durable_part_preserves_old_object_and_allows_verified_retry() {
-    let Some(database_url) = isolated_postgres_url().await else {
+    let Some(database_url) = isolated_postgres_url("s3").await else {
         return;
     };
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -5300,7 +5262,7 @@ async fn s3_local_multipart_completion_honors_conditional_headers_and_retry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_multipart_completion_honors_conditional_headers_and_retry() {
-    let Some(database_url) = isolated_postgres_url().await else {
+    let Some(database_url) = isolated_postgres_url("s3").await else {
         return;
     };
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -5318,7 +5280,7 @@ async fn s3_postgres_multipart_completion_honors_conditional_headers_and_retry()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_multipart_completion_conditional_race_has_one_winner() {
-    let Some(database_url) = isolated_postgres_url().await else {
+    let Some(database_url) = isolated_postgres_url("s3").await else {
         return;
     };
     let pool = sqlx::postgres::PgPoolOptions::new()

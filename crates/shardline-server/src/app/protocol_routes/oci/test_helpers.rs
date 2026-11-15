@@ -26,47 +26,9 @@ pub(crate) struct OciPostgresTestCluster {
 }
 
 pub(crate) async fn build_oci_postgres_test_cluster() -> Option<OciPostgresTestCluster> {
-    let database_url = shardline_test_support::postgres_fixture_url("DATABASE_URL")?;
-    let schema = format!(
-        "oci_fixture_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("fixture clock after Unix epoch")
-            .as_nanos()
-    );
-    let admin = sqlx::PgPool::connect(&database_url)
-        .await
-        .expect("connect PostgreSQL OCI admin");
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&admin)
-        .await
-        .expect("create isolated OCI schema");
-    admin.close().await;
-    let mut scoped_url = url::Url::parse(&database_url).expect("parse PostgreSQL OCI URL");
-    let old_options = scoped_url
-        .query_pairs()
-        .find(|(key, _)| key == "options")
-        .map_or_else(String::new, |(_, value)| value.into_owned());
-    let other_parameters: Vec<_> = scoped_url
-        .query_pairs()
-        .filter(|(key, _)| key != "options")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    scoped_url.set_query(None);
-    scoped_url
-        .query_pairs_mut()
-        .extend_pairs(other_parameters)
-        .append_pair("options", &format!("{old_options} -csearch_path={schema}"));
-    let bootstrap = sqlx::PgPool::connect(scoped_url.as_str())
-        .await
-        .expect("connect isolated OCI schema");
-    crate::apply_database_migrations(&bootstrap)
-        .await
-        .expect("migrate isolated OCI schema");
-    bootstrap.close().await;
+    let scoped_url = crate::test_support::postgres_fixture::isolated_postgres_url("oci").await?;
     Some(
-        build_oci_postgres_test_cluster_for_url(scoped_url.as_str())
+        build_oci_postgres_test_cluster_for_url(&scoped_url)
             .await
             .expect("configured PostgreSQL OCI nodes must initialize"),
     )
