@@ -233,6 +233,15 @@ impl FileDigest {
         let start = usize::try_from(term.chunk_index_start)?;
         let end = usize::try_from(term.chunk_index_end)?;
         let members = info.chunks().get(start..end).ok_or_else(rejected)?;
+        let mut update_digest = |data: &[u8]| {
+            if !reusing_prefix {
+                if let Some(worker) = &mut worker {
+                    worker.update(data);
+                } else {
+                    digest.update(data);
+                }
+            }
+        };
         if let ServerObjectStore::S3(remote) = store {
             streaming_source::visit_range(
                 remote,
@@ -240,13 +249,7 @@ impl FileDigest {
                 members,
                 checkpoint,
                 &mut |_, data| {
-                    if !reusing_prefix {
-                        if let Some(worker) = &mut worker {
-                            worker.update(data);
-                        } else {
-                            digest.update(data);
-                        }
-                    }
+                    update_digest(data);
                     Ok(())
                 },
             )?;
@@ -296,13 +299,7 @@ impl FileDigest {
             {
                 return Err(rejected());
             }
-            if !reusing_prefix {
-                if let Some(worker) = &mut worker {
-                    worker.update(&data);
-                } else {
-                    digest.update(&data);
-                }
-            }
+            update_digest(&data);
         }
         Ok(())
     }
