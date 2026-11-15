@@ -534,16 +534,28 @@ fn large_copy_publishes_when_destination_stays_absent() {
 }
 
 #[test]
-fn large_copy_aborts_failed_completion_without_unconditional_retry() {
-    for status in ["409 Conflict", "403 Forbidden"] {
+fn large_copy_aborts_failed_parts_and_completion_without_unconditional_retry() {
+    for (part_status, completion_status) in [
+        (None, Some("409 Conflict")),
+        (None, Some("403 Forbidden")),
+        (Some("412 Precondition Failed"), None),
+        (Some("403 Forbidden"), None),
+    ] {
         let provider = Provider::new(None);
-        provider.state.lock().unwrap().completion_status = Some(status);
+        {
+            let mut state = provider.state.lock().unwrap();
+            state.part_status = part_status;
+            state.completion_status = completion_status;
+        }
         assert!(provider.copy().is_err());
         let state = provider.state.lock().unwrap();
         assert!(state.destination.is_none());
-        assert!(state.conditional_completion);
+        assert_eq!(state.conditional_completion, part_status.is_none());
         assert!(state.aborted);
-        assert_eq!(state.completion_requests, 1);
+        assert_eq!(
+            state.completion_requests,
+            usize::from(part_status.is_none())
+        );
     }
 }
 

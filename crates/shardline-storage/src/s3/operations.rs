@@ -792,72 +792,65 @@ impl S3ObjectStore {
             return existing_copy_outcome(self, source, destination, source_len);
         }
 
-        let store = self.inner.clone();
-        let src = source_location.clone();
-        let dst = destination_location.clone();
-        let len = source_len;
-
         // Initialize before creating remote state so a local client-construction
         // failure cannot leave an unpublished multipart upload behind.
         let conditional_completion = self.conditional_completion_inner.get().await?;
-
-        let upload_id = store
-            .create_multipart(&dst)
-            .await
-            .map_err(S3ObjectStoreError::External)?;
-
-        let mut offset = 0_u64;
-        let mut part_idx = 0_usize;
-        let mut part_ids = Vec::new();
-
-        let result: Result<(), S3ObjectStoreError> = async {
-            while offset < len {
-                let chunk_end = offset.saturating_add(LARGE_COPY_CHUNK_BYTES).min(len);
-                let chunk = store
-                    .get_range(&src, offset..chunk_end)
-                    .await
-                    .map_err(S3ObjectStoreError::External)?;
-                let payload = PutPayload::from_bytes(chunk);
-                let part_id = store
-                    .put_part(&dst, &upload_id, part_idx, payload)
-                    .await
-                    .map_err(S3ObjectStoreError::External)?;
+        let upload_id = self.inner.create_multipart(destination_location).await?;
+        let result = async {
+            let mut offset = 0_u64;
+            let mut part_ids = Vec::new();
+            while offset < source_len {
+                let chunk_end = offset
+                    .saturating_add(LARGE_COPY_CHUNK_BYTES)
+                    .min(source_len);
+                let chunk = self
+                    .inner
+                    .get_range(source_location, offset..chunk_end)
+                    .await?;
+                let part_id = self
+                    .inner
+                    .put_part(
+                        destination_location,
+                        &upload_id,
+                        part_ids.len(),
+                        PutPayload::from_bytes(chunk),
+                    )
+                    .await?;
                 part_ids.push(part_id);
-                part_idx = part_idx.wrapping_add(1);
                 offset = chunk_end;
             }
-            Ok(())
+            // The provider must enforce absence atomically at publication.
+            // Another HEAD here cannot fence a competing node's later PUT.
+            // This client adds If-None-Match only to completion, retaining
+            // the dependency's signing, XML parsing and retries.
+            match conditional_completion
+                .complete_multipart(destination_location, &upload_id, part_ids)
+                .await
+            {
+                Ok(_) => Ok(PutOutcome::Inserted),
+                Err(
+                    ExternalObjectStoreError::AlreadyExists { .. }
+                    | ExternalObjectStoreError::Precondition { .. },
+                ) => Ok(PutOutcome::AlreadyExists),
+                Err(error) => Err(error),
+            }
         }
         .await;
 
+        // Abort before inspecting a competing destination. Transfer failures
+        // remain errors; only a completion conflict can become AlreadyExists.
+        if !matches!(&result, Ok(PutOutcome::Inserted)) {
+            self.inner
+                .abort_multipart(destination_location, &upload_id)
+                .await
+                .ok();
+        }
         match result {
-            Ok(()) => {
-                // The provider must enforce absence atomically at publication.
-                // Another HEAD here cannot fence a competing node's later PUT.
-                // This dedicated client adds If-None-Match only to completion,
-                // retaining the dependency's signing, XML parsing and retries.
-                match conditional_completion
-                    .complete_multipart(&dst, &upload_id, part_ids)
-                    .await
-                {
-                    Ok(_) => Ok(PutOutcome::Inserted),
-                    Err(
-                        ExternalObjectStoreError::AlreadyExists { .. }
-                        | ExternalObjectStoreError::Precondition { .. },
-                    ) => {
-                        store.abort_multipart(&dst, &upload_id).await.ok();
-                        existing_copy_outcome(self, source, destination, source_len)
-                    }
-                    Err(error) => {
-                        store.abort_multipart(&dst, &upload_id).await.ok();
-                        Err(S3ObjectStoreError::External(error))
-                    }
-                }
+            Ok(PutOutcome::AlreadyExists) => {
+                existing_copy_outcome(self, source, destination, source_len)
             }
-            Err(error) => {
-                store.abort_multipart(&dst, &upload_id).await.ok();
-                Err(error)
-            }
+            Ok(outcome) => Ok(outcome),
+            Err(error) => Err(S3ObjectStoreError::External(error)),
         }
     }
 
