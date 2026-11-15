@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, hash_map::Entry},
     fs::File,
     io::{BufReader, Cursor, Read, Seek},
     path::Path,
@@ -490,21 +490,18 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
 
     for xorb_info in bounded_shard.xorb_infos {
         checkpoint()?;
-        let hash = xorb_info.metadata.xorb_hash.hex();
-        if !xorb_cache.contains_key(&hash) {
-            let (verified, _source) = load_xorb_range_info_with_checkpoint(
-                object_store,
-                &hash,
-                member_references.as_deref_mut(),
-                checkpoint,
-            )?;
-            xorb_cache.insert(hash.clone(), verified);
-        }
-        let verified = xorb_cache
-            .get(&hash)
-            .ok_or(XetAdapterError::InvalidSerializedShard(
-                InvalidSerializedShardError::XorbMetadataCacheInsertionFailed,
-            ))?;
+        let verified = match xorb_cache.entry(xorb_info.metadata.xorb_hash) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let (verified, _source) = load_xorb_range_info_with_checkpoint(
+                    object_store,
+                    &entry.key().hex(),
+                    member_references.as_deref_mut(),
+                    checkpoint,
+                )?;
+                entry.insert(verified)
+            }
+        };
         checkpoint()?;
         verification::verify_xorb_members(&xorb_info, &verified.verified_chunks)?;
         in_memory_shard
@@ -525,7 +522,7 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
             if info.verified_chunks.len() > shardline_index::MAX_XET_DESCRIPTOR_CHUNKS {
                 continue;
             }
-            descriptors.push(info.descriptor(hash));
+            descriptors.push(info.descriptor(&hash.hex()));
         }
         descriptors.sort_unstable_by(|left, right| left.hash.cmp(&right.hash));
     }
@@ -792,7 +789,7 @@ fn build_file_records_with_cache(
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     mut member_references: Option<&mut HashSet<ObjectKey>>,
-    xorb_cache: &mut HashMap<String, XorbRangeInfo>,
+    xorb_cache: &mut HashMap<MerkleHash, XorbRangeInfo>,
     file_digests: &mut file_digests::FileDigestVerifier,
     checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
 ) -> Result<(Vec<FileRecord>, Vec<XetFileIdentity>), XetAdapterError> {
@@ -828,41 +825,37 @@ fn build_file_records_with_cache(
                 );
             }
 
-            let xorb_info = if let Some(info) = xorb_cache.get(&hash) {
-                info
-            } else {
-                // Drop the previous spool before materializing another source.
-                file_digests.release_source();
-                let ordered = file_digests::ordered_source_terms(
-                    file_info
-                        .segments
-                        .get(segment_index..)
-                        .ok_or(XetAdapterError::Overflow)?,
-                )?;
-                let mut remaining = ordered;
-                digest.begin_terms(ordered);
-                let (loaded, source) = load_xorb_range_info_with_visitor(
-                    object_store,
-                    &hash,
-                    member_references.as_deref_mut(),
-                    checkpoint,
-                    &mut |member, data| {
-                        checkpoint()?;
-                        digest.update_validating_terms(&mut remaining, member, data);
-                        Ok(())
-                    },
-                )?;
-                digest.finish_terms();
-                digested_through = segment_index
-                    .checked_add(ordered.len())
-                    .ok_or(XetAdapterError::Overflow)?;
-                file_digests.retain_verified_source(&hash, source);
-                xorb_cache.insert(hash.clone(), loaded);
-                xorb_cache
-                    .get(&hash)
-                    .ok_or(XetAdapterError::InvalidSerializedShard(
-                        InvalidSerializedShardError::XorbMetadataCacheInsertionFailed,
-                    ))?
+            let xorb_info = match xorb_cache.entry(segment.xorb_hash) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    // Drop the previous spool before materializing another source.
+                    file_digests.release_source();
+                    let ordered = file_digests::ordered_source_terms(
+                        file_info
+                            .segments
+                            .get(segment_index..)
+                            .ok_or(XetAdapterError::Overflow)?,
+                    )?;
+                    let mut remaining = ordered;
+                    digest.begin_terms(ordered);
+                    let (loaded, source) = load_xorb_range_info_with_visitor(
+                        object_store,
+                        &hash,
+                        member_references.as_deref_mut(),
+                        checkpoint,
+                        &mut |member, data| {
+                            checkpoint()?;
+                            digest.update_validating_terms(&mut remaining, member, data);
+                            Ok(())
+                        },
+                    )?;
+                    digest.finish_terms();
+                    digested_through = segment_index
+                        .checked_add(ordered.len())
+                        .ok_or(XetAdapterError::Overflow)?;
+                    file_digests.retain_verified_source(&hash, source);
+                    entry.insert(loaded)
+                }
             };
             let packed_start = xorb_info.packed_start(range_start)?;
             let packed_end = xorb_info.packed_end(range_end)?;
@@ -909,7 +902,7 @@ fn build_file_records_with_cache(
             .iter()
             .flat_map(|segment| {
                 xorb_cache
-                    .get(&segment.xorb_hash.hex())
+                    .get(&segment.xorb_hash)
                     .into_iter()
                     .flat_map(move |info| {
                         info.verified_chunks

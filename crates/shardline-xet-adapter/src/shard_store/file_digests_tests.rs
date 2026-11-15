@@ -63,7 +63,7 @@ fn cancelled_digest_stops_between_verified_members_and_can_retry() {
     };
     let mut verified = HashMap::new();
     verified.insert(
-        hash.hex(),
+        hash,
         load_xorb_range_info(&objects, &hash.hex(), None).unwrap(),
     );
     let digest = format!("{:x}", Sha256::digest(members.concat()));
@@ -167,7 +167,7 @@ fn cancelled_digest_reload_stops_s3_streaming_and_can_retry() {
             .unwrap();
             tokio::task::spawn_blocking(move || {
                 let mut verified = HashMap::new();
-                verified.insert(hash.hex(), info);
+                verified.insert(hash, info);
                 let checks = AtomicUsize::new(0);
                 let mut verifier = file_digests::FileDigestVerifier::default();
                 // Model an evicted source whose authenticated metadata remains cached.
@@ -568,7 +568,7 @@ fn cached_source_change_is_rejected(
     let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
     let (hash, leaves) = store_members(&objects, &[b"first", b"second"]);
     let (info, source) = load_xorb_range_info_with_source(&objects, &hash.hex(), None).unwrap();
-    let mut cache = HashMap::from([(hash.hex(), info)]);
+    let mut cache = HashMap::from([(hash, info)]);
     let mut verifier = file_digests::FileDigestVerifier::default();
     verifier.retain_verified_source(&hash.hex(), source);
     let key = xorb_object_key(&hash.hex()).unwrap();

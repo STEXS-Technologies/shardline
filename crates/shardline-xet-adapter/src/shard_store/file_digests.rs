@@ -100,13 +100,12 @@ impl FileDigestVerifier {
         file: &MDBFileInfo,
         expected: Option<&str>,
         derive: bool,
-        verified: &HashMap<String, XorbRangeInfo>,
+        verified: &HashMap<MerkleHash, XorbRangeInfo>,
         checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
     ) -> Result<Option<String>, XetAdapterError> {
         let mut digest = FileDigest::new(expected.map(str::to_owned), derive);
         for term in &file.segments {
-            let hash = term.xorb_hash.hex();
-            let info = verified.get(&hash).ok_or_else(rejected)?;
+            let info = verified.get(&term.xorb_hash).ok_or_else(rejected)?;
             digest.update(self, store, term, info, checkpoint)?;
         }
         digest.finish()
