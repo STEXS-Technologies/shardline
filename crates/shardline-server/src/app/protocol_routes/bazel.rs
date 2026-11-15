@@ -508,42 +508,25 @@ mod tests {
     // =========================================================================
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ac_get_missing_returns_not_found() {
-        let (state, _tmp) = build_test_state().await;
-        let app = bazel_router(state);
-        let hash = test_hash();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/v1/bazel/cache/ac/{hash}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ac_head_missing_returns_not_found() {
-        let (state, _tmp) = build_test_state().await;
-        let app = bazel_router(state);
-        let hash = test_hash();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("HEAD")
-                    .uri(format!("/v1/bazel/cache/ac/{hash}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    async fn read_routes_return_not_found_for_missing_objects() {
+        for prefix in ["/v1/bazel/cache/ac", "/v1/bazel/cache/cas", "/v1/bazel"] {
+            for method in ["GET", "HEAD"] {
+                let (state, _tmp) = build_test_state().await;
+                let app = bazel_router(state);
+                let uri = format!("{prefix}/{}", test_hash());
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -720,25 +703,6 @@ mod tests {
     // =========================================================================
     // CAS (Content-Addressable Storage) integration tests
     // =========================================================================
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cas_get_missing_returns_not_found() {
-        let (state, _tmp) = build_test_state().await;
-        let app = bazel_router(state);
-        let hash = test_hash();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/v1/bazel/cache/cas/{hash}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cas_put_and_get_happy_path() {
@@ -954,45 +918,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn flat_get_missing_returns_not_found() {
-        let (state, _tmp) = build_test_state().await;
-        let app = bazel_router(state);
-        let hash = test_hash();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/v1/bazel/{hash}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn flat_head_missing_returns_not_found() {
-        let (state, _tmp) = build_test_state().await;
-        let app = bazel_router(state);
-        let hash = test_hash();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("HEAD")
-                    .uri(format!("/v1/bazel/{hash}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn flat_put_to_cas_and_get_from_flat() {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state.clone());
@@ -1123,54 +1048,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_hash_returns_error() {
-        assert!(matches!(
-            bazel_cache_object_key(
-                BazelCacheKind::Ac,
-                "short",
-                &AuthorizedRepository::anonymous_full_access()
-            ),
-            Err(ProtocolError::InvalidContentHash)
-        ));
-    }
-
-    #[test]
-    fn invalid_hash_not_hex_returns_error() {
-        assert!(matches!(
-            bazel_cache_object_key(
-                BazelCacheKind::Cas,
-                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-                &AuthorizedRepository::anonymous_full_access(),
-            ),
-            Err(ProtocolError::InvalidContentHash)
-        ));
-    }
-
-    // ------------------------------------------------------------------
-    // Edge cases
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn empty_hash_returns_error() {
-        assert!(matches!(
-            bazel_cache_object_key(
-                BazelCacheKind::Ac,
-                "",
-                &AuthorizedRepository::anonymous_full_access()
-            ),
-            Err(ProtocolError::InvalidContentHash)
-        ));
-    }
-
-    #[test]
-    fn uppercase_hex_returns_error() {
-        assert!(matches!(
-            bazel_cache_object_key(
-                BazelCacheKind::Ac,
-                &"A".repeat(64),
-                &AuthorizedRepository::anonymous_full_access()
-            ),
-            Err(ProtocolError::InvalidContentHash)
-        ));
+    fn cache_namespaces_reject_invalid_hashes() {
+        for kind in [BazelCacheKind::Ac, BazelCacheKind::Cas] {
+            for hash in ["short", "", &"z".repeat(64), &"A".repeat(64)] {
+                assert!(
+                    matches!(
+                        bazel_cache_object_key(
+                            kind,
+                            hash,
+                            &AuthorizedRepository::anonymous_full_access()
+                        ),
+                        Err(ProtocolError::InvalidContentHash)
+                    ),
+                    "accepted invalid hash {hash:?}"
+                );
+            }
+        }
     }
 }
