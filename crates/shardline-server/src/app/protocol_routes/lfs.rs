@@ -2373,73 +2373,50 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn batch_rejects_unsupported_operation() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let request = json!({
-            "operation": "verify",
-            "objects": []
-        });
-
-        let response = app.oneshot(batch_request(&request)).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let parsed = crate::test_support::json_body(response).await;
-        assert_eq!(parsed["message"], "unsupported operation");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn batch_rejects_invalid_oid() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let request = json!({
-            "operation": "download",
-            "objects": [{ "oid": "not-a-valid-hash", "size": 100 }]
-        });
-
-        let response = app.oneshot(batch_request(&request)).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let parsed = crate::test_support::json_body(response).await;
-        assert_eq!(parsed["message"], "invalid oid");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn batch_rejects_unsupported_hash_algorithm() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let request = json!({
-            "operation": "download",
-            "hash_algo": "sha512",
-            "objects": [{ "oid": test_oid_constant(), "size": 100 }]
-        });
-
-        let response = app.oneshot(batch_request(&request)).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let parsed = crate::test_support::json_body(response).await;
-        assert_eq!(parsed["message"], "unsupported hash algorithm");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn batch_rejects_unsupported_transfer_adapter() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let request = json!({
-            "operation": "download",
-            "transfers": ["custom"],
-            "objects": [{ "oid": test_oid_constant(), "size": 100 }]
-        });
-
-        let response = app.oneshot(batch_request(&request)).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let parsed = crate::test_support::json_body(response).await;
-        assert_eq!(parsed["message"], "unsupported transfer adapter");
+    async fn batch_rejects_invalid_requests() {
+        for (request, expected_message) in [
+            (
+                json!({
+                    "operation": "verify",
+                    "objects": []
+                }),
+                "unsupported operation",
+            ),
+            (
+                json!({
+                    "operation": "download",
+                    "objects": [{ "oid": "not-a-valid-hash", "size": 100 }]
+                }),
+                "invalid oid",
+            ),
+            (
+                json!({
+                    "operation": "download",
+                    "hash_algo": "sha512",
+                    "objects": [{ "oid": test_oid_constant(), "size": 100 }]
+                }),
+                "unsupported hash algorithm",
+            ),
+            (
+                json!({
+                    "operation": "download",
+                    "transfers": ["custom"],
+                    "objects": [{ "oid": test_oid_constant(), "size": 100 }]
+                }),
+                "unsupported transfer adapter",
+            ),
+        ] {
+            let (state, _tmp) = build_test_state().await;
+            let app = lfs_router(state);
+            let response = app.oneshot(batch_request(&request)).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{request}"
+            );
+            let parsed = crate::test_support::json_body(response).await;
+            assert_eq!(parsed["message"], expected_message, "{request}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
