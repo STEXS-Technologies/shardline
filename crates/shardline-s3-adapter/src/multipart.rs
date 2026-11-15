@@ -1765,7 +1765,7 @@ async fn persist_session_with_evidence(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let existing = match fs::read(&path).await {
+    let mut existing = match fs::read(&path).await {
         Ok(bytes) => match serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) {
             Ok(persisted) => Some(persisted),
             Err(error) if reliability_envelope_field_present(&bytes) => {
@@ -1806,11 +1806,11 @@ async fn persist_session_with_evidence(
         .as_ref()
         .and_then(|value| value.merkle_snapshot_sequence);
     let mut previous_merkle_evidence = existing
-        .as_ref()
-        .and_then(|value| value.merkle_evidence_commit.clone());
+        .as_mut()
+        .and_then(|value| value.merkle_evidence_commit.take());
     let mut previous_merkle_snapshot = existing
-        .as_ref()
-        .and_then(|value| value.merkle_snapshot_commit.clone());
+        .as_mut()
+        .and_then(|value| value.merkle_snapshot_commit.take());
     if committed_head > 0 && (last_evidence_sequence.is_none() || last_snapshot_sequence.is_none())
     {
         // Compatibility path for metadata written before sequence sidecars
@@ -1872,7 +1872,7 @@ async fn persist_session_with_evidence(
     let new_evidence = events_after_sequence(evidence.events(), last_evidence_sequence);
     let new_snapshot_evidence =
         events_after_sequence(snapshot_evidence.events(), last_snapshot_sequence);
-    let new_record = SessionEvidenceJournalRecord {
+    let mut new_record = SessionEvidenceJournalRecord {
         evidence: new_evidence.to_vec(),
         snapshot_evidence: new_snapshot_evidence.to_vec(),
     };
@@ -1947,20 +1947,20 @@ async fn persist_session_with_evidence(
             .last()
             .map(|event| event.sequence)
             .or(last_evidence_sequence),
-        journal_evidence_head: new_record.evidence.last().cloned().or_else(|| {
+        journal_evidence_head: new_record.evidence.pop().or_else(|| {
             existing
-                .as_ref()
-                .and_then(|value| value.journal_evidence_head.clone())
+                .as_mut()
+                .and_then(|value| value.journal_evidence_head.take())
         }),
         journal_snapshot_sequence: new_record
             .snapshot_evidence
             .last()
             .map(|event| event.sequence)
             .or(last_snapshot_sequence),
-        journal_snapshot_head: new_record.snapshot_evidence.last().cloned().or_else(|| {
+        journal_snapshot_head: new_record.snapshot_evidence.pop().or_else(|| {
             existing
-                .as_ref()
-                .and_then(|value| value.journal_snapshot_head.clone())
+                .as_mut()
+                .and_then(|value| value.journal_snapshot_head.take())
         }),
         merkle_head: Some(merkle_head),
         merkle_bytes,
