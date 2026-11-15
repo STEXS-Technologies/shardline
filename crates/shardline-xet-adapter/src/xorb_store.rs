@@ -681,50 +681,56 @@ mod tests {
     // ── map_object_key_error ────────────────────────────────────────────
 
     #[test]
-    fn xorb_store_map_object_key_error_maps_all_variants() {
+    fn xorb_store_maps_object_key_errors_to_invalid_content_hash() {
         use shardline_storage::ObjectKeyError;
-        let cases: &[(ObjectKeyError, &str)] = &[
-            (ObjectKeyError::Empty, "invalid"),
-            (ObjectKeyError::UnsafePath, "invalid"),
-            (ObjectKeyError::ControlCharacter, "invalid"),
-            (ObjectKeyError::TooLong, "invalid"),
-        ];
-        for (err, _) in cases {
-            let mapped = super::map_object_key_error(*err);
-            let msg = mapped.to_string();
-            assert!(msg.contains("hash"), "msg '{msg}' missing 'hash'");
+        for error in [
+            ObjectKeyError::Empty,
+            ObjectKeyError::UnsafePath,
+            ObjectKeyError::ControlCharacter,
+            ObjectKeyError::TooLong,
+        ] {
+            let mapped = super::map_object_key_error(error);
+            assert!(matches!(mapped, XetAdapterError::InvalidContentHash));
+            assert!(
+                mapped.to_string().contains("hash"),
+                "missing hash message for {error:?}"
+            );
         }
     }
 
     // ── visit_stored_xorb_chunk_hashes ───────────────────────────────────
 
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_visits_all_chunks() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+    #[tokio::test]
+    async fn visit_stored_xorb_chunk_hashes_visits_every_member() {
+        for (num_chunks, chunk_bytes) in
+            [(2, 512), (1, 256), (3, 256), (5, 256), (2, 256), (4, 128)]
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+            let raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(chunk_bytes));
+            let serialized = SerializedXorbObject::from_xorb_with_compression(
+                raw,
+                CompressionScheme::None,
+                true,
+            )
+            .unwrap();
+            let hash = serialized.hash.hex();
+            super::store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data)
+                .await
                 .unwrap();
-        let hash = serialized.hash.hex();
-
-        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        let key = xorb_object_key(&hash).unwrap();
-
-        let mut visited = Vec::new();
-        let result = visit_stored_xorb_chunk_hashes(
-            &object_store,
-            &key,
-            |chunk_hash: String| -> Result<(), XetAdapterError> {
-                visited.push(chunk_hash);
+            let key = xorb_object_key(&hash).unwrap();
+            let mut visited = Vec::new();
+            visit_stored_xorb_chunk_hashes(&object_store, &key, |hash| {
+                visited.push(hash);
                 Ok(())
-            },
-        );
-        assert!(result.is_ok(), "visit failed: {result:?}");
-        assert!(!visited.is_empty(), "should have visited chunk hashes");
-        for hex in &visited {
-            assert_eq!(hex.len(), 64, "expected 64-char hex hash");
+            })
+            .unwrap();
+            assert_eq!(
+                visited.len(),
+                num_chunks as usize,
+                "{num_chunks} chunks of {chunk_bytes} bytes"
+            );
+            assert!(visited.iter().all(|hash| hash.len() == 64));
         }
     }
 
@@ -1018,56 +1024,6 @@ mod tests {
         assert!(!visited, "visitor should not be called");
     }
 
-    // ── ObjectKey error mapping ──────────────────────────────────────────
-
-    #[test]
-    fn xorb_store_map_object_key_error_message_content() {
-        use shardline_storage::ObjectKeyError;
-        let cases = [
-            ObjectKeyError::Empty,
-            ObjectKeyError::UnsafePath,
-            ObjectKeyError::ControlCharacter,
-            ObjectKeyError::TooLong,
-        ];
-        for err in cases {
-            let mapped = super::map_object_key_error(err);
-            let msg = mapped.to_string();
-            assert!(
-                msg.contains("hash"),
-                "msg '{msg}' missing 'hash' for {err:?}"
-            );
-        }
-    }
-
-    // ── visit_stored_xorb_chunk_hashes with stored xorb ────────────────
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_visits_once_per_existing_chunk() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-
-        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        let key = xorb_object_key(&hash).unwrap();
-
-        let mut count = 0_usize;
-        let result = visit_stored_xorb_chunk_hashes(
-            &object_store,
-            &key,
-            |_hash: String| -> Result<(), XetAdapterError> {
-                count += 1;
-                Ok(())
-            },
-        );
-        assert!(result.is_ok(), "visit should succeed: {result:?}");
-        assert_eq!(count, 1, "should visit exactly 1 chunk hash");
-    }
-
     // ── store_uploaded_xorb_with_metrics with footerless bytes ────────
 
     #[test]
@@ -1283,36 +1239,6 @@ mod tests {
     }
 
     // ── visit_stored_xorb_chunk_hashes with various xorb sizes ─────────
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_visits_correct_number_of_hashes() {
-        for num_chunks in [1, 3, 5] {
-            let temp = tempfile::tempdir().unwrap();
-            let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-            let raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(256));
-            let serialized = SerializedXorbObject::from_xorb_with_compression(
-                raw,
-                CompressionScheme::None,
-                true,
-            )
-            .unwrap();
-            let hash = serialized.hash.hex();
-            async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-            let key = xorb_object_key(&hash).unwrap();
-
-            let mut count = 0_usize;
-            let result = visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
-                count += 1;
-                Ok(())
-            });
-            assert!(result.is_ok(), "visit failed for {num_chunks} chunks");
-            assert_eq!(
-                count, num_chunks as usize,
-                "expected {num_chunks} hashes, got {count}"
-            );
-        }
-    }
 
     // ── canonicalize_uploaded_xorb with footerless + wrong hash ────────
 
@@ -1692,48 +1618,6 @@ mod tests {
         let wrong_hash = ShardlineHash::from_bytes([0x42; 32]);
         let result = normalize_serialized_xorb(wrong_hash, &serialized.serialized_data);
         assert!(result.is_err());
-    }
-
-    // ── visit_stored_xorb_chunk_hashes with stored xorb (coverage boost) ─
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_two_chunks_visits_both() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        let key = xorb_object_key(&hash).unwrap();
-        let mut visited = Vec::new();
-        visit_stored_xorb_chunk_hashes(&object_store, &key, |h| {
-            visited.push(h);
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(visited.len(), 2);
-    }
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_four_chunks_visits_all() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let raw = build_raw_xorb(4, ChunkSize::Fixed(128));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        let key = xorb_object_key(&hash).unwrap();
-        let mut count = 0_usize;
-        visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
-            count += 1;
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(count, 4);
     }
 
     #[test]
