@@ -337,178 +337,53 @@ mod tests {
         }
     }
 
-    // ── oci_route_served_by_api ────────────────────────────────────────
-
     #[test]
-    fn api_serves_get_manifest() {
-        assert!(oci_route_served_by_api(&Method::GET, &manifest_path()));
+    fn api_route_contract() {
+        for (method, path, expected) in [
+            (Method::GET, manifest_path(), true),
+            (Method::HEAD, manifest_path(), true),
+            (Method::PUT, manifest_path(), true),
+            (Method::DELETE, manifest_path(), true),
+            (Method::GET, tags_list_path(), true),
+            (Method::DELETE, blob_path(), true),
+            (Method::GET, blob_path(), false),
+            (Method::POST, blob_uploads_path(), false),
+            (Method::PATCH, blob_upload_session_path(), false),
+            (Method::PUT, blob_upload_session_path(), false),
+            (Method::GET, blob_upload_session_path(), false),
+            (Method::DELETE, blob_upload_session_path(), false),
+        ] {
+            assert_eq!(
+                oci_route_served_by_api(&method, &path),
+                expected,
+                "method={method} path={path:?}"
+            );
+        }
     }
 
     #[test]
-    fn api_serves_head_manifest() {
-        assert!(oci_route_served_by_api(&Method::HEAD, &manifest_path()));
-    }
-
-    #[test]
-    fn api_serves_put_manifest() {
-        assert!(oci_route_served_by_api(&Method::PUT, &manifest_path()));
-    }
-
-    #[test]
-    fn api_serves_delete_manifest() {
-        assert!(oci_route_served_by_api(&Method::DELETE, &manifest_path()));
-    }
-
-    #[test]
-    fn api_serves_get_tags_list() {
-        assert!(oci_route_served_by_api(&Method::GET, &tags_list_path()));
-    }
-
-    #[test]
-    fn api_serves_delete_blob() {
-        assert!(oci_route_served_by_api(&Method::DELETE, &blob_path()));
-    }
-
-    #[test]
-    fn api_rejects_get_blob() {
-        assert!(!oci_route_served_by_api(&Method::GET, &blob_path()));
-    }
-
-    #[test]
-    fn api_rejects_post_blob_uploads() {
-        assert!(!oci_route_served_by_api(
-            &Method::POST,
-            &blob_uploads_path()
-        ));
-    }
-
-    #[test]
-    fn api_rejects_patch_blob_upload_session() {
-        assert!(!oci_route_served_by_api(
-            &Method::PATCH,
-            &blob_upload_session_path()
-        ));
-    }
-
-    #[test]
-    fn api_rejects_put_blob_upload_session() {
-        assert!(!oci_route_served_by_api(
-            &Method::PUT,
-            &blob_upload_session_path()
-        ));
-    }
-
-    #[test]
-    fn api_rejects_get_blob_upload_session() {
-        assert!(!oci_route_served_by_api(
-            &Method::GET,
-            &blob_upload_session_path()
-        ));
-    }
-
-    #[test]
-    fn api_rejects_delete_blob_upload_session() {
-        assert!(!oci_route_served_by_api(
-            &Method::DELETE,
-            &blob_upload_session_path()
-        ));
-    }
-
-    // ── oci_route_served_by_transfer ───────────────────────────────────
-
-    #[test]
-    fn transfer_serves_get_blob() {
-        assert!(oci_route_served_by_transfer(&Method::GET, &blob_path()));
-    }
-
-    #[test]
-    fn transfer_serves_head_blob() {
-        assert!(oci_route_served_by_transfer(&Method::HEAD, &blob_path()));
-    }
-
-    #[test]
-    fn transfer_serves_post_blob_uploads() {
-        assert!(oci_route_served_by_transfer(
-            &Method::POST,
-            &blob_uploads_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_serves_patch_blob_upload_session() {
-        assert!(oci_route_served_by_transfer(
-            &Method::PATCH,
-            &blob_upload_session_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_serves_put_blob_upload_session() {
-        assert!(oci_route_served_by_transfer(
-            &Method::PUT,
-            &blob_upload_session_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_serves_get_blob_upload_session() {
-        assert!(oci_route_served_by_transfer(
-            &Method::GET,
-            &blob_upload_session_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_serves_delete_blob_upload_session() {
-        assert!(oci_route_served_by_transfer(
-            &Method::DELETE,
-            &blob_upload_session_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_rejects_get_manifest() {
-        assert!(!oci_route_served_by_transfer(
-            &Method::GET,
-            &manifest_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_rejects_head_manifest() {
-        assert!(!oci_route_served_by_transfer(
-            &Method::HEAD,
-            &manifest_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_rejects_put_manifest() {
-        assert!(!oci_route_served_by_transfer(
-            &Method::PUT,
-            &manifest_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_rejects_delete_manifest() {
-        assert!(!oci_route_served_by_transfer(
-            &Method::DELETE,
-            &manifest_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_rejects_get_tags_list() {
-        assert!(!oci_route_served_by_transfer(
-            &Method::GET,
-            &tags_list_path()
-        ));
-    }
-
-    #[test]
-    fn transfer_rejects_delete_blob() {
-        assert!(!oci_route_served_by_transfer(&Method::DELETE, &blob_path()));
+    fn transfer_route_contract() {
+        for (method, path, expected) in [
+            (Method::GET, blob_path(), true),
+            (Method::HEAD, blob_path(), true),
+            (Method::POST, blob_uploads_path(), true),
+            (Method::PATCH, blob_upload_session_path(), true),
+            (Method::PUT, blob_upload_session_path(), true),
+            (Method::GET, blob_upload_session_path(), true),
+            (Method::DELETE, blob_upload_session_path(), true),
+            (Method::GET, manifest_path(), false),
+            (Method::HEAD, manifest_path(), false),
+            (Method::PUT, manifest_path(), false),
+            (Method::DELETE, manifest_path(), false),
+            (Method::GET, tags_list_path(), false),
+            (Method::DELETE, blob_path(), false),
+        ] {
+            assert_eq!(
+                oci_route_served_by_transfer(&method, &path),
+                expected,
+                "method={method} path={path:?}"
+            );
+        }
     }
 
     // ── api ∩ transfer = ∅ for all method+path combinations ───────────
