@@ -312,7 +312,9 @@ impl FileUploadIngestor {
         &mut self,
         object_store: &ServerObjectStore,
     ) -> Result<(), ServerError> {
-        self.submit_owned_chunk(object_store).await
+        let replacement = self.take_pending_buffer();
+        let chunk = mem::replace(&mut self.pending, replacement);
+        self.submit_chunk(object_store, chunk).await
     }
 
     /// Flush a chunk of exactly `boundary` bytes from the front of
@@ -324,61 +326,14 @@ impl FileUploadIngestor {
         boundary: usize,
     ) -> Result<(), ServerError> {
         let chunk = self.pending.split_to(boundary);
-        self.pack_local_chunk(object_store, &chunk).await?;
-        let sequence = self.next_sequence;
-        self.next_sequence = checked_increment(self.next_sequence)?;
-        let offset = self.next_offset;
-        let chunk_length = u64::try_from(chunk.len())?;
-        self.next_offset = checked_add(self.next_offset, chunk_length)?;
-        if let Some(packed) = &mut self.packed_protocol {
-            packed.push(&chunk, offset).await?;
-            return Ok(());
-        }
-        if matches!(object_store, ServerObjectStore::Blackhole) {
-            let chunk = ChunkBuffer(chunk.freeze());
-            let (outcome, reusable_buffer) =
-                put_if_absent_pooled_chunk_buffer(object_store, chunk).await?;
-            if outcome.inserted {
-                record_chunk_inserted(outcome.chunk_length);
-            }
-            if let Some(reusable_buffer) = reusable_buffer {
-                self.recycle_pending_buffer(reusable_buffer);
-            }
-            self.completed_chunks.push(SequencedStoredChunkOutcome {
-                sequence,
-                offset,
-                stored: outcome,
-            });
-            return Ok(());
-        }
-
-        self.drain_completed_chunks_to_capacity().await?;
-        let object_store = object_store.clone();
-        let verified_chunks = self.verified_chunks.clone();
-        self.in_flight_chunks.spawn(async move {
-            let chunk = ChunkBuffer(chunk.freeze());
-            let (outcome, reusable_buffer) =
-                put_if_absent_with_verified_cache(&object_store, chunk, Some(&verified_chunks))
-                    .await?;
-            if outcome.inserted {
-                record_chunk_inserted(outcome.chunk_length);
-            }
-            Ok(SequencedStoredChunkTaskOutcome {
-                sequence,
-                offset,
-                stored: outcome,
-                reusable_buffer,
-            })
-        });
-        Ok(())
+        self.submit_chunk(object_store, chunk).await
     }
 
-    async fn submit_owned_chunk(
+    async fn submit_chunk(
         &mut self,
         object_store: &ServerObjectStore,
+        chunk: BytesMut,
     ) -> Result<(), ServerError> {
-        let replacement = self.take_pending_buffer();
-        let chunk = mem::replace(&mut self.pending, replacement);
         self.pack_local_chunk(object_store, &chunk).await?;
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
