@@ -714,3 +714,30 @@ fn provider_operation_id_is_shared_by_typed_and_snapshot_paths() {
     assert_eq!(snapshot_operation.operation_id, typed.as_str());
     assert_eq!(snapshot_operation.kind, OperationKind::ProviderEvent);
 }
+
+#[test]
+fn evidence_suffix_selection_preserves_boundaries_and_borrows_input() {
+    let snapshot = HubRefSnapshot::new("repo", "main", Some("sha-1".to_owned())).unwrap();
+    let events: Vec<_> = (0..3)
+        .map(|sequence| {
+            SnapshotEvidenceEvent::new(sequence, snapshot.clone(), snapshot.clone()).unwrap()
+        })
+        .collect();
+    verify_snapshot_chain(&events).unwrap();
+    for (sequence, expected_start) in [
+        (None, 0),
+        (Some(0), 1),
+        (Some(1), 2),
+        (Some(2), 3),
+        (Some(u64::MAX), 3),
+    ] {
+        let suffix = events_after_sequence(&events, sequence);
+        let expected = &events[expected_start..];
+        assert_eq!(suffix.len(), expected.len(), "{sequence:?}");
+        assert_eq!(suffix.as_ptr(), expected.as_ptr(), "{sequence:?}");
+    }
+    assert!(events_after_sequence::<SnapshotEvidenceEvent<HubRefSnapshot>>(&[], None).is_empty());
+    assert!(
+        events_after_sequence::<SnapshotEvidenceEvent<HubRefSnapshot>>(&[], Some(0)).is_empty()
+    );
+}

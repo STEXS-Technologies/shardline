@@ -59,7 +59,7 @@ pub use event::{
     verify_state_transition_chain_ends_at, verify_upload_lifecycle_events,
     verify_upload_lifecycle_head,
 };
-pub use event_metadata::EvidenceEventMetadata;
+pub use event_metadata::{EvidenceEventMetadata, events_after_sequence};
 pub use lifecycle_log::LifecycleEvidenceLog;
 pub use lifecycle_profile::{
     LifecycleCommand, ResumableLifecycleProfile, UploadLifecycleProfile, native_lifecycle_registry,

@@ -31,8 +31,9 @@ use shardline_reliability::{
     ResumableSessionSnapshotDomain, SessionEvidenceLog, SnapshotEvidenceEvent, SnapshotEvidenceLog,
     StateTransitionEvent, append_or_baseline_snapshot_evidence,
     build_persisted_merkle_chain_with_previous, build_typed_merkle_chain, canonical_state_digest,
-    resumable_session_snapshot_identity, verify_and_append_session_transition,
-    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
+    events_after_sequence, resumable_session_snapshot_identity,
+    verify_and_append_session_transition, verify_or_repair_session_evidence,
+    verify_or_repair_snapshot_evidence,
 };
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
@@ -1893,7 +1894,7 @@ async fn persist_session_with_evidence(
     }
     let new_evidence = events_after_sequence(evidence.events(), last_evidence_sequence);
     let new_snapshot_evidence =
-        snapshot_events_after_sequence(snapshot_evidence.events(), last_snapshot_sequence);
+        events_after_sequence(snapshot_evidence.events(), last_snapshot_sequence);
     let new_record = SessionEvidenceJournalRecord {
         evidence: new_evidence.to_vec(),
         snapshot_evidence: new_snapshot_evidence.to_vec(),
@@ -1903,7 +1904,7 @@ async fn persist_session_with_evidence(
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>()?;
     let snapshot_evidence_json =
-        snapshot_events_after_sequence(snapshot_evidence.events(), last_merkle_snapshot_sequence)
+        events_after_sequence(snapshot_evidence.events(), last_merkle_snapshot_sequence)
             .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
@@ -1999,26 +2000,6 @@ async fn persist_session_with_evidence(
         merkle_snapshot_commit: previous_merkle_snapshot,
     })?;
     write_file_atomically(&path, &bytes).await
-}
-
-fn events_after_sequence(
-    events: &[StateTransitionEvent],
-    sequence: Option<u64>,
-) -> &[StateTransitionEvent] {
-    let start = sequence.map_or(0, |sequence| {
-        events.partition_point(|event| event.sequence <= sequence)
-    });
-    events.get(start..).unwrap_or_default()
-}
-
-fn snapshot_events_after_sequence(
-    events: &[SnapshotEvidenceEvent<DigestSnapshot>],
-    sequence: Option<u64>,
-) -> &[SnapshotEvidenceEvent<DigestSnapshot>] {
-    let start = sequence.map_or(0, |sequence| {
-        events.partition_point(|event| event.sequence <= sequence)
-    });
-    events.get(start..).unwrap_or_default()
 }
 
 /// Writes bytes via a temporary file + rename so a crash never leaves a torn

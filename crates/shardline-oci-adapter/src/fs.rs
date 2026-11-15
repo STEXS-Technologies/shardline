@@ -10,8 +10,9 @@ use shardline_reliability::{
     DigestSnapshot, PersistedMerkleJournalRecord, ResumableSessionSnapshotDomain,
     SessionEvidenceLog, SnapshotEvidenceEvent, SnapshotEvidenceLog, StateTransitionEvent,
     append_or_baseline_snapshot_evidence, build_persisted_merkle_chain_with_previous,
-    build_typed_merkle_chain, canonical_state_digest, resumable_session_snapshot_identity,
-    verify_and_append_session_transition, verify_persisted_merkle_commit_with_previous,
+    build_typed_merkle_chain, canonical_state_digest, events_after_sequence,
+    resumable_session_snapshot_identity, verify_and_append_session_transition,
+    verify_persisted_merkle_commit_with_previous,
 };
 #[cfg(unix)]
 use shardline_storage::{
@@ -345,72 +346,27 @@ pub(crate) async fn persist_upload_session_with_evidence(
         }
     }
 
-    let evidence_json = evidence
-        .events()
+    let evidence_to_append =
+        events_after_sequence(evidence.events(), journal_head.and(last_evidence_sequence))
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+    let snapshot_to_append = events_after_sequence(
+        snapshot_evidence.events(),
+        journal_head.and(last_snapshot_sequence),
+    )
+    .iter()
+    .map(serde_json::to_value)
+    .collect::<Result<Vec<_>, _>>()?;
+    let merkle_events = events_after_sequence(evidence.events(), last_merkle_evidence_sequence)
         .iter()
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>()?;
-    let snapshot_evidence_json = snapshot_evidence
-        .events()
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()?;
-    let evidence_to_append = if journal_head.is_some() {
-        evidence_json
+    let snapshot_merkle_events =
+        events_after_sequence(snapshot_evidence.events(), last_merkle_snapshot_sequence)
             .iter()
-            .filter(|event| {
-                last_evidence_sequence.is_none_or(|sequence| {
-                    event
-                        .get("sequence")
-                        .and_then(serde_json::Value::as_u64)
-                        .is_some_and(|value| value > sequence)
-                })
-            })
-            .cloned()
-            .collect()
-    } else {
-        evidence_json.clone()
-    };
-    let snapshot_to_append = if journal_head.is_some() {
-        snapshot_evidence_json
-            .iter()
-            .filter(|event| {
-                last_snapshot_sequence.is_none_or(|sequence| {
-                    event
-                        .get("sequence")
-                        .and_then(serde_json::Value::as_u64)
-                        .is_some_and(|value| value > sequence)
-                })
-            })
-            .cloned()
-            .collect()
-    } else {
-        snapshot_evidence_json.clone()
-    };
-    let merkle_events = evidence_json
-        .iter()
-        .filter(|event| {
-            last_merkle_evidence_sequence.is_none_or(|sequence| {
-                event
-                    .get("sequence")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some_and(|value| value > sequence)
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let snapshot_merkle_events = snapshot_evidence_json
-        .iter()
-        .filter(|event| {
-            last_merkle_snapshot_sequence.is_none_or(|sequence| {
-                event
-                    .get("sequence")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some_and(|value| value > sequence)
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
     let merkle_commits = build_persisted_merkle_chain_with_previous(
         shardline_reliability::OperationKind::ResumableSession,
         &merkle_events,

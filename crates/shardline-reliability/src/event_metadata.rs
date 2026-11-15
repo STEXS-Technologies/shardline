@@ -53,3 +53,18 @@ impl<S: SnapshotEvidence> EvidenceEventMetadata for SnapshotEvidenceEvent<S> {
         SnapshotEvidenceEvent::verify_integrity(self)
     }
 }
+
+/// Borrows the suffix newer than a persisted sequence from ordered evidence.
+///
+/// Callers must verify the event chain before selecting its suffix. This helper
+/// selects events only; it does not verify their integrity or sequence order.
+#[must_use]
+pub fn events_after_sequence<T: EvidenceEventMetadata>(
+    events: &[T],
+    sequence: Option<u64>,
+) -> &[T] {
+    let start = sequence.map_or(0, |sequence| {
+        events.partition_point(|event| event.sequence_number() <= sequence)
+    });
+    events.get(start..).unwrap_or_default()
+}
