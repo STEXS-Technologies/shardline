@@ -50,6 +50,16 @@ fn test_oid(content: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(content))
 }
 
+async fn assert_multichunk_object(state: &AppState, oid: &str) {
+    let key = lfs_object_key(oid, &AuthorizedRepository::anonymous_full_access()).unwrap();
+    let file_id = shardline_server_core::protocol_support::protocol_object_file_id(&key);
+    let record = state.backend.protocol_file_record(&file_id).await.unwrap();
+    assert!(
+        record.chunks.len() > 1,
+        "fixture must exercise multiple chunks"
+    );
+}
+
 fn test_oid_constant() -> String {
     test_oid(b"test-lfs-object")
 }
@@ -891,10 +901,8 @@ async fn object_handlers_reject_invalid_oid() {
 async fn get_object_happy_path_after_upload() {
     let (state, _tmp) = build_test_state().await;
     let app = lfs_router(state.clone());
-    // Use data large enough (>256 bytes) to produce multiple CDC chunks
-    // with chunk_size=128 (min_chunk=16, max_chunk=256), ensuring xorb
-    // packing produces a multi-chunk xorb that the download path handles.
-    let content: Vec<u8> = (0u16..300u16).map(|i| (i as u8) ^ 0xAA).collect();
+    // Exceed the 128 KiB maximum CDC chunk size of the 64 KiB fixture.
+    let content: Vec<u8> = (0u32..131_073).map(|i| (i as u8) ^ 0xAA).collect();
     let oid = test_oid(&content);
 
     // Upload first
@@ -912,6 +920,7 @@ async fn get_object_happy_path_after_upload() {
         .await
         .unwrap();
     assert_eq!(put_response.status(), StatusCode::OK);
+    assert_multichunk_object(&state, &oid).await;
 
     // Download
     let get_response = app
@@ -1741,10 +1750,8 @@ async fn verify_object_missing_returns_not_found() {
 async fn verify_object_happy_path_after_upload() {
     let (state, _tmp) = build_test_state().await;
     let app = lfs_router(state.clone());
-    // Use data large enough (>256 bytes) to produce multiple CDC chunks
-    // with chunk_size=128 (min_chunk=16, max_chunk=256), ensuring xorb
-    // packing produces a multi-chunk xorb that the verify path handles.
-    let content: Vec<u8> = (0u16..300u16).map(|i| (i as u8) ^ 0xBB).collect();
+    // Exceed the 128 KiB maximum CDC chunk size of the 64 KiB fixture.
+    let content: Vec<u8> = (0u32..131_073).map(|i| (i as u8) ^ 0xBB).collect();
     let oid = test_oid(&content);
 
     // Upload
@@ -1761,6 +1768,7 @@ async fn verify_object_happy_path_after_upload() {
         .await
         .unwrap();
     assert_eq!(put.status(), StatusCode::OK);
+    assert_multichunk_object(&state, &oid).await;
 
     // Verify
     let verify = app
