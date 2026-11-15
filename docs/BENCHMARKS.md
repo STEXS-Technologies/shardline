@@ -3750,15 +3750,15 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`7ad0579ec88cb9a06ee69e2c48111c9037a568eb`. It counts all tracked `.rs`
+`1b4f59c44a880d132b6554435b278a24e9a7024e`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 585,478 | 18,171 (3.01%) |
-| Server | 220,570 | 213,777 | 6,793 (3.08%) |
+| Entire repository | 603,649 | 585,111 | 18,538 (3.07%) |
+| Server | 220,570 | 213,340 | 7,230 (3.28%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
@@ -3778,16 +3778,18 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
-This refresh includes 473 fewer Rust lines since the previously measured
-`28c0f227` snapshot. Subsequent cleanup shares verified Xorb metadata and cache-hit
-decoding, removes repeated shard-test runtime/fixture setup, and consolidates
-boundary contracts while retaining their distinct input cases. Some changes add
-stronger assertions or avoid allocations without reducing lines.
+This refresh includes 367 fewer Rust lines since the previously measured
+`7ad0579e` snapshot. Subsequent cleanup shares protocol fixtures, PostgreSQL schema
+setup, chaos payload generation and file inventories, and consolidates OCI read
+and upload-response handling. Stronger fixture requirements make configured
+PostgreSQL setup failures fail tests rather than silently skip qualification.
+Some changes add diagnostics or avoid allocations without reducing lines.
 
 The inventory revision is not a release qualification stamp. The complete local
-distributed gate below was repeated at `7e3c77a5`, after this source snapshot.
-Independent hosted CI and a multi-host PostgreSQL/S3 split-role topology remain
-separate qualification requirements.
+distributed gate below passed at the earlier `7e3c77a5` revision. Later changes
+have targeted test and lint results; that full gate has not been repeated for
+this inventory revision. Independent hosted CI and a multi-host PostgreSQL/S3
+split-role topology remain separate qualification requirements.
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
@@ -3795,8 +3797,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 7ad0579ec88cb9a06ee69e2c48111c9037a568eb -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 7ad0579ec88cb9a06ee69e2c48111c9037a568eb -- '*.rs' | wc -l
+git grep -I -n '^' 1b4f59c44a880d132b6554435b278a24e9a7024e -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 1b4f59c44a880d132b6554435b278a24e9a7024e -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
