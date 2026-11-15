@@ -420,6 +420,32 @@ async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() -> Resul
             packed_end: u64::try_from(normalized_xorb.len())?,
         }],
     };
+    let fixed = FileRecord {
+        file_id: "fixed.bin".into(),
+        chunk_size: record.total_bytes,
+        ..record.clone()
+    };
+    let shared = FileRecord {
+        file_id: "shared.bin".into(),
+        ..record.clone()
+    };
+    let mut expected_hashes = chunk_hashes.clone();
+    expected_hashes.insert(xorb_hash.clone());
+    let mut expected_keys = std::collections::HashSet::new();
+    expected_keys.insert(xorb_object_key(&xorb_hash)?.as_str().to_owned());
+    for hash in &expected_hashes {
+        expected_keys.insert(chunk_object_key(hash)?.as_str().to_owned());
+    }
+    for records in [[&fixed, &record, &shared], [&shared, &record, &fixed]] {
+        let references = crate::records::collect_deleted_repository_references(
+            &object_store,
+            records.into_iter(),
+        )?;
+        assert_eq!(references.file_versions, 3);
+        assert_eq!(references.chunk_hashes, expected_hashes);
+        assert_eq!(references.held_object_keys, expected_keys);
+    }
+
     RecordMutation::write_version_record(&record_store, &record).await?;
     RecordMutation::write_latest_record(&record_store, &record).await?;
 

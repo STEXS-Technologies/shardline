@@ -7,7 +7,7 @@ use shardline_vcs::RepositoryRef;
 
 use crate::ProviderEventsError;
 use shardline_server_core::{ServerObjectStore, chunk_object_key, parse_stored_file_record_bytes};
-use shardline_xet_adapter::{visit_stored_xorb_chunk_hashes, xorb_object_key};
+use shardline_xet_adapter::{visit_stored_xorb_chunk_hashes_if_present, xorb_object_key};
 
 pub(super) async fn ensure_absent_or_matching_record<RecordAdapter>(
     record_store: &RecordAdapter,
@@ -74,6 +74,7 @@ pub(super) fn collect_deleted_repository_references<'record>(
     let mut chunk_hashes = HashSet::new();
     let mut held_object_keys = HashSet::new();
     let mut seen_record_identities = HashSet::new();
+    let mut seen_native_xorbs = HashSet::new();
     for record in records {
         if !seen_record_identities.insert(record_identity_key(record)) {
             continue;
@@ -83,23 +84,25 @@ pub(super) fn collect_deleted_repository_references<'record>(
             .ok_or(ProviderEventsError::Overflow)?;
         for chunk in &record.chunks {
             if record.chunk_size == 0 {
+                if seen_native_xorbs.contains(chunk.hash.as_str()) {
+                    continue;
+                }
                 let xorb_object_key = xorb_object_key(&chunk.hash)?;
                 held_object_keys.insert(xorb_object_key.as_str().to_owned());
-                let mut visit_result = Ok(());
-                visit_stored_xorb_chunk_hashes(object_store, &xorb_object_key, |chunk_hash_hex| {
-                    match chunk_object_key(&chunk_hash_hex) {
-                        Ok(chunk_object_key) => {
-                            held_object_keys.insert(chunk_object_key.as_str().to_owned());
-                            chunk_hashes.insert(chunk_hash_hex);
-                            Ok(())
-                        }
-                        Err(e) => {
-                            visit_result = Err(e);
-                            Err(shardline_xet_adapter::XetAdapterError::NotFound)
-                        }
-                    }
-                })?;
-                visit_result?;
+                if visit_stored_xorb_chunk_hashes_if_present(
+                    object_store,
+                    &xorb_object_key,
+                    |chunk_hash_hex| {
+                        let chunk_object_key = chunk_object_key(&chunk_hash_hex)?;
+                        held_object_keys.insert(chunk_object_key.as_str().to_owned());
+                        chunk_hashes.insert(chunk_hash_hex);
+                        Ok(())
+                    },
+                )? {
+                    // Reuse only successful verification within this scan; a
+                    // missing source may appear before a later reference.
+                    seen_native_xorbs.insert(chunk.hash.as_str());
+                }
                 continue;
             }
 
