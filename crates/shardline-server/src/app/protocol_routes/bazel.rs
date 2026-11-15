@@ -281,32 +281,8 @@ pub(crate) async fn bazel_get(
     .await
 }
 
-/// PUT /v1/bazel/{hash} — Upload blob to CAS.
-#[tracing::instrument(skip(state, _headers, body), fields(hash))]
-pub(crate) async fn bazel_put(
-    State(state): State<Arc<AppState>>,
-    Path(hash): Path<String>,
-    repo: BazelWriteRepository,
-    _headers: HeaderMap,
-    body: Body,
-) -> Result<impl IntoResponse, ServerError> {
-    let _admit = state
-        .admission
-        .try_acquire(weights::XORB_UPLOAD)
-        .ok_or(ServerError::WorkQueueSaturated)?;
-    let object_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
-    let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    let _stored = state
-        .backend
-        .put_sha256_addressed_object_stream_if_absent(
-            &object_key,
-            &hash,
-            body,
-            repo.capability().namespace(),
-        )
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
+/// The flat upload route has the same CAS semantics as the explicit CAS route.
+pub(crate) use bazel_put_cas as bazel_put;
 
 /// HEAD /v1/bazel/{hash} — Check existence (tries AC first, falls back to CAS).
 #[tracing::instrument(skip(state, _headers), fields(hash))]
