@@ -1364,30 +1364,63 @@ mod tests {
     }
 
     #[test]
-    fn shard_object_key_maps_native_hash_into_shard_namespace() {
-        let hash = "ab".repeat(32);
-        let key = shard_object_key(&hash);
-
-        let key = key.expect("expected valid key");
-        assert_eq!(key.as_str(), format!("shards/ab/{hash}.shard"));
+    fn shard_object_key_preserves_native_layout_and_round_trips() {
+        let hashes = ["ab", "cd", "ef"]
+            .map(|pair| pair.repeat(32))
+            .into_iter()
+            .chain(
+                ["aa", "ff", "10", "99", "ac"].map(|prefix| format!("{prefix}{}", "0".repeat(62))),
+            );
+        for hash in hashes {
+            let key = shard_object_key(&hash).unwrap();
+            assert_eq!(key.as_str(), format!("shards/{}/{hash}.shard", &hash[..2]));
+            assert_eq!(
+                shard_hash_from_object_key_if_present(&key).unwrap(),
+                Some(hash.as_str()),
+                "round trip for {hash}",
+            );
+        }
     }
 
     #[test]
-    fn shard_object_key_rejects_non_hash_input() {
-        assert!(shard_object_key("asset.bin").is_err());
-        assert!(shard_object_key(&"A".repeat(64)).is_err());
+    fn shard_object_key_rejects_invalid_hashes() {
+        for hash in [
+            "asset.bin".to_owned(),
+            "A".repeat(64),
+            String::new(),
+            "zz".repeat(32),
+            "abc".to_owned(),
+        ] {
+            assert!(
+                matches!(
+                    shard_object_key(&hash),
+                    Err(XetAdapterError::InvalidContentHash)
+                ),
+                "invalid hash {hash:?}",
+            );
+        }
     }
 
     #[test]
-    fn shard_hash_from_object_key_extracts_hash_for_retained_shard_layout() {
-        let hash = "cd".repeat(32);
-        let key = shard_object_key(&hash);
-
-        let key = key.expect("expected valid key");
-        let extracted = shard_hash_from_object_key_if_present(&key);
-
-        let extracted = extracted.expect("expected valid extracted");
-        assert_eq!(extracted, Some(hash.as_str()));
+    fn shard_hash_discovery_ignores_unrelated_object_keys() {
+        for path in [
+            "shards",
+            "shards/ab",
+            "shards/ab/abhash.shard/extra",
+            "xorbs/ab/abhash.shard",
+            "shards/abc/abchash.shard",
+            "shards/xx/xxhash.shard",
+            "shards/ab/abhash",
+            "shards/bb/abhash.shard",
+            "shards/gg/gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.shard",
+        ] {
+            let key = shardline_storage::ObjectKey::parse(path).unwrap();
+            assert_eq!(
+                shard_hash_from_object_key_if_present(&key).unwrap(),
+                None,
+                "unrelated key {path}",
+            );
+        }
     }
 
     #[test]
@@ -1639,83 +1672,6 @@ mod tests {
 
         assert!(hashes.contains(&first_chunk.hex()));
         assert!(hashes.contains(&second_chunk.hex()));
-    }
-
-    // ── shard_hash_from_object_key_if_present edge cases ─────────────────
-
-    #[test]
-    fn shard_hash_from_key_rejects_single_segment() {
-        let key = shardline_storage::ObjectKey::parse("shards").unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn shard_hash_from_key_rejects_two_segments() {
-        let key = shardline_storage::ObjectKey::parse("shards/ab").unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn shard_hash_from_key_rejects_extra_segments() {
-        let key = shardline_storage::ObjectKey::parse("shards/ab/abhash.shard/extra").unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn shard_hash_from_key_rejects_wrong_namespace() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/ab/abhash.shard").unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn shard_hash_from_key_rejects_invalid_prefix_length() {
-        let key = shardline_storage::ObjectKey::parse("shards/abc/abchash.shard").unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn shard_hash_from_key_rejects_non_hex_prefix() {
-        let key = shardline_storage::ObjectKey::parse("shards/xx/xxhash.shard").unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn shard_hash_from_key_rejects_missing_shard_extension() {
-        let key = shardline_storage::ObjectKey::parse("shards/ab/abhash").unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn shard_hash_from_key_rejects_prefix_mismatch() {
-        let key = shardline_storage::ObjectKey::parse("shards/bb/abhash.shard").unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn shard_hash_from_key_rejects_invalid_hash_characters() {
-        let key = shardline_storage::ObjectKey::parse(
-            "shards/gg/gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.shard",
-        )
-        .unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
     }
 
     // ── file_section_followed_entries ────────────────────────────────────
@@ -2134,51 +2090,6 @@ mod tests {
         );
     }
 
-    // ── shard_object_key edge cases ──────────────────────────────────────
-
-    #[test]
-    fn shard_object_key_constructs_valid_key() {
-        let hash = "cd".repeat(32);
-        let key = shard_object_key(&hash);
-        let key = key.unwrap();
-        assert!(key.as_str().starts_with("shards/cd/"));
-        assert!(key.as_str().ends_with(".shard"));
-        assert_eq!(key.as_str().len(), "shards/cd/".len() + 64 + ".shard".len());
-    }
-
-    #[test]
-    fn shard_object_key_rejects_empty_hash() {
-        let result = shard_object_key("");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn shard_object_key_rejects_non_hex_characters() {
-        let result = shard_object_key(&"zz".repeat(32));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn shard_object_key_rejects_short_hash() {
-        let result = shard_object_key("abc");
-        assert!(result.is_err());
-    }
-
-    // ── shard_hash_from_object_key_if_present edge cases ────────────────
-
-    #[test]
-    fn shard_hash_from_key_accepts_valid_key() {
-        use shardline_storage::ObjectKey;
-        let hash = "ef".repeat(32);
-        let key_str = format!("shards/ef/{hash}.shard");
-        let key = ObjectKey::parse(&key_str).unwrap();
-        let extracted = super::shard_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), Some(hash.as_str()));
-    }
-
-    // ── read_bounded_file_sections with verification and metadata flags ──
-
     // ── read_bounded_file_sections with verification flag ─────────────────
 
     #[test]
@@ -2339,24 +2250,6 @@ mod tests {
     #[test]
     fn checked_add_limit_works_at_boundary() {
         assert_eq!(super::checked_add_limit(100, 100, 200).unwrap(), 200);
-    }
-
-    // ── Shard object key with edge case hashes ───────────────────────────
-
-    #[test]
-    fn shard_object_key_various_prefixes() {
-        let prefixes = ["aa", "ff", "10", "99", "ac"];
-        for prefix in prefixes {
-            let hash = format!("{}{}", prefix, "0".repeat(62));
-            let key = shard_object_key(&hash);
-            assert!(key.is_ok(), "failed for prefix {prefix}: {key:?}");
-            let key = key.unwrap();
-            assert!(
-                key.as_str().contains(&format!("shards/{prefix}/")),
-                "key '{}' missing expected prefix segment",
-                key.as_str()
-            );
-        }
     }
 
     // ── dedupe_shard_mapping ─────────────────────────────────────────────
