@@ -2048,16 +2048,16 @@ mod tests {
         database_url: &str,
         root: PathBuf,
         object_store: crate::ServerObjectStore,
-    ) -> Option<Arc<AppState>> {
-        let chunk_size = NonZeroUsize::new(65_536)?;
+    ) -> Arc<AppState> {
+        let chunk_size = NonZeroUsize::new(65_536).expect("nonzero fixture chunk size");
         let config = ServerConfig::new(
-            "127.0.0.1:0".parse().ok()?,
+            "127.0.0.1:0".parse().expect("fixture address"),
             "http://127.0.0.1:8080".to_owned(),
             root.clone(),
             chunk_size,
         )
         .with_server_frontends([ServerFrontend::Lfs])
-        .ok()?;
+        .expect("LFS fixture frontend");
         let backend = crate::PostgresBackend::new_with_object_store(
             root,
             "http://127.0.0.1:8080".to_owned(),
@@ -2070,7 +2070,7 @@ mod tests {
         crate::apply_database_migrations(&backend.gc_barrier_pool)
             .await
             .expect("configured PostgreSQL LFS fixture migrations must apply");
-        Some(Arc::new(AppState {
+        Arc::new(AppState {
             config,
             role: ServerRole::All,
             backend: ServerBackend::Postgres(backend),
@@ -2084,7 +2084,7 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: crate::ProtocolMetrics::default(),
-        }))
+        })
     }
 
     /// Builds a minimal [`AppState`] with explicit LFS chunked-patch store
@@ -3550,7 +3550,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[allow(clippy::arithmetic_side_effects)]
     async fn patch_object_resumes_across_postgres_nodes_without_shared_rwx() {
-        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        let Some(database_url) = shardline_test_support::postgres_fixture_url("DATABASE_URL")
+        else {
             return;
         };
         let tmp = TempDir::new().expect("tempdir");
@@ -3558,17 +3559,11 @@ mod tests {
             .expect("shared object store");
         let node_a_root = tmp.path().join("node-a");
         let node_b_root = tmp.path().join("node-b");
-        let Some(node_a) =
+        let node_a =
             build_postgres_lfs_state(&database_url, node_a_root.clone(), shared_store.clone())
-                .await
-        else {
-            return;
-        };
-        let Some(node_b) =
-            build_postgres_lfs_state(&database_url, node_b_root.clone(), shared_store).await
-        else {
-            return;
-        };
+                .await;
+        let node_b =
+            build_postgres_lfs_state(&database_url, node_b_root.clone(), shared_store).await;
         let app_a = lfs_router(node_a);
         let app_b = lfs_router(node_b);
         let content = format!("cross-replica:{}", tmp.path().display()).into_bytes();
@@ -3652,17 +3647,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn patch_object_hash_mismatch_can_be_repaired_durably() {
-        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        let Some(database_url) = shardline_test_support::postgres_fixture_url("DATABASE_URL")
+        else {
             return;
         };
         let tmp = TempDir::new().expect("tempdir");
         let shared_store = crate::ServerObjectStore::local(tmp.path().join("objects"))
             .expect("shared object store");
-        let Some(state) =
-            build_postgres_lfs_state(&database_url, tmp.path().join("node"), shared_store).await
-        else {
-            return;
-        };
+        let state =
+            build_postgres_lfs_state(&database_url, tmp.path().join("node"), shared_store).await;
         let app = lfs_router(Arc::clone(&state));
         let expected = format!("expected-lfs-content:{}", tmp.path().display()).into_bytes();
         let mut damaged = expected.clone();
