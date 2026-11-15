@@ -382,7 +382,7 @@ impl ServerObjectStore {
         object_key: &ObjectKey,
         length: u64,
     ) -> Result<NamedTempFile, ServerObjectStoreError> {
-        let mut output = NamedTempFile::new().map_err(ServerObjectStoreError::Io)?;
+        let mut output = NamedTempFile::new()?;
         if length == 0 {
             return Ok(output);
         }
@@ -394,8 +394,7 @@ impl ServerObjectStore {
                 if actual != length {
                     return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
                 }
-                std::io::copy(&mut input, output.as_file_mut())
-                    .map_err(ServerObjectStoreError::Io)?;
+                std::io::copy(&mut input, output.as_file_mut())?;
             }
             Self::S3(store) => {
                 let end = length
@@ -422,7 +421,7 @@ impl ServerObjectStore {
         &self,
         object_key: &ObjectKey,
     ) -> Result<Option<(NamedTempFile, u64)>, ServerObjectStoreError> {
-        let mut output = NamedTempFile::new().map_err(ServerObjectStoreError::Io)?;
+        let mut output = NamedTempFile::new()?;
         match self {
             Self::Local(store) => {
                 let Some(metadata) = ObjectStore::metadata(store, object_key)? else {
@@ -433,14 +432,12 @@ impl ServerObjectStore {
                 if length != metadata.length() {
                     return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
                 }
-                std::io::copy(&mut input, output.as_file_mut())
-                    .map_err(ServerObjectStoreError::Io)?;
+                std::io::copy(&mut input, output.as_file_mut())?;
                 Ok(Some((output, length)))
             }
-            Self::S3(store) => store
+            Self::S3(store) => Ok(store
                 .copy_object_to_file_if_present(object_key, output.as_file_mut())?
-                .map(|length| (output, length))
-                .map_or(Ok(None), |object| Ok(Some(object))),
+                .map(|length| (output, length))),
             Self::Blackhole => Ok(None),
         }
     }
@@ -506,10 +503,7 @@ impl ServerObjectStore {
                 let Some(length) = result? else {
                     return Ok(None);
                 };
-                Ok(Some((
-                    output.into_object().map_err(ServerObjectStoreError::Io)?,
-                    length,
-                )))
+                Ok(Some((output.into_object()?, length)))
             }
             Self::Blackhole => Ok(None),
         }
