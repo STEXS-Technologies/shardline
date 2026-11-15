@@ -1921,9 +1921,9 @@ fn parse_content_range(value: &str) -> Result<(u64, u64, u64), ()> {
     let value = value.strip_prefix("bytes ").ok_or(())?;
     let (range_part, total_part) = value.split_once('/').ok_or(())?;
     let total: u64 = total_part.parse().map_err(|_err| ())?;
-    let mut parts = range_part.split('-');
-    let start: u64 = parts.next().ok_or(())?.trim().parse().map_err(|_err| ())?;
-    let end: u64 = parts.next().ok_or(())?.trim().parse().map_err(|_err| ())?;
+    let (start, end) = range_part.split_once('-').ok_or(())?;
+    let start: u64 = start.trim().parse().map_err(|_err| ())?;
+    let end: u64 = end.trim().parse().map_err(|_err| ())?;
     if end < start {
         return Err(());
     }
@@ -2149,53 +2149,36 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn parse_content_range_accepts_standard_format() {
-        assert_eq!(parse_content_range("bytes 0-99/200"), Ok((0, 99, 200)));
+    fn parse_content_range_accepts_supported_formats() {
+        for (value, expected) in [
+            ("bytes 0-99/200", (0, 99, 200)),
+            ("  bytes 0-99/200 ", (0, 99, 200)),
+            ("bytes  0 - 99 /200", (0, 99, 200)),
+            ("bytes 1048576-2097151/4194304", (1048576, 2097151, 4194304)),
+            ("bytes 5-5/200", (5, 5, 200)),
+        ] {
+            assert_eq!(parse_content_range(value), Ok(expected), "{value:?}");
+        }
     }
 
     #[test]
-    fn parse_content_range_accepts_with_whitespace() {
-        // The parser trims the entire value and the prefix, but does NOT
-        // trim internal whitespace between range and total parts.
-        assert_eq!(parse_content_range("bytes 0-99/200"), Ok((0, 99, 200)));
-    }
-
-    #[test]
-    fn parse_content_range_accepts_large_offsets() {
-        assert_eq!(
-            parse_content_range("bytes 1048576-2097151/4194304"),
-            Ok((1048576, 2097151, 4194304))
-        );
-    }
-
-    #[test]
-    fn parse_content_range_rejects_missing_bytes_prefix() {
-        assert_eq!(parse_content_range("0-99/200"), Err(()));
-    }
-
-    #[test]
-    fn parse_content_range_rejects_missing_total() {
-        assert_eq!(parse_content_range("bytes 0-99"), Err(()));
-    }
-
-    #[test]
-    fn parse_content_range_rejects_non_numeric_start() {
-        assert_eq!(parse_content_range("bytes abc-99/200"), Err(()));
-    }
-
-    #[test]
-    fn parse_content_range_rejects_non_numeric_end() {
-        assert_eq!(parse_content_range("bytes 0-xyz/200"), Err(()));
-    }
-
-    #[test]
-    fn parse_content_range_rejects_non_numeric_total() {
-        assert_eq!(parse_content_range("bytes 0-99/abc"), Err(()));
-    }
-
-    #[test]
-    fn parse_content_range_rejects_empty_string() {
-        assert_eq!(parse_content_range(""), Err(()));
+    fn parse_content_range_rejects_malformed_values() {
+        for value in [
+            "0-99/200",
+            "bytes 0-99",
+            "bytes abc-99/200",
+            "bytes 0-xyz/200",
+            "bytes 0-99/abc",
+            "",
+            "bytes /200",
+            "bytes -1-99/200",
+            "bytes 100-50/200",
+            "bytes 0-99-100/200",
+            "bytes 0-99-/200",
+            "bytes 0-99/ 200",
+        ] {
+            assert_eq!(parse_content_range(value), Err(()), "{value:?}");
+        }
     }
 
     proptest! {
@@ -2234,27 +2217,6 @@ mod tests {
             let expected = oracle.iter().all(|covered| *covered);
             prop_assert_eq!(lfs_ranges_cover_total(&parts, total).expect("valid ranges"), expected);
         }
-    }
-
-    #[test]
-    fn parse_content_range_rejects_total_only() {
-        assert_eq!(parse_content_range("bytes /200"), Err(()));
-    }
-
-    #[test]
-    fn parse_content_range_rejects_negative_numbers() {
-        assert_eq!(parse_content_range("bytes -1-99/200"), Err(()));
-    }
-
-    #[test]
-    fn parse_content_range_rejects_end_before_start() {
-        assert_eq!(parse_content_range("bytes 100-50/200"), Err(()));
-    }
-
-    #[test]
-    fn parse_content_range_accepts_end_equals_start() {
-        // Single-byte chunk at offset 5.
-        assert_eq!(parse_content_range("bytes 5-5/200"), Ok((5, 5, 200)));
     }
 
     // ── lfs_validation_response ────────────────────────────────────────────
