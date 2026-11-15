@@ -2334,10 +2334,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["transfer"], "basic");
         assert_eq!(parsed["hash_algo"], "sha256");
         let objects = parsed["objects"].as_array().unwrap();
@@ -2361,10 +2358,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         let objects = parsed["objects"].as_array().unwrap();
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0]["oid"], oid);
@@ -2391,10 +2385,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["message"], "unsupported operation");
     }
 
@@ -2411,10 +2402,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["message"], "invalid oid");
     }
 
@@ -2432,10 +2420,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["message"], "unsupported hash algorithm");
     }
 
@@ -2453,10 +2438,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["message"], "unsupported transfer adapter");
     }
 
@@ -2474,10 +2456,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["transfer"], "basic");
     }
 
@@ -2494,10 +2473,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         let objects = parsed["objects"].as_array().unwrap();
         assert!(objects.is_empty());
     }
@@ -2521,10 +2497,7 @@ mod tests {
         let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         // Without auth, falls back to basic (no CAS token to return).
         assert_eq!(parsed["transfer"], "basic");
     }
@@ -2573,10 +2546,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
 
         // Must use xet transfer
         assert_eq!(parsed["transfer"], "xet");
@@ -2653,10 +2623,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
 
         assert_eq!(parsed["transfer"], "xet");
         let obj = &parsed["objects"][0];
@@ -2703,10 +2670,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
 
         // Read scope should still get xet transfer for downloads
         assert_eq!(parsed["transfer"], "xet");
@@ -2860,10 +2824,7 @@ mod tests {
                 "{method} {path}"
             );
             if method != "HEAD" {
-                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                let parsed: Value = serde_json::from_slice(&body).unwrap();
+                let parsed = crate::test_support::json_body(response).await;
                 assert_eq!(parsed["message"], "invalid oid", "{method} {path}");
             }
         }
@@ -3482,10 +3443,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["message"], "missing Content-Range header");
     }
 
@@ -3508,10 +3466,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["message"], "invalid Content-Range header");
     }
 
@@ -3666,10 +3621,7 @@ mod tests {
 
         // u64::MAX is a valid u64 value → should deserialize and return 200.
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         let objects = parsed["objects"].as_array().unwrap();
         assert!(
             objects[0].get("error").is_some(),
@@ -4000,10 +3952,7 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             "a PATCH beyond the active-session cap must be rejected"
         );
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["error"], "too many active lfs patch sessions");
 
         // The rejected PATCH never wrote a staging file.
@@ -4060,10 +4009,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["error"], "lfs patch staging byte quota exceeded");
 
         // The rejected chunk never materialized a staging file.
@@ -4210,10 +4156,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let parsed = crate::test_support::json_body(response).await;
         assert_eq!(parsed["error"], "lfs patch staging byte quota exceeded");
 
         // The rejected continuation never extended the staging file.

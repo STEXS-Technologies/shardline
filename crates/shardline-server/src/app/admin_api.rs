@@ -967,12 +967,7 @@ mod tests {
         builder.body(Body::empty()).expect("request")
     }
 
-    async fn json_body(response: axum::response::Response) -> Value {
-        let bytes = to_bytes(response.into_body(), 1_048_576)
-            .await
-            .expect("response body");
-        serde_json::from_slice(&bytes).expect("JSON response")
-    }
+    use crate::test_support::json_body;
 
     #[tokio::test]
     async fn disabled_admin_api_hides_every_endpoint() {
