@@ -497,7 +497,7 @@ impl CompleteMultipartUploadResult {
         self.to_xml_with_checksum(
             self.checksum_crc32
                 .as_deref()
-                .map(|value| ("ChecksumCRC32", value)),
+                .map(|value| ("ChecksumCRC32", value, "COMPOSITE")),
         )
     }
 
@@ -505,7 +505,7 @@ impl CompleteMultipartUploadResult {
     /// response type's field layout.
     #[must_use]
     pub fn to_crc32c_xml(&self, checksum_crc32c: &str) -> String {
-        self.to_xml_with_checksum(Some(("ChecksumCRC32C", checksum_crc32c)))
+        self.to_xml_with_checksum(Some(("ChecksumCRC32C", checksum_crc32c, "COMPOSITE")))
     }
 
     /// Serializes a negotiated multipart checksum using its S3 XML field and
@@ -535,25 +535,17 @@ impl CompleteMultipartUploadResult {
                 "Invalid negotiated multipart checksum",
             ));
         }
-        let checksum = format!(
-            "  <{checksum_field}>{}</{checksum_field}>\n  <ChecksumType>{}</ChecksumType>\n",
-            xml_escape(checksum_value),
-            xml_escape(checksum_type),
-        );
-        Ok(self.to_xml_with_checksum_xml(&checksum))
+        Ok(self.to_xml_with_checksum(Some((checksum_field, checksum_value, checksum_type))))
     }
 
-    fn to_xml_with_checksum(&self, checksum: Option<(&str, &str)>) -> String {
-        let checksum = checksum.map_or_else(String::new, |(field, value)| {
+    fn to_xml_with_checksum(&self, checksum: Option<(&str, &str, &str)>) -> String {
+        let checksum = checksum.map_or_else(String::new, |(field, value, checksum_type)| {
             format!(
-                "  <{field}>{}</{field}>\n  <ChecksumType>COMPOSITE</ChecksumType>\n",
-                xml_escape(value)
+                "  <{field}>{}</{field}>\n  <ChecksumType>{}</ChecksumType>\n",
+                xml_escape(value),
+                xml_escape(checksum_type),
             )
         });
-        self.to_xml_with_checksum_xml(&checksum)
-    }
-
-    fn to_xml_with_checksum_xml(&self, checksum: &str) -> String {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n  <Bucket>{}</Bucket>\n  <Key>{}</Key>\n  <ETag>{}</ETag>\n{}</CompleteMultipartUploadResult>\n",
             xml_escape(&self.bucket),
