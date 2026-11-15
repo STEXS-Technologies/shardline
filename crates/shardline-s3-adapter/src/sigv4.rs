@@ -282,7 +282,7 @@ pub fn verify_sigv4_post_policy(
     if STANDARD.encode(&policy_bytes) != policy {
         return Err(denied());
     }
-    let document: serde_json::Value =
+    let mut document: serde_json::Value =
         serde_json::from_slice(&policy_bytes).map_err(|_invalid_policy| denied())?;
     let expiration = document
         .get("expiration")
@@ -300,17 +300,18 @@ pub fn verify_sigv4_post_policy(
         return Err(denied());
     }
     let conditions = document
-        .get("conditions")
-        .and_then(serde_json::Value::as_array)
+        .get_mut("conditions")
+        .and_then(serde_json::Value::as_array_mut)
         .filter(|conditions| !conditions.is_empty())
-        .ok_or_else(denied)?
-        .clone();
+        .map(std::mem::take)
+        .ok_or_else(denied)?;
     let prefixed_secret = Zeroizing::new(format!("AWS4{}", credential.secret_key));
     let date_key = mac(prefixed_secret.as_bytes(), scope_date.as_bytes())?;
     let region_key = mac(&date_key, region.as_bytes())?;
     let service_key = mac(&region_key, b"s3")?;
     let signing_key = mac(&service_key, b"aws4_request")?;
-    let signature = hex::decode(auth.signature).map_err(|_invalid_signature| denied())?;
+    let mut signature = [0; 32];
+    hex::decode_to_slice(auth.signature, &mut signature).map_err(|_invalid_signature| denied())?;
     let mut verifier =
         Hmac::<Sha256>::new_from_slice(&signing_key).map_err(|_invalid_key| denied())?;
     verifier.update(policy.as_bytes());
@@ -530,12 +531,13 @@ pub fn verify_sigv4(
     let region_key = mac(&date_key, region.as_bytes())?;
     let service_key = mac(&region_key, b"s3")?;
     let signing_key = mac(&service_key, b"aws4_request")?;
-    let signature = hex::decode(signature).map_err(|_invalid_signature| denied())?;
+    let mut signature_bytes = [0; 32];
+    hex::decode_to_slice(signature, &mut signature_bytes).map_err(|_invalid_signature| denied())?;
     let mut verifier =
         Hmac::<Sha256>::new_from_slice(&signing_key).map_err(|_invalid_key| denied())?;
     verifier.update(to_sign.as_bytes());
     verifier
-        .verify_slice(&signature)
+        .verify_slice(&signature_bytes)
         .map_err(|_mismatch| denied())?;
     let streaming = if streaming {
         let encoding = singleton_header(headers, "content-encoding")?.ok_or_else(denied)?;
@@ -565,9 +567,7 @@ pub fn verify_sigv4(
             key: shardline_protocol::SecretBytes::new(signing_key.to_vec()),
             timestamp: timestamp.to_owned(),
             scope: scope_suffix.to_owned(),
-            previous: signature
-                .try_into()
-                .map_err(|_invalid_signature| denied())?,
+            previous: signature_bytes,
             length: length.parse().map_err(|_invalid_length| denied())?,
         })
     } else {
