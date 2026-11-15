@@ -119,41 +119,40 @@ struct DeletePathResponse {
 
 /// Low-level transport for the metadata endpoints. Both the [`XetClient`]
 /// surface and the upload session's automatic registration use it.
-#[derive(Clone)]
-pub(crate) struct MetadataClient {
-    pub(crate) transfer: TransferClient,
-    pub(crate) tokens: TokenService,
-    pub(crate) api_base: String,
-    pub(crate) repository: RepositoryId,
-    pub(crate) retry_policy: RetryPolicy,
+pub(crate) struct MetadataClient<'session> {
+    pub(crate) transfer: &'session TransferClient,
+    pub(crate) tokens: &'session TokenService,
+    pub(crate) api_base: &'session str,
+    pub(crate) repository: &'session RepositoryId,
+    pub(crate) retry_policy: &'session RetryPolicy,
 }
 
-impl MetadataClient {
+impl<'session> MetadataClient<'session> {
     /// Builds a metadata client from the client's shared session state.
-    pub(crate) fn from_download(inner: &DownloadSessionInner) -> Self {
-        Self {
-            transfer: inner.transfer.clone(),
-            tokens: inner.tokens.clone(),
-            api_base: inner.api_base.clone(),
-            repository: inner.repository.clone(),
-            retry_policy: inner.retry_policy.clone(),
-        }
+    pub(crate) fn from_download(inner: &'session DownloadSessionInner) -> Self {
+        Self::from_upload(
+            &inner.transfer,
+            &inner.tokens,
+            &inner.api_base,
+            &inner.repository,
+            &inner.retry_policy,
+        )
     }
 
     /// Builds a metadata client from the upload session's shared state.
-    pub(crate) fn from_upload(
-        transfer: &TransferClient,
-        tokens: &TokenService,
-        api_base: &str,
-        repository: &RepositoryId,
-        retry_policy: &RetryPolicy,
+    pub(crate) const fn from_upload(
+        transfer: &'session TransferClient,
+        tokens: &'session TokenService,
+        api_base: &'session str,
+        repository: &'session RepositoryId,
+        retry_policy: &'session RetryPolicy,
     ) -> Self {
         Self {
-            transfer: transfer.clone(),
-            tokens: tokens.clone(),
-            api_base: api_base.to_owned(),
-            repository: repository.clone(),
-            retry_policy: retry_policy.clone(),
+            transfer,
+            tokens,
+            api_base,
+            repository,
+            retry_policy,
         }
     }
 
@@ -177,13 +176,7 @@ impl MetadataClient {
 
     /// Substitutes `{provider}/{owner}/{repo}/{rev}` into a route template.
     pub(crate) fn repo_route(&self, template: &str) -> String {
-        template
-            .replace(
-                "{provider}",
-                &encode_path_segment(&self.repository.provider),
-            )
-            .replace("{owner}", &encode_path_segment(&self.repository.owner))
-            .replace("{repo}", &encode_path_segment(&self.repository.repo))
+        self.repo_route_scope(template)
             .replace("{rev}", &encode_path_segment(&self.repository.revision))
     }
 
@@ -229,7 +222,7 @@ impl MetadataClient {
         let retry = self.read_retry();
         let token = self.tokens.read_token().await?;
         let route = self.repo_route(XET_TREE_ROUTE);
-        let url = build_url(&self.api_base, &route, &[("path", path)]);
+        let url = build_url(self.api_base, &route, &[("path", path)]);
         self.send_json(
             &retry,
             token.token,
@@ -258,7 +251,7 @@ impl MetadataClient {
         if let Some(cursor) = cursor {
             query.push(("cursor", cursor));
         }
-        let url = build_url(&self.api_base, &route, &query);
+        let url = build_url(self.api_base, &route, &query);
         self.send_json(
             &retry,
             token.token,
@@ -279,7 +272,7 @@ impl MetadataClient {
         let retry = self.write_retry();
         let token = self.tokens.write_token().await?;
         let route = self.repo_route(XET_PATH_ROUTE);
-        let url = build_url(&self.api_base, &route, no_query());
+        let url = build_url(self.api_base, &route, no_query());
         // Substitute the `{*path}` wildcard with the remote path (axum decodes
         // the captured value; encode each segment so special characters survive).
         let url = url.replace("{*path}", &encode_path_segments(remote));
@@ -310,7 +303,7 @@ impl MetadataClient {
         let retry = self.write_retry();
         let token = self.tokens.write_token().await?;
         let route = self.repo_route(XET_PATH_ROUTE);
-        let mut url = build_url(&self.api_base, &route, no_query());
+        let mut url = build_url(self.api_base, &route, no_query());
         url = url.replace("{*path}", &encode_path_segments(remote));
         if recursive {
             url.push_str("?recursive=true");

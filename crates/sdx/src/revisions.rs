@@ -50,7 +50,7 @@ struct RevisionsResponse {
 #[serde(rename_all = "camelCase")]
 struct DeleteRevisionResponse {}
 
-impl MetadataClient {
+impl MetadataClient<'_> {
     /// Lists every revision of the repository by walking the keyset-cursor
     /// pages until the server reports no `nextCursor`.
     ///
@@ -66,7 +66,7 @@ impl MetadataClient {
         let mut cursors = HashSet::new();
         loop {
             let query = cursor.as_deref().map(|cursor| ("cursor", cursor));
-            let url = crate::tree::build_url(&self.api_base, &route, query.as_slice());
+            let url = crate::tree::build_url(self.api_base, &route, query.as_slice());
             let response: RevisionsResponse = self
                 .send_json(
                     &retry,
@@ -96,7 +96,7 @@ impl MetadataClient {
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
-        let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
+        let url = crate::tree::build_url(self.api_base, &route, crate::tree::no_query());
         match self
             .send_json::<Revision>(
                 &retry,
@@ -122,7 +122,7 @@ impl MetadataClient {
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
-        let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
+        let url = crate::tree::build_url(self.api_base, &route, crate::tree::no_query());
         let _: DeleteRevisionResponse = self
             .send_json(
                 &retry,
