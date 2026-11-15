@@ -168,12 +168,7 @@ const fn is_amz_credential_name(name: &str) -> bool {
 /// ```
 #[must_use]
 pub fn extract_access_key(headers: &HeaderMap) -> Option<&str> {
-    if headers.get_all(AUTHORIZATION).iter().nth(1).is_some() {
-        return None;
-    }
-    let authorization = headers.get(AUTHORIZATION);
-    if let Some(authorization) = authorization {
-        let value = authorization.to_str().ok()?;
+    if let Some(value) = singleton_header(headers, AUTHORIZATION.as_str()).ok()? {
         let authorization_token = match AuthScheme::try_from(value) {
             Ok(AuthScheme::Bearer) => value.get(AuthScheme::Bearer.prefix_len()..),
             Ok(AuthScheme::SigV4) => extract_sigv4_access_key(value),
@@ -184,15 +179,26 @@ pub fn extract_access_key(headers: &HeaderMap) -> Option<&str> {
         }
     }
     // Only inspect the fallback after no higher-priority credential was selected.
-    if headers
-        .get_all(X_AMZ_SECURITY_TOKEN_HEADER)
-        .iter()
-        .nth(1)
-        .is_some()
-    {
-        return None;
+    singleton_header(headers, X_AMZ_SECURITY_TOKEN_HEADER)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn singleton_header<'headers>(
+    headers: &'headers HeaderMap,
+    name: &str,
+) -> Result<Option<&'headers str>, S3Error> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(S3Error::access_denied());
     }
-    headers.get(X_AMZ_SECURITY_TOKEN_HEADER)?.to_str().ok()
+    value
+        .to_str()
+        .map(Some)
+        .map_err(|_invalid_header| S3Error::access_denied())
 }
 
 /// Extracts the access-key component from a SigV4 `Authorization` header value.
@@ -474,6 +480,19 @@ mod tests {
             HeaderValue::from_static("fallback-token"),
         );
         assert_eq!(extract_access_key(&headers), Some("fallback-token"));
+        // Invalid Authorization bytes cannot be repaired by a valid fallback.
+        headers.insert(AUTHORIZATION, HeaderValue::from_bytes(b"\x80").unwrap());
+        assert_eq!(extract_access_key(&headers), None);
+        // An invalid unused fallback cannot override a valid Authorization.
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer primary-token"),
+        );
+        headers.insert(
+            X_AMZ_SECURITY_TOKEN_HEADER,
+            HeaderValue::from_bytes(b"\x80").unwrap(),
+        );
+        assert_eq!(extract_access_key(&headers), Some("primary-token"));
     }
 
     #[test]

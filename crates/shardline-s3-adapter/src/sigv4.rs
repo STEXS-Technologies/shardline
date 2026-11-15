@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-use crate::S3Error;
+use crate::{S3Error, auth::singleton_header};
 
 mod streaming;
 pub use streaming::SigV4ChunkVerifier;
@@ -604,21 +604,6 @@ fn mac(key: &[u8], value: &[u8]) -> Result<Zeroizing<Vec<u8>>, S3Error> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_invalid_key| denied())?;
     mac.update(value);
     Ok(Zeroizing::new(mac.finalize().into_bytes().to_vec()))
-}
-
-fn singleton_header<'headers>(
-    headers: &'headers HeaderMap,
-    name: &str,
-) -> Result<Option<&'headers str>, S3Error> {
-    let mut values = headers.get_all(name).iter();
-    let value = values
-        .next()
-        .map(|value| value.to_str().map_err(|_invalid_header| denied()))
-        .transpose()?;
-    if values.next().is_some() {
-        return Err(denied());
-    }
-    Ok(value)
 }
 
 fn unique<'pairs>(pairs: &'pairs [(String, String)], name: &str) -> Result<&'pairs str, S3Error> {
