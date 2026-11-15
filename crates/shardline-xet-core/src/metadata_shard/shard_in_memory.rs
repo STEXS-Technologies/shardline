@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::mem::size_of;
 use std::sync::Arc;
 
 use super::file_structs::*;
@@ -11,7 +10,6 @@ use crate::{error::Result, merklehash::MerkleHash};
 pub struct MDBInMemoryShard {
     pub xorb_content: BTreeMap<MerkleHash, Arc<MDBXorbInfo>>,
     pub file_content: BTreeMap<MerkleHash, MDBFileInfo>,
-    current_shard_file_size: u64,
 }
 
 impl MDBInMemoryShard {
@@ -19,20 +17,12 @@ impl MDBInMemoryShard {
         &mut self,
         xorb_block_contents: impl Into<Arc<MDBXorbInfo>>,
     ) -> Result<()> {
-        let dest_content_v: Arc<MDBXorbInfo> = xorb_block_contents.into();
-        self.xorb_content
-            .insert(dest_content_v.metadata.xorb_hash, dest_content_v.clone());
-        for _chunk in dest_content_v.chunks.iter() {
-            self.current_shard_file_size += (size_of::<u64>() + 2 * size_of::<u32>()) as u64;
-        }
-        self.current_shard_file_size += dest_content_v.num_bytes();
-        self.current_shard_file_size += (size_of::<u64>() + size_of::<u32>()) as u64;
+        let xorb: Arc<MDBXorbInfo> = xorb_block_contents.into();
+        self.xorb_content.insert(xorb.metadata.xorb_hash, xorb);
         Ok(())
     }
 
     pub fn add_file_reconstruction_info(&mut self, file_info: MDBFileInfo) -> Result<()> {
-        self.current_shard_file_size += file_info.num_bytes();
-        self.current_shard_file_size += (size_of::<u64>() + size_of::<u32>()) as u64;
         self.file_content
             .insert(file_info.metadata.file_hash, file_info);
         Ok(())
