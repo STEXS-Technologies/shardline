@@ -221,10 +221,9 @@ where
 
     object_store.visit_prefix(&prefix, |metadata| -> Result<(), RebuildError> {
         report.scanned_retained_shards = checked_increment(report.scanned_retained_shards)?;
-        let shard_key = metadata.key().clone();
-        let shard_location = shard_key.as_str().to_owned();
+        let shard_key = metadata.key();
         let (mut shard_reader, length) = object_store
-            .materialize_bounded_object_if_present(&shard_key, 0)?
+            .materialize_bounded_object_if_present(shard_key, 0)?
             .ok_or(shardline_server_core::ServerObjectStoreError::NotFound)?;
         if length != metadata.length() {
             return Err(
@@ -239,7 +238,7 @@ where
                     push_issue(
                         report,
                         IndexRebuildIssueKind::InvalidRetainedShard,
-                        shard_location,
+                        shard_key.as_str().to_owned(),
                         IndexRebuildIssueDetail::InvalidRetainedShard(detail),
                     )?;
                     return Ok(());
@@ -249,13 +248,13 @@ where
 
         for chunk_hash_hex in chunk_hashes {
             let chunk_hash = parse_xet_hash_hex(&chunk_hash_hex)?;
-            let mapping = DedupeShardMapping::new(chunk_hash, shard_key.clone());
             match desired.get(&chunk_hash) {
-                Some(existing)
-                    if existing.shard_object_key().as_str()
-                        <= mapping.shard_object_key().as_str() => {}
+                Some(existing) if existing.shard_object_key().as_str() <= shard_key.as_str() => {}
                 _ => {
-                    desired.insert(chunk_hash, mapping);
+                    desired.insert(
+                        chunk_hash,
+                        DedupeShardMapping::new(chunk_hash, shard_key.clone()),
+                    );
                 }
             }
         }
