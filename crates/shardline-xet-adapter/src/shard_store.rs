@@ -1783,44 +1783,42 @@ mod tests {
         }
     }
 
-    // ── Pure helper function tests ────────────────────────────────────────
-
     #[test]
-    fn checked_add_ok() {
+    fn checked_add_preserves_values_and_reports_overflow() {
         assert_eq!(super::checked_add(100, 200).unwrap(), 300);
-    }
-
-    #[test]
-    fn checked_add_overflow() {
-        assert!(super::checked_add(usize::MAX, 1).is_err());
-    }
-
-    #[test]
-    fn checked_increment_ok() {
-        assert_eq!(super::checked_increment(41).unwrap(), 42);
-    }
-
-    #[test]
-    fn checked_increment_overflow() {
-        assert!(super::checked_increment(usize::MAX).is_err());
-    }
-
-    #[test]
-    fn checked_add_limit_ok() {
-        assert_eq!(super::checked_add_limit(50, 50, 200).unwrap(), 100);
-    }
-
-    #[test]
-    fn checked_add_limit_exceeded() {
         assert!(matches!(
-            super::checked_add_limit(150, 100, 200),
-            Err(XetAdapterError::TooManyShardTerms)
+            super::checked_add(usize::MAX, 1),
+            Err(XetAdapterError::Overflow),
         ));
     }
 
     #[test]
-    fn checked_add_limit_overflow() {
-        assert!(super::checked_add_limit(usize::MAX, 1, usize::MAX).is_err());
+    fn checked_increment_handles_zero_and_overflow() {
+        for (value, expected) in [(0, 1), (41, 42)] {
+            assert_eq!(super::checked_increment(value).unwrap(), expected);
+        }
+        assert!(matches!(
+            super::checked_increment(usize::MAX),
+            Err(XetAdapterError::Overflow),
+        ));
+    }
+
+    #[test]
+    fn checked_add_limit_distinguishes_boundary_limit_and_overflow() {
+        for (left, right, limit, expected) in [(50, 50, 200, 100), (100, 100, 200, 200)] {
+            assert_eq!(
+                super::checked_add_limit(left, right, limit).unwrap(),
+                expected
+            );
+        }
+        assert!(matches!(
+            super::checked_add_limit(150, 100, 200),
+            Err(XetAdapterError::TooManyShardTerms),
+        ));
+        assert!(matches!(
+            super::checked_add_limit(usize::MAX, 1, usize::MAX),
+            Err(XetAdapterError::Overflow),
+        ));
     }
 
     // ── retained_shard_chunk_hashes edge cases ──────────────────────────
@@ -2164,23 +2162,6 @@ mod tests {
         assert!(matches!(result, Err(XetAdapterError::TooManyShardTerms)));
     }
 
-    // ── checked helper functions ─────────────────────────────────────────
-
-    #[test]
-    fn checked_add_saturates_to_error() {
-        assert!(super::checked_add(usize::MAX, 1).is_err());
-    }
-
-    #[test]
-    fn checked_increment_zero_works() {
-        assert_eq!(super::checked_increment(0).unwrap(), 1);
-    }
-
-    #[test]
-    fn checked_add_limit_works_at_boundary() {
-        assert_eq!(super::checked_add_limit(100, 100, 200).unwrap(), 200);
-    }
-
     // ── dedupe_shard_mapping ─────────────────────────────────────────────
 
     #[test]
@@ -2195,8 +2176,8 @@ mod tests {
 
     // ── resolve_dedupe_shard_object async test ────────────────────────────
 
-    #[test]
-    fn resolve_dedupe_shard_object_returns_not_found_for_missing_mapping() {
+    #[tokio::test]
+    async fn resolve_dedupe_shard_object_returns_not_found_for_missing_mapping() {
         use shardline_index::MemoryIndexStore;
 
         let temp = tempfile::tempdir().unwrap();
@@ -2204,12 +2185,8 @@ mod tests {
         let index_store = MemoryIndexStore::new();
         let chunk_hash_hex = "ab".repeat(32);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(super::resolve_dedupe_shard_object(
-            &index_store,
-            &object_store,
-            &chunk_hash_hex,
-        ));
+        let result =
+            super::resolve_dedupe_shard_object(&index_store, &object_store, &chunk_hash_hex).await;
 
         assert!(
             matches!(result, Err(XetAdapterError::NotFound)),
@@ -2217,11 +2194,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_dedupe_shard_object_finds_existing_object() {
-        use shardline_index::{DedupeShardMapping, MemoryIndexStore};
+    #[tokio::test]
+    async fn resolve_dedupe_shard_object_finds_existing_object() {
+        use shardline_index::MemoryIndexStore;
         use shardline_server_core::chunk_hash;
-        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore, PutOutcome};
+        use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, PutOutcome};
 
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
@@ -2234,39 +2211,27 @@ mod tests {
         let shard_data = b"stored-shard-data";
         let body = ObjectBody::from_slice(shard_data);
         let integrity = ObjectIntegrity::new(chunk_hash(shard_data), shard_data.len() as u64);
-        let outcome = object_store
-            .put_if_absent(&shard_key, body, &integrity)
+        let outcome = AsyncObjectStore::put_if_absent(&object_store, &shard_key, body, &integrity)
+            .await
             .expect("put_if_absent should succeed");
         assert!(matches!(outcome, PutOutcome::Inserted));
 
-        // Create and store a dedupe mapping in the index
-        let chunk_hash = shardline_index::parse_xet_hash_hex(&chunk_hash_hex).unwrap();
-        // DedupeShardMapping::new takes (ShardlineHash, ObjectKey)
-        // Create a mapping using the ShardlineHash directly
-        let mapping = DedupeShardMapping::new(chunk_hash, shard_key.clone());
+        let mapping = dedupe_shard_mapping(&chunk_hash_hex, &shard_key).unwrap();
         index_store
             .upsert_dedupe_shard_mapping(&mapping)
             .expect("upsert_dedupe_shard_mapping should succeed");
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(super::resolve_dedupe_shard_object(
-            &index_store,
-            &object_store,
-            &chunk_hash_hex,
-        ));
-
-        assert!(
-            result.is_ok(),
-            "resolve_dedupe_shard_object failed: {result:?}"
-        );
-        let (resolved_key, length) = result.unwrap();
+        let (resolved_key, length) =
+            super::resolve_dedupe_shard_object(&index_store, &object_store, &chunk_hash_hex)
+                .await
+                .expect("stored shard mapping resolves");
         assert_eq!(resolved_key.as_str(), shard_key.as_str());
         assert_eq!(length, shard_data.len() as u64);
     }
 
-    #[test]
-    fn resolve_dedupe_shard_object_returns_not_found_for_missing_shard() {
-        use shardline_index::{DedupeShardMapping, MemoryIndexStore};
+    #[tokio::test]
+    async fn resolve_dedupe_shard_object_returns_not_found_for_missing_shard() {
+        use shardline_index::MemoryIndexStore;
 
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
@@ -2276,18 +2241,13 @@ mod tests {
         let shard_key = shard_object_key(&chunk_hash_hex).unwrap();
 
         // Create a mapping but don't store the underlying shard object
-        let chunk_hash = shardline_index::parse_xet_hash_hex(&chunk_hash_hex).unwrap();
-        let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
+        let mapping = dedupe_shard_mapping(&chunk_hash_hex, &shard_key).unwrap();
         index_store
             .upsert_dedupe_shard_mapping(&mapping)
             .expect("upsert_dedupe_shard_mapping should succeed");
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(super::resolve_dedupe_shard_object(
-            &index_store,
-            &object_store,
-            &chunk_hash_hex,
-        ));
+        let result =
+            super::resolve_dedupe_shard_object(&index_store, &object_store, &chunk_hash_hex).await;
 
         assert!(
             matches!(result, Err(XetAdapterError::NotFound)),
@@ -2295,20 +2255,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_dedupe_shard_object_rejects_invalid_chunk_hash() {
+    #[tokio::test]
+    async fn resolve_dedupe_shard_object_rejects_invalid_chunk_hash() {
         use shardline_index::MemoryIndexStore;
 
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
         let index_store = MemoryIndexStore::new();
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(super::resolve_dedupe_shard_object(
-            &index_store,
-            &object_store,
-            "not-a-valid-hash",
-        ));
+        let result =
+            super::resolve_dedupe_shard_object(&index_store, &object_store, "not-a-valid-hash")
+                .await;
 
         assert!(result.is_err(), "expected error for invalid hash");
     }
