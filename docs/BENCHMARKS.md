@@ -4101,9 +4101,64 @@ they are not latency or throughput measurements.
 
 A fourth attempted check, `drill_deploy_partition_during_lfs_patch_repair`,
 failed before fault injection because the required `nicolaka/netshoot:v0.13`
-image was unavailable locally and Docker could not resolve its registry. It
-is **not qualified** by this run. These results remain targeted local recovery
-evidence, not a passing full distributed integrity gate or CI release result.
+image was unavailable locally and Docker could not resolve its registry. The
+subsequent release-mode qualification below resolved that prerequisite and
+executed the partition drill successfully.
+
+### Release-mode maintenance and LFS partition qualification (2026-11-15)
+
+An all-features CLI built from clean commit
+`98ff78d4e7bcdb523da95fc06590c6468ab1b671` passed the workspace's default
+release build (optimization level 3, thin LTO, one codegen unit, panic abort),
+using Rust `1.99.0 (b940084d7 2026-09-28)` and four build jobs. The frozen
+executable's SHA-256 was
+`59f71f524235b758f5ef5cfa2e16fcc048d580cc574775ece3d09236a452b5e8`.
+
+The maintenance-copy cases used that executable, the checksum-verified released
+v1.12.1 executable, and the historical archive producer specified in
+[the integration prerequisites](../CONTRIBUTING.md#full-docker-integration-prerequisites).
+The archive producer was built from
+`a2f343963f0105e6c89fad8c6c76d150211c648a` with dev debug information disabled;
+its frozen executable's SHA-256 was
+`146cf17c8eadbe3af8444ee4fb56ea34f9b450ab32685a2d31156dc08dfa75d2`.
+
+| Existing selection | Result | Test elapsed time |
+| --- | --- | ---: |
+| All 13 `maintenance_profiles::storage_copy::` cases | Passed | 82.229 s total |
+| `drill_deploy_partition_during_lfs_patch_repair` | Passed | 13.078 s |
+
+The maintenance cases cover local-to-S3 and S3-to-S3 interruption, accepted PUT
+and saved-report recovery, termination during source inventory, unsafe history
+paths, unrelated PostgreSQL configuration, and inspection of historical and
+released copy evidence without replay. They use disposable MinIO fixtures.
+The partition drill uses PostgreSQL/MinIO and real packet loss: the overlapping
+LFS PATCH fails while metadata is unreachable, then completion after healing
+returns byte-exact content. Timings include setup and deliberate fault waits.
+
+The initial broader consumer run had omitted its required CLI environment and
+therefore failed all 13 maintenance-copy cases before exercising them. The
+corrected selection above passed every case with no runtime prerequisite skips;
+60 unrelated HTTP tests were excluded. The other selection excluded 49
+deployment tests. These are targeted local results, not a passing full
+integration suite, distributed-integrity gate, or independent CI result.
+
+With the three executable variables from the linked prerequisites configured,
+reproduce with:
+
+```bash
+cargo nextest run --locked -p shardline-server --all-features \
+  --test s3_e2e_http -E 'test(maintenance_profiles::storage_copy::)' \
+  --run-ignored all --test-threads 1 --success-output immediate --failure-output immediate
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 SHARDLINE_CHAOS_DEPLOYMENT=1 \
+  cargo nextest run --locked -p shardline-server --all-features \
+  --test deployment_chaos -E 'test(drill_deploy_partition_during_lfs_patch_repair)' \
+  --test-threads 1 --success-output immediate --failure-output immediate
+```
+
+The missing `nicolaka/netshoot:v0.13` prerequisite was loaded using anonymous
+Skopeo access to Docker Hub, with source digest
+`sha256:a20c2531bf35436ed3766cd6cfe89d352b050ccc4d7005ce6400adf97503da1b`.
+The existing drill then ran unchanged against the preloaded image.
 
 ### Concurrent S3 and GC measurements (2026-11-15)
 
