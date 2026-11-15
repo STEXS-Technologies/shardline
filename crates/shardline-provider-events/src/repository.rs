@@ -9,7 +9,7 @@ use shardline_storage::ObjectKey;
 use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent};
 
 use super::{
-    DEFAULT_LOCAL_GC_RETENTION_SECONDS, ProviderWebhookOutcome, ProviderWebhookOutcomeKind,
+    DEFAULT_LOCAL_GC_RETENTION_SECONDS, ProviderWebhookOutcome,
     records::{
         DeletedRepositoryReferences, collect_deleted_repository_references, parse_record_entry,
         prepare_renamed_records, record_belongs_to_repository, repository_record_scope,
@@ -61,13 +61,7 @@ where
     Ok(ProviderWebhookOutcome {
         affected_file_versions: file_versions,
         affected_chunks: u64::try_from(chunk_hashes.len())?,
-        ..ProviderWebhookOutcome::for_event(
-            event,
-            ProviderWebhookOutcomeKind::RepositoryRenamed {
-                new_owner: new_repository.owner().to_owned(),
-                new_repo: new_repository.name().to_owned(),
-            },
-        )
+        ..ProviderWebhookOutcome::for_event(event)
     })
 }
 
@@ -112,13 +106,7 @@ pub(super) async fn plan_postgres_repository_renamed(
     Ok(ProviderWebhookOutcome {
         affected_file_versions: file_versions,
         affected_chunks: u64::try_from(chunk_hashes.len())?,
-        ..ProviderWebhookOutcome::for_event(
-            event,
-            ProviderWebhookOutcomeKind::RepositoryRenamed {
-                new_owner: new_repository.owner().to_owned(),
-                new_repo: new_repository.name().to_owned(),
-            },
-        )
+        ..ProviderWebhookOutcome::for_event(event)
     })
 }
 
@@ -175,7 +163,7 @@ pub(super) async fn plan_postgres_repository_deleted(
         affected_chunks: u64::try_from(chunk_hashes.len())?,
         applied_holds: u64::try_from(mutation.retention_holds_len())?,
         retention_seconds: Some(DEFAULT_LOCAL_GC_RETENTION_SECONDS),
-        ..ProviderWebhookOutcome::for_event(event, ProviderWebhookOutcomeKind::RepositoryDeleted)
+        ..ProviderWebhookOutcome::for_event(event)
     })
 }
 
@@ -246,7 +234,7 @@ where
         affected_chunks: u64::try_from(chunk_hashes.len())?,
         applied_holds: u64::try_from(held_object_keys.len())?,
         retention_seconds: Some(DEFAULT_LOCAL_GC_RETENTION_SECONDS),
-        ..ProviderWebhookOutcome::for_event(event, ProviderWebhookOutcomeKind::RepositoryDeleted)
+        ..ProviderWebhookOutcome::for_event(event)
     })
 }
 

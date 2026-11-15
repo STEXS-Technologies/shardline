@@ -3,7 +3,7 @@ use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent};
 
 use crate::ProviderEventsError;
 
-use super::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind};
+use super::ProviderWebhookOutcome;
 
 pub(super) async fn apply_access_changed<IndexAdapter>(
     index_store: &IndexAdapter,
@@ -23,10 +23,7 @@ where
     )
     .await?;
 
-    Ok(ProviderWebhookOutcome::for_event(
-        event,
-        ProviderWebhookOutcomeKind::AccessChanged,
-    ))
+    Ok(ProviderWebhookOutcome::for_event(event))
 }
 
 pub(super) async fn apply_revision_pushed<IndexAdapter>(
@@ -48,12 +45,7 @@ where
     )
     .await?;
 
-    Ok(ProviderWebhookOutcome::for_event(
-        event,
-        ProviderWebhookOutcomeKind::RevisionPushed {
-            revision: revision.to_owned(),
-        },
-    ))
+    Ok(ProviderWebhookOutcome::for_event(event))
 }
 
 pub(super) async fn migrate_provider_repository_state<IndexAdapter>(
@@ -162,6 +154,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::ProviderWebhookOutcomeKind;
 
     fn make_event(kind: RepositoryWebhookEventKind, delivery_id: &str) -> RepositoryWebhookEvent {
         RepositoryWebhookEvent::new(

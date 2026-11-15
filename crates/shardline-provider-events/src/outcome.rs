@@ -3,16 +3,13 @@ use shardline_vcs::{RepositoryWebhookEvent, RepositoryWebhookEventKind};
 use super::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind};
 
 impl ProviderWebhookOutcome {
-    pub(crate) fn for_event(
-        event: &RepositoryWebhookEvent,
-        event_kind: ProviderWebhookOutcomeKind,
-    ) -> Self {
+    pub(crate) fn for_event(event: &RepositoryWebhookEvent) -> Self {
         Self {
             provider: event.repository().provider(),
             owner: event.repository().owner().to_owned(),
             repo: event.repository().name().to_owned(),
             delivery_id: event.delivery_id().as_str().to_owned(),
-            event_kind,
+            event_kind: event_kind(event.kind()),
             affected_file_versions: 0,
             affected_chunks: 0,
             applied_holds: 0,
@@ -21,9 +18,7 @@ impl ProviderWebhookOutcome {
     }
 }
 
-pub(super) fn duplicate_webhook_event_kind(
-    kind: &RepositoryWebhookEventKind,
-) -> ProviderWebhookOutcomeKind {
+fn event_kind(kind: &RepositoryWebhookEventKind) -> ProviderWebhookOutcomeKind {
     match kind {
         RepositoryWebhookEventKind::RepositoryDeleted => {
             ProviderWebhookOutcomeKind::RepositoryDeleted
@@ -40,57 +35,5 @@ pub(super) fn duplicate_webhook_event_kind(
                 revision: revision.as_str().to_owned(),
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use shardline_vcs::{ProviderKind, RepositoryRef, RepositoryWebhookEventKind, RevisionRef};
-
-    use super::duplicate_webhook_event_kind;
-    use crate::ProviderWebhookOutcomeKind;
-
-    #[test]
-    fn duplicate_event_kind_repository_deleted() {
-        let kind = RepositoryWebhookEventKind::RepositoryDeleted;
-        assert_eq!(
-            duplicate_webhook_event_kind(&kind),
-            ProviderWebhookOutcomeKind::RepositoryDeleted
-        );
-    }
-
-    #[test]
-    fn duplicate_event_kind_access_changed() {
-        let kind = RepositoryWebhookEventKind::AccessChanged;
-        assert_eq!(
-            duplicate_webhook_event_kind(&kind),
-            ProviderWebhookOutcomeKind::AccessChanged
-        );
-    }
-
-    #[test]
-    fn duplicate_event_kind_revision_pushed() {
-        let revision = RevisionRef::new("refs/heads/feature").unwrap();
-        let kind = RepositoryWebhookEventKind::RevisionPushed { revision };
-        assert_eq!(
-            duplicate_webhook_event_kind(&kind),
-            ProviderWebhookOutcomeKind::RevisionPushed {
-                revision: "refs/heads/feature".to_owned(),
-            }
-        );
-    }
-
-    #[test]
-    fn duplicate_event_kind_repository_renamed() {
-        let new_repository =
-            RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
-        let kind = RepositoryWebhookEventKind::RepositoryRenamed { new_repository };
-        assert_eq!(
-            duplicate_webhook_event_kind(&kind),
-            ProviderWebhookOutcomeKind::RepositoryRenamed {
-                new_owner: "new-owner".to_owned(),
-                new_repo: "new-repo".to_owned(),
-            }
-        );
     }
 }

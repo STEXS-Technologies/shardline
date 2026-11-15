@@ -69,6 +69,4 @@ mod state;
 mod tests;
 
 mod provider_events;
-#[cfg(test)]
-pub(crate) use provider_events::duplicate_webhook_outcome;
 pub use provider_events::*;
