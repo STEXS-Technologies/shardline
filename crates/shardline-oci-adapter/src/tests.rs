@@ -2255,107 +2255,59 @@ async fn count_active_sessions_skips_expired_session() {
     assert_eq!(count, 0, "expired session should be skipped");
 }
 
-// ── purge_expired_upload_sessions branch tests ───────────────────────────
-
 #[tokio::test]
-async fn purge_expired_session_stem_not_utf8_bin() {
-    // purge_expired_upload_sessions: file with .bin extension and non-UTF-8 stem → continue (line 1005)
-    let root = temp_root();
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
-    // Create a .bin file with non-UTF-8 name
-    #[cfg(unix)]
-    {
-        let bad_name = std::ffi::OsStr::from_bytes(b"\xff\xfe.bin");
-        let bad_path = upload_dir.join(bad_name);
-        tokio::fs::write(&bad_path, b"orphan").await.unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+async fn purge_skips_invalid_session_stems() {
+    for extension in ["bin", "json", "tail"] {
+        let root = temp_root();
+        let path = crate::upload_dir(root.path()).join(format!("invalid-stem.{extension}"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
-        // File should remain since it was skipped (stem not valid session ID → continue on 1008)
-        // Actually on 1005: file_stem().and_then(OsStr::to_str) returns None → continue
-        // The file should NOT be removed (no metadata exists, but the non-UTF-8 stem
-        // skips the orphan-removal logic entirely — it continues at line 1005)
-        assert!(bad_path.exists(), "non-UTF-8 stem file should be skipped");
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = upload_dir;
-    }
-}
-
-#[tokio::test]
-async fn purge_expired_session_stem_validation_skips_bin() {
-    // purge_expired_upload_sessions: .bin file with invalid session ID stem → continue (line 1008)
-    let root = temp_root();
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
-    let bin_path = upload_dir.join("invalid-stem.bin");
-    tokio::fs::write(&bin_path, b"orphan").await.unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+        tokio::fs::write(&path, b"retained").await.unwrap();
+        purge_expired_upload_sessions::<TestBackend>(
+            root.path(),
+            NO_BACKEND,
+            ttl(),
+            crate::fs::unix_now_seconds_checked().unwrap(),
+        )
         .await
         .unwrap();
-    // File should remain (stem fails validation → continue)
-    assert!(
-        bin_path.exists(),
-        "invalid-stem .bin file should be skipped"
-    );
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"retained",
+            "{extension}"
+        );
+    }
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn purge_expired_session_stem_not_utf8_json() {
-    // purge_expired_upload_sessions: .json file with non-UTF-8 stem → continue (line 1021)
-    let root = temp_root();
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
-    #[cfg(unix)]
-    {
-        let bad_name = std::ffi::OsStr::from_bytes(b"\xfe\xff.json");
-        let bad_path = upload_dir.join(bad_name);
-        tokio::fs::write(&bad_path, b"{}").await.unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+async fn purge_skips_non_utf8_session_stems() {
+    for name in [
+        b"\xff\xfe.bin".as_slice(),
+        b"\xfe\xff.json",
+        b"\xff\xfe.tail",
+    ] {
+        let root = temp_root();
+        let path = crate::upload_dir(root.path()).join(std::ffi::OsStr::from_bytes(name));
+        tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
-        // File should remain (non-UTF-8 stem → continue at line 1021)
-        assert!(bad_path.exists(), "non-UTF-8 json should be skipped");
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = upload_dir;
-    }
-}
-
-#[tokio::test]
-async fn purge_expired_session_stem_validation_skips_json() {
-    // purge_expired_upload_sessions: .json file with invalid session ID stem → continue (line 1024)
-    let root = temp_root();
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
-    let json_path = upload_dir.join("invalid-stem.json");
-    tokio::fs::write(&json_path, b"{}").await.unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+        tokio::fs::write(&path, b"retained").await.unwrap();
+        purge_expired_upload_sessions::<TestBackend>(
+            root.path(),
+            NO_BACKEND,
+            ttl(),
+            crate::fs::unix_now_seconds_checked().unwrap(),
+        )
         .await
         .unwrap();
-    assert!(
-        json_path.exists(),
-        "invalid-stem .json file should be skipped"
-    );
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"retained",
+            "{name:?}"
+        );
+    }
 }
 
 #[tokio::test]
