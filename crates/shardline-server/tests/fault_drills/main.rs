@@ -31,6 +31,8 @@ use shardline_server::{
     ServerConfig, ServerFrontend, ServerRole, app, run_fsck, write_backup_manifest,
 };
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
+use shardline_test_support::deterministic_bytes;
+
 use std::{
     net::SocketAddr,
     num::{NonZeroU64, NonZeroUsize},
@@ -70,19 +72,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
-}
-
-/// Deterministic pseudo-random payload (cheap, no RNG dependency).
-fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
-    let mut state = seed | 1;
-    let mut out = Vec::with_capacity(len);
-    for _ in 0..len {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        out.push((state & 0xff) as u8);
-    }
-    out
 }
 
 fn copy_directory_tree(source: &Path, destination: &Path) -> std::io::Result<()> {

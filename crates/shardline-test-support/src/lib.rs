@@ -53,6 +53,6 @@ pub use docker::HttpsWebhookFixture;
 pub use client_process::{native_client_output, native_client_output_with_input};
 #[cfg(feature = "docker")]
 pub use fixtures::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};
-pub use fixtures::{InvariantError, S3FaultProxy, S3ProxyFault, TempStorage};
+pub use fixtures::{InvariantError, S3FaultProxy, S3ProxyFault, TempStorage, deterministic_bytes};
 pub use native_clients::{native_clients_required, require_native_client};
 pub use postgres_fixture::postgres_fixture_url;

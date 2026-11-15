@@ -39,7 +39,9 @@ use shardline_server::{
 };
 use shardline_server_core::{AuthProvider, ServerObjectStoreError, auth::LocalHmacProvider};
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore as _, S3ObjectStoreConfig};
+use shardline_test_support::deterministic_bytes;
 use shardline_test_support::{S3FaultProxy, S3ProxyFault};
+
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
@@ -159,18 +161,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
-}
-
-fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
-    let mut state = seed | 1;
-    let mut out = Vec::with_capacity(len);
-    for _ in 0..len {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        out.push((state & 0xff) as u8);
-    }
-    out
 }
 
 /// Extract the text of the first `<{tag}>..</{tag}>` element from an XML body

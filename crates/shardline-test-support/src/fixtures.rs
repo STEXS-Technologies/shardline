@@ -89,3 +89,19 @@ impl Default for TempStorage {
         Self::new()
     }
 }
+
+/// Deterministic xorshift payload shared by chaos fixtures.
+///
+/// Preserves fixture seeds without adding an RNG dependency.
+#[must_use]
+pub fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push((state & 0xff) as u8);
+    }
+    out
+}
