@@ -711,52 +711,33 @@ mod tests {
         ));
     }
 
-    // ── payload_within_bound ─────────────────────────────────────────────
-
     #[test]
-    fn payload_within_bound_accepts_small_payload() {
+    fn payload_bound_includes_empty_small_and_exact_maximum() {
+        assert!(payload_within_bound(b""));
         assert!(payload_within_bound(b"small"));
-    }
-
-    #[test]
-    fn payload_within_bound_rejects_oversized() {
-        let oversized = vec![0u8; (MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES + 1) as usize];
+        let max = MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES as usize;
+        let oversized = vec![0u8; max + 1];
         assert!(!payload_within_bound(&oversized));
-    }
-
-    #[test]
-    fn payload_within_bound_accepts_exact_max() {
-        let exact = vec![0u8; MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES as usize];
-        assert!(payload_within_bound(&exact));
+        assert!(payload_within_bound(&oversized[..max]));
     }
 
     // ── ReconstructionCacheService::from_config ────────────────────────────
 
     #[test]
-    fn from_config_disabled_adapter_returns_disabled_service() {
-        let config = ServerConfig::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-            "http://localhost:8080".to_owned(),
-            PathBuf::from("/tmp/test"),
-            NonZeroUsize::new(4096).unwrap(),
-        )
-        .with_reconstruction_cache_disabled();
-
-        let service = ReconstructionCacheService::from_config(&config).unwrap();
-        assert_eq!(service.backend_name(), "disabled");
-    }
-
-    #[test]
-    fn from_config_memory_adapter_returns_memory_service() {
+    fn configured_memory_and_disabled_adapters_have_expected_names() {
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://localhost:8080".to_owned(),
             PathBuf::from("/tmp/test"),
             NonZeroUsize::new(4096).unwrap(),
         );
-
-        let service = ReconstructionCacheService::from_config(&config).unwrap();
-        assert_eq!(service.backend_name(), "memory");
+        for (config, expected) in [
+            (config.clone(), "memory"),
+            (config.with_reconstruction_cache_disabled(), "disabled"),
+        ] {
+            let service = ReconstructionCacheService::from_config(&config).unwrap();
+            assert_eq!(service.backend_name(), expected);
+        }
     }
 
     #[test]
@@ -798,21 +779,26 @@ mod tests {
     // ── version_key() ────────────────────────────────────────────────────
 
     #[test]
-    fn version_key_with_all_params() {
+    fn version_keys_preserve_file_identity_and_repository_scope() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap();
-        let key = ReconstructionCacheService::version_key("file-id", "hash123", Some(&scope));
-        // Key should be a non-empty string representation
-        let key_str = format!("{key:?}");
-        assert!(!key_str.is_empty());
-    }
-
-    #[test]
-    fn version_key_without_scope() {
-        let key = ReconstructionCacheService::version_key("file-id", "hash123", None);
-        let key_str = format!("{key:?}");
-        assert!(!key_str.is_empty());
+        let scoped = ReconstructionCacheService::version_key("file-id", "hash123", Some(&scope));
+        let unscoped = ReconstructionCacheService::version_key("file-id", "hash123", None);
+        for key in [&scoped, &unscoped] {
+            assert_eq!(key.file_id(), "file-id");
+            assert_eq!(key.content_hash(), Some("hash123"));
+        }
+        let actual_scope = scoped.repository_scope().unwrap();
+        assert_eq!(actual_scope.owner(), "owner");
+        assert_eq!(actual_scope.repo(), "repo");
+        assert_eq!(
+            actual_scope.clone().provider_kind(),
+            RepositoryProvider::GitHub
+        );
+        assert_eq!(actual_scope.revision(), None);
+        assert!(unscoped.repository_scope().is_none());
+        assert_ne!(scoped, unscoped);
     }
 
     // ── get_or_load — payload at exact max bound ─────────────────────────
@@ -901,13 +887,6 @@ mod tests {
         let huge = Duration::from_secs(u64::MAX);
         let result = super::duration_micros(huge);
         assert!(result.is_err());
-    }
-
-    // ── payload_within_bound — zero length ───────────────────────────────
-
-    #[test]
-    fn payload_within_bound_accepts_zero_length() {
-        assert!(payload_within_bound(b""));
     }
 
     // ── benchmark_memory_reconstruction_cache_with_loader ───────────────
