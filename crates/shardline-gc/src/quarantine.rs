@@ -279,6 +279,37 @@ where
     Ok(hold_object_keys)
 }
 
+// Release only the observed row. A concurrent replacement remains quarantined
+// and refreshes the local snapshot; callers may delete storage only on `true`.
+async fn release_quarantine_candidate<IndexAdapter>(
+    index_store: &IndexAdapter,
+    entries: &mut HashMap<String, QuarantineCandidate>,
+    object_key: &str,
+) -> Result<bool, GcError>
+where
+    IndexAdapter: AsyncIndexStore + Sync,
+    IndexAdapter::Error: Into<GcError>,
+{
+    let Some((key, candidate)) = entries.remove_entry(object_key) else {
+        return Ok(false);
+    };
+    if index_store
+        .delete_quarantine_candidate_if_matches(&candidate)
+        .await
+        .map_err(Into::into)?
+    {
+        return Ok(true);
+    }
+    if let Some(current) = index_store
+        .quarantine_candidate(candidate.object_key())
+        .await
+        .map_err(Into::into)?
+    {
+        entries.insert(key, current);
+    }
+    Ok(false)
+}
+
 pub(super) async fn reconcile_quarantine_entries<IndexAdapter>(
     index_store: &IndexAdapter,
     orphan_objects: &HashMap<String, OrphanObject>,
@@ -298,25 +329,10 @@ where
         .collect::<Vec<_>>();
 
     for object_key in stale_object_keys {
-        let Some(candidate) = quarantine_entries.remove(&object_key) else {
-            continue;
-        };
-        let deleted = index_store
-            .delete_quarantine_candidate_if_matches(&candidate)
-            .await
-            .map_err(Into::into)?;
-        if !deleted {
-            if let Some(current) = index_store
-                .quarantine_candidate(candidate.object_key())
-                .await
-                .map_err(Into::into)?
-            {
-                quarantine_entries.insert(object_key, current);
-            }
-            continue;
+        if release_quarantine_candidate(index_store, quarantine_entries, &object_key).await? {
+            report.released_quarantine_candidates =
+                checked_increment(report.released_quarantine_candidates)?;
         }
-        report.released_quarantine_candidates =
-            checked_increment(report.released_quarantine_candidates)?;
     }
 
     for (object_key, orphan) in orphan_objects {
@@ -456,25 +472,10 @@ where
 
     for object_key in object_keys {
         let Some(orphan) = orphan_objects.get(&object_key) else {
-            let Some(candidate) = quarantine_entries.remove(&object_key) else {
-                continue;
-            };
-            let deleted = index_store
-                .delete_quarantine_candidate_if_matches(&candidate)
-                .await
-                .map_err(Into::into)?;
-            if !deleted {
-                if let Some(current) = index_store
-                    .quarantine_candidate(candidate.object_key())
-                    .await
-                    .map_err(Into::into)?
-                {
-                    quarantine_entries.insert(object_key, current);
-                }
-                continue;
+            if release_quarantine_candidate(index_store, quarantine_entries, &object_key).await? {
+                report.released_quarantine_candidates =
+                    checked_increment(report.released_quarantine_candidates)?;
             }
-            report.released_quarantine_candidates =
-                checked_increment(report.released_quarantine_candidates)?;
             continue;
         };
 
@@ -498,21 +499,7 @@ where
         // data loss if the index delete fails, which would leave a
         // permanently stuck quarantine entry referencing a non-existent
         // object.
-        let Some(removed_candidate) = quarantine_entries.remove(&object_key) else {
-            continue;
-        };
-        let deleted = index_store
-            .delete_quarantine_candidate_if_matches(&removed_candidate)
-            .await
-            .map_err(Into::into)?;
-        if !deleted {
-            if let Some(current) = index_store
-                .quarantine_candidate(removed_candidate.object_key())
-                .await
-                .map_err(Into::into)?
-            {
-                quarantine_entries.insert(object_key, current);
-            }
+        if !release_quarantine_candidate(index_store, quarantine_entries, &object_key).await? {
             continue;
         }
 

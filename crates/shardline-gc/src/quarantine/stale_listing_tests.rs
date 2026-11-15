@@ -59,3 +59,40 @@ async fn sweep_settles_a_listed_object_deleted_before_sweep() {
     assert!(index.quarantine_candidate(&key).await.unwrap().is_none());
     assert!(objects.metadata(&key).unwrap().is_none());
 }
+
+#[tokio::test]
+async fn quarantine_release_preserves_replacements_and_requires_a_matching_row() {
+    let index = MemoryIndexStore::new();
+    let key =
+        ObjectKey::parse("aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    let original = QuarantineCandidate::new(key.clone(), 8, 1, 2).unwrap();
+    let replacement = QuarantineCandidate::new(key.clone(), 16, 3, 4).unwrap();
+    index
+        .upsert_quarantine_candidate(&replacement)
+        .await
+        .unwrap();
+    let mut entries = HashMap::from([(key.as_str().to_owned(), original)]);
+    assert!(
+        !release_quarantine_candidate(&index, &mut entries, key.as_str())
+            .await
+            .unwrap()
+    );
+    assert_eq!(entries.get(key.as_str()), Some(&replacement));
+    assert_eq!(
+        index.quarantine_candidate(&key).await.unwrap(),
+        Some(replacement)
+    );
+    assert!(
+        release_quarantine_candidate(&index, &mut entries, key.as_str())
+            .await
+            .unwrap()
+    );
+    assert!(entries.is_empty());
+    assert!(index.quarantine_candidate(&key).await.unwrap().is_none());
+    assert!(
+        !release_quarantine_candidate(&index, &mut entries, key.as_str())
+            .await
+            .unwrap()
+    );
+}
