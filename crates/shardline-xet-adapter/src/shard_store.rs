@@ -1016,54 +1016,46 @@ fn load_xorb_range_info_with_visitor(
 > {
     checkpoint()?;
     let key = xorb_object_key(hash_hex)?;
-    if let ServerObjectStore::S3(store) = object_store {
-        let validated = streaming_source::validate(
-            store,
-            &key,
-            parse_xet_hash_hex(hash_hex)?,
-            checkpoint,
-            visitor,
-        )?;
-        if let Some(references) = member_references {
-            for chunk in validated.chunks() {
-                let hash = shardline_index::xet_hash_hex_string(chunk.hash());
-                references.insert(shardline_server_core::chunk_object_key(&hash)?);
-            }
-        }
-        return Ok((
-            XorbRangeInfo {
-                total_length: validated.total_length(),
-                verified_chunks: validated.chunks().to_vec(),
-            },
-            None,
-        ));
-    }
-    let source =
-        object_store.materialize_bounded_object_if_present_with_checkpoint(&key, 0, checkpoint);
-    checkpoint()?;
-    let Some((mut reader, _length)) = source? else {
-        tracing::warn!(xorb_hash = hash_hex, "shard referenced a missing Xorb");
-        return Err(XetAdapterError::MissingReferencedXorb);
-    };
-    let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let validation = {
-        // Footer fields and member headers are small reads. Buffer only this
-        // validation pass, within its admitted worker, and discard read-ahead
-        // before retaining the source for subsequent member authentication.
-        let mut buffered = BufReader::with_capacity(64 * 1024, &mut reader);
-        crate::xorb::validate_serialized_xorb_with_data_and_visitor(
-            &mut checkpoint_reader::CheckpointReader {
-                reader: &mut buffered,
+    let (validated, source) = if let ServerObjectStore::S3(store) = object_store {
+        (
+            streaming_source::validate(
+                store,
+                &key,
+                parse_xet_hash_hex(hash_hex)?,
                 checkpoint,
-            },
-            expected_hash,
-            0,
-            Vec::new(),
-            visitor,
+                visitor,
+            )?,
+            None,
         )
+    } else {
+        let source =
+            object_store.materialize_bounded_object_if_present_with_checkpoint(&key, 0, checkpoint);
+        checkpoint()?;
+        let Some((mut reader, _length)) = source? else {
+            tracing::warn!(xorb_hash = hash_hex, "shard referenced a missing Xorb");
+            return Err(XetAdapterError::MissingReferencedXorb);
+        };
+        let expected_hash = parse_xet_hash_hex(hash_hex)?;
+        let validation = {
+            // Footer fields and member headers are small reads. Buffer only this
+            // validation pass, within its admitted worker, and discard read-ahead
+            // before retaining the source for subsequent member authentication.
+            let mut buffered = BufReader::with_capacity(64 * 1024, &mut reader);
+            crate::xorb::validate_serialized_xorb_with_data_and_visitor(
+                &mut checkpoint_reader::CheckpointReader {
+                    reader: &mut buffered,
+                    checkpoint,
+                },
+                expected_hash,
+                0,
+                Vec::new(),
+                visitor,
+            )
+        };
+        checkpoint()?;
+        let (validated, _decoded) = validation?;
+        (validated, Some(reader))
     };
-    checkpoint()?;
-    let (validated, _decoded) = validation?;
     if let Some(references) = member_references {
         for chunk in validated.chunks() {
             let hash = shardline_index::xet_hash_hex_string(chunk.hash());
@@ -1075,7 +1067,7 @@ fn load_xorb_range_info_with_visitor(
             total_length: validated.total_length(),
             verified_chunks: validated.chunks().to_vec(),
         },
-        Some(reader),
+        source,
     ))
 }
 
