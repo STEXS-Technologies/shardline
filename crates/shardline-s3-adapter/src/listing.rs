@@ -423,14 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_params_rejects_malformed_continuation_token() {
-        assert!(
-            parse_list_objects_v2_params(&query(&[("continuation-token", "not-base64!!")]))
-                .is_err()
-        );
-    }
-
-    #[test]
     fn parse_params_empty_delimiter_is_none() {
         let params = parse_list_objects_v2_params(&query(&[("delimiter", "")])).unwrap();
         assert_eq!(params.delimiter, None);
@@ -439,21 +431,23 @@ mod tests {
     // ── token roundtrip ─────────────────────────────────────────────────────
 
     #[test]
-    fn continuation_token_roundtrip() {
+    fn continuation_tokens_roundtrip_and_reject_invalid_cursors() {
         for cursor in ["", "a", "data/2.txt", "spaces and ünïcode/keys"] {
             let token = encode_continuation_token(cursor);
             assert_eq!(decode_continuation_token(&token).unwrap(), cursor);
+            let params =
+                parse_list_objects_v2_params(&query(&[("continuation-token", &token)])).unwrap();
+            assert_eq!(params.cursor(), Some(cursor));
         }
-    }
-
-    #[test]
-    fn decode_continuation_token_rejects_garbage() {
-        assert!(decode_continuation_token("!!!").is_err());
-        assert!(
-            decode_continuation_token("").is_ok(),
-            "empty decodes to empty"
-        );
-        assert_eq!(decode_continuation_token("").unwrap(), "");
+        // /w== is valid base64 containing invalid UTF-8.
+        for token in ["!!!", "not-base64!!", "/w=="] {
+            for error in [
+                decode_continuation_token(token).unwrap_err(),
+                parse_list_objects_v2_params(&query(&[("continuation-token", token)])).unwrap_err(),
+            ] {
+                assert_eq!(error.code, "InvalidArgument", "{token}");
+            }
+        }
     }
 
     // ── group_page ──────────────────────────────────────────────────────────
