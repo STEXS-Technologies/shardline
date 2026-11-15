@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use shardline_index::{FileRecord, FileRecordInvariantError, RecordTraversal, StoredRecord};
-use shardline_protocol::{RepositoryScope, TokenClaimsError};
+use shardline_protocol::RepositoryScope;
 use shardline_server_core::{
     OpsRecordStore, provider_directory, validate_content_hash, validate_identifier,
 };
@@ -124,15 +124,6 @@ where
         );
     }
 
-    if validate_repository_scope(record.repository_scope.as_ref()).is_err() {
-        return reject_version(
-            report,
-            IndexRebuildIssueKind::InvalidVersionRepositoryScope,
-            location,
-            IndexRebuildIssueDetail::InvalidRepositoryScope,
-        );
-    }
-
     let expected_path = RecordTraversal::version_record_locator(record_store, &record);
     if expected_path != path {
         return reject_version(
@@ -212,21 +203,6 @@ where
         || (candidate.modified_since_epoch == existing.modified_since_epoch
             && candidate.record.content_hash == existing.record.content_hash
             && candidate.locator > existing.locator)
-}
-
-fn validate_repository_scope(
-    repository_scope: Option<&RepositoryScope>,
-) -> Result<(), TokenClaimsError> {
-    if let Some(repository_scope) = repository_scope {
-        let _validated = RepositoryScope::new(
-            repository_scope.provider(),
-            repository_scope.owner(),
-            repository_scope.name(),
-            repository_scope.revision(),
-        )?;
-    }
-
-    Ok(())
 }
 
 const fn reconstruction_plan_error_detail(
@@ -871,31 +847,6 @@ mod tests {
                 "lower: {lower:?}, higher: {higher:?}"
             );
         }
-    }
-
-    // ---- validate_repository_scope tests ----
-
-    #[test]
-    fn validate_repository_scope_none_returns_ok() {
-        assert!(validate_repository_scope(None).is_ok());
-    }
-
-    #[test]
-    fn validate_repository_scope_valid_scope_returns_ok() {
-        let scope = make_scope();
-        assert!(validate_repository_scope(Some(&scope)).is_ok());
-    }
-
-    #[test]
-    fn validate_repository_scope_empty_owner_returns_err() {
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "", "repo", None);
-        assert_eq!(scope, Err(TokenClaimsError::EmptyRepositoryOwner));
-    }
-
-    #[test]
-    fn validate_repository_scope_empty_name_returns_err() {
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "", None);
-        assert_eq!(scope, Err(TokenClaimsError::EmptyRepositoryName));
     }
 
     // ---- reconstruction_plan_error_detail tests ----
