@@ -706,40 +706,50 @@ mod tests {
     }
 
     #[test]
-    fn visit_stored_xorb_chunk_hashes_returns_ok_for_unknown_key() {
+    fn visit_stored_xorb_chunk_hashes_skips_missing_or_unrelated_objects() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa/nonexistent.xorb").unwrap();
-        let mut visited = false;
-        let result = visit_stored_xorb_chunk_hashes(
-            &object_store,
-            &key,
-            |_hash: String| -> Result<(), XetAdapterError> {
+        let missing = xorb_object_key(&"ab".repeat(32)).unwrap();
+        let cases = [
+            ("xorbs/default/aa/nonexistent.xorb", None),
+            ("shards/aa/hash.shard", None),
+            (missing.as_str(), None),
+            (
+                "xorbs/default/aa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.xorb",
+                Some(b"some data".as_slice()),
+            ),
+            (
+                "xorbs/default/aa/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.xorb",
+                Some(b"dummy data".as_slice()),
+            ),
+            (
+                "xorbs/missing/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.xorb",
+                None,
+            ),
+            (
+                "xorbs/default/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Some(b"test bytes".as_slice()),
+            ),
+        ];
+        for (path, body) in cases {
+            let key = shardline_storage::ObjectKey::parse(path).unwrap();
+            if let Some(body) = body {
+                let integrity = ObjectIntegrity::new(
+                    shardline_server_core::chunk_hash(body),
+                    body.len() as u64,
+                );
+                object_store
+                    .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+                    .unwrap();
+            }
+            let mut visited = false;
+            visit_stored_xorb_chunk_hashes(&object_store, &key, |_| {
                 visited = true;
                 Ok(())
-            },
-        );
-        assert!(result.is_ok(), "expected Ok for missing key");
-        assert!(!visited, "visitor should not be called for missing key");
-    }
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_returns_ok_for_invalid_key() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        // A non-xorb key should cause xorb_hash_from_object_key_if_present to return None
-        let key = shardline_storage::ObjectKey::parse("shards/aa/hash.shard").unwrap();
-        let mut visited = false;
-        let result = visit_stored_xorb_chunk_hashes(
-            &object_store,
-            &key,
-            |_hash: String| -> Result<(), XetAdapterError> {
-                visited = true;
-                Ok(())
-            },
-        );
-        assert!(result.is_ok(), "expected Ok for invalid key: {result:?}");
-        assert!(!visited, "visitor should not be called for invalid key");
+            })
+            .unwrap();
+            assert!(!visited, "unexpected member callback for {path:?}");
+        }
     }
 
     #[test]
@@ -973,28 +983,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── visit_stored_xorb_chunk_hashes with corrupted xorb ────────────
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_rejects_missing_stored_xorb() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        // Key that looks like a xorb key but doesn't exist
-        let key = xorb_object_key(&"ab".repeat(32)).unwrap();
-        let mut visited = false;
-        let result = visit_stored_xorb_chunk_hashes(
-            &object_store,
-            &key,
-            |_hash: String| -> Result<(), XetAdapterError> {
-                visited = true;
-                Ok(())
-            },
-        );
-        assert!(result.is_ok(), "expected Ok for missing key");
-        assert!(!visited, "visitor should not be called");
-    }
-
     // ── store_uploaded_xorb_with_metrics with footerless bytes ────────
 
     #[test]
@@ -1018,71 +1006,6 @@ mod tests {
         let stored = result.unwrap();
         assert!(stored.was_inserted);
         assert!(stored.stored_bytes > 0, "stored_bytes should be > 0");
-    }
-
-    // ── visit_stored_xorb_chunk_hashes with existing object but invalid hash ─
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_returns_ok_when_hash_missing_from_key() {
-        // Create a key that looks like a valid xorb path but where the
-        // hash part doesn't start with the prefix (so
-        // xorb_hash_from_object_key_if_present returns Ok(None)).
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        // Key with a non-matching prefix: "bb" in filename but "aa" is the directory prefix
-        let key = shardline_storage::ObjectKey::parse(
-            "xorbs/default/aa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.xorb",
-        )
-        .unwrap();
-        let integrity = ObjectIntegrity::new(shardline_server_core::chunk_hash(b"some data"), 9);
-        object_store
-            .put_if_absent(&key, ObjectBody::from_slice(b"some data"), &integrity)
-            .unwrap();
-
-        let mut visited = false;
-        let result = visit_stored_xorb_chunk_hashes(
-            &object_store,
-            &key,
-            |_hash: String| -> Result<(), XetAdapterError> {
-                visited = true;
-                Ok(())
-            },
-        );
-        // metadata() finds the object, but xorb_hash_from_object_key_if_present
-        // returns Ok(None) because hash doesn't start with prefix -> early return Ok(())
-        assert!(result.is_ok(), "expected Ok for non-matching hash prefix");
-        assert!(!visited, "visitor should not be called");
-    }
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_rejects_hash_with_invalid_characters() {
-        // Store at a key where the hash has non-hex chars
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let key = shardline_storage::ObjectKey::parse(
-            "xorbs/default/aa/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.xorb",
-        )
-        .unwrap();
-        let integrity = ObjectIntegrity::new(shardline_server_core::chunk_hash(b"dummy data"), 10);
-        object_store
-            .put_if_absent(&key, ObjectBody::from_slice(b"dummy data"), &integrity)
-            .unwrap();
-
-        let mut visited = false;
-        let result = visit_stored_xorb_chunk_hashes(
-            &object_store,
-            &key,
-            |_hash: String| -> Result<(), XetAdapterError> {
-                visited = true;
-                Ok(())
-            },
-        );
-        // metadata() finds the object, xorb_hash_from_object_key_if_present
-        // returns Ok(None) because the prefix "zz" is not hex
-        assert!(result.is_ok(), "expected Ok for non-hex prefix");
-        assert!(!visited, "visitor should not be called");
     }
 
     // ── store_uploaded_xorb unpacked_length sanity checks ────────────────
@@ -1209,8 +1132,6 @@ mod tests {
         assert!(stored.was_inserted);
     }
 
-    // ── visit_stored_xorb_chunk_hashes with various xorb sizes ─────────
-
     // ── canonicalize_uploaded_xorb with footerless + wrong hash ────────
 
     #[test]
@@ -1229,8 +1150,6 @@ mod tests {
             "expected error for wrong hash on normalized xorb"
         );
     }
-
-    // ── xorb_object_key with edge cases ────────────────────────────────
 
     // ── store_uploaded_xorb with edge cases ───────────────────────────
 
@@ -1387,53 +1306,6 @@ mod tests {
             assert_eq!(h.len(), 64);
             assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
         }
-    }
-
-    // ── visit_stored_xorb_chunk_hashes with missing object (no metadata) ─
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_non_existent_namespace() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        // A key in a non-existent namespace
-        let key =
-            shardline_storage::ObjectKey::parse("xorbs/missing/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.xorb")
-                .unwrap();
-        let mut visited = false;
-        let result = visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
-            visited = true;
-            Ok(())
-        });
-        // metadata() should return None since the key doesn't exist
-        assert!(result.is_ok());
-        assert!(!visited);
-    }
-
-    #[test]
-    fn visit_stored_xorb_chunk_hashes_without_xorb_suffix() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        // Store at a key that lacks .xorb suffix but otherwise looks valid
-        let key = shardline_storage::ObjectKey::parse(
-            "xorbs/default/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        .unwrap();
-        let integrity = ObjectIntegrity::new(shardline_server_core::chunk_hash(b"test bytes"), 10);
-        object_store
-            .put_if_absent(&key, ObjectBody::from_slice(b"test bytes"), &integrity)
-            .unwrap();
-
-        let mut visited = false;
-        let result = visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
-            visited = true;
-            Ok(())
-        });
-        // metadata() returns Some, but xorb_hash_from_object_key_if_present
-        // returns Ok(None) because key lacks .xorb suffix
-        assert!(result.is_ok());
-        assert!(!visited);
     }
 
     // ── store_uploaded_xorb with varied setup ────────────────────────────
