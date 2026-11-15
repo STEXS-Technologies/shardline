@@ -772,46 +772,39 @@ async fn tampered_upload_session_cannot_be_read_or_deleted() {
 async fn read_upload_session_returns_not_found_when_expired() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
-    let zero_ttl = NonZeroU64::new(1).unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    let result = read_upload_session(root.path(), &session_id, zero_ttl).await;
-    assert!(matches!(result, Err(OciAdapterError::NotFound)));
-}
-
-#[tokio::test]
-async fn purge_expired_upload_sessions_removes_old_sessions() {
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 10_000;
-    purge_expired_upload_sessions::<TestBackend>(
-        root.path(),
-        NO_BACKEND,
-        NonZeroU64::new(1).unwrap(),
-        now,
-    )
-    .await
-    .unwrap();
-    let result = read_upload_session(root.path(), &session_id, ttl()).await;
-    assert!(matches!(result, Err(OciAdapterError::NotFound)));
-}
-
-#[tokio::test]
-async fn purge_expired_upload_sessions_keeps_fresh_sessions() {
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+    let mut session = read_session(root.path(), &session_id).await;
+    session.last_touched_unix_seconds = 1;
+    super::persist_upload_session(root.path(), &session_id, &session)
         .await
         .unwrap();
     let result = read_upload_session(root.path(), &session_id, ttl()).await;
-    assert!(result.is_ok());
+    assert!(matches!(result, Err(OciAdapterError::NotFound)));
+}
+
+#[tokio::test]
+async fn purge_expires_sessions_at_the_ttl_boundary() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let session = read_session(root.path(), &session_id).await;
+    let expires_at = session.last_touched_unix_seconds + ttl().get();
+    for (now, retained) in [(expires_at - 1, true), (expires_at, false)] {
+        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+            .await
+            .unwrap();
+        for path in [
+            crate::upload_body_path(root.path(), &session_id),
+            crate::upload_metadata_path(root.path(), &session_id),
+            crate::fs::upload_evidence_journal_path(root.path(), &session_id),
+        ] {
+            assert_eq!(path.is_file(), retained, "{path:?} at {now}");
+        }
+        let result = read_upload_session(root.path(), &session_id, ttl()).await;
+        if retained {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(result, Err(OciAdapterError::NotFound)));
+        }
+    }
 }
 
 #[tokio::test]
@@ -2379,47 +2372,6 @@ async fn purge_expired_read_error_is_preserved_with_permission_denied() {
         read_result.is_err(),
         "unreadable metadata should not be purged"
     );
-}
-
-// ── purge_expired_upload_sessions — isolated expired + fresh ──────────────
-
-#[allow(clippy::shadow_unrelated)]
-#[tokio::test]
-async fn purge_expired_upload_sessions_removes_expired_and_keeps_fresh_sequentially() {
-    let root = temp_root();
-
-    // 1. Create an expired session and purge it.
-    let expired_id = create_test_session(root.path(), false).await.unwrap();
-    let far_future = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 10_000;
-    purge_expired_upload_sessions::<TestBackend>(
-        root.path(),
-        NO_BACKEND,
-        NonZeroU64::new(1).unwrap(),
-        far_future,
-    )
-    .await
-    .unwrap();
-    let result = read_upload_session(root.path(), &expired_id, ttl()).await;
-    assert!(
-        matches!(result, Err(OciAdapterError::NotFound)),
-        "expired session should be purged"
-    );
-
-    // 2. Create a fresh session and verify it survives a normal purge.
-    let fresh_id = create_test_session(root.path(), false).await.unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
-        .await
-        .unwrap();
-    let result = read_upload_session(root.path(), &fresh_id, ttl()).await;
-    assert!(result.is_ok(), "fresh session should survive purge");
 }
 
 // ── Unix anchored-file closure coverage (path-escape closures) ────────────
