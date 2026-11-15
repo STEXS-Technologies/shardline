@@ -179,12 +179,8 @@ impl Chunker {
             }
         }
 
-        if is_final {
-            if !self.chunkbuf.is_empty() {
-                let tail = std::mem::take(&mut self.chunkbuf);
-                chunks.push(Chunk::new(Bytes::from(tail)));
-            }
-            self.reset();
+        if is_final && let Some(tail) = self.finish() {
+            chunks.push(tail);
         }
 
         chunks
@@ -205,8 +201,7 @@ impl Chunker {
         self.chunkbuf
             .extend_from_slice(data.get(..append_len).unwrap_or_default());
 
-        let boundary = self.cdc.find_boundary(&self.chunkbuf);
-        match boundary {
+        match self.cdc.find_boundary(&self.chunkbuf) {
             Some(boundary) => {
                 // Keep this chunk; the caller re-feeds unconsumed input.
                 // CDC already reset its state when it found the boundary.
@@ -234,10 +229,7 @@ impl Chunker {
     pub fn next_block(&mut self, data: &[u8], is_final: bool) -> Vec<Chunk> {
         let mut chunks = Vec::new();
         let mut pos = 0;
-        loop {
-            if pos >= data.len() {
-                break;
-            }
+        while pos < data.len() {
             let (chunk, consumed) = self.next(data.get(pos..).unwrap_or_default(), is_final);
             if let Some(chunk) = chunk {
                 chunks.push(chunk);
@@ -335,15 +327,7 @@ mod tests {
 
     /// My chunker batch driver (whole data in one `next_block_bytes` call).
     fn my_batch_boundaries(data: &[u8], target: usize) -> Vec<usize> {
-        let mut chunker = Chunker::new(target);
-        let chunks = chunker.next_block_bytes(&Bytes::copy_from_slice(data), true);
-        let mut boundaries = Vec::new();
-        let mut consumed = 0usize;
-        for chunk in chunks {
-            consumed = consumed.wrapping_add(chunk.len());
-            boundaries.push(consumed);
-        }
-        boundaries
+        my_stream_boundaries(data, target, data.len().max(1))
     }
 
     /// My `next`/`next_block` streaming driver (mirrors upstream contract).
