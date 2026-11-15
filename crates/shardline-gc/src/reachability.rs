@@ -818,79 +818,73 @@ mod tests {
         assert_eq!(reachability.scanned_records, 1);
     }
 
-    #[test]
-    fn collect_referenced_object_keys_with_empty_stores() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let record_store = MemoryRecordStore::new();
-            let index_store = MemoryIndexStore::new();
-            let object_store = ServerObjectStore::blackhole();
+    #[tokio::test]
+    async fn collect_referenced_object_keys_with_empty_stores() {
+        let record_store = MemoryRecordStore::new();
+        let index_store = MemoryIndexStore::new();
+        let object_store = ServerObjectStore::blackhole();
 
-            let mut reachability = ReachabilityAccumulator::default();
-            collect_referenced_object_keys(
-                &record_store,
-                &index_store,
-                &object_store,
-                &[ServerFrontend::Xet],
-                &mut reachability,
-            )
-            .await
-            .unwrap();
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            &mut reachability,
+        )
+        .await
+        .unwrap();
 
-            assert_eq!(reachability.scanned_records, 0);
-            assert!(reachability.referenced_object_keys.is_empty());
-        });
+        assert_eq!(reachability.scanned_records, 0);
+        assert!(reachability.referenced_object_keys.is_empty());
     }
 
-    #[test]
-    fn collect_referenced_object_keys_with_stored_chunk_record() {
+    #[tokio::test]
+    async fn collect_referenced_object_keys_with_stored_chunk_record() {
         use shardline_index::{FileChunkRecord, FileRecord, MemoryRecordStore, RecordMutation};
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let record_store = MemoryRecordStore::new();
-            let index_store = MemoryIndexStore::new();
-            let object_store = ServerObjectStore::blackhole();
+        let record_store = MemoryRecordStore::new();
+        let index_store = MemoryIndexStore::new();
+        let object_store = ServerObjectStore::blackhole();
 
-            let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-            let record = FileRecord {
-                deduplication_domain: None,
-                file_id: "test-file".to_owned(),
-                content_hash: hash.to_owned(),
-                total_bytes: 100,
-                chunk_size: 100,
-                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-                repository_scope: None,
-                chunks: vec![FileChunkRecord {
-                    hash: hash.to_owned(),
-                    offset: 0,
-                    length: 100,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 0,
-                }],
-            };
-            record_store.write_latest_record(&record).await.unwrap();
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let record = FileRecord {
+            deduplication_domain: None,
+            file_id: "test-file".to_owned(),
+            content_hash: hash.to_owned(),
+            total_bytes: 100,
+            chunk_size: 100,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash.to_owned(),
+                offset: 0,
+                length: 100,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        record_store.write_latest_record(&record).await.unwrap();
 
-            let mut reachability = ReachabilityAccumulator::default();
-            collect_referenced_object_keys(
-                &record_store,
-                &index_store,
-                &object_store,
-                &[ServerFrontend::Xet],
-                &mut reachability,
-            )
-            .await
-            .unwrap();
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            &mut reachability,
+        )
+        .await
+        .unwrap();
 
-            assert_eq!(reachability.scanned_records, 1);
-            let chunk_key = format!("{prefix}/{hash}", prefix = &hash[..2]);
-            assert!(
-                reachability.referenced_object_keys.contains(&chunk_key),
-                "chunk key must be marked as referenced"
-            );
-        });
+        assert_eq!(reachability.scanned_records, 1);
+        let chunk_key = format!("{prefix}/{hash}", prefix = &hash[..2]);
+        assert!(
+            reachability.referenced_object_keys.contains(&chunk_key),
+            "chunk key must be marked as referenced"
+        );
     }
 
     // ── managed_object_hash tests ───────────────────────────────────────
@@ -926,267 +920,255 @@ mod tests {
 
     // ── collect_referenced_object_keys with version records ──────────────
 
-    #[test]
-    fn collect_referenced_object_keys_with_version_records() {
+    #[tokio::test]
+    async fn collect_referenced_object_keys_with_version_records() {
         use shardline_index::{FileChunkRecord, FileRecord, MemoryRecordStore, RecordMutation};
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let record_store = MemoryRecordStore::new();
-            let index_store = MemoryIndexStore::new();
-            let object_store = ServerObjectStore::blackhole();
+        let record_store = MemoryRecordStore::new();
+        let index_store = MemoryIndexStore::new();
+        let object_store = ServerObjectStore::blackhole();
 
-            let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-            let record = FileRecord {
-                deduplication_domain: None,
-                file_id: "version-file".to_owned(),
-                content_hash: hash.to_owned(),
-                total_bytes: 200,
-                chunk_size: 200,
-                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-                repository_scope: None,
-                chunks: vec![FileChunkRecord {
-                    hash: hash.to_owned(),
-                    offset: 0,
-                    length: 200,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 0,
-                }],
-            };
-            record_store.write_version_record(&record).await.unwrap();
+        let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let record = FileRecord {
+            deduplication_domain: None,
+            file_id: "version-file".to_owned(),
+            content_hash: hash.to_owned(),
+            total_bytes: 200,
+            chunk_size: 200,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash.to_owned(),
+                offset: 0,
+                length: 200,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        record_store.write_version_record(&record).await.unwrap();
 
-            let mut reachability = ReachabilityAccumulator::default();
-            collect_referenced_object_keys(
-                &record_store,
-                &index_store,
-                &object_store,
-                &[ServerFrontend::Xet],
-                &mut reachability,
-            )
-            .await
-            .unwrap();
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            &mut reachability,
+        )
+        .await
+        .unwrap();
 
-            assert_eq!(reachability.scanned_records, 1);
-            let chunk_key = format!("{prefix}/{hash}", prefix = &hash[..2]);
-            assert!(
-                reachability.referenced_object_keys.contains(&chunk_key),
-                "version record chunk should be referenced"
-            );
-        });
+        assert_eq!(reachability.scanned_records, 1);
+        let chunk_key = format!("{prefix}/{hash}", prefix = &hash[..2]);
+        assert!(
+            reachability.referenced_object_keys.contains(&chunk_key),
+            "version record chunk should be referenced"
+        );
     }
 
     // ── collect_referenced_object_keys with dedupe shard mapping ─────────
 
-    #[test]
-    fn collect_referenced_object_keys_with_dedupe_shard_mapping() {
+    #[tokio::test]
+    async fn collect_referenced_object_keys_with_dedupe_shard_mapping() {
         use shardline_index::{
             DedupeShardMapping, FileChunkRecord, FileRecord, MemoryRecordStore, RecordMutation,
         };
         use shardline_protocol::ShardlineHash;
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let record_store = MemoryRecordStore::new();
-            let index_store = MemoryIndexStore::new();
-            let object_store = ServerObjectStore::blackhole();
+        let record_store = MemoryRecordStore::new();
+        let index_store = MemoryIndexStore::new();
+        let object_store = ServerObjectStore::blackhole();
 
-            // Create a record with a stored chunk so its hash goes into
-            // live_dedupe_chunk_hashes.
-            let chunk_hash_hex = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-            let record = FileRecord {
-                deduplication_domain: None,
-                file_id: "dedupe-file".to_owned(),
-                content_hash: chunk_hash_hex.to_owned(),
-                total_bytes: 100,
-                chunk_size: 100,
-                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-                repository_scope: None,
-                chunks: vec![FileChunkRecord {
-                    hash: chunk_hash_hex.to_owned(),
-                    offset: 0,
-                    length: 100,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 0,
-                }],
-            };
-            record_store.write_latest_record(&record).await.unwrap();
+        // Create a record with a stored chunk so its hash goes into
+        // live_dedupe_chunk_hashes.
+        let chunk_hash_hex = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let record = FileRecord {
+            deduplication_domain: None,
+            file_id: "dedupe-file".to_owned(),
+            content_hash: chunk_hash_hex.to_owned(),
+            total_bytes: 100,
+            chunk_size: 100,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: chunk_hash_hex.to_owned(),
+                offset: 0,
+                length: 100,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        record_store.write_latest_record(&record).await.unwrap();
 
-            // Add a dedupe shard mapping that references the same chunk hash.
-            let chunk_hash = ShardlineHash::from_bytes([0xee; 32]);
-            let shard_key = ObjectKey::parse(
-                "shards/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.shard",
-            )
-            .unwrap();
-            let mapping = DedupeShardMapping::new(chunk_hash, shard_key.clone());
-            index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
+        // Add a dedupe shard mapping that references the same chunk hash.
+        let chunk_hash = ShardlineHash::from_bytes([0xee; 32]);
+        let shard_key = ObjectKey::parse(
+            "shards/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.shard",
+        )
+        .unwrap();
+        let mapping = DedupeShardMapping::new(chunk_hash, shard_key.clone());
+        index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
 
-            let mut reachability = ReachabilityAccumulator::default();
-            collect_referenced_object_keys(
-                &record_store,
-                &index_store,
-                &object_store,
-                &[ServerFrontend::Xet],
-                &mut reachability,
-            )
-            .await
-            .unwrap();
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            &mut reachability,
+        )
+        .await
+        .unwrap();
 
-            // The shard key should be referenced because the chunk hash
-            // is in live_dedupe_chunk_hashes.
-            assert!(
-                reachability
-                    .referenced_object_keys
-                    .contains(shard_key.as_str()),
-                "shard key from dedupe mapping should be referenced"
-            );
-            // The chunk key should also be referenced.
-            let chunk_key = format!("ee/{chunk_hash_hex}");
-            assert!(
-                reachability.referenced_object_keys.contains(&chunk_key),
-                "chunk key should be referenced"
-            );
-        });
+        // The shard key should be referenced because the chunk hash
+        // is in live_dedupe_chunk_hashes.
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains(shard_key.as_str()),
+            "shard key from dedupe mapping should be referenced"
+        );
+        // The chunk key should also be referenced.
+        let chunk_key = format!("ee/{chunk_hash_hex}");
+        assert!(
+            reachability.referenced_object_keys.contains(&chunk_key),
+            "chunk key should be referenced"
+        );
     }
 
     // ── collect_referenced_object_keys with referenced-object-terms layout ─
 
-    #[test]
-    fn collect_referenced_object_keys_with_referenced_object_terms() {
+    #[tokio::test]
+    async fn collect_referenced_object_keys_with_referenced_object_terms() {
         use shardline_index::{FileChunkRecord, FileRecord, MemoryRecordStore, RecordMutation};
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let record_store = MemoryRecordStore::new();
-            let index_store = MemoryIndexStore::new();
-            let object_store = ServerObjectStore::blackhole();
+        let record_store = MemoryRecordStore::new();
+        let index_store = MemoryIndexStore::new();
+        let object_store = ServerObjectStore::blackhole();
 
-            // chunk_size = 0 → ReferencedObjectTerms storage layout.
-            let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-            let record = FileRecord {
-                deduplication_domain: None,
-                file_id: "terms-file".to_owned(),
-                content_hash: hash.to_owned(),
-                total_bytes: 100,
-                chunk_size: 0,
-                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-                repository_scope: None,
-                chunks: vec![FileChunkRecord {
-                    hash: hash.to_owned(),
-                    offset: 0,
-                    length: 100,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 0,
-                }],
-            };
-            record_store.write_latest_record(&record).await.unwrap();
+        // chunk_size = 0 → ReferencedObjectTerms storage layout.
+        let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let record = FileRecord {
+            deduplication_domain: None,
+            file_id: "terms-file".to_owned(),
+            content_hash: hash.to_owned(),
+            total_bytes: 100,
+            chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash.to_owned(),
+                offset: 0,
+                length: 100,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        record_store.write_latest_record(&record).await.unwrap();
 
-            let mut reachability = ReachabilityAccumulator::default();
-            collect_referenced_object_keys(
-                &record_store,
-                &index_store,
-                &object_store,
-                &[ServerFrontend::Xet],
-                &mut reachability,
-            )
-            .await
-            .unwrap();
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            &mut reachability,
+        )
+        .await
+        .unwrap();
 
-            assert_eq!(reachability.scanned_records, 1);
-            // With terms layout, the referenced key is a xorb key.
-            let xorb_key = format!("xorbs/default/aa/{hash}.xorb");
-            assert!(
-                reachability.referenced_object_keys.contains(&xorb_key),
-                "xorb term key must be referenced"
-            );
-        });
+        assert_eq!(reachability.scanned_records, 1);
+        // With terms layout, the referenced key is a xorb key.
+        let xorb_key = format!("xorbs/default/aa/{hash}.xorb");
+        assert!(
+            reachability.referenced_object_keys.contains(&xorb_key),
+            "xorb term key must be referenced"
+        );
     }
 
     // ── collect_referenced_object_keys with both latest and version records ─
 
-    #[test]
-    fn collect_referenced_object_keys_counts_both_record_types() {
+    #[tokio::test]
+    async fn collect_referenced_object_keys_counts_both_record_types() {
         use shardline_index::{FileChunkRecord, FileRecord, MemoryRecordStore, RecordMutation};
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let record_store = MemoryRecordStore::new();
-            let index_store = MemoryIndexStore::new();
-            let object_store = ServerObjectStore::blackhole();
+        let record_store = MemoryRecordStore::new();
+        let index_store = MemoryIndexStore::new();
+        let object_store = ServerObjectStore::blackhole();
 
-            let hash1 = "1111111111111111111111111111111111111111111111111111111111111111";
-            let hash2 = "2222222222222222222222222222222222222222222222222222222222222222";
+        let hash1 = "1111111111111111111111111111111111111111111111111111111111111111";
+        let hash2 = "2222222222222222222222222222222222222222222222222222222222222222";
 
-            // Latest record with hash1
-            let latest = FileRecord {
-                deduplication_domain: None,
-                file_id: "latest-file".to_owned(),
-                content_hash: hash1.to_owned(),
-                total_bytes: 50,
-                chunk_size: 50,
-                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-                repository_scope: None,
-                chunks: vec![FileChunkRecord {
-                    hash: hash1.to_owned(),
-                    offset: 0,
-                    length: 50,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 0,
-                }],
-            };
-            record_store.write_latest_record(&latest).await.unwrap();
+        // Latest record with hash1
+        let latest = FileRecord {
+            deduplication_domain: None,
+            file_id: "latest-file".to_owned(),
+            content_hash: hash1.to_owned(),
+            total_bytes: 50,
+            chunk_size: 50,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash1.to_owned(),
+                offset: 0,
+                length: 50,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        record_store.write_latest_record(&latest).await.unwrap();
 
-            // Version record with hash2
-            let version = FileRecord {
-                deduplication_domain: None,
-                file_id: "version-file".to_owned(),
-                content_hash: hash2.to_owned(),
-                total_bytes: 75,
-                chunk_size: 75,
-                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-                repository_scope: None,
-                chunks: vec![FileChunkRecord {
-                    hash: hash2.to_owned(),
-                    offset: 0,
-                    length: 75,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 0,
-                }],
-            };
-            record_store.write_version_record(&version).await.unwrap();
+        // Version record with hash2
+        let version = FileRecord {
+            deduplication_domain: None,
+            file_id: "version-file".to_owned(),
+            content_hash: hash2.to_owned(),
+            total_bytes: 75,
+            chunk_size: 75,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash2.to_owned(),
+                offset: 0,
+                length: 75,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        record_store.write_version_record(&version).await.unwrap();
 
-            let mut reachability = ReachabilityAccumulator::default();
-            collect_referenced_object_keys(
-                &record_store,
-                &index_store,
-                &object_store,
-                &[ServerFrontend::Xet],
-                &mut reachability,
-            )
-            .await
-            .unwrap();
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            &mut reachability,
+        )
+        .await
+        .unwrap();
 
-            assert_eq!(reachability.scanned_records, 2);
-            assert!(
-                reachability.referenced_object_keys.contains(
-                    "11/1111111111111111111111111111111111111111111111111111111111111111"
-                )
-            );
-            assert!(
-                reachability.referenced_object_keys.contains(
-                    "22/2222222222222222222222222222222222222222222222222222222222222222"
-                )
-            );
-        });
+        assert_eq!(reachability.scanned_records, 2);
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains("11/1111111111111111111111111111111111111111111111111111111111111111")
+        );
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains("22/2222222222222222222222222222222222222222222222222222222222222222")
+        );
     }
 
     // ── scan_stale_temporary_artifacts tests ────────────────────────────
