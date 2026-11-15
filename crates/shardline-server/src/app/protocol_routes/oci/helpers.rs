@@ -89,23 +89,16 @@ impl FromRequestParts<Arc<AppState>> for OciRepository {
 /// Maps an OCI `(method, path)` pair to the token scope required to serve it.
 /// Returns `None` for unsupported routes.
 const fn oci_required_scope(method: &Method, path: &OciPath) -> Option<TokenScope> {
-    match (method, path) {
-        (&Method::GET | &Method::HEAD, OciPath::Blob { .. } | OciPath::Manifest { .. }) => {
-            Some(TokenScope::Read)
-        }
-        (&Method::GET, OciPath::TagsList { .. } | OciPath::Referrers { .. }) => {
-            Some(TokenScope::Read)
-        }
-        (&Method::DELETE, OciPath::Blob { .. } | OciPath::Manifest { .. }) => {
-            Some(TokenScope::Write)
-        }
-        (&Method::PUT, OciPath::Manifest { .. }) => Some(TokenScope::Write),
-        (&Method::POST, OciPath::BlobUploads { .. }) => Some(TokenScope::Write),
-        (
-            &Method::PATCH | &Method::PUT | &Method::GET | &Method::DELETE,
-            OciPath::BlobUploadSession { .. },
-        ) => Some(TokenScope::Write),
-        _ => None,
+    if !oci_route_served_by_api(method, path) && !oci_route_served_by_transfer(method, path) {
+        return None;
+    }
+    // Upload-session status is part of the write workflow, including GET.
+    if matches!(method, &Method::GET | &Method::HEAD)
+        && !matches!(path, OciPath::BlobUploadSession { .. })
+    {
+        Some(TokenScope::Read)
+    } else {
+        Some(TokenScope::Write)
     }
 }
 
@@ -332,7 +325,8 @@ mod tests {
     // ── api ∩ transfer = ∅ for all method+path combinations ───────────
 
     #[test]
-    fn api_and_transfer_are_complementary() {
+    fn route_admission_and_required_scopes() {
+        use TokenScope::{Read, Write};
         let methods = [
             Method::GET,
             Method::HEAD,
@@ -340,18 +334,57 @@ mod tests {
             Method::PUT,
             Method::PATCH,
             Method::DELETE,
+            Method::OPTIONS,
+            Method::CONNECT,
+            Method::TRACE,
         ];
-        let paths = [
-            blob_path(),
-            manifest_path(),
-            blob_uploads_path(),
-            blob_upload_session_path(),
-            tags_list_path(),
+        let cases = [
+            (
+                blob_path(),
+                [Some(Read), Some(Read), None, None, None, Some(Write)],
+            ),
+            (
+                manifest_path(),
+                [Some(Read), Some(Read), None, Some(Write), None, Some(Write)],
+            ),
+            (
+                blob_uploads_path(),
+                [None, None, Some(Write), None, None, None],
+            ),
+            (
+                blob_upload_session_path(),
+                [
+                    Some(Write),
+                    None,
+                    None,
+                    Some(Write),
+                    Some(Write),
+                    Some(Write),
+                ],
+            ),
+            (tags_list_path(), [Some(Read), None, None, None, None, None]),
+            (
+                OciPath::Referrers {
+                    repository: REPO.to_owned(),
+                    digest_hex: DIGEST.to_owned(),
+                },
+                [Some(Read), None, None, None, None, None],
+            ),
         ];
-        for method in &methods {
-            for path in &paths {
-                let served_by_api = oci_route_served_by_api(method, path);
-                let served_by_transfer = oci_route_served_by_transfer(method, path);
+        for (path, scopes) in cases {
+            for (index, method) in methods.iter().enumerate() {
+                let expected_scope = scopes.get(index).copied().flatten();
+                assert_eq!(
+                    oci_required_scope(method, &path),
+                    expected_scope,
+                    "method={method} path={path:?}"
+                );
+                let served_by_api = oci_route_served_by_api(method, &path);
+                let served_by_transfer = oci_route_served_by_transfer(method, &path);
+                assert_eq!(
+                    served_by_api || served_by_transfer,
+                    expected_scope.is_some()
+                );
                 assert!(
                     !(served_by_api && served_by_transfer),
                     "method={method} path={path:?} served by BOTH api and transfer"
