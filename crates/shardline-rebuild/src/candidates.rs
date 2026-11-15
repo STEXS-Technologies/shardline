@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    time::Duration,
+};
 
 use shardline_index::{FileRecord, FileRecordInvariantError, RecordTraversal, StoredRecord};
 use shardline_protocol::RepositoryScope;
@@ -151,14 +154,14 @@ where
         locator: path,
         modified_since_epoch,
     };
-    match candidates.get_mut(&key) {
-        Some(existing) if candidate_is_newer(&candidate, existing) => {
-            *existing = candidate;
+    match candidates.entry(key) {
+        Entry::Occupied(mut slot) if candidate_is_newer(&candidate, slot.get()) => {
+            slot.insert(candidate);
         }
-        None => {
-            candidates.insert(key, candidate);
+        Entry::Vacant(slot) => {
+            slot.insert(candidate);
         }
-        Some(_) => {}
+        Entry::Occupied(_) => {}
     }
 
     Ok(())
@@ -197,12 +200,15 @@ fn candidate_is_newer<Locator>(
 where
     Locator: Ord,
 {
-    candidate.modified_since_epoch > existing.modified_since_epoch
-        || (candidate.modified_since_epoch == existing.modified_since_epoch
-            && candidate.record.content_hash > existing.record.content_hash)
-        || (candidate.modified_since_epoch == existing.modified_since_epoch
-            && candidate.record.content_hash == existing.record.content_hash
-            && candidate.locator > existing.locator)
+    (
+        candidate.modified_since_epoch,
+        &candidate.record.content_hash,
+        &candidate.locator,
+    ) > (
+        existing.modified_since_epoch,
+        &existing.record.content_hash,
+        &existing.locator,
+    )
 }
 
 const fn reconstruction_plan_error_detail(
