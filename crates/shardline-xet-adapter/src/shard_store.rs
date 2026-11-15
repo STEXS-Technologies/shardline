@@ -69,6 +69,31 @@ pub struct ParsedShardUpload {
     pub dedupe_chunk_hashes: Vec<String>,
 }
 
+impl ParsedShardUpload {
+    pub(crate) async fn register<Commit, CommitFuture>(
+        self,
+        commit: Commit,
+    ) -> Result<crate::ShardUploadResponse, XetAdapterError>
+    where
+        Commit:
+            FnOnce(Vec<FileRecord>, Vec<DedupeShardMapping>, Vec<XetFileIdentity>) -> CommitFuture,
+        CommitFuture: std::future::Future<Output = Result<(), XetAdapterError>>,
+    {
+        let mappings = self
+            .dedupe_chunk_hashes
+            .iter()
+            .map(|hash| dedupe_shard_mapping(hash, &self.shard_key))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Observe cancellation queued during synchronous verification before
+        // invoking publication, even when the callback completes immediately.
+        tokio::task::yield_now().await;
+        commit(self.records, mappings, self.file_identities).await?;
+        Ok(crate::ShardUploadResponse {
+            result: self.result,
+        })
+    }
+}
+
 /// Fully verified shard metadata which has not published any object or record.
 /// This owned value can cross a blocking-worker boundary; dropping it publishes
 /// nothing. Publication must remain with the request's current owner.
@@ -199,23 +224,17 @@ impl PreparedShardUpload {
         CommitFuture: std::future::Future<Output = Result<(), XetAdapterError>>,
     {
         let parsed = persist_normalized_shard(&self.objects, self.normalized)?;
-        let mappings = parsed
-            .dedupe_chunk_hashes
-            .iter()
-            .map(|hash| dedupe_shard_mapping(hash, &parsed.shard_key))
-            .collect::<Result<Vec<_>, _>>()?;
-        tokio::task::yield_now().await;
-        commit(
-            parsed.records,
-            mappings,
-            self.references,
-            parsed.file_identities,
-            self.descriptors,
-        )
-        .await?;
-        Ok(crate::ShardUploadResponse {
-            result: parsed.result,
-        })
+        parsed
+            .register(|records, mappings, identities| {
+                commit(
+                    records,
+                    mappings,
+                    self.references,
+                    identities,
+                    self.descriptors,
+                )
+            })
+            .await
     }
 }
 

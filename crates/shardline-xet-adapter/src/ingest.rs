@@ -12,8 +12,7 @@ use crate::{
 };
 
 use super::{
-    dedupe_shard_mapping, parse_uploaded_shard, parse_uploaded_shard_file, store_uploaded_xorb,
-    store_uploaded_xorb_file,
+    parse_uploaded_shard, parse_uploaded_shard_file, store_uploaded_xorb, store_uploaded_xorb_file,
 };
 
 /// # Errors
@@ -65,20 +64,9 @@ where
         repository_scope,
         shard_metadata_limits,
     )?;
-    let mappings = parsed
-        .dedupe_chunk_hashes
-        .iter()
-        .map(|chunk_hash_hex| dedupe_shard_mapping(chunk_hash_hex, &parsed.shard_key))
-        .collect::<Result<Vec<_>, _>>()?;
-    // Parsing can perform synchronous verification. Give a cancellation queued
-    // during that work a scheduling boundary before invoking durable metadata
-    // publication, even when the callback's future completes immediately.
-    tokio::task::yield_now().await;
-    commit_metadata(parsed.records, mappings).await?;
-
-    Ok(ShardUploadResponse {
-        result: parsed.result,
-    })
+    parsed
+        .register(|records, mappings, _identities| commit_metadata(records, mappings))
+        .await
 }
 
 /// Registers a shard parsed directly from a temporary file. Metadata sections
@@ -101,16 +89,9 @@ where
 {
     let parsed =
         parse_uploaded_shard_file(object_store, path, repository_scope, shard_metadata_limits)?;
-    let mappings = parsed
-        .dedupe_chunk_hashes
-        .iter()
-        .map(|chunk_hash_hex| dedupe_shard_mapping(chunk_hash_hex, &parsed.shard_key))
-        .collect::<Result<Vec<_>, _>>()?;
-    tokio::task::yield_now().await;
-    commit_metadata(parsed.records, mappings).await?;
-    Ok(ShardUploadResponse {
-        result: parsed.result,
-    })
+    parsed
+        .register(|records, mappings, _identities| commit_metadata(records, mappings))
+        .await
 }
 
 /// Registers a shard and supplies physical member references obtained during
