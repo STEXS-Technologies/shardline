@@ -98,17 +98,17 @@ where
             break;
         }
         for (xorb, ordinal, member) in page {
-            let cursor = (xorb.clone(), ordinal);
+            let cursor = (xorb, ordinal);
             if after.as_ref().is_some_and(|previous| previous >= &cursor) {
                 return Err(GcError::InvalidContentHash);
             }
-            after = Some(cursor);
             if reachability.live_dedupe_chunk_hashes.contains(&member) {
-                let key = shardline_xet_adapter::xorb_object_key(&xorb)?;
+                let key = shardline_xet_adapter::xorb_object_key(&cursor.0)?;
                 reachability
                     .referenced_object_keys
                     .insert(key.as_str().to_owned());
             }
+            after = Some(cursor);
         }
     }
 
