@@ -210,26 +210,23 @@ mod tests {
 
     #[test]
     fn sha256_digest_parser_requires_prefixed_lowercase_hex() {
-        let digest = parse_sha256_digest::<ValidateContentHashError>(
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        assert!(digest.is_ok());
         assert_eq!(
-            digest.unwrap_or_default(),
+            parse_sha256_digest::<ValidateContentHashError>(
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )
+            .unwrap(),
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
-        assert!(
-            parse_sha256_digest::<ValidateContentHashError>(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            )
-            .is_err()
-        );
-        assert!(
-            parse_sha256_digest::<ValidateContentHashError>(
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
-            )
-            .is_err()
-        );
+        for value in [
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        ] {
+            assert!(
+                parse_sha256_digest::<ValidateContentHashError>(value).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]
@@ -308,30 +305,25 @@ mod tests {
     }
 
     #[test]
-    fn oci_repository_scope_validator_accepts_bound_roots_and_nested_namespaces() {
+    fn oci_repository_scope_validator_checks_boundaries_and_unscoped_access() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
-
-        assert!(
-            validate_oci_repository_scope::<ValidateContentHashError>("team/assets", Some(&scope))
-                .is_ok()
-        );
-        assert!(
-            validate_oci_repository_scope::<ValidateContentHashError>(
-                "team/assets/cache",
-                Some(&scope)
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_oci_repository_scope::<ValidateContentHashError>("team/other", Some(&scope))
-                .is_err()
-        );
-        assert!(
-            validate_oci_repository_scope::<ValidateContentHashError>("other/assets", Some(&scope))
-                .is_err()
-        );
+        for (value, scope, valid) in [
+            ("team/assets", Some(&scope), true),
+            ("team/assets/cache", Some(&scope), true),
+            ("team/other", Some(&scope), false),
+            ("other/assets", Some(&scope), false),
+            ("other/repo", Some(&scope), false),
+            ("team/assets-other", Some(&scope), false),
+            ("any/repo", None, true),
+        ] {
+            assert_eq!(
+                validate_oci_repository_scope::<ValidateContentHashError>(value, scope).is_ok(),
+                valid,
+                "{value}"
+            );
+        }
     }
 
     #[test]
@@ -394,37 +386,5 @@ mod tests {
     fn shared_sha256_key_rejects_bad_hash() {
         let key = shared_sha256_object_key::<ValidateContentHashError>("bad");
         assert!(key.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_scope_no_scope_is_noop() {
-        let result = validate_oci_repository_scope::<ValidateContentHashError>("any/repo", None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn validate_oci_repository_scope_rejects_non_matching() {
-        use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
-        let result =
-            validate_oci_repository_scope::<ValidateContentHashError>("other/repo", Some(&scope));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_sha256_digest_missing_prefix() {
-        let result = parse_sha256_digest::<ValidateContentHashError>(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_sha256_digest_bad_hex() {
-        let result = parse_sha256_digest::<ValidateContentHashError>(
-            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-        );
-        assert!(result.is_err());
     }
 }
