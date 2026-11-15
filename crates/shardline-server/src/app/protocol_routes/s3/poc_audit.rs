@@ -1418,26 +1418,7 @@ async fn frontend_pairs_have_no_route_conflicts() {
                         .enable_all()
                         .build()
                         .unwrap();
-                    let tmp = TempDir::new().unwrap();
-                    let config = ServerConfig::new(
-                        "127.0.0.1:0".parse().unwrap(),
-                        "http://127.0.0.1:8080".to_owned(),
-                        tmp.path().to_path_buf(),
-                        NonZeroUsize::new(65536).unwrap(),
-                    )
-                    .with_server_role(ServerRole::All)
-                    .with_deployment_mode(crate::DeploymentMode::Insecure)
-                    .with_server_frontends(pair)
-                    .expect("server frontends")
-                    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-                    .expect("token signing key")
-                    .with_reconstruction_cache_disabled();
-                    config
-                        .validate_runtime_requirements()
-                        .expect("runtime requirements");
-                    let _app = rt
-                        .block_on(crate::app::router(config))
-                        .expect("pair router must build");
+                    let _app = rt.block_on(build_router_with(pair.to_vec()));
                 })
             });
             let payload = result
