@@ -15,6 +15,107 @@ fn entry(owner: &str, revision: &str, path: &str, timestamp: u64) -> TreeEntry {
     }
 }
 
+async fn tree_scan_contract<S: TreeStore>(store: &S, owner: &str)
+where
+    S::Error: std::fmt::Debug,
+{
+    let namespace = TreeKey::new("generic", owner, "repo", "main");
+    let mut inserted = Vec::new();
+    let mut paths = vec![
+        "aaa",
+        "aaa/early",
+        "literal%",
+        "literal%/child",
+        "literal_/child",
+        "literal_neighbor",
+        "ζ",
+        "ζ/child",
+        "ζ/last",
+        "ζ-other",
+        "\u{d7ff}",
+        "\u{d7ff}/child",
+        "\u{e000}/neighbor",
+        "\u{10ffff}",
+        "\u{10ffff}/child",
+        "\u{10ffff}\u{10ffff}/child",
+    ];
+    paths.sort_unstable();
+    for path in &paths {
+        let row = entry(owner, "main", path, 1);
+        store.upsert_tree_entry(&row).await.unwrap();
+        inserted.push(row);
+    }
+    for mut scoped in [
+        entry(owner, "feature", "outside/revision", 1),
+        entry(owner, "main", "outside/provider", 1),
+        entry(owner, "main", "outside/owner", 1),
+        entry(owner, "main", "outside/repo", 1),
+    ] {
+        if scoped.path.ends_with("provider") {
+            scoped.provider = "other".to_owned();
+        }
+        if scoped.path.ends_with("owner") {
+            scoped.owner = format!("{owner}-other");
+        }
+        if scoped.path.ends_with("repo") {
+            scoped.repo = "other".to_owned();
+        }
+        store.upsert_tree_entry(&scoped).await.unwrap();
+        inserted.push(scoped);
+    }
+    for prefix in [
+        "",
+        "aaa",
+        "literal%",
+        "literal_",
+        "ζ",
+        "\u{d7ff}",
+        "\u{10ffff}",
+        "\u{10ffff}\u{10ffff}",
+        "missing",
+    ] {
+        for cursor in [None, Some("literal%"), Some("ζ/child"), Some("\u{10ffff}")] {
+            for limit in [0, 1, 2, 100] {
+                let expected = paths
+                    .iter()
+                    .copied()
+                    .filter(|path| {
+                        prefix.is_empty()
+                            || *path == prefix
+                            || path
+                                .strip_prefix(prefix)
+                                .is_some_and(|rest| rest.starts_with('/'))
+                    })
+                    .filter(|path| cursor.is_none_or(|after| *path > after))
+                    .take(limit)
+                    .collect::<Vec<_>>();
+                let actual = store
+                    .scan_tree(&namespace, prefix, cursor, limit)
+                    .await
+                    .unwrap();
+                let actual_paths = actual
+                    .iter()
+                    .map(|row| row.path.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual_paths, expected,
+                    "prefix={prefix:?} cursor={cursor:?} limit={limit}"
+                );
+            }
+        }
+    }
+    for row in inserted {
+        let row_namespace = TreeKey::new(&row.provider, &row.owner, &row.repo, &row.revision);
+        assert_eq!(
+            store
+                .delete_tree_entries(&row_namespace, &row.path, false)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+}
+
 async fn revision_pruning_contract<S: TreeStore>(store: &S, owner: &str)
 where
     S::Error: std::fmt::Debug,
@@ -403,6 +504,7 @@ where
 #[tokio::test]
 async fn memory_tree_registration_transaction_contract() {
     let store = crate::MemoryIndexStore::new();
+    tree_scan_contract(&store, "memory-scan-contract").await;
     revision_pruning_contract(&store, "memory-pruning-contract").await;
     transactional_registration(&store, "memory").await;
     concurrent_register_delete(&store, "memory-race").await;
@@ -416,6 +518,7 @@ async fn memory_tree_registration_transaction_contract() {
 async fn sqlite_tree_registration_transaction_contract() {
     let tmp = tempfile::tempdir().unwrap();
     let store = crate::LocalIndexStore::open(tmp.path().to_path_buf());
+    tree_scan_contract(&store, "sqlite-scan-contract").await;
     revision_pruning_contract(&store, "sqlite-pruning-contract").await;
     transactional_registration(&store, "sqlite").await;
     registration_rollback(&store, "sqlite-rollback").await;
@@ -438,6 +541,7 @@ async fn postgres_tree_registration_transaction_contract() {
         .unwrap();
     let store = crate::PostgresIndexStore::new(pool.clone());
     let owner = format!("registration-{}", std::process::id());
+    tree_scan_contract(&store, &format!("{owner}-scan-contract")).await;
     revision_pruning_contract(&store, &format!("{owner}-pruning-contract")).await;
     transactional_registration(&store, &owner).await;
     registration_rollback(&store, &format!("{owner}-rollback")).await;

@@ -1049,7 +1049,9 @@ impl TreeStore for MemoryIndexStore {
             .tree_entries
             .keys()
             .filter(|k| {
-                k.provider == entry.provider && k.owner == entry.owner && k.repo == entry.repo
+                k.namespace.provider == entry.provider
+                    && k.namespace.owner == entry.owner
+                    && k.namespace.repo == entry.repo
             })
             .count();
         if (count_revisions >= max_revisions && !state.revisions.contains_key(&revision_key))
@@ -1117,21 +1119,11 @@ impl TreeStore for MemoryIndexStore {
         let mut deleted = 0u64;
         if recursive {
             let prefix_with_slash = format!("{path}/");
-            let tree = &mut state.tree_entries;
-            tree.retain(|k, _| {
-                if k.provider != key.provider
-                    || k.owner != key.owner
-                    || k.repo != key.repo
-                    || k.revision != key.revision
-                {
-                    return true;
-                }
-                if k.path == path || k.path.starts_with(&prefix_with_slash) {
-                    deleted = deleted.saturating_add(1);
-                    false
-                } else {
-                    true
-                }
+            state.tree_entries.retain(|key_entry, _| {
+                let remove = key_entry.namespace == *key
+                    && (key_entry.path == path || key_entry.path.starts_with(&prefix_with_slash));
+                deleted = deleted.saturating_add(u64::from(remove));
+                !remove
             });
         } else {
             let search = MemoryTreeKey::from_key(key, path);
@@ -1155,27 +1147,19 @@ impl TreeStore for MemoryIndexStore {
         } else {
             format!("{prefix}/")
         };
-        let mut result = Vec::new();
-        for (k, entry) in &state.tree_entries {
-            if k.provider != key.provider
-                || k.owner != key.owner
-                || k.repo != key.repo
-                || k.revision != key.revision
-            {
-                continue;
-            }
-            if !prefix.is_empty() && k.path != prefix && !k.path.starts_with(&prefix_with_slash) {
-                continue;
-            }
-            if cursor.is_some_and(|c| k.path.as_str() <= c) {
-                continue;
-            }
-            result.push(entry.clone());
-            if result.len() >= limit {
-                break;
-            }
-        }
-        Ok(result)
+        Ok(state
+            .tree_entries
+            .range(MemoryTreeKey::from_key(key, prefix)..)
+            .take_while(|(entry_key, _)| entry_key.namespace == *key)
+            .filter(|(entry_key, _)| {
+                prefix.is_empty()
+                    || entry_key.path == prefix
+                    || entry_key.path.starts_with(&prefix_with_slash)
+            })
+            .filter(|(entry_key, _)| cursor.is_none_or(|after| entry_key.path.as_str() > after))
+            .take(limit)
+            .map(|(_, entry)| entry.clone())
+            .collect())
     }
 
     async fn upsert_revision(&self, rev: &RevisionRecord) -> Result<bool, Self::Error> {
@@ -1217,7 +1201,9 @@ impl TreeStore for MemoryIndexStore {
             .tree_entries
             .iter()
             .filter(|(k, _)| {
-                k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
+                k.namespace.provider == key.provider
+                    && k.namespace.owner == key.owner
+                    && k.namespace.repo == key.repo
             })
             .count();
         Ok(u64::try_from(count).unwrap_or(u64::MAX))
@@ -1249,12 +1235,9 @@ impl TreeStore for MemoryIndexStore {
         let mut state = self.lock_state()?;
         let revision_key = TreeKey::new(&key.provider, &key.owner, &key.repo, rev);
         let removed = state.revisions.remove(&revision_key).is_some();
-        state.tree_entries.retain(|k, _| {
-            !(k.provider == key.provider
-                && k.owner == key.owner
-                && k.repo == key.repo
-                && k.revision == rev)
-        });
+        state
+            .tree_entries
+            .retain(|entry_key, _| entry_key.namespace != revision_key);
         Ok(u64::from(removed))
     }
 
@@ -1280,12 +1263,9 @@ impl TreeStore for MemoryIndexStore {
         let removed = u64::try_from(over_cap).unwrap_or(u64::MAX);
         for (_, pruned_key) in rows.into_iter().take(over_cap) {
             state.revisions.remove(&pruned_key);
-            state.tree_entries.retain(|k, _| {
-                !(k.provider == key.provider
-                    && k.owner == key.owner
-                    && k.repo == key.repo
-                    && k.revision == pruned_key.revision)
-            });
+            state
+                .tree_entries
+                .retain(|entry_key, _| entry_key.namespace != pruned_key);
         }
         Ok(removed)
     }
@@ -1460,30 +1440,21 @@ impl MemoryWebhookDeliveryKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct MemoryTreeKey {
-    provider: String,
-    owner: String,
-    repo: String,
-    revision: String,
+    namespace: TreeKey,
     path: String,
 }
 
 impl MemoryTreeKey {
     fn from_entry(entry: &TreeEntry) -> Self {
         Self {
-            provider: entry.provider.clone(),
-            owner: entry.owner.clone(),
-            repo: entry.repo.clone(),
-            revision: entry.revision.clone(),
+            namespace: TreeKey::new(&entry.provider, &entry.owner, &entry.repo, &entry.revision),
             path: entry.path.clone(),
         }
     }
 
     fn from_key(key: &TreeKey, path: &str) -> Self {
         Self {
-            provider: key.provider.clone(),
-            owner: key.owner.clone(),
-            repo: key.repo.clone(),
-            revision: key.revision.clone(),
+            namespace: key.clone(),
             path: path.to_owned(),
         }
     }
