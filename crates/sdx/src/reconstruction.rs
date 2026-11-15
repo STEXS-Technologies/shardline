@@ -26,7 +26,7 @@ use crate::{
     hash::compute_term_verification_hash,
     retry::RetryContext,
     transfer::{ByteRange, TransferClient},
-    xorb::{DecodedChunk, XorbReader},
+    xorb::XorbReader,
 };
 
 /// A fully reconstructed byte range (or full file) with its resolved terms.
@@ -176,8 +176,8 @@ async fn assemble(
     plan: Reconstruction,
     requested_range: Option<ByteRange>,
 ) -> Result<ReconstructedFile, SdxError> {
-    let mut decoded_fetches: HashMap<usize, Vec<DecodedChunk>> = HashMap::new();
-    for (fetch_index, fetch) in plan.fetches.iter().enumerate() {
+    let mut decoded_fetches = Vec::with_capacity(plan.fetches.len());
+    for fetch in &plan.fetches {
         let fetch_url = &fetch.url;
         let fetch_bytes = fetch.bytes;
         let ranged = run_with_retry(retry, token, |tok| async move {
@@ -196,22 +196,15 @@ async fn assemble(
                 actual: actual_chunks,
             });
         }
-        decoded_fetches.insert(fetch_index, chunks);
+        decoded_fetches.push((fetch, chunks));
     }
 
     let mut output = Vec::new();
     let mut resolved_terms = Vec::with_capacity(plan.terms.len());
     for (term_index, term) in plan.terms.iter().enumerate() {
-        let fetch =
-            plan.fetches
-                .get(term.fetch_index)
-                .ok_or_else(|| SdxError::MissingFetchInfo {
-                    term_index,
-                    hash: term.xorb_hash.clone(),
-                })?;
-        let chunks =
+        let (fetch, chunks) =
             decoded_fetches
-                .get(&term.fetch_index)
+                .get(term.fetch_index)
                 .ok_or_else(|| SdxError::MissingFetchInfo {
                     term_index,
                     hash: term.xorb_hash.clone(),

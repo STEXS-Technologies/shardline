@@ -772,10 +772,6 @@ impl FileUploadPipeline {
         }
 
         let xorb_hash = parse_xet_hash_hex(&built.xorb_hash_hex)?;
-        let num_bytes_in_xorb = built
-            .chunk_entries
-            .iter()
-            .fold(0u64, |acc, entry| acc.saturating_add(entry.raw_length));
         let mut chunks = Vec::with_capacity(built.chunk_entries.len());
         let mut unpacked_offset = 0u64;
         for entry in &built.chunk_entries {
@@ -789,15 +785,12 @@ impl FileUploadPipeline {
         }
         let shard_xorb = ShardXorb {
             xorb_hash,
-            num_bytes_in_xorb,
+            num_bytes_in_xorb: unpacked_offset,
             chunks,
         };
 
         let mut state = self.session.inner.state.lock().await;
-        state
-            .xorb_infos
-            .entry(xorb_hash)
-            .or_insert_with(|| shard_xorb.clone());
+        state.xorb_infos.entry(xorb_hash).or_insert(shard_xorb);
         for (index, (chunk, _offset)) in self.pending.iter().enumerate() {
             let location = ChunkLocation {
                 xorb_hash,
