@@ -273,8 +273,8 @@ where
         })
         .await?;
 
-    for (chunk_hash, mapping) in &desired {
-        match existing.get(chunk_hash) {
+    for (chunk_hash, mapping) in desired {
+        match existing.remove(&chunk_hash) {
             Some(existing_mapping)
                 if existing_mapping.shard_object_key() == mapping.shard_object_key() =>
             {
@@ -283,7 +283,7 @@ where
             }
             _ => {
                 index_store
-                    .upsert_dedupe_shard_mapping(mapping)
+                    .upsert_dedupe_shard_mapping(&mapping)
                     .await
                     .map_err(Into::into)?;
                 report.rebuilt_dedupe_shard_mappings =
@@ -296,11 +296,7 @@ where
     // and deletion. Server entry points hold that barrier; generic store callers
     // provide their own ownership so a concurrent shard publication cannot be
     // removed using an older inventory.
-    for (chunk_hash, mapping) in existing {
-        if desired.contains_key(&chunk_hash) {
-            continue;
-        }
-
+    for mapping in existing.into_values() {
         let deleted = index_store
             .delete_dedupe_shard_mapping_if_matches(&mapping)
             .await

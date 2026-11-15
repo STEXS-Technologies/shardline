@@ -1160,97 +1160,7 @@ async fn rebuild_dedupe_shard_mappings_removes_stale_existing_mappings() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rebuild_dedupe_shard_mappings_with_valid_shard_unchanged_mapping() {
-    use shardline_index::{DedupeShardMapping, parse_xet_hash_hex};
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
-    use shardline_xet_core::{
-        merklehash::{compute_data_hash, file_hash, xorb_hash},
-        metadata_shard::{
-            file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
-            shard_in_memory::MDBInMemoryShard,
-            xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
-        },
-    };
-
-    // Build a minimal valid shard with one chunk that has the global-dedup flag
-    // so that `collect_dedupe_chunk_hashes` includes it.
-    let chunk_data = b"test chunk data for rebuild dedupe test";
-    let chunk_hash = compute_data_hash(chunk_data);
-    let xorb_hash = xorb_hash(&[(chunk_hash, chunk_data.len() as u64)]);
-    let file_hash_val = file_hash(&[(chunk_hash, chunk_data.len() as u64)]);
-
-    let mut shard = MDBInMemoryShard::default();
-    shard
-        .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
-            segments: vec![FileDataSequenceEntry::new(
-                xorb_hash,
-                chunk_data.len() as u64,
-                0_u64,
-                1_u64,
-            )],
-            verification: Vec::new(),
-            metadata_ext: None,
-        })
-        .unwrap();
-    shard
-        .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
-            chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
-                    .with_global_dedup_flag(true),
-            ],
-        })
-        .unwrap();
-    let shard_bytes = shard.to_bytes().unwrap();
-    let chunk_hash_hex = chunk_hash.hex();
-
-    let storage = shardline_test_support::TempStorage::new();
-    let index_store = shardline_index::MemoryIndexStore::new();
-    let object_root = storage.path().join("chunks");
-    std::fs::create_dir_all(&object_root).unwrap();
-    let object_store = ServerObjectStore::local(&object_root).unwrap();
-
-    // Store the shard in the object store using a realistic shard key
-    let shard_key_str = format!("shards/{}/{}", &chunk_hash_hex[..2], chunk_hash_hex);
-    let shard_key = ObjectKey::parse(&shard_key_str).unwrap();
-    object_store
-        .put_overwrite(
-            &shard_key,
-            ObjectBody::from_slice(&shard_bytes),
-            &ObjectIntegrity::new(
-                shardline_server_core::chunk_hash(&shard_bytes),
-                shard_bytes.len() as u64,
-            ),
-        )
-        .unwrap();
-
-    // Insert a matching dedupe mapping so the rebuild finds it unchanged
-    let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
-    let existing_mapping = DedupeShardMapping::new(shardline_chunk_hash, shard_key.clone());
-    index_store
-        .upsert_dedupe_shard_mapping(&existing_mapping)
-        .unwrap();
-
-    let mut report = IndexRebuildReport::default();
-    rebuild_dedupe_shard_mappings(
-        &index_store,
-        &object_store,
-        shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
-        &mut report,
-    )
-    .await
-    .unwrap();
-
-    assert!(report.is_clean(), "expected clean report, got: {report:?}");
-    assert_eq!(report.scanned_retained_shards, 1);
-    assert_eq!(report.unchanged_dedupe_shard_mappings, 1);
-    assert_eq!(report.rebuilt_dedupe_shard_mappings, 0);
-    assert_eq!(report.removed_stale_dedupe_shard_mappings, 0);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn rebuild_dedupe_shard_mappings_with_valid_shard_rebuilds_changed_mapping() {
+async fn rebuild_dedupe_shard_mappings_preserves_and_repairs_existing_mappings() {
     use shardline_index::{DedupeShardMapping, DedupeStore, parse_xet_hash_hex};
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
     use shardline_xet_core::{
@@ -1262,97 +1172,92 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_rebuilds_changed_mapping
         },
     };
 
-    // Build a minimal valid shard with one chunk (global-dedup flagged)
-    let chunk_data = b"rebuild test data for changed mapping";
-    let chunk_hash = compute_data_hash(chunk_data);
-    let xorb_hash = xorb_hash(&[(chunk_hash, chunk_data.len() as u64)]);
-    let file_hash_val = file_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+    for (chunk_data, changed) in [
+        (b"test chunk data for rebuild dedupe test".as_slice(), false),
+        (b"rebuild test data for changed mapping".as_slice(), true),
+    ] {
+        // Build a minimal valid shard with one chunk that has the global-dedup flag
+        // so that `collect_dedupe_chunk_hashes` includes it.
+        let chunk_hash = compute_data_hash(chunk_data);
+        let xorb_hash = xorb_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+        let file_hash_val = file_hash(&[(chunk_hash, chunk_data.len() as u64)]);
 
-    let mut shard = MDBInMemoryShard::default();
-    shard
-        .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
-            segments: vec![FileDataSequenceEntry::new(
-                xorb_hash,
-                chunk_data.len() as u64,
-                0_u64,
-                1_u64,
-            )],
-            verification: Vec::new(),
-            metadata_ext: None,
-        })
-        .unwrap();
-    shard
-        .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
-            chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
-                    .with_global_dedup_flag(true),
-            ],
-        })
-        .unwrap();
-    let shard_bytes = shard.to_bytes().unwrap();
-    let chunk_hash_hex = chunk_hash.hex();
+        let mut shard = MDBInMemoryShard::default();
+        shard
+            .add_file_reconstruction_info(MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(
+                    xorb_hash,
+                    chunk_data.len() as u64,
+                    0_u64,
+                    1_u64,
+                )],
+                verification: Vec::new(),
+                metadata_ext: None,
+            })
+            .unwrap();
+        shard
+            .add_xorb_block(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
+                        .with_global_dedup_flag(true),
+                ],
+            })
+            .unwrap();
+        let shard_bytes = shard.to_bytes().unwrap();
+        let chunk_hash_hex = chunk_hash.hex();
 
-    let storage = shardline_test_support::TempStorage::new();
-    let index_store = shardline_index::MemoryIndexStore::new();
-    let object_root = storage.path().join("chunks");
-    std::fs::create_dir_all(&object_root).unwrap();
-    let object_store = ServerObjectStore::local(&object_root).unwrap();
+        let storage = shardline_test_support::TempStorage::new();
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = storage.path().join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
 
-    // Store the shard
-    let shard_key_str = format!("shards/{}/{}", &chunk_hash_hex[..2], chunk_hash_hex);
-    let shard_key = ObjectKey::parse(&shard_key_str).unwrap();
-    object_store
-        .put_overwrite(
-            &shard_key,
-            ObjectBody::from_slice(&shard_bytes),
-            &ObjectIntegrity::new(
-                shardline_server_core::chunk_hash(&shard_bytes),
-                shard_bytes.len() as u64,
-            ),
+        // Store the shard in the object store using a realistic shard key
+        let shard_key_str = format!("shards/{}/{}", &chunk_hash_hex[..2], chunk_hash_hex);
+        let shard_key = ObjectKey::parse(&shard_key_str).unwrap();
+        object_store
+            .put_overwrite(
+                &shard_key,
+                ObjectBody::from_slice(&shard_bytes),
+                &ObjectIntegrity::new(
+                    shardline_server_core::chunk_hash(&shard_bytes),
+                    shard_bytes.len() as u64,
+                ),
+            )
+            .unwrap();
+
+        let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
+        let previous_key = if changed {
+            ObjectKey::parse("shards/ab/a_different_shard.shard").unwrap()
+        } else {
+            shard_key.clone()
+        };
+        let existing_mapping = DedupeShardMapping::new(shardline_chunk_hash, previous_key);
+        index_store
+            .upsert_dedupe_shard_mapping(&existing_mapping)
+            .unwrap();
+
+        let mut report = IndexRebuildReport::default();
+        rebuild_dedupe_shard_mappings(
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            &mut report,
         )
+        .await
         .unwrap();
 
-    // Insert an existing mapping that points to a DIFFERENT shard key.
-    // The rebuild will see that the desired mapping (pointing to the real shard)
-    // differs from the existing mapping (pointing to a fake shard) and will
-    // upsert the correct one.
-    let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
-    let fake_shard_key = ObjectKey::parse("shards/ab/a_different_shard.shard").unwrap();
-    let old_mapping = DedupeShardMapping::new(shardline_chunk_hash, fake_shard_key);
-    index_store
-        .upsert_dedupe_shard_mapping(&old_mapping)
-        .unwrap();
-
-    let mut report = IndexRebuildReport::default();
-    rebuild_dedupe_shard_mappings(
-        &index_store,
-        &object_store,
-        shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
-        &mut report,
-    )
-    .await
-    .unwrap();
-
-    assert!(report.is_clean(), "expected clean report, got: {report:?}");
-    assert_eq!(report.scanned_retained_shards, 1);
-    assert_eq!(report.rebuilt_dedupe_shard_mappings, 1);
-    assert_eq!(report.unchanged_dedupe_shard_mappings, 0);
-    assert_eq!(report.removed_stale_dedupe_shard_mappings, 0);
-
-    // Verify the mapping was updated to point to the correct shard key
-    let updated = DedupeStore::dedupe_shard_mapping(&index_store, &shardline_chunk_hash).unwrap();
-    assert!(
-        updated.is_some(),
-        "mapping should still exist after rebuild"
-    );
-    if let Some(updated) = updated {
-        assert_eq!(
-            updated.shard_object_key(),
-            &shard_key,
-            "mapping should be updated to point to the real shard"
-        );
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+        assert_eq!(report.scanned_retained_shards, 1);
+        assert_eq!(report.unchanged_dedupe_shard_mappings, u64::from(!changed));
+        assert_eq!(report.rebuilt_dedupe_shard_mappings, u64::from(changed));
+        assert_eq!(report.removed_stale_dedupe_shard_mappings, 0);
+        let stored = DedupeStore::dedupe_shard_mapping(&index_store, &shardline_chunk_hash)
+            .unwrap()
+            .expect("retained mapping must exist after rebuild");
+        assert_eq!(stored.shard_object_key(), &shard_key);
     }
 }
 
