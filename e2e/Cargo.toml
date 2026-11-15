@@ -103,7 +103,7 @@ reqwest = { version = "0.12.28", default-features = false, features = ["json", "
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = { version = "0.10", features = ["compress"] }
-rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 tokio = { version = "1.53.3", features = ["full"] }
 tempfile = "3.15"
 tracing = "0.1"
@@ -121,3 +121,9 @@ opt-level = 3
 # Mirror the main workspace's upstream HTTP/1 shutdown fix during acceptance.
 # Remove both overrides when a fixed Hyper registry release is available.
 hyper = { git = "https://github.com/hyperium/hyper", rev = "97fff93e53f9e6a993f2d6a25d50883b7b8752a7" }
+
+# Resolver-only compatibility with patched bundled SQLite (RUSTSEC-2026-0459).
+# SQLx is used for PostgreSQL; its optional SQLite driver is not compiled.
+# Remove after a SQLx registry release allows libsqlite3-sys 0.39.
+# https://github.com/launchbadge/sqlx/pull/4502
+sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }

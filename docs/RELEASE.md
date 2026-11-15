@@ -28,6 +28,17 @@ remove the patches from both workspace manifests and the reviewed publication
 exception, and test a separate consumer without workspace overrides.
 Do not remove the patch merely to pass the publication check.
 
+The SQLx SQLite resolver patch pins [upstream PR 4502](https://github.com/launchbadge/sqlx/pull/4502)
+at `10462fa4414c6c7f1ed1d39bb31678e3b726878c`. It allows the patched
+`libsqlite3-sys` 0.39 used by rusqlite 0.41 to coexist with SQLx 0.9.
+Shardline uses the registry SQLx PostgreSQL driver; the patched SQLite driver is
+not compiled. Cargo still resolves that optional driver's native-library
+constraint. Both workspace manifests and lockfiles carry the pin. This override
+has no publication exception: crates.io publication remains blocked until SQLx
+releases the compatible constraint and both overrides can be removed. Do not
+roll back bundled SQLite to bypass this gate; the previously locked
+`libsqlite3-sys` 0.37 is affected by [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html).
+
 Publishing is triggered only by pushing a release tag. Manual runs of the Release
 workflow validate the build and never publish crates, images, or release assets.
 The tagged commit must be on `main`, and the tag must match the workspace version.

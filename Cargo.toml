@@ -19,9 +19,9 @@ documentation = "https://docs.rs/shardline"
 
 [workspace.dependencies]
 aes-gcm = "0.10"
-arrow-array = "60.0.0"
-arrow-json = "60.0.0"
-arrow-schema = "60.0.0"
+arrow-array = "60.1.0"
+arrow-json = "60.1.0"
+arrow-schema = "60.1.0"
 async-trait = "0.1.92"
 dotenvy = "0.15"
 toml = "0.8"
@@ -50,7 +50,7 @@ jsonwebtoken = "9"
 libc = "0.2.177"
 libfuzzer-sys = "0.4"
 object_store = { version = "0.14.2", default-features = false }
-parquet = { version = "60.0.0", default-features = false, features = [
+parquet = { version = "60.1.0", default-features = false, features = [
     "arrow",
     "snap",
     "brotli",
@@ -61,8 +61,8 @@ parquet = { version = "60.0.0", default-features = false, features = [
 redis = { version = "1.0.2", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 reqwest = { version = "0.12.28", default-features = false }
-rusqlite = "0.39"
-rustix = { version = "1", features = ["process", "time"] }
+rusqlite = "0.41"
+rustix = { version = "1.1.6", features = ["process", "time"] }
 serde = "1.0"
 serde_json = "1.0"
 sha1 = "0.10"
@@ -222,3 +222,9 @@ flat_map_option = "deny"
 # Upstream fix for stranded HTTP/1 requests when a pooled connection closes.
 # https://github.com/hyperium/hyper/pull/4222
 hyper = { git = "https://github.com/hyperium/hyper", rev = "97fff93e53f9e6a993f2d6a25d50883b7b8752a7" }
+
+# Resolver-only compatibility with patched bundled SQLite (RUSTSEC-2026-0459).
+# SQLx is used for PostgreSQL; its optional SQLite driver is not compiled.
+# Remove after a SQLx registry release allows libsqlite3-sys 0.39.
+# https://github.com/launchbadge/sqlx/pull/4502
+sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
