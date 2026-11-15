@@ -4,15 +4,9 @@
 //! growth bound, concurrency chaos with GC fixed point, partial-read resume
 //! after a client abort, and multiversion overwrite kills.
 //!
-//! This file is a SEPARATE integration-test crate from `fault_drills.rs`. The
-//! ~37 harness helpers below are duplicated verbatim from that file (each
-//! integration test builds its own crate; duplication keeps `fault_drills.rs`
-//! a frozen regression gate). The harness is extended additively with:
-//!   - a reconstruction-cache mode (default `Disabled`; `with_redis_cache` /
-//!     `with_memory_cache`),
-//!   - `s3_delete` (DELETE verb),
-//!   - chunk-set helpers (`chunk_file_paths`, `corrupt_file`,
-//!     `new_chunk_files`, `session_dir_count`), and a seeded LCG for drill 6.
+//! The harness restarts the server on the same storage root and supports
+//! disabled, Redis, and in-memory reconstruction caches. Deterministic payloads
+//! and storage evidence coordinate fault injection and byte-exact checks.
 //!
 //! Same philosophy as `fault_drills.rs`: every kill is synchronized on
 //! *on-disk evidence* (a new chunk file appearing) or on a body that is
@@ -37,8 +31,7 @@
     clippy::expect_used,
     clippy::panic,
     clippy::needless_borrows_for_generic_args,
-    clippy::unnecessary_map_or,
-    dead_code
+    clippy::unnecessary_map_or
 )]
 
 use futures_util::StreamExt;
@@ -115,21 +108,12 @@ const fn lcg_next(state: &mut u64) -> u64 {
     *state
 }
 
-/// Extract the first `{tag}` element's text from an XML string (S3 envelopes).
-fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)?.checked_add(open.len())?;
-    let end = xml[start..].find(&close)?.checked_add(start)?;
-    Some(xml[start..end].to_owned())
-}
-
 // ---------------------------------------------------------------------------
 // DrillHarness — spawn / kill / restart on the same root directory.
 // ---------------------------------------------------------------------------
 
 /// Reconstruction-cache mode for `build_config`. Default is `Disabled`,
-/// preserving the behavior of `fault_drills.rs`.
+/// matching the base fault drills.
 #[derive(Clone, Debug)]
 enum CacheMode {
     Disabled,
@@ -169,6 +153,7 @@ impl DrillHarness {
         }
     }
 
+    #[cfg(feature = "docker")]
     fn with_postgres(mut self, url: &str) -> Self {
         self.index_postgres_url = Some(url.to_owned());
         self
@@ -308,43 +293,6 @@ impl DrillHarness {
             .await
             .unwrap()
     }
-
-    async fn s3_delete(&self, key: &str) -> reqwest::Response {
-        self.client
-            .delete(self.url(&self.s3_path(key)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await
-            .unwrap()
-    }
-
-    async fn s3_create_multipart(&self, key: &str) -> String {
-        let resp = self
-            .client
-            .post(self.url(&format!("{}?uploads", self.s3_path(key))))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status().as_u16(),
-            200,
-            "create multipart should succeed"
-        );
-        let xml = resp.text().await.unwrap();
-        extract_xml_tag(&xml, "UploadId").expect("UploadId in create-multipart response")
-    }
-
-    async fn s3_complete_multipart(&self, key: &str, upload_id: &str) -> reqwest::Response {
-        self.client
-            .post(self.url(&format!("{}?uploadId={upload_id}", self.s3_path(key))))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/xml")
-            .body(b"<CompleteMultipartUpload></CompleteMultipartUpload>".to_vec())
-            .send()
-            .await
-            .unwrap()
-    }
 }
 
 impl Drop for DrillHarness {
@@ -397,42 +345,6 @@ fn count_chunk_files(root: &Path) -> usize {
     count_files_recursive(&root.join("chunks"))
 }
 
-fn part_file_size(root: &Path, upload_id: &str, part_number: u32) -> u64 {
-    let path = root
-        .join("s3-uploads")
-        .join(upload_id)
-        .join(format!("part-{part_number}"));
-    std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
-}
-
-fn session_dir_exists(root: &Path, upload_id: &str) -> bool {
-    root.join("s3-uploads").join(upload_id).is_dir()
-}
-
-fn quarantine_row_count(root: &Path) -> usize {
-    let db_path = root.join("metadata.sqlite3");
-    if !db_path.is_file() {
-        return 0;
-    }
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return 0;
-    };
-    conn.busy_timeout(Duration::from_millis(500)).ok();
-    let count: Result<i64, _> = conn.query_row(
-        "SELECT COUNT(*) FROM shardline_quarantine_candidates",
-        [],
-        |row| row.get(0),
-    );
-    count.map(|value| value as usize).unwrap_or(0)
-}
-
-fn quarantine_manifest_files(root: &Path) -> usize {
-    count_files_recursive(&root.join("gc").join("quarantine"))
-}
-
 async fn wait_until(timeout: Duration, what: &str, cond: impl Fn() -> bool) {
     let deadline = tokio::time::Instant::now()
         .checked_add(timeout)
@@ -448,39 +360,8 @@ async fn wait_until(timeout: Duration, what: &str, cond: impl Fn() -> bool) {
     }
 }
 
-/// Poll for the part-1 file on disk; if the part request resolves early or the
-/// deadline passes, dump the session directory for diagnosis.
-async fn wait_part_evidence(
-    root: &Path,
-    upload_id: &str,
-    part_task: &JoinHandle<reqwest::Result<reqwest::Response>>,
-) {
-    let deadline = tokio::time::Instant::now()
-        .checked_add(Duration::from_secs(5))
-        .expect("deadline overflow");
-    loop {
-        if part_file_size(root, upload_id, 1) > 0 {
-            return;
-        }
-        if part_task.is_finished() {
-            panic!("part task finished before part-1 evidence appeared (upload={upload_id})");
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let uploads = root.join("s3-uploads");
-            let listing = std::fs::read_dir(&uploads)
-                .map(|rd| {
-                    rd.flatten()
-                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            panic!("no part-1 evidence; s3-uploads listing={listing:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
 /// Migrate the owned PostgreSQL fixture; the server does not self-migrate.
+#[cfg(feature = "docker")]
 async fn ensure_dev_postgres_migrated(url: &str) {
     let mut last = None;
     for _ in 0..5 {
@@ -502,7 +383,7 @@ async fn ensure_dev_postgres_migrated(url: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// NEW extreme-drill helpers (additive to the duplicated set above).
+// Storage corruption and chunk-set helpers.
 // ---------------------------------------------------------------------------
 
 fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
