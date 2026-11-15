@@ -254,41 +254,31 @@ mod tests {
         payload
     }
 
-    fn expected_chunks(chunks: &[&[u8]]) -> Vec<DecodedChunk> {
-        chunks
-            .iter()
-            .map(|data| DecodedChunk {
-                data: data.to_vec(),
-                hash: compute_chunk_hash(data),
-            })
-            .collect()
-    }
-
     #[test]
-    fn decode_chunks_round_trips_payload_without_footer() {
-        let chunk_a = b"hello xet chunk";
-        let chunk_b = b"second chunk payload";
-        let payload = serialize_payload(&[chunk_a, chunk_b]);
-
-        let decoded = XorbReader::new(payload).decode_chunks().unwrap();
-
-        assert_eq!(decoded, expected_chunks(&[chunk_a, chunk_b]));
-    }
-
-    #[test]
-    fn decode_chunks_single_chunk() {
-        let chunk = b"just one chunk";
-        let payload = serialize_payload(&[chunk]);
-
-        let decoded = XorbReader::new(payload).decode_chunks().unwrap();
-
-        assert_eq!(decoded, expected_chunks(&[chunk]));
-    }
-
-    #[test]
-    fn decode_chunks_empty_payload_yields_no_chunks() {
-        let decoded = XorbReader::new(Vec::new()).decode_chunks().unwrap();
-        assert!(decoded.is_empty());
+    fn decode_chunks_preserves_payloads_and_hashes() {
+        let varied: Vec<u8> = (0..512).map(|i| (i * 31 % 251) as u8).collect();
+        let cases: [&[&[u8]]; 5] = [
+            &[],
+            &[b"just one chunk"],
+            &[b"hello xet chunk", b"second chunk payload"],
+            &[b"hash me"],
+            &[&varied],
+        ];
+        for chunks in cases {
+            let payload = serialize_payload(chunks);
+            let decoded = XorbReader::new(payload).decode_chunks().unwrap();
+            let expected: Vec<_> = chunks
+                .iter()
+                .map(|data| DecodedChunk {
+                    data: data.to_vec(),
+                    hash: compute_chunk_hash(data),
+                })
+                .collect();
+            assert_eq!(decoded, expected);
+            for chunk in decoded {
+                assert_ne!(chunk.hash, compute_chunk_hash(b"hash different"));
+            }
+        }
     }
 
     #[test]
@@ -313,25 +303,6 @@ mod tests {
 
         let result = XorbReader::new(payload).decode_chunks();
         assert!(matches!(result, Err(XorbError::Format(_))));
-    }
-
-    #[test]
-    fn decode_chunks_computes_data_hashes() {
-        let chunk = b"hash me";
-        let payload = serialize_payload(&[chunk]);
-        let decoded = XorbReader::new(payload).decode_chunks().unwrap();
-        assert_eq!(decoded[0].hash, compute_chunk_hash(chunk));
-        assert_ne!(decoded[0].hash, compute_chunk_hash(b"hash different"));
-    }
-
-    #[test]
-    fn decode_chunks_handles_incompressible_data() {
-        // CompressionScheme::None keeps data byte-identical even for highly
-        // compressible input; use a varied payload to exercise the path.
-        let chunk: Vec<u8> = (0..512).map(|i| (i * 31 % 251) as u8).collect();
-        let payload = serialize_payload(&[&chunk]);
-        let decoded = XorbReader::new(payload).decode_chunks().unwrap();
-        assert_eq!(decoded[0].data, chunk);
     }
 
     #[test]
