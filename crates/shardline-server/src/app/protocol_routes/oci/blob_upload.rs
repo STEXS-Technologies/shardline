@@ -7,7 +7,7 @@ use axum::{
         HeaderMap, StatusCode, Uri,
         header::{CONTENT_RANGE, LOCATION, RANGE},
     },
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use sha2::{Digest as _, Sha256};
 use shardline_index::{
@@ -864,10 +864,7 @@ pub(crate) async fn oci_delete_blob_upload(
         {
             return Err(ServerError::NotFound);
         }
-        return Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .body(Body::empty())
-            .map_err(|_error| ServerError::Overflow);
+        return Ok(StatusCode::NO_CONTENT.into_response());
     }
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
@@ -885,10 +882,7 @@ pub(crate) async fn oci_delete_blob_upload(
         abort_s3_multipart_upload_session(&state.backend, &session).await?;
     }
     delete_upload_session(state.config.root_dir(), session_id).await?;
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[cfg(test)]
