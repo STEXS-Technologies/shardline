@@ -3862,6 +3862,23 @@ Strict library/test Clippy passed for CAS, cache and server at their respective
 revisions. Tests used Rust 1.99 and strict Clippy used Rust 1.100. These checks
 provide no new production-throughput or build-time measurement.
 
+At `ef1d8e7a`, the dedicated native S3 listing pagination integration binary
+passed both SQLite and PostgreSQL lanes with Rust 1.99. PostgreSQL 16 ran in a
+disposable container with `DATABASE_URL` configured and
+`SHARDLINE_REQUIRE_POSTGRES_TESTS=1`; neither lane skipped. The test exercises
+v1/v2 HTTP listing walks, delimiter rollups, Unicode ordering, cursor boundaries,
+zero page sizes and invalid limits. PostgreSQL contained 21 S3 index rows after
+the run, independently confirming that the database lane executed. Object storage
+was local; this does not qualify PostgreSQL with a remote object store or measure
+listing read amplification.
+
+The same revision passed all 329 selected adapter-library and non-PostgreSQL S3
+server-route tests, and strict adapter library/test Clippy. Multipart completion
+now stores each part checksum once; public CRC-specific and generic accessors
+retain their behavior. Query and listing parsers no longer convert through
+intermediate name enums, and ordinary v2 XML listing responses borrow their
+result until URL encoding requires a copy.
+
 At `46fe2321`, raw-Xorb construction shares one implementation and server
 packing omits an unused boundary vector. Thirty-two duplicated compression/raw
 smoke tests were consolidated, moving their unique wire-value, scheme-name and
