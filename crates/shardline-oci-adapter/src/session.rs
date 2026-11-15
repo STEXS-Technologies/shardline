@@ -443,14 +443,11 @@ pub async fn repair_upload_session_evidence(
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?,
         )
     } else {
-        (
-            persisted.evidence.clone(),
-            persisted.snapshot_evidence.clone(),
-        )
+        (persisted.evidence, persisted.snapshot_evidence)
     };
     let _ignored = delete_file_anchored(root, &upload_evidence_journal_path(root, session_id));
-    let reset = serde_json::to_vec(&PersistedOciUploadSession {
-        session: persisted.session.clone(),
+    let reset = PersistedOciUploadSession {
+        session: persisted.session,
         evidence: SessionEvidenceLog::default(),
         snapshot_evidence: SnapshotEvidenceLog::default(),
         journal_head: None,
@@ -466,12 +463,12 @@ pub async fn repair_upload_session_evidence(
         journal_evidence_head: None,
         journal_snapshot_head: None,
         reliability_head_metadata: false,
-    })?;
-    write_upload_metadata(root, session_id, reset).await?;
+    };
+    write_upload_metadata(root, session_id, serde_json::to_vec(&reset)?).await?;
     persist_upload_session_with_evidence(
         root,
         session_id,
-        &persisted.session,
+        &reset.session,
         &evidence,
         snapshot_evidence,
     )

@@ -82,13 +82,12 @@ pub async fn append_s3_multipart_upload_bytes_owned<B: OciBackend>(
 
         let temporary_object_key = ObjectKey::parse(&multipart.temporary_object_key)
             .map_err(|_error| OciAdapterError::InvalidContentHash)?;
-        let upload_id = multipart.upload_id.clone();
         let (parts, remainder) = tail.as_chunks::<OCI_S3_MULTIPART_CHUNK_BYTES>();
         for part_bytes in parts {
             let part_id = backend
                 .upload_resumable_object_part(
                     &temporary_object_key,
-                    &upload_id,
+                    &multipart.upload_id,
                     multipart.uploaded_part_ids.len(),
                     retain_source(part_bytes.to_vec(), bytes.clone()),
                 )
@@ -161,7 +160,7 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
     }
     let (session, _new_length) =
         append_s3_multipart_upload_bytes(root, backend, session_id, session, final_bytes).await?;
-    let Some(multipart) = session.s3_multipart.as_ref() else {
+    let Some(multipart) = session.s3_multipart else {
         let observed = SerializableSha256State::default().finalize_hex()?;
         if observed != digest_hex {
             return Err(OciAdapterError::ExpectedBodyHashMismatch);
@@ -174,20 +173,17 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
     };
 
     let observed = multipart.sha256_state.finalize_hex()?;
-    let temporary_object_key = ObjectKey::parse(&multipart.temporary_object_key)
+    let temp_key = ObjectKey::parse(&multipart.temporary_object_key)
         .map_err(|_error| OciAdapterError::InvalidContentHash)?;
     if observed != digest_hex {
         let _ignored = backend
-            .abort_resumable_object_upload(&temporary_object_key, &multipart.upload_id)
+            .abort_resumable_object_upload(&temp_key, &multipart.upload_id)
             .await;
         return Err(OciAdapterError::ExpectedBodyHashMismatch);
     }
 
-    // Save IDs before fallible operations so we can abort on failure.
-    let temp_key = temporary_object_key;
-    let upload_id = multipart.upload_id.clone();
-
-    let mut part_ids: Vec<String> = multipart.uploaded_part_ids.clone();
+    let upload_id = multipart.upload_id;
+    let mut part_ids = multipart.uploaded_part_ids;
     let tail = read_upload_tail(root, session_id).await?;
     if !tail.is_empty() {
         match backend
@@ -217,17 +213,14 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
     // Attach part numbers for ordering validation by the S3 backend.
     let parts: Vec<(usize, String)> = part_ids.into_iter().enumerate().collect();
 
-    match backend
+    if let Err(error) = backend
         .complete_resumable_object_upload(&temp_key, &upload_id, parts)
         .await
     {
-        Ok(()) => {}
-        Err(error) => {
-            let _result = backend
-                .abort_resumable_object_upload(&temp_key, &upload_id)
-                .await;
-            return Err(error);
-        }
+        let _result = backend
+            .abort_resumable_object_upload(&temp_key, &upload_id)
+            .await;
+        return Err(error);
     }
     let canonical_key = shared_sha256_object_key(digest_hex)?;
     let canonical_outcome = backend.copy_object_if_absent(&temp_key, &canonical_key)?;
