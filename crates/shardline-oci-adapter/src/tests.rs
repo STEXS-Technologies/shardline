@@ -7,7 +7,6 @@
     clippy::ignored_unit_patterns
 )]
 
-use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -348,23 +347,17 @@ fn upload_session_fixture() -> OciUploadSession {
     }
 }
 
-fn create_test_session(
-    root: &Path,
-    use_s3: bool,
-) -> impl Future<Output = Result<String, OciAdapterError>> {
-    let root = root.to_path_buf();
-    async move {
-        create_upload_session(
-            &root,
-            NO_BACKEND,
-            "repo",
-            None,
-            ttl(),
-            max_sessions(),
-            use_s3,
-        )
-        .await
-    }
+async fn create_test_session(root: &Path, use_s3: bool) -> Result<String, OciAdapterError> {
+    create_upload_session(
+        root,
+        NO_BACKEND,
+        "repo",
+        None,
+        ttl(),
+        max_sessions(),
+        use_s3,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -1382,17 +1375,7 @@ fn upload_session_length_tracks_multipart_state() {
 #[tokio::test]
 async fn touch_upload_session_persists_updated_timestamp() {
     let root = temp_root();
-    let session_id = super::create_upload_session(
-        root.path(),
-        NO_BACKEND,
-        "repo",
-        None,
-        ttl(),
-        max_sessions(),
-        false,
-    )
-    .await
-    .unwrap();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
     let session = super::read_upload_session(root.path(), &session_id, ttl())
         .await
         .unwrap();
