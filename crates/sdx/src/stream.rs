@@ -2002,12 +2002,12 @@ struct ReconstructionTermManager {
 }
 
 impl ReconstructionTermManager {
-    async fn new(
+    fn new(
         ctx: StreamContext,
         file_id: String,
         token: String,
         requested_byte_range: Range<u64>,
-    ) -> Result<Self, SdxError> {
+    ) -> Self {
         let mut manager = Self {
             ctx,
             file_id,
@@ -2025,9 +2025,9 @@ impl ReconstructionTermManager {
         // Seed the pipeline with two blocks so the first block's completion
         // time can be measured against the second.
         let initial = manager.ctx.limits.min_reconstruction_fetch_size;
-        manager.prefetch_block(initial).await?;
-        manager.prefetch_block(initial.saturating_mul(2)).await?;
-        Ok(manager)
+        manager.prefetch_block(initial);
+        manager.prefetch_block(initial.saturating_mul(2));
+        manager
     }
 
     /// Returns the next block of file terms, or `None` when the file has been
@@ -2046,7 +2046,7 @@ impl ReconstructionTermManager {
                 }
             }
         }
-        self.check_prefetch_buffer().await?;
+        self.check_prefetch_buffer();
         let Some(join_handle) = self.prefetch_queue.pop_front() else {
             return Ok(None);
         };
@@ -2079,9 +2079,9 @@ impl ReconstructionTermManager {
     }
 
     /// Ensures enough term metadata is prefetched to keep the pipeline fed.
-    async fn check_prefetch_buffer(&mut self) -> Result<(), SdxError> {
+    fn check_prefetch_buffer(&mut self) {
         if self.is_done_fetching() {
-            return Ok(());
+            return;
         }
         // Scoped allow mirrors the upstream estimator's float math
         // (`manager.rs` `check_prefetch_buffer`).
@@ -2097,7 +2097,7 @@ impl ReconstructionTermManager {
                 .prefetched_byte_position
                 .saturating_sub(self.current_active_byte_position);
             if !self.prefetch_queue.is_empty() && target_buffer <= current as f64 {
-                return Ok(());
+                return;
             }
             // No `saturating_sub` for f64: clamp the deficit to >= 0.
             let deficit = (target_buffer - current as f64).max(0.0);
@@ -2105,13 +2105,13 @@ impl ReconstructionTermManager {
                 self.ctx.limits.min_reconstruction_fetch_size,
                 self.ctx.limits.max_reconstruction_fetch_size,
             );
-            self.prefetch_block(next_block_size).await
+            self.prefetch_block(next_block_size);
         }
     }
 
     /// Schedules a prefetch of `block_size` bytes starting at the current
     /// prefetch position.
-    async fn prefetch_block(&mut self, block_size: u64) -> Result<(), SdxError> {
+    fn prefetch_block(&mut self, block_size: u64) {
         let block_size = block_size.clamp(
             self.ctx.limits.min_reconstruction_fetch_size,
             self.ctx.limits.max_reconstruction_fetch_size,
@@ -2132,7 +2132,7 @@ impl ReconstructionTermManager {
         }
         // Empty range (empty file, or already at/past the end).
         if prefetch_range.start >= prefetch_range.end {
-            return Ok(());
+            return;
         }
         self.prefetched_byte_position = prefetch_range.end;
 
@@ -2159,7 +2159,6 @@ impl ReconstructionTermManager {
         });
         self.prefetch_queue
             .push_back(AbortOnDropHandle::new(join_handle));
-        Ok(())
     }
 }
 
@@ -2301,8 +2300,7 @@ impl FileReconstructor {
             file_id,
             token.clone(),
             requested_range.clone(),
-        )
-        .await?;
+        );
 
         // Dynamic buffer scaling: target = (base + n * perfile).min(limit).
         // `increment_permits_to_target` may return a virtual permit this
@@ -2483,12 +2481,6 @@ impl DownloadStream {
         }
     }
 
-    fn ensure_started(&mut self) {
-        if self.start_signal.is_some() {
-            self.start();
-        }
-    }
-
     fn cancel_reconstruction(&self) {
         self.run_state.cancel();
         if let Some(signal) = self.start_signal.as_ref() {
@@ -2516,7 +2508,7 @@ impl DownloadStream {
             terminal?;
             return Ok(None);
         }
-        self.ensure_started();
+        self.start();
 
         if self.pending_data.is_none() {
             let item = if let Ok(item) = self.receiver.try_recv() {
@@ -2727,12 +2719,6 @@ impl UnorderedDownloadStream {
         }
     }
 
-    fn ensure_started(&mut self) {
-        if self.start_signal.is_some() {
-            self.start();
-        }
-    }
-
     fn cancel_reconstruction(&self) {
         self.run_state.cancel();
         if let Some(signal) = self.start_signal.as_ref() {
@@ -2757,7 +2743,7 @@ impl UnorderedDownloadStream {
             terminal?;
             return Ok(None);
         }
-        self.ensure_started();
+        self.start();
 
         if let Ok(result) = self.receiver.try_recv() {
             return self.process_term(result);
@@ -4324,9 +4310,7 @@ mod tests {
             FILE_ID.to_owned(),
             READ_TOKEN.to_owned(),
             0..0,
-        )
-        .await
-        .unwrap();
+        );
         let (handle, dropped) = pending_prefetch_task().await;
         manager.prefetch_queue.push_back(handle);
         drop(manager);
@@ -4344,9 +4328,7 @@ mod tests {
             FILE_ID.to_owned(),
             READ_TOKEN.to_owned(),
             0..0,
-        )
-        .await
-        .unwrap();
+        );
         let (handle, dropped) = pending_prefetch_task().await;
         manager.prefetch_queue.push_back(handle);
         let mut next = Box::pin(manager.next_file_terms());
