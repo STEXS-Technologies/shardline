@@ -2003,6 +2003,17 @@ mod tests {
         }
     }
 
+    fn lfs_test_config(root: PathBuf, base_url: &str) -> ServerConfig {
+        ServerConfig::new(
+            "127.0.0.1:0".parse().expect("fixture address"),
+            base_url.to_owned(),
+            root,
+            NonZeroUsize::new(65_536).expect("nonzero fixture chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Lfs])
+        .expect("LFS fixture frontend")
+    }
+
     fn lfs_test_state(
         config: ServerConfig,
         backend: ServerBackend,
@@ -2032,15 +2043,7 @@ mod tests {
     /// which keeps each test self-contained without token minting.
     async fn build_test_state() -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = NonZeroUsize::new(65536).unwrap();
-        let config = ServerConfig::new(
-            "127.0.0.1:0".parse().unwrap(),
-            "http://127.0.0.1:0".to_owned(),
-            tmp.path().to_path_buf(),
-            chunk_size,
-        )
-        .with_server_frontends([ServerFrontend::Lfs])
-        .expect("server frontends");
+        let config = lfs_test_config(tmp.path().to_path_buf(), "http://127.0.0.1:0");
 
         let backend = crate::ServerBackend::from_config(&config)
             .await
@@ -2056,19 +2059,11 @@ mod tests {
         root: PathBuf,
         object_store: crate::ServerObjectStore,
     ) -> Arc<AppState> {
-        let chunk_size = NonZeroUsize::new(65_536).expect("nonzero fixture chunk size");
-        let config = ServerConfig::new(
-            "127.0.0.1:0".parse().expect("fixture address"),
-            "http://127.0.0.1:8080".to_owned(),
-            root.clone(),
-            chunk_size,
-        )
-        .with_server_frontends([ServerFrontend::Lfs])
-        .expect("LFS fixture frontend");
+        let config = lfs_test_config(root.clone(), "http://127.0.0.1:8080");
         let backend = crate::PostgresBackend::new_with_object_store(
             root,
             "http://127.0.0.1:8080".to_owned(),
-            chunk_size,
+            config.chunk_size(),
             database_url,
             object_store,
         )
@@ -2088,21 +2083,13 @@ mod tests {
         ttl_seconds: NonZeroU64,
     ) -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = NonZeroUsize::new(65536).unwrap();
-        let config = ServerConfig::new(
-            "127.0.0.1:0".parse().unwrap(),
-            "http://127.0.0.1:0".to_owned(),
-            tmp.path().to_path_buf(),
-            chunk_size,
-        )
-        .with_server_frontends([ServerFrontend::Lfs])
-        .expect("server frontends")
-        .with_lfs_patch_max_active_sessions(max_active_sessions)
-        .expect("lfs patch max active sessions")
-        .with_lfs_patch_total_max_bytes(total_max_bytes)
-        .expect("lfs patch total max bytes")
-        .with_lfs_patch_ttl_seconds(ttl_seconds)
-        .expect("lfs patch ttl");
+        let config = lfs_test_config(tmp.path().to_path_buf(), "http://127.0.0.1:0")
+            .with_lfs_patch_max_active_sessions(max_active_sessions)
+            .expect("lfs patch max active sessions")
+            .with_lfs_patch_total_max_bytes(total_max_bytes)
+            .expect("lfs patch total max bytes")
+            .with_lfs_patch_ttl_seconds(ttl_seconds)
+            .expect("lfs patch ttl");
 
         let backend = crate::ServerBackend::from_config(&config)
             .await
@@ -2116,15 +2103,7 @@ mod tests {
     /// Builds a minimal [`AppState`] with an auth provider for xet transfer tests.
     async fn build_test_state_with_auth() -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = NonZeroUsize::new(65536).unwrap();
-        let config = ServerConfig::new(
-            "127.0.0.1:0".parse().unwrap(),
-            "http://127.0.0.1:8080".to_owned(),
-            tmp.path().to_path_buf(),
-            chunk_size,
-        )
-        .with_server_frontends([ServerFrontend::Lfs])
-        .expect("server frontends");
+        let config = lfs_test_config(tmp.path().to_path_buf(), "http://127.0.0.1:8080");
 
         let backend = crate::ServerBackend::from_config(&config)
             .await
