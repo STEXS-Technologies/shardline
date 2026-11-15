@@ -108,35 +108,34 @@ pub(crate) fn write_fsck_summary(
     writer: &mut (impl Write + ?Sized),
     report: &LocalFsckReport,
 ) -> io::Result<()> {
-    writeln!(writer, "latest_records: {}", report.latest_records)?;
-    writeln!(writer, "version_records: {}", report.version_records)?;
-    writeln!(
-        writer,
-        "inspected_chunk_references: {}",
-        report.inspected_chunk_references
-    )?;
-    writeln!(
-        writer,
-        "inspected_dedupe_shard_mappings: {}",
-        report.inspected_dedupe_shard_mappings
-    )?;
-    writeln!(
-        writer,
-        "inspected_reconstructions: {}",
-        report.inspected_reconstructions
-    )?;
-    writeln!(
-        writer,
-        "inspected_webhook_deliveries: {}",
-        report.inspected_webhook_deliveries
-    )?;
-    writeln!(
-        writer,
-        "inspected_provider_repository_states: {}",
-        report.inspected_provider_repository_states
-    )?;
-    writeln!(writer, "issue_count: {}", report.issue_count())?;
+    for (name, value) in [
+        ("latest_records", report.latest_records),
+        ("version_records", report.version_records),
+        (
+            "inspected_chunk_references",
+            report.inspected_chunk_references,
+        ),
+        (
+            "inspected_dedupe_shard_mappings",
+            report.inspected_dedupe_shard_mappings,
+        ),
+        (
+            "inspected_reconstructions",
+            report.inspected_reconstructions,
+        ),
+        (
+            "inspected_webhook_deliveries",
+            report.inspected_webhook_deliveries,
+        ),
+        (
+            "inspected_provider_repository_states",
+            report.inspected_provider_repository_states,
+        ),
+    ] {
+        writeln!(writer, "{name}: {value}")?;
+    }
 
+    writeln!(writer, "issue_count: {}", report.issue_count())?;
     writer.flush()
 }
 
@@ -375,66 +374,49 @@ pub(crate) fn write_lifecycle_repair_summary_prefixed(
     prefix: &str,
 ) -> io::Result<()> {
     let sep = if prefix.is_empty() { "" } else { "." };
-    writeln!(
-        writer,
-        "{prefix}{sep}scanned_records: {}",
-        report.scanned_records
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}referenced_objects: {}",
-        report.referenced_objects
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}scanned_quarantine_candidates: {}",
-        report.scanned_quarantine_candidates
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}removed_missing_quarantine_candidates: {}",
-        report.removed_missing_quarantine_candidates
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}removed_reachable_quarantine_candidates: {}",
-        report.removed_reachable_quarantine_candidates
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}removed_held_quarantine_candidates: {}",
-        report.removed_held_quarantine_candidates
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}scanned_retention_holds: {}",
-        report.scanned_retention_holds
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}removed_expired_retention_holds: {}",
-        report.removed_expired_retention_holds
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}removed_missing_retention_holds: {}",
-        report.removed_missing_retention_holds
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}scanned_webhook_deliveries: {}",
-        report.scanned_webhook_deliveries
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}removed_stale_webhook_deliveries: {}",
-        report.removed_stale_webhook_deliveries
-    )?;
-    writeln!(
-        writer,
-        "{prefix}{sep}removed_future_webhook_deliveries: {}",
-        report.removed_future_webhook_deliveries
-    )?;
+    for (name, value) in [
+        ("scanned_records", report.scanned_records),
+        ("referenced_objects", report.referenced_objects),
+        (
+            "scanned_quarantine_candidates",
+            report.scanned_quarantine_candidates,
+        ),
+        (
+            "removed_missing_quarantine_candidates",
+            report.removed_missing_quarantine_candidates,
+        ),
+        (
+            "removed_reachable_quarantine_candidates",
+            report.removed_reachable_quarantine_candidates,
+        ),
+        (
+            "removed_held_quarantine_candidates",
+            report.removed_held_quarantine_candidates,
+        ),
+        ("scanned_retention_holds", report.scanned_retention_holds),
+        (
+            "removed_expired_retention_holds",
+            report.removed_expired_retention_holds,
+        ),
+        (
+            "removed_missing_retention_holds",
+            report.removed_missing_retention_holds,
+        ),
+        (
+            "scanned_webhook_deliveries",
+            report.scanned_webhook_deliveries,
+        ),
+        (
+            "removed_stale_webhook_deliveries",
+            report.removed_stale_webhook_deliveries,
+        ),
+        (
+            "removed_future_webhook_deliveries",
+            report.removed_future_webhook_deliveries,
+        ),
+    ] {
+        writeln!(writer, "{prefix}{sep}{name}: {value}")?;
+    }
 
     writer.flush()
 }
