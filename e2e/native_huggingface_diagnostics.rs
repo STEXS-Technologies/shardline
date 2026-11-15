@@ -19,6 +19,10 @@ pub(super) fn script_lines(stderr: &[u8]) -> String {
 
 pub(super) fn categories(stdout: &[u8], stderr: &[u8]) -> String {
     let markers: &[(&str, &[&[u8]])] = &[
+        (
+            "missing-python-package",
+            &[b"ModuleNotFoundError: No module named"],
+        ),
         ("local-disk-full", &[b"No space left on device", b"ENOSPC"]),
         ("object-store-full", &[b"XMinioStorageFull", b"StorageFull"]),
         ("unauthorized", &[b"401 Unauthorized", b"401 Client Error"]),
@@ -66,5 +70,9 @@ fn diagnostics_never_echo_credentials_or_unrecognized_errors() {
         categories(b"private unknown failure", b"secret"),
         "unclassified"
     );
+    let missing = b"ModuleNotFoundError: No module named 'private-package-token'";
+    for (stdout, stderr) in [(missing.as_slice(), b"".as_slice()), (b"", missing)] {
+        assert_eq!(categories(stdout, stderr), "missing-python-package");
+    }
     assert_eq!(script_lines(b"secret\n  File \"<string>\", line 42, in <module>\n  File \"private-token\", line 9\n  File \"<string>\", line secret"), "42");
 }
