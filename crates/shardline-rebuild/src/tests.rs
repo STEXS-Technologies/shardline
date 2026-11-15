@@ -162,62 +162,37 @@ fn make_candidate_with_file_id(file_id: &str) -> VersionCandidate<&'static str> 
 }
 
 #[test]
-fn desired_reconstruction_file_ids_empty_candidates_returns_empty_set() {
-    let candidates: Vec<VersionCandidate<&str>> = Vec::new();
-    let result = desired_reconstruction_file_ids(&candidates);
-    assert!(result.is_empty());
-}
-
-#[test]
-fn desired_reconstruction_file_ids_includes_valid_xet_hash() {
-    let valid_hash = "a".repeat(64);
-    let candidates = vec![make_candidate_with_file_id(&valid_hash)];
-    let result = desired_reconstruction_file_ids(&candidates);
-    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&valid_hash).unwrap()));
-    assert_eq!(result.len(), 1);
-}
-
-#[test]
-fn desired_reconstruction_file_ids_filters_non_hash_file_ids() {
-    let valid_hash = "a".repeat(64);
-    let candidates = vec![
-        make_candidate_with_file_id(&valid_hash),
-        make_candidate_with_file_id("not-a-hash"),
-        make_candidate_with_file_id("path/to/file.txt"),
-    ];
-    let result = desired_reconstruction_file_ids(&candidates);
-    assert_eq!(result.len(), 1);
-    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&valid_hash).unwrap()));
-}
-
-#[test]
-fn desired_reconstruction_file_ids_deduplicates() {
-    let valid_hash = "b".repeat(64);
-    let candidates = vec![
-        make_candidate_with_file_id(&valid_hash),
-        make_candidate_with_file_id(&valid_hash),
-        make_candidate_with_file_id(&valid_hash),
-    ];
-    let result = desired_reconstruction_file_ids(&candidates);
-    assert_eq!(result.len(), 1);
-}
-
-#[test]
-fn desired_reconstruction_file_ids_multiple_unique_hashes() {
-    let hash1 = "a".repeat(64);
-    let hash2 = "b".repeat(64);
-    let hash3 = "c".repeat(64);
-    let candidates = vec![
-        make_candidate_with_file_id(&hash1),
-        make_candidate_with_file_id("invalid"),
-        make_candidate_with_file_id(&hash2),
-        make_candidate_with_file_id(&hash3),
-    ];
-    let result = desired_reconstruction_file_ids(&candidates);
-    assert_eq!(result.len(), 3);
-    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&hash1).unwrap()));
-    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&hash2).unwrap()));
-    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&hash3).unwrap()));
+fn reconstruction_ids_filter_and_deduplicate_candidates() {
+    let a = "a".repeat(64);
+    let b = "b".repeat(64);
+    let c = "c".repeat(64);
+    for (ids, expected) in [
+        (vec![], vec![]),
+        (vec![a.as_str()], vec![a.as_str()]),
+        (
+            vec![a.as_str(), "not-a-hash", "path/to/file.txt"],
+            vec![a.as_str()],
+        ),
+        (vec![b.as_str(), b.as_str(), b.as_str()], vec![b.as_str()]),
+        (
+            vec![a.as_str(), "invalid", b.as_str(), c.as_str()],
+            vec![a.as_str(), b.as_str(), c.as_str()],
+        ),
+    ] {
+        let candidates = ids
+            .iter()
+            .map(|id| make_candidate_with_file_id(id))
+            .collect::<Vec<_>>();
+        let expected = expected
+            .into_iter()
+            .map(|hash| shardline_index::parse_xet_hash_hex(hash).unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            desired_reconstruction_file_ids(&candidates),
+            expected,
+            "{ids:?}"
+        );
+    }
 }
 
 // ---- RebuildError From conversions ----
@@ -411,30 +386,6 @@ async fn run_index_rebuild_with_existing_latest_unchanged() {
     assert_eq!(report.scanned_version_records, 1);
     assert_eq!(report.rebuilt_latest_records, 0);
     assert_eq!(report.unchanged_latest_records, 1);
-}
-
-// ---- desired_reconstruction_file_ids preserves dirty report state ----
-
-#[test]
-fn desired_reconstruction_file_ids_does_not_modify_report_state() {
-    let mut report = empty_report();
-    push_issue(
-        &mut report,
-        IndexRebuildIssueKind::InvalidVersionFileId,
-        "loc".to_owned(),
-        IndexRebuildIssueDetail::InvalidFileId {
-            file_id: "bad".to_owned(),
-        },
-    )
-    .unwrap();
-    assert!(!report.is_clean());
-
-    let candidates = vec![make_candidate_with_file_id(&"a".repeat(64))];
-    let _result = desired_reconstruction_file_ids(&candidates);
-
-    // Report is still dirty — the function does not touch the report.
-    assert!(!report.is_clean());
-    assert_eq!(report.issue_count(), 1);
 }
 
 // ---- push_issue with many issues ----
