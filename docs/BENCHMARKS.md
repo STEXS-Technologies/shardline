@@ -4552,8 +4552,10 @@ harness source at `ee7f7d0f` is unchanged from `ab409963`.
 The control supports concurrent ingestion affecting reuse/packing choices rather
 than a chunk-boundary mismatch. The one- and two-replica ranges overlap, so this
 does not isolate a replica-count effect or establish a historical regression.
-Reducing the surplus requires ingestion coordination or verified reference
-rewriting/compaction; deleting referenced containers is not a safe GC shortcut.
+Ingestion must avoid repacking members that become reusable during an upload;
+existing surplus would need verified reference rewriting/compaction. Deleting
+referenced containers is not a safe GC shortcut. The buffered-member fix below
+addresses the demonstrated ingestion race.
 These measurements do not compare concurrent native Xet/basic LFS workloads or
 establish production throughput, cloud unit costs or a margin.
 
@@ -4572,6 +4574,48 @@ For the serial control, use another new directory with `--replicas 1`,
 `--datasets repeated`, `--clients 1`, and omit `--retention-expiry`. Retain the
 provenance, per-lane JSON, inventories and traces as described above; fixture
 service files contain disposable credentials.
+
+### Buffered-member reuse during concurrent ingestion (2026-11-15)
+
+Candidate `b00a06e8708bb3f24a9c6f8358190839382c6abd` fixes a late-discovery race
+in the shared S3/basic LFS packer. Chunks can miss discovery before another
+upload publishes, then remain buffered when a later chunk discovers and fully
+verifies that source. Before packing, the upload now reuses buffered members
+already covered by its verified, domain-filtered cache. Only this bounded batch
+is reordered for file offsets. This adds no metadata/object-store probes or
+locks for buffered members; final publication retains its deletion fences.
+
+The deterministic regression failed on the previous code: an identical upload
+repacked 17 buffered chunks. It now writes none. Its mixed-content case also
+checks that only the new prefix is packed, downloads match, response offsets
+stay ordered, and buffer admission is released. All 153 ingestion tests passed.
+Both PostgreSQL-required tests for source deletion/publication and slow
+verification releasing discovery locks passed separately; strict Clippy passed.
+
+A frozen Rust 1.99.0 dev binary, SHA-256
+`e585fb82334738ad568f4cdee1bc23ce48b114e74c42f55984005e1336737760`, passed
+the same twelve-lane PostgreSQL/MinIO matrix: 32 one-MiB objects, eight clients,
+one/two one-CPU, 1-GiB API replicas, three repetitions. All 1,728 final downloads
+matched, and traces reconciled with MinIO counters.
+
+| Data | Replicas | Final payload bytes in every run | Used physical members / distinct used chunk hashes |
+| --- | ---: | ---: | ---: |
+| Unique | 1 or 2 | 33,588,965 | 546 / 546 |
+| Repeated | 1 or 2 | 8,397,245 | 135 / 135 |
+
+The repeated lanes now match the earlier serial control: eight referenced
+containers, 8 MiB of distinct unpacked content, and no duplicate used members.
+Initial and final payload bytes were identical in every lane. All final GC logs
+reported zero active/new/retained quarantine candidates. This run used ordinary
+GC without another hour-long wait; it measures prevention of the earlier live
+surplus, not reclamation of existing duplicates. Unique ingestion still used
+128 backend requests and 1,956 top-level SQL calls per lane, matching the frozen
+baseline. Shared-host timings do not establish a production speedup or capacity.
+
+Reproduce with the matrix command above, the recorded candidate binary/revision,
+a new output directory, and omit `--retention-expiry`. Arbitrary overlapping
+files, concurrent native Xet/LFS clients, and production throughput still need
+qualification.
 
 ### Reusing validated upload descriptors (2026-11-15)
 
