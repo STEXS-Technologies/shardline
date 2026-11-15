@@ -4409,3 +4409,32 @@ six checks. Median check time decreased approximately 54%; this is a focused
 standalone index result, not a server, SDK, release-build, or container timing.
 Local-only index/CAS/storage tests, default S3 storage tests, a real MinIO
 round trip, and server/storage Clippy checks also passed.
+
+### Native Hugging Face split roles with PostgreSQL/MinIO (2026-11-15)
+
+The existing
+`native_huggingface_frontends::native_huggingface_cli_flows_with_split_roles_postgres_minio`
+E2E test passed at source snapshot `d6f873cd`, with the accompanying one-line
+E2E lockfile correction. Cargo initially rejected `--locked` because the separate
+E2E lockfile still listed Axum under the Xet adapter. Removing that obsolete edge
+preserved every package version and checksum; the locked offline rerun passed
+one test in 34.90 seconds (45 other tests filtered out).
+
+Used the existing CI client pins: `huggingface_hub==2.2.0`, `hf_xet==1.7.0`,
+`httpx==0.28.1`, `duckdb==1.5.5`, and `pyarrow==25.0.0`, in a separate environment
+on `PATH`. The first runtime attempt with an incomplete environment stopped at
+its missing `httpx` import; it did not qualify the deployment. The complete-client
+rerun exercised the stock CLI flow, including a 9 MiB Xet upload, and asserted
+that a native download traversed the transfer role with HTTP 206.
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo test --offline --locked \
+  --manifest-path e2e/Cargo.toml --test native_huggingface_cli_e2e \
+  native_huggingface_frontends::native_huggingface_cli_flows_with_split_roles_postgres_minio \
+  -- --ignored --exact
+```
+
+This adds remote-storage split-role client evidence to the local fault gate.
+Both role servers are Tokio tasks in one test process; Docker supplies the real
+PostgreSQL and MinIO services. It does not establish independent server-process
+failure recovery, multi-host isolation, or production capacity.

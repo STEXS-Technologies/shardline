@@ -3993,7 +3993,6 @@ dependencies = [
 name = "shardline-xet-adapter"
 version = "1.13.0"
 dependencies = [
- "axum",
  "blake3",
  "serde",
  "sha2 0.10.9",
