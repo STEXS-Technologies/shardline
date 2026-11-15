@@ -26,22 +26,24 @@ pub(crate) struct OciPostgresTestCluster {
 }
 
 pub(crate) async fn build_oci_postgres_test_cluster() -> Option<OciPostgresTestCluster> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let database_url = shardline_test_support::postgres_fixture_url("DATABASE_URL")?;
     let schema = format!(
         "oci_fixture_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
+            .expect("fixture clock after Unix epoch")
             .as_nanos()
     );
-    let admin = sqlx::PgPool::connect(&database_url).await.ok()?;
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect PostgreSQL OCI admin");
     sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&admin)
         .await
-        .ok()?;
+        .expect("create isolated OCI schema");
     admin.close().await;
-    let mut scoped_url = url::Url::parse(&database_url).ok()?;
+    let mut scoped_url = url::Url::parse(&database_url).expect("parse PostgreSQL OCI URL");
     let old_options = scoped_url
         .query_pairs()
         .find(|(key, _)| key == "options")
@@ -56,10 +58,18 @@ pub(crate) async fn build_oci_postgres_test_cluster() -> Option<OciPostgresTestC
         .query_pairs_mut()
         .extend_pairs(other_parameters)
         .append_pair("options", &format!("{old_options} -csearch_path={schema}"));
-    let bootstrap = sqlx::PgPool::connect(scoped_url.as_str()).await.ok()?;
-    crate::apply_database_migrations(&bootstrap).await.ok()?;
+    let bootstrap = sqlx::PgPool::connect(scoped_url.as_str())
+        .await
+        .expect("connect isolated OCI schema");
+    crate::apply_database_migrations(&bootstrap)
+        .await
+        .expect("migrate isolated OCI schema");
     bootstrap.close().await;
-    build_oci_postgres_test_cluster_for_url(scoped_url.as_str()).await
+    Some(
+        build_oci_postgres_test_cluster_for_url(scoped_url.as_str())
+            .await
+            .expect("configured PostgreSQL OCI nodes must initialize"),
+    )
 }
 
 pub(crate) async fn build_oci_postgres_test_cluster_for_url(

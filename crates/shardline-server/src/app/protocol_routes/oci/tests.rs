@@ -13,10 +13,9 @@ const TAG: &str = "latest";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() {
-    if std::env::var("DATABASE_URL").is_err() {
+    let Some(mut cluster) = build_oci_postgres_test_cluster().await else {
         return;
-    }
-    let mut cluster = build_oci_postgres_test_cluster().await.unwrap();
+    };
     let state = std::sync::Arc::get_mut(&mut cluster.node_a).unwrap();
     let backend = match &mut state.backend {
         crate::ServerBackend::Postgres(backend) => Some(backend),
@@ -113,7 +112,7 @@ async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_ordinary_gc_reclaims_row_scoped_abandoned_manifest_after_hold_release() {
     use shardline_index::{AsyncIndexStore as _, OciObjectStore as _};
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    let Some(url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
     let admin = sqlx::PgPool::connect(&url).await.unwrap();
@@ -345,10 +344,9 @@ async fn postgres_ordinary_gc_reclaims_row_scoped_abandoned_manifest_after_hold_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_interrupted_manifest_bytes_stay_hidden_until_publication() {
-    if std::env::var("DATABASE_URL").is_err() {
+    let Some(cluster) = build_oci_postgres_test_cluster().await else {
         return;
-    }
-    let cluster = build_oci_postgres_test_cluster().await.unwrap();
+    };
     let backend = match &cluster.node_a.backend {
         crate::ServerBackend::Postgres(backend) => Some(backend),
         crate::ServerBackend::Local(_) => None,
@@ -456,10 +454,9 @@ async fn postgres_interrupted_manifest_bytes_stay_hidden_until_publication() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_manifest_dependency_pending_delete_returns_retryable_error() {
-    if std::env::var("DATABASE_URL").is_err() {
+    let Some(cluster) = build_oci_postgres_test_cluster().await else {
         return;
-    }
-    let cluster = build_oci_postgres_test_cluster().await.unwrap();
+    };
     let backend = match &cluster.node_a.backend {
         crate::ServerBackend::Postgres(backend) => Some(backend),
         crate::ServerBackend::Local(_) => None,
@@ -1834,19 +1831,9 @@ async fn manifest_integrity_and_rejection_local() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manifest_integrity_and_rejection_postgres() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+    let Some(cluster) = build_oci_postgres_test_cluster().await else {
         return;
     };
-    let pool = sqlx::PgPool::connect(&database_url)
-        .await
-        .expect("configured PostgreSQL must connect");
-    crate::apply_database_migrations(&pool)
-        .await
-        .expect("apply migrations");
-    pool.close().await;
-    let cluster = build_oci_postgres_test_cluster()
-        .await
-        .expect("configured PostgreSQL cluster must initialize");
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
