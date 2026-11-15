@@ -287,150 +287,49 @@ mod tests {
         assert!(boundary <= 256);
     }
 
-    /// Verify that streaming CDC (small frames) produces the same chunk
-    /// boundaries as batch CDC (entire data at once).
-    ///
-    /// This is the critical correctness property: chunk boundaries must
-    /// be identical regardless of how data is fed in.
-    #[test]
-    fn cdc_streaming_matches_batch_boundaries() {
-        // Generate pseudo-random data large enough for multiple chunks
-        // With target=1024, min=128, max=2048 — need several KB
-        let mut data = Vec::with_capacity(256 * 1024);
-        let mut state: u64 = 42;
-        while data.len() < 256 * 1024 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            data.extend_from_slice(&state.to_le_bytes());
-        }
-        data.truncate(256 * 1024);
-
-        let target = 1024;
-
-        // --- Batch mode: feed entire data, collect boundaries ---
-        let mut batch_chunker = CdcChunker::new(target);
-        let mut batch_boundaries = Vec::new();
-        let mut batch_pos = 0;
-        loop {
-            let remaining = &data[batch_pos..];
-            if remaining.is_empty() {
-                break;
-            }
-            match batch_chunker.find_boundary(remaining) {
-                Some(b) => {
-                    batch_pos += b;
-                    batch_chunker.reset();
-                    batch_boundaries.push(batch_pos);
-                }
-                None => break,
-            }
-        }
-        // Flush remaining as final chunk
-        if batch_pos < data.len() {
-            batch_boundaries.push(data.len());
-        }
-
-        // --- Streaming mode: feed in small frames (128 bytes each) ---
-        let mut stream_chunker = CdcChunker::new(target);
-        let mut stream_boundaries = Vec::new();
-        let mut accumulated = Vec::new();
-        let frame_size = 128;
-
-        for chunk_start in (0..data.len()).step_by(frame_size) {
-            let end = (chunk_start + frame_size).min(data.len());
-            accumulated.extend_from_slice(&data[chunk_start..end]);
-
-            loop {
-                if accumulated.len() < stream_chunker.min_chunk() {
+    fn streamed_boundaries(data: &[u8], target: usize, frame_size: usize) -> Vec<usize> {
+        let mut chunker = CdcChunker::new(target);
+        let mut pending = Vec::new();
+        let mut boundaries = Vec::new();
+        let mut consumed = 0;
+        for frame in data.chunks(frame_size) {
+            pending.extend_from_slice(frame);
+            while pending.len() >= chunker.min_chunk() {
+                let Some(boundary) = chunker.find_boundary(&pending) else {
                     break;
-                }
-                match stream_chunker.find_boundary(&accumulated) {
-                    Some(b) => {
-                        // Record absolute offset
-                        let abs_offset = stream_boundaries.last().copied().unwrap_or(0) + b;
-                        stream_boundaries.push(abs_offset);
-                        // Remove consumed bytes from front
-                        accumulated = accumulated.split_off(b);
-                        stream_chunker.reset();
-                    }
-                    None => break,
-                }
+                };
+                consumed += boundary;
+                boundaries.push(consumed);
+                pending = pending.split_off(boundary);
             }
         }
-        // Flush remaining
-        if !accumulated.is_empty() {
-            let abs_offset = stream_boundaries.last().copied().unwrap_or(0) + accumulated.len();
-            stream_boundaries.push(abs_offset);
+        if !pending.is_empty() {
+            boundaries.push(data.len());
         }
-
-        // --- Compare ---
-        assert_eq!(
-            batch_boundaries,
-            stream_boundaries,
-            "Streaming CDC boundaries differ from batch!\n  batch:   {:?}\n  stream:  {:?}",
-            batch_boundaries.iter().take(20).collect::<Vec<_>>(),
-            stream_boundaries.iter().take(20).collect::<Vec<_>>(),
-        );
-        assert!(
-            batch_boundaries.len() >= 5,
-            "Expected multiple chunks, got {}",
-            batch_boundaries.len()
-        );
+        boundaries
     }
 
-    /// Verify CDC produces deterministic boundaries across different
-    /// call patterns — matching xet-data's streaming contract.
     #[test]
-    fn cdc_boundary_determinism_across_frame_sizes() {
-        let mut data = Vec::with_capacity(64 * 1024);
-        let mut state: u64 = 99;
-        while data.len() < 64 * 1024 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            data.extend_from_slice(&state.to_le_bytes());
-        }
-        data.truncate(64 * 1024);
-
-        let target = 256;
-
-        // Feed at various frame sizes and collect boundaries
-        let collect_boundaries = |frame_size: usize| -> Vec<usize> {
-            let mut chunker = CdcChunker::new(target);
-            let mut boundaries = Vec::new();
-            let mut accumulated = Vec::new();
-
-            for chunk_start in (0..data.len()).step_by(frame_size) {
-                let end = (chunk_start + frame_size).min(data.len());
-                accumulated.extend_from_slice(&data[chunk_start..end]);
-
-                loop {
-                    if accumulated.len() < chunker.min_chunk() {
-                        break;
-                    }
-                    match chunker.find_boundary(&accumulated) {
-                        Some(b) => {
-                            let abs = boundaries.last().copied().unwrap_or(0) + b;
-                            boundaries.push(abs);
-                            accumulated = accumulated.split_off(b);
-                            chunker.reset();
-                        }
-                        None => break,
-                    }
-                }
+    fn streaming_boundaries_are_independent_of_frame_size() {
+        for (length, mut seed, target, frames) in [
+            (256 * 1024, 42_u64, 1024, &[128][..]),
+            (64 * 1024, 99_u64, 256, &[1, 17, 32, 64, 128, 256, 512][..]),
+        ] {
+            let mut data = Vec::with_capacity(length);
+            while data.len() < length {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                data.extend_from_slice(&seed.to_le_bytes());
             }
-            if !accumulated.is_empty() {
-                let abs = boundaries.last().copied().unwrap_or(0) + accumulated.len();
-                boundaries.push(abs);
+            data.truncate(length);
+            let expected = streamed_boundaries(&data, target, data.len());
+            assert!(expected.len() >= 5);
+            for &frame in frames {
+                assert_eq!(
+                    streamed_boundaries(&data, target, frame),
+                    expected,
+                    "target={target}, frame={frame}"
+                );
             }
-            boundaries
-        };
-
-        let ref_boundaries = collect_boundaries(data.len()); // batch
-        for frame_size in [1, 17, 32, 64, 128, 256, 512] {
-            let boundaries = collect_boundaries(frame_size);
-            assert_eq!(
-                boundaries, ref_boundaries,
-                "Frame size {} produced different boundaries",
-                frame_size
-            );
         }
     }
 }

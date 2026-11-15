@@ -331,46 +331,6 @@ mod tests {
         boundaries
     }
 
-    /// The server's streaming-frame boundary driver (its `cdc.rs` test logic).
-    fn server_stream_boundaries(data: &[u8], target: usize, frame_size: usize) -> Vec<usize> {
-        let mut chunker = CdcChunker::new(target);
-        let mut boundaries = Vec::new();
-        let mut accumulated = Vec::new();
-        let mut start = 0;
-        while start < data.len() {
-            let end = start.wrapping_add(frame_size).min(data.len());
-            accumulated.extend_from_slice(data.get(start..end).unwrap_or_default());
-            loop {
-                if accumulated.len() < chunker.min_chunk() {
-                    break;
-                }
-                match chunker.find_boundary(&accumulated) {
-                    Some(boundary) => {
-                        let abs = boundaries
-                            .last()
-                            .copied()
-                            .unwrap_or(0usize)
-                            .wrapping_add(boundary);
-                        boundaries.push(abs);
-                        accumulated = accumulated.split_off(boundary);
-                        chunker.reset();
-                    }
-                    None => break,
-                }
-            }
-            start = end;
-        }
-        if !accumulated.is_empty() {
-            let abs = boundaries
-                .last()
-                .copied()
-                .unwrap_or(0usize)
-                .wrapping_add(accumulated.len());
-            boundaries.push(abs);
-        }
-        boundaries
-    }
-
     /// My chunker streaming boundary driver (via `next_block_bytes`).
     fn my_stream_boundaries(data: &[u8], target: usize, frame_size: usize) -> Vec<usize> {
         let mut chunker = Chunker::new(target);
@@ -610,22 +570,14 @@ mod tests {
         ];
         for (name, data) in cases {
             for target in [1024usize, 4096, 65536] {
-                let server_batch = server_batch_boundaries(&data, target);
-                let server_stream = server_stream_boundaries(&data, target, 128);
-                let my_batch = my_batch_boundaries(&data, target);
-                let my_stream = my_stream_boundaries(&data, target, 128);
-                assert_eq!(
-                    my_batch, server_batch,
-                    "{name} target {target}: batch boundaries differ from server batch"
-                );
-                assert_eq!(
-                    my_stream, server_stream,
-                    "{name} target {target}: streaming boundaries differ from server streaming"
-                );
-                assert_eq!(
-                    server_stream, server_batch,
-                    "{name} target {target}: server streaming must equal server batch"
-                );
+                let expected = server_batch_boundaries(&data, target);
+                for actual in [
+                    my_batch_boundaries(&data, target),
+                    my_stream_boundaries(&data, target, 128),
+                    my_next_block_boundaries(&data, target, 128),
+                ] {
+                    assert_eq!(actual, expected, "{name} target {target}");
+                }
             }
         }
     }
@@ -634,17 +586,12 @@ mod tests {
     fn chunker_determinism_across_frame_sizes_matches_server() {
         let data = lcg_data(64 * 1024, 99);
         let target = 256;
-        let ref_stream = server_stream_boundaries(&data, target, data.len());
+        let ref_stream = server_batch_boundaries(&data, target);
         for frame_size in [1, 17, 32, 64, 128, 256, 512] {
             let mine = my_stream_boundaries(&data, target, frame_size);
-            let server = server_stream_boundaries(&data, target, frame_size);
             assert_eq!(
                 mine, ref_stream,
                 "frame size {frame_size} produced different boundaries"
-            );
-            assert_eq!(
-                server, ref_stream,
-                "server frame size {frame_size} produced different boundaries"
             );
         }
     }
