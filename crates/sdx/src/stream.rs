@@ -713,8 +713,8 @@ pub trait DataWriter: Send {
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when the range is not sequential, the writer is
-    /// finished, a prior background task failed, or the writer channel closed.
+    /// Returns [`SdxError`] when the range is not sequential, a prior
+    /// background task failed, or the writer channel closed.
     async fn set_next_term_data_source(
         &mut self,
         byte_range: Range<u64>,
@@ -948,11 +948,6 @@ impl DataWriter for SequentialWriter {
         while let Some(result) = self.active_tasks.try_join_next() {
             result.map_err(|error| SdxError::TaskJoin(error.to_string()))??;
         }
-        if self.finished {
-            return Err(SdxError::StreamInternal(
-                "writer has already finished".to_owned(),
-            ));
-        }
         if byte_range.start != self.next_position {
             return Err(SdxError::StreamInternal(format!(
                 "byte range not sequential: expected start at {}, got {}",
@@ -1015,11 +1010,6 @@ impl DataWriter for SequentialWriter {
 
     async fn finish(mut self: Box<Self>) -> Result<u64, SdxError> {
         self.run_state.check_background_error()?;
-        if self.finished {
-            return Err(SdxError::StreamInternal(
-                "writer has already finished".to_owned(),
-            ));
-        }
         if self.sender.send(SequentialRetrievalItem::Finish).is_err() {
             self.run_state.check_background_error()?;
             return Err(SdxError::StreamInternal(
@@ -1030,28 +1020,21 @@ impl DataWriter for SequentialWriter {
         while let Some(result) = self.active_tasks.join_next().await {
             result.map_err(|error| SdxError::TaskJoin(error.to_string()))??;
         }
-        match self.background_handle.take() {
-            Some(handle) => {
-                handle.await.map_err(|error| {
-                    SdxError::StreamInternal(format!("background writer task failed: {error}"))
-                })?;
-                self.run_state.check_background_error()?;
-                let actual_bytes = self.bytes_written.load(Ordering::Relaxed);
-                if actual_bytes != expected_bytes {
-                    return Err(SdxError::StreamInternal(format!(
-                        "bytes written mismatch: expected {expected_bytes} bytes, wrote {actual_bytes} bytes"
-                    )));
-                }
-                self.finished = true;
-                Ok(actual_bytes)
-            }
-            None => {
-                // Streaming mode: no background writer thread; the consumer
-                // (DownloadStream) reads items directly from the channel.
-                self.finished = true;
-                Ok(expected_bytes)
+        if let Some(handle) = self.background_handle.take() {
+            handle.await.map_err(|error| {
+                SdxError::StreamInternal(format!("background writer task failed: {error}"))
+            })?;
+            self.run_state.check_background_error()?;
+            let actual_bytes = self.bytes_written.load(Ordering::Relaxed);
+            if actual_bytes != expected_bytes {
+                return Err(SdxError::StreamInternal(format!(
+                    "bytes written mismatch: expected {expected_bytes} bytes, wrote {actual_bytes} bytes"
+                )));
             }
         }
+        // Streaming mode leaves delivery to the consumer; writer mode verified it above.
+        self.finished = true;
+        Ok(expected_bytes)
     }
 }
 
@@ -1189,11 +1172,6 @@ impl DataWriter for UnorderedWriter {
             self.total_bytes_sent = self
                 .total_bytes_sent
                 .saturating_add(result.map_err(|error| SdxError::TaskJoin(error.to_string()))??);
-        }
-        if self.finished {
-            return Err(SdxError::StreamInternal(
-                "writer has already finished".to_owned(),
-            ));
         }
         let expected_size = byte_range.end.saturating_sub(byte_range.start);
         self.progress
