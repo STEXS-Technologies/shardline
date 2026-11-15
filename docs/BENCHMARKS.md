@@ -3750,15 +3750,15 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`c78b7e1e5001220241cbbe085135298ed1b35d97`. It counts all tracked `.rs`
+`f1b385b8142d3de65c3ff8a64abe9394990a6bb9`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 582,344 | 21,305 (3.53%) |
-| Server | 220,570 | 211,584 | 8,986 (4.07%) |
+| Entire repository | 603,649 | 581,535 | 22,114 (3.66%) |
+| Server | 220,570 | 211,158 | 9,412 (4.27%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
@@ -3778,12 +3778,12 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
-This refresh includes 877 fewer Rust lines since the previously measured
-`7b101b0b` snapshot. It removes an unreachable retention-repair action and an
-optional request-connection mode, shares chunk submission, uses the pinned
-Gear table, and simplifies completion ordering and verified reuse control flow.
-Buffer-pool tests now check allocation reuse, and the task-admission test uses
-real asynchronous storage tasks rather than a synchronous blackhole store.
+This refresh includes 809 fewer Rust lines since `c78b7e1e`. The client and
+server share one CDC boundary engine; SDK metadata decoding no longer copies
+identical response structs; Xorb packing reuses the core footer writer and
+already-computed chunk hashes. Shared shard field readers also fix legacy v2
+imports. Real-server SDK tests moved to the E2E workspace rather than being
+removed; standalone SDK tests no longer pull in the full server.
 
 At `c78b7e1e`, all 23 selected server CDC and client chunker tests passed,
 including upstream golden boundaries and client/server equivalence across frame
@@ -3831,11 +3831,11 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' c78b7e1e5001220241cbbe085135298ed1b35d97 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' c78b7e1e5001220241cbbe085135298ed1b35d97 -- '*.rs' | wc -l
+git grep -I -n '^' f1b385b8142d3de65c3ff8a64abe9394990a6bb9 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' f1b385b8142d3de65c3ff8a64abe9394990a6bb9 -- '*.rs' | wc -l
 ```
 
-The cleanup preserves incremental build artifacts, narrows ordinary binary and
+The cleanup reuses Cargo build artifacts, narrows ordinary binary and
 integration-test targets, reuses the pinned Nextest installer, removes unused
 dependencies/features, shares root/E2E Cargo artifacts in the E2E CI job and
 avoids unnecessary CI tool installation. Local E2E commands also
@@ -3969,6 +3969,41 @@ measure a full SDK or index build-time improvement. Server/CLI builds retain
 HTTP middleware, so no server/CLI, release or CI speedup is attributed to this
 change. Both metrics feature configurations, Xet HTTP fixtures, and the real
 server metrics semantics test pass; default-profile and CI gates remain intact.
+
+### Standalone SDK test compilation
+
+On November 15, 2026, two fresh-artifact pairs compared
+`23b9ad7af34a3bf524e3a915e666ab7937b5496d` with
+`f1b385b8142d3de65c3ff8a64abe9394990a6bb9`. Both used Linux x86_64,
+Rust/Cargo 1.99.0, four jobs, disabled dev/test debug information and incremental
+compilation, no compiler wrapper, and a new target directory for every build.
+Registry and filesystem caches remained warm. Run order was baseline, candidate,
+candidate, baseline; all four builds passed.
+
+| SDK-only test compilation | Baseline | Current branch |
+| --- | ---: | ---: |
+| Wall time, first sample | 83.53 s | 49.50 s |
+| Wall time, second sample | 80.15 s | 48.14 s |
+| Distinct packages in the host dependency tree | 447 | 362 |
+
+The SDK no longer has a server dev-dependency. Its real-server suite and five
+container interoperability tests now live in the existing E2E workspace, with
+CI selections updated. SDK unit and mock-protocol tests remain local. Thus this
+measures cheaper SDK-only iteration, not the complete qualification workload or
+a server/CLI build improvement. The 256 MiB and ignored 1 GiB memory gates also
+passed after moving, with their original limits.
+
+These are shared-host observations, not isolated cold-machine or hosted-CI
+measurements. Background host work was not excluded; a graph refresh could
+overlap the first baseline. The samples do not establish a universal build-time
+percentage. Reproduce from each revision with an initially absent target path:
+
+```bash
+/usr/bin/time -v env RUSTC_WRAPPER= CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 \
+  CARGO_TARGET_DIR=/path/to/new-sdk-target-REVISION-SAMPLE \
+  cargo +1.99.0 test --offline --locked --no-run -p sdx --tests
+```
 
 ## Shared protocol chunk reuse qualification
 
