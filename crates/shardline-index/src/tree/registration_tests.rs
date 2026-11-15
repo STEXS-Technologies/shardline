@@ -116,6 +116,47 @@ where
     }
 }
 
+async fn revision_listing_contract<S: TreeStore>(store: &S, owner: &str)
+where
+    S::Error: std::fmt::Debug,
+{
+    let repo = RepoKey::new("generic", owner, "repo");
+    let names = ["rev-00", "rev-01", "rev-02", "rev-03", "rev-04"];
+    for name in names.into_iter().rev() {
+        let revision = RevisionRecord {
+            provider: repo.provider.clone(),
+            owner: repo.owner.clone(),
+            repo: repo.repo.clone(),
+            revision: name.to_owned(),
+            created_at_unix_seconds: 1,
+            updated_at_unix_seconds: 1,
+        };
+        assert!(store.upsert_revision(&revision).await.unwrap());
+    }
+    for cursor in [None, Some(""), Some("rev-02"), Some("rev-025"), Some("z")] {
+        for limit in [0, 1, 3, 100] {
+            let expected: Vec<_> = names
+                .iter()
+                .copied()
+                .filter(|name| cursor.is_none_or(|cursor| *name > cursor))
+                .take(limit)
+                .collect();
+            let actual = store.list_revisions(&repo, cursor, limit).await.unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|record| record.revision.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "cursor={cursor:?} limit={limit}"
+            );
+        }
+    }
+    for name in names {
+        assert_eq!(store.delete_revision(&repo, name).await.unwrap(), 1);
+    }
+}
+
 async fn revision_pruning_contract<S: TreeStore>(store: &S, owner: &str)
 where
     S::Error: std::fmt::Debug,
@@ -505,6 +546,7 @@ where
 async fn memory_tree_registration_transaction_contract() {
     let store = crate::MemoryIndexStore::new();
     tree_scan_contract(&store, "memory-scan-contract").await;
+    revision_listing_contract(&store, "memory-listing-contract").await;
     revision_pruning_contract(&store, "memory-pruning-contract").await;
     transactional_registration(&store, "memory").await;
     concurrent_register_delete(&store, "memory-race").await;
@@ -519,6 +561,7 @@ async fn sqlite_tree_registration_transaction_contract() {
     let tmp = tempfile::tempdir().unwrap();
     let store = crate::LocalIndexStore::open(tmp.path().to_path_buf());
     tree_scan_contract(&store, "sqlite-scan-contract").await;
+    revision_listing_contract(&store, "sqlite-listing-contract").await;
     revision_pruning_contract(&store, "sqlite-pruning-contract").await;
     transactional_registration(&store, "sqlite").await;
     registration_rollback(&store, "sqlite-rollback").await;
@@ -542,6 +585,7 @@ async fn postgres_tree_registration_transaction_contract() {
     let store = crate::PostgresIndexStore::new(pool.clone());
     let owner = format!("registration-{}", std::process::id());
     tree_scan_contract(&store, &format!("{owner}-scan-contract")).await;
+    revision_listing_contract(&store, &format!("{owner}-listing-contract")).await;
     revision_pruning_contract(&store, &format!("{owner}-pruning-contract")).await;
     transactional_registration(&store, &owner).await;
     registration_rollback(&store, &format!("{owner}-rollback")).await;

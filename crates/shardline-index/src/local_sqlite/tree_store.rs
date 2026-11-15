@@ -1033,37 +1033,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_revisions_respects_limit_and_cursor() {
-        let store = make_store();
-        for n in 0..5u8 {
-            let rev = RevisionRecord {
-                provider: "github".to_owned(),
-                owner: "owner".to_owned(),
-                repo: "repo".to_owned(),
-                revision: format!("rev-{n:02}"),
-                created_at_unix_seconds: u64::from(n),
-                updated_at_unix_seconds: u64::from(n),
-            };
-            assert!(TreeStore::upsert_revision(&store, &rev).await.unwrap());
-        }
-
-        // A bounded listing returns at most `limit` rows, ordered by revision.
-        let first = TreeStore::list_revisions(&store, &repo_key(), None, 3)
-            .await
-            .unwrap();
-        let names: Vec<&str> = first.iter().map(|r| r.revision.as_str()).collect();
-        assert_eq!(names, vec!["rev-00", "rev-01", "rev-02"]);
-
-        // The cursor resumes after the last returned revision name.
-        let cursor = first.last().unwrap().revision.clone();
-        let rest = TreeStore::list_revisions(&store, &repo_key(), Some(&cursor), 100)
-            .await
-            .unwrap();
-        let names: Vec<&str> = rest.iter().map(|r| r.revision.as_str()).collect();
-        assert_eq!(names, vec!["rev-03", "rev-04"]);
-    }
-
-    #[tokio::test]
     async fn upsert_revision_returns_false_on_update() {
         let store = make_store();
         let rev = RevisionRecord {
