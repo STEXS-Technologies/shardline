@@ -40,7 +40,7 @@ fn check_terms(ranges: &[(usize, usize)], expected_rechecks: usize) {
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "ordered", None).unwrap();
     let mut verifier = file_digests::FileDigestVerifier::default();
     let (records, identities) = build_file_records_with_cache(
-        vec![file],
+        &[file],
         &objects,
         Some(&scope),
         None,

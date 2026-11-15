@@ -467,7 +467,7 @@ fn source_validation_and_file_digest_share_materializations() {
         };
         let mut verifier = file_digests::FileDigestVerifier::default();
         let (records, identities) = build_file_records_with_cache(
-            vec![file],
+            &[file],
             &objects,
             Some(&repository),
             None,
@@ -584,7 +584,7 @@ fn cached_source_change_is_rejected(
         )),
     };
     build_file_records_with_cache(
-        vec![file],
+        &[file],
         &objects,
         None,
         None,

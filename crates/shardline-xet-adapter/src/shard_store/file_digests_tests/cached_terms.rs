@@ -93,7 +93,7 @@ fn cached_contiguous_terms_preserve_order_and_reject_forged_splits() {
             }
             let mut verifier = file_digests::FileDigestVerifier::default();
             let result = build_file_records_with_cache(
-                vec![seed.clone(), target],
+                &[seed.clone(), target],
                 &objects,
                 Some(&scope),
                 None,

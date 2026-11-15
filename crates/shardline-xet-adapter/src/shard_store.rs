@@ -460,25 +460,17 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
         .map_err(|error| invalid_serialized_shard(&error))?;
     let version = header.version;
     let bounded_shard = read_bounded_shard_sections(&mut shard_reader, limits, version)?;
-    let mut in_memory_shard = MDBInMemoryShard::default();
     validate_referenced_xorb_count(&bounded_shard.file_infos, limits.max_xorbs().get())?;
     let mut xorb_cache = HashMap::new();
     let mut file_digests = file_digests::FileDigestVerifier::default();
     file_digests.parallel_digest = work.parallel_digest;
     let mut member_references = member_references;
 
-    for file_info in &bounded_shard.file_infos {
-        checkpoint()?;
-        in_memory_shard
-            .add_file_reconstruction_info(file_info.clone())
-            .map_err(|error| invalid_serialized_shard(&error))?;
-    }
-
     // Visit sources in logical file order so validation and SHA-256 derivation
     // share the same bounded materialization. Verify all client CAS metadata,
     // including unreferenced blocks, before producing a publishable result.
     let (records, file_identities) = build_file_records_with_cache(
-        bounded_shard.file_infos,
+        &bounded_shard.file_infos,
         object_store,
         repository_scope,
         member_references.as_deref_mut(),
@@ -488,6 +480,13 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
     )?;
     drop(file_digests);
 
+    let mut in_memory_shard = MDBInMemoryShard::default();
+    for file_info in bounded_shard.file_infos {
+        checkpoint()?;
+        in_memory_shard
+            .add_file_reconstruction_info(file_info)
+            .map_err(|error| invalid_serialized_shard(&error))?;
+    }
     for xorb_info in bounded_shard.xorb_infos {
         checkpoint()?;
         let verified = match xorb_cache.entry(xorb_info.metadata.xorb_hash) {
@@ -785,7 +784,7 @@ pub fn shard_hash_from_object_key_if_present(
 }
 
 fn build_file_records_with_cache(
-    file_infos: Vec<MDBFileInfo>,
+    file_infos: &[MDBFileInfo],
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     mut member_references: Option<&mut HashSet<ObjectKey>>,
@@ -960,7 +959,7 @@ fn validate_referenced_xorb_count(
     let mut referenced_xorbs = HashSet::new();
     for file_info in file_infos {
         for segment in &file_info.segments {
-            referenced_xorbs.insert(segment.xorb_hash.hex());
+            referenced_xorbs.insert(segment.xorb_hash);
             if referenced_xorbs.len() > max_xorbs {
                 return Err(XetAdapterError::TooManyShardTerms);
             }

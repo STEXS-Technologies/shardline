@@ -135,7 +135,7 @@ async fn exercise(fault: Fault) -> Result<(), XetAdapterError> {
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "streaming", None).unwrap();
         let mut verifier = file_digests::FileDigestVerifier::default();
         let (records, identities) = build_file_records_with_cache(
-            vec![file],
+            &[file],
             &objects,
             Some(&scope),
             None,
