@@ -1666,58 +1666,26 @@ mod tests {
         assert!(hashes.contains(&second_chunk.hex()));
     }
 
-    // ── file_section_followed_entries ────────────────────────────────────
-
     #[test]
-    fn file_section_followed_entries_without_verification_or_metadata() {
-        let seg_count = 3usize;
-        let header = FileDataSequenceHeader::new(
-            shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count as u64,
-            false,
-            false,
-        );
-        let result = super::file_section_followed_entries(&header, seg_count).unwrap();
-        assert_eq!(result, seg_count);
-    }
-
-    #[test]
-    fn file_section_followed_entries_with_verification() {
-        let seg_count = 3usize;
-        let header = FileDataSequenceHeader::new(
-            shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count as u64,
-            true,
-            false,
-        );
-        let result = super::file_section_followed_entries(&header, seg_count).unwrap();
-        assert_eq!(result, seg_count + seg_count);
-    }
-
-    #[test]
-    fn file_section_followed_entries_with_metadata_ext() {
-        let seg_count = 3usize;
-        let header = FileDataSequenceHeader::new(
-            shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count as u64,
-            false,
-            true,
-        );
-        let result = super::file_section_followed_entries(&header, seg_count).unwrap();
-        assert_eq!(result, seg_count + 1);
-    }
-
-    #[test]
-    fn file_section_followed_entries_with_both() {
-        let seg_count = 2usize;
-        let header = FileDataSequenceHeader::new(
-            shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count as u64,
-            true,
-            true,
-        );
-        let result = super::file_section_followed_entries(&header, seg_count).unwrap();
-        assert_eq!(result, seg_count + seg_count + 1);
+    fn file_section_entry_counts_include_verification_and_metadata() {
+        for (segments, verification, metadata, expected) in [
+            (3, false, false, 3),
+            (3, true, false, 6),
+            (3, false, true, 4),
+            (2, true, true, 5),
+        ] {
+            let header = FileDataSequenceHeader::new(
+                compute_data_hash(b"h"),
+                segments as u64,
+                verification,
+                metadata,
+            );
+            assert_eq!(
+                super::file_section_followed_entries(&header, segments).unwrap(),
+                expected,
+                "segments={segments}, verification={verification}, metadata={metadata}",
+            );
+        }
     }
 
     // ── validate_referenced_xorb_count ────────────────────────────────────
@@ -1778,36 +1746,41 @@ mod tests {
     }
 
     #[test]
-    fn xorb_range_info_packed_start_zero_for_index_zero() {
-        let info = range_info(&[100, 200, 300]);
-        assert_eq!(info.packed_start(0).unwrap(), 0);
+    fn xorb_range_start_maps_chunk_boundaries_and_rejects_missing_entries() {
+        let cases: &[(&[u64], u64, Option<u64>)] = &[
+            (&[100, 200, 300], 0, Some(0)),
+            (&[100, 200, 300], 1, Some(100)),
+            (&[100, 200, 300], 2, Some(200)),
+            (&[100, 200], 3, None),
+            (&[100], 0, Some(0)),
+            (&[100], 2, None),
+        ];
+        for &(ends, index, expected) in cases {
+            assert_eq!(
+                range_info(ends).packed_start(index).ok(),
+                expected,
+                "ends={ends:?}, start={index}",
+            );
+        }
     }
 
     #[test]
-    fn xorb_range_info_packed_start_uses_previous_chunk_end() {
-        let info = range_info(&[100, 200, 300]);
-        assert_eq!(info.packed_start(1).unwrap(), 100);
-        assert_eq!(info.packed_start(2).unwrap(), 200);
-    }
-
-    #[test]
-    fn xorb_range_info_packed_start_rejects_past_end() {
-        let info = range_info(&[100, 200]);
-        assert!(info.packed_start(3).is_err());
-    }
-
-    #[test]
-    fn xorb_range_info_packed_end_uses_zero_based_index() {
-        let info = range_info(&[100, 200, 300]);
-        assert_eq!(info.packed_end(1).unwrap(), 100);
-        assert_eq!(info.packed_end(2).unwrap(), 200);
-        assert_eq!(info.packed_end(3).unwrap(), 300);
-    }
-
-    #[test]
-    fn xorb_range_info_packed_end_rejects_past_end() {
-        let info = range_info(&[100, 200]);
-        assert!(info.packed_end(3).is_err());
+    fn xorb_range_end_preserves_zero_index_compatibility_and_bounds() {
+        let cases: &[(&[u64], u64, Option<u64>)] = &[
+            (&[100, 200, 300], 1, Some(100)),
+            (&[100, 200, 300], 2, Some(200)),
+            (&[100, 200, 300], 3, Some(300)),
+            (&[100, 200], 3, None),
+            (&[100, 200], 0, Some(100)),
+            (&[], 1, None),
+        ];
+        for &(ends, index, expected) in cases {
+            assert_eq!(
+                range_info(ends).packed_end(index).ok(),
+                expected,
+                "ends={ends:?}, end={index}",
+            );
+        }
     }
 
     // ── Pure helper function tests ────────────────────────────────────────
@@ -2189,42 +2162,6 @@ mod tests {
         }];
         let result = super::validate_referenced_xorb_count(&file_infos, 0);
         assert!(matches!(result, Err(XetAdapterError::TooManyShardTerms)));
-    }
-
-    // ── XorbRangeInfo edge cases ─────────────────────────────────────────
-
-    #[test]
-    fn xorb_range_info_packed_start_rejects_subtract_underflow_for_index_above_zero() {
-        // range_start > 0 but previous_index underflows when range_start = 0
-        let info = range_info(&[100]);
-        // This is fine - packed_start(0) = 0
-        assert_eq!(info.packed_start(0).unwrap(), 0);
-    }
-
-    #[test]
-    fn xorb_range_info_packed_start_rejects_index_beyond_list() {
-        let info = range_info(&[100]);
-        // packed_start(2) -> range_start=2 -> previous_index = 1 -> out of bounds
-        let result = info.packed_start(2);
-        assert!(
-            result.is_err(),
-            "expected error for out-of-bounds start index"
-        );
-    }
-
-    #[test]
-    fn xorb_range_info_packed_end_preserves_zero_index_compatibility() {
-        let info = range_info(&[100, 200]);
-        // packed_end(0) -> range_end = 0 -> saturating_sub(1) = 0 -> get(0) = Some(100)
-        assert_eq!(info.packed_end(0).unwrap(), 100);
-    }
-
-    #[test]
-    fn xorb_range_info_packed_end_rejects_empty_chunks() {
-        let info = range_info(&[]);
-        // packed_end(1) -> range_end = 1 -> saturating_sub(1) = 0 -> get(0) = None
-        let result = info.packed_end(1);
-        assert!(result.is_err(), "expected error for empty verified chunks");
     }
 
     // ── checked helper functions ─────────────────────────────────────────
