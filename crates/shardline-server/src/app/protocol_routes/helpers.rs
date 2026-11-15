@@ -58,15 +58,17 @@ pub(crate) async fn direct_object_response_from_snapshot(
         .backend
         .read_object_stream_from_snapshot(object_key, snapshot, range)
         .await?;
+    let selected_length = range
+        .map_or(Some(total_length), |range| range.len())
+        .ok_or(ServerError::Overflow)?;
     let mut response = if let Some(range) = range {
         metrics::record_range_request();
-        let transfer_length = range.len().ok_or(ServerError::Overflow)?;
         byte_range_stream_response(
             byte_stream,
             state.transfer_limiter.clone(),
             range,
             total_length,
-            transfer_length,
+            selected_length,
         )
     } else {
         full_byte_stream_response(byte_stream, state.transfer_limiter.clone(), total_length)
@@ -85,9 +87,6 @@ pub(crate) async fn direct_object_response_from_snapshot(
     }
     // Count the payload selected for this response before its body is polled.
     // This is not a count of bytes acknowledged by the client.
-    let selected_length = range
-        .map_or(Some(total_length), |range| range.len())
-        .ok_or(ServerError::Overflow)?;
     metrics::record_download(protocol, selected_length, 0.0, true);
     Ok(response)
 }
@@ -369,35 +368,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_optional_range_returns_none_when_header_absent() {
-        let headers = HeaderMap::new();
-        let result = parse_optional_range(&headers, 1024);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-    }
-
-    #[test]
-    fn parse_optional_range_parses_valid_range_header() {
+    fn optional_range_distinguishes_absent_valid_and_malformed_headers() {
         let mut headers = HeaderMap::new();
+        assert!(parse_optional_range(&headers, 100).unwrap().is_none());
         headers.insert(
             axum::http::header::RANGE,
             HeaderValue::from_static("bytes=0-9"),
         );
-        let result = parse_optional_range(&headers, 100);
-        let range = result.unwrap().unwrap();
-        assert_eq!(range.start(), 0);
-        assert_eq!(range.end_inclusive(), 9);
-    }
-
-    #[test]
-    fn parse_optional_range_rejects_invalid_range_header() {
-        let mut headers = HeaderMap::new();
+        let range = parse_optional_range(&headers, 100).unwrap().unwrap();
+        assert_eq!((range.start(), range.end_inclusive()), (0, 9));
         headers.insert(
             axum::http::header::RANGE,
             HeaderValue::from_static("bytes=abc-def"),
         );
-        let result = parse_optional_range(&headers, 100);
-        assert!(matches!(result, Err(ServerError::InvalidRangeHeader)));
+        assert!(matches!(
+            parse_optional_range(&headers, 100),
+            Err(ServerError::InvalidRangeHeader)
+        ));
     }
 
     #[test]
