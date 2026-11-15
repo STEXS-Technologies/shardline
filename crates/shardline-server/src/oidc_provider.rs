@@ -1434,6 +1434,12 @@ mod tests {
         let token_claims = result.unwrap();
         assert_eq!(token_claims.subject(), "admin-user");
         assert_eq!(token_claims.scope(), TokenScope::Write);
+        claims.insert("scope", serde_json::json!("admin"));
+        let administrative = encode(&header, &claims, &encoding_key).expect("sign admin claim");
+        assert!(matches!(
+            provider.verify_token(&administrative),
+            Err(AuthError::InvalidToken)
+        ));
     }
 
     #[test]

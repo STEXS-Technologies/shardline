@@ -237,12 +237,13 @@ repository and permissions; a valid signature alone does not establish that the
 issuer's assignment policy is correct.
 
 With repository mapping enabled, missing or malformed assignments are rejected
-and never fall back to `sub`. The selected permission claim must be `read`,
-`write`, or `admin` (`admin` maps to write); unknown or missing permissions are
-rejected. If the permission claim name is unset, it defaults to `scope`.
+and never fall back to `sub`. The selected permission claim must be `read` or `write`; `admin`, unknown, or
+missing permissions are rejected. If the permission claim name is unset, it defaults to `scope`.
 A configured permission name is also strict when used without repository mapping.
 The verified subject remains the actor, and internally issued credentials retain
-its assigned repository and permission.
+its assigned repository and permission. A platform administrator role is not a
+storage permission. External issuers that previously used `admin` must issue explicit
+`read` or `write` permissions; `admin` is rejected even with legacy claim mapping.
 
 Without these settings, the legacy subject-derived `oidc/<sub>` or `jwks/<sub>`
 repository mapping and read-default permission handling remain available. Use

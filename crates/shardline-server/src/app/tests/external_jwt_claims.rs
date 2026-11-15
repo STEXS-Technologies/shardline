@@ -84,7 +84,6 @@ async fn external_jwt_resource_mapping_preserves_scope_through_internal_token_is
         assert_eq!(other.scope(), TokenScope::Write);
         assert_eq!(other.repository().owner(), "tenant-b");
         assert_ne!(other.repository(), verified.repository());
-        writable["permissions"] = json!("admin");
         writable["aud"] = json!(["another-service", "storage"]);
         assert_eq!(
             auth.provider()
@@ -105,6 +104,7 @@ async fn external_jwt_resource_mapping_preserves_scope_through_internal_token_is
             ),
             ("permissions", None),
             ("permissions", Some(json!("unknown"))),
+            ("permissions", Some(json!("admin"))),
             ("permissions", Some(json!(["write"]))),
         ] {
             let mut invalid = payload.clone();
@@ -141,6 +141,13 @@ async fn external_jwt_resource_mapping_preserves_scope_through_internal_token_is
             .unwrap();
         assert_eq!(standard_claims.scope(), TokenScope::Write);
         assert_eq!(standard_claims.repository(), verified.repository());
+        standard_payload["scope"] = json!("admin");
+        assert!(
+            standard
+                .provider()
+                .verify_token(&signed(&standard_payload))
+                .is_err()
+        );
     }
 }
 

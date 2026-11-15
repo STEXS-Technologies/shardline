@@ -60,7 +60,8 @@ impl ExternalJwtClaims {
             .get(self.scope_claim.as_deref().unwrap_or("scope"))
             .and_then(serde_json::Value::as_str);
         let scope = match scope {
-            Some("write" | "admin") => TokenScope::Write,
+            Some("write") => TokenScope::Write,
+            Some("admin") => return Err(AuthError::InvalidToken),
             Some("read") => TokenScope::Read,
             _ if self.repository_claim.is_some() || self.scope_claim.is_some() => {
                 return Err(AuthError::InvalidToken);
