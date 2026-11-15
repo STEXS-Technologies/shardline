@@ -3785,8 +3785,8 @@ retains distinct inputs and expected results; the LFS reconstruction fixtures no
 also verify that stored objects actually span multiple chunks.
 
 The inventory revision is not a release qualification stamp. The complete local
-distributed gate below passed again at `c64bc0f8`, after the later LFS/Bazel
-handler and shared protocol-fixture changes. A combined run at `0eaeaa81` passed
+distributed gate below passed again at `5b056cb6`, after the shared protocol
+cleanup and multipart buffering changes. A combined run at `0eaeaa81` passed
 all 565 selected S3, OCI, LFS, Bazel, admin and shared protocol-helper library tests
 in 68.494 seconds, with PostgreSQL 16 configured and `SHARDLINE_REQUIRE_POSTGRES_TESTS=1`. The run included ignored tests
 in those modules, including the PostgreSQL/MinIO disconnected-copy recovery test;
@@ -4134,6 +4134,32 @@ released-version rollback. The multinode suite uses in-process roles and local
 SQLite/filesystem storage. This result does not establish a multi-host
 PostgreSQL/S3 topology, independent hosted CI, optimized-release performance or
 production capacity.
+
+### Distributed-integrity gate after multipart buffering changes (2026-11-15)
+
+The complete local gate passed at clean commit
+`5b056cb60319bcf3941a2bf203665c6431c39450`, including the OCI multipart
+prefix-removal change, S3 AWS-chunked split buffers, shared query parsing and
+LFS error responses.
+
+| Stage | Result | Test elapsed time |
+| --- | --- | ---: |
+| Deployment faults and compatibility | 50 passed, 0 skipped | 470.500 s |
+| Split-role traffic and probe contracts | 8 passed, 0 skipped | 22.602 s |
+
+Total driver time was 532.198 seconds. The frozen all-features dev executable
+retained SHA-256
+`93874312aa9e911c866073585863e8c5aec4684cdb4326a8855211f0e99dad4a`.
+The gate script checksum and build settings match the preceding qualification:
+Rust/Cargo 1.99.0, four build jobs, disabled dev/test debug information and no
+compiler wrapper. Exact test counts were checked and runtime skip/panic markers
+were rejected. Revision metadata, build/client versions and complete logs were
+retained. Reproduce with the earlier gate command at this pinned revision.
+
+This includes real local PostgreSQL/MinIO fault drills and released-version
+upgrade/rollback checks. The multinode suite still uses in-process roles with
+local SQLite/filesystem storage. It does not establish multi-host PostgreSQL/S3
+qualification, independent hosted CI, optimized-release throughput or capacity.
 
 ### PostgreSQL/MinIO GC recovery qualification (2026-11-15)
 
