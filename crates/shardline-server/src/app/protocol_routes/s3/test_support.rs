@@ -39,26 +39,29 @@ pub(super) async fn build_test_state_with_options(
     session_max_bytes: NonZeroU64,
 ) -> (Arc<AppState>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(65536).unwrap();
-    let config = ServerConfig::new(
+    let config = test_config(tmp.path())
+        .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
+        .expect("s3 max part bytes")
+        .with_s3_min_part_bytes(min_part_bytes)
+        .expect("s3 min part bytes")
+        .with_s3_upload_session_max_bytes(session_max_bytes)
+        .expect("s3 session max bytes");
+
+    let state = build_state(config).await;
+    (state, tmp)
+}
+
+pub(super) fn test_config(root: &std::path::Path) -> ServerConfig {
+    ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         "http://127.0.0.1:8080".to_owned(),
-        tmp.path().to_path_buf(),
-        chunk_size,
+        root.to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
     )
     .with_server_frontends([ServerFrontend::S3])
     .expect("server frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .expect("token signing key")
-    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
-    .expect("s3 max part bytes")
-    .with_s3_min_part_bytes(min_part_bytes)
-    .expect("s3 min part bytes")
-    .with_s3_upload_session_max_bytes(session_max_bytes)
-    .expect("s3 session max bytes");
-
-    let state = build_state(config).await;
-    (state, tmp)
 }
 
 pub(super) fn mint_token(scope: TokenScope, owner: &str, name: &str) -> String {
@@ -96,11 +99,18 @@ pub(super) fn put_request(uri: String, body: Vec<u8>) -> axum::http::Request<Bod
 }
 
 pub(super) async fn build_state(config: ServerConfig) -> Arc<AppState> {
-    let chunk_size = config.chunk_size();
     let backend = crate::ServerBackend::from_config(&config)
         .await
         .expect("backend from config");
 
+    build_state_with_backend(config, backend)
+}
+
+pub(super) fn build_state_with_backend(
+    config: ServerConfig,
+    backend: crate::ServerBackend,
+) -> Arc<AppState> {
+    let chunk_size = config.chunk_size();
     let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
 
     Arc::new(AppState {

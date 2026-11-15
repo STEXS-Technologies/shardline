@@ -47,8 +47,9 @@ use crate::{
 };
 
 use super::test_support::{
-    BUCKET, NAME, OWNER, TEST_SIGNING_KEY, body_bytes, build_state, build_test_state,
-    build_test_state_with_options, mint_token, put_request, sigv4_auth,
+    BUCKET, NAME, OWNER, TEST_SIGNING_KEY, body_bytes, build_state, build_state_with_backend,
+    build_test_state, build_test_state_with_options, mint_token, put_request, sigv4_auth,
+    test_config,
 };
 use super::{
     bucket::{
@@ -78,45 +79,21 @@ async fn build_postgres_state(
     root: &Path,
     object_store: crate::object_store::ServerObjectStore,
 ) -> Arc<AppState> {
-    let chunk_size = NonZeroUsize::new(65_536).unwrap();
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        root.to_path_buf(),
-        chunk_size,
-    )
-    .with_server_frontends([ServerFrontend::S3])
-    .expect("configured PostgreSQL fixture frontends")
-    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("configured PostgreSQL fixture signing key")
-    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
-    .expect("configured PostgreSQL fixture maximum part size")
-    .with_s3_min_part_bytes(NonZeroU64::MIN)
-    .expect("configured PostgreSQL fixture minimum part size");
+    let config = test_config(root)
+        .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
+        .expect("configured PostgreSQL fixture maximum part size")
+        .with_s3_min_part_bytes(NonZeroU64::MIN)
+        .expect("configured PostgreSQL fixture minimum part size");
     let backend = crate::PostgresBackend::new_with_object_store(
         root.to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        chunk_size,
+        config.chunk_size(),
         database_url,
         object_store,
     )
     .await
     .unwrap_or_else(|_error| panic!("configured PostgreSQL fixture backend initialization"));
-    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY)
-        .expect("configured PostgreSQL fixture authentication");
-    Arc::new(AppState {
-        config,
-        role: ServerRole::All,
-        backend: crate::ServerBackend::Postgres(backend),
-        auth: Some(auth),
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
-        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256).unwrap()),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    })
+    build_state_with_backend(config, crate::ServerBackend::Postgres(backend))
 }
 
 #[tokio::test]
@@ -134,23 +111,13 @@ async fn build_test_state_with_s3_part_file_cap(
     max_active_part_files: NonZeroUsize,
 ) -> (Arc<AppState>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(65536).unwrap();
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        tmp.path().to_path_buf(),
-        chunk_size,
-    )
-    .with_server_frontends([ServerFrontend::S3])
-    .expect("server frontends")
-    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key")
-    .with_s3_min_part_bytes(NonZeroU64::new(1).unwrap())
-    .expect("s3 min part bytes")
-    .with_s3_upload_session_max_bytes(NonZeroU64::new(1 << 40).unwrap())
-    .expect("s3 session max bytes")
-    .with_s3_upload_max_active_part_files(max_active_part_files)
-    .expect("s3 max active part files");
+    let config = test_config(tmp.path())
+        .with_s3_min_part_bytes(NonZeroU64::new(1).unwrap())
+        .expect("s3 min part bytes")
+        .with_s3_upload_session_max_bytes(NonZeroU64::new(1 << 40).unwrap())
+        .expect("s3 session max bytes")
+        .with_s3_upload_max_active_part_files(max_active_part_files)
+        .expect("s3 max active part files");
 
     let state = build_state(config).await;
     (state, tmp)
@@ -166,23 +133,13 @@ async fn build_test_state_with_part_sizes(
     session_max_bytes: NonZeroU64,
 ) -> (Arc<AppState>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(65536).unwrap();
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        tmp.path().to_path_buf(),
-        chunk_size,
-    )
-    .with_server_frontends([ServerFrontend::S3])
-    .expect("server frontends")
-    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key")
-    .with_s3_max_part_bytes(max_part_bytes)
-    .expect("s3 max part bytes")
-    .with_s3_min_part_bytes(min_part_bytes)
-    .expect("s3 min part bytes")
-    .with_s3_upload_session_max_bytes(session_max_bytes)
-    .expect("s3 session max bytes");
+    let config = test_config(tmp.path())
+        .with_s3_max_part_bytes(max_part_bytes)
+        .expect("s3 max part bytes")
+        .with_s3_min_part_bytes(min_part_bytes)
+        .expect("s3 min part bytes")
+        .with_s3_upload_session_max_bytes(session_max_bytes)
+        .expect("s3 session max bytes");
 
     let state = build_state(config).await;
     (state, tmp)
