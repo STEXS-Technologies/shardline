@@ -2828,3 +2828,26 @@ mod write_file_atomically_tests {
         assert_eq!(contents, b"payload");
     }
 }
+
+#[test]
+fn upload_snapshot_v1_preserves_the_serialized_session_schema() {
+    let mut session = upload_session_fixture();
+    for multipart in [false, true] {
+        session.use_s3_multipart = multipart;
+        if multipart {
+            let mut sha256_state = super::SerializableSha256State::default();
+            sha256_state.update(b"abc").unwrap();
+            session.s3_multipart = Some(super::OciS3MultipartUploadSession {
+                temporary_object_key: "temporary/object".into(),
+                upload_id: "upload-id".into(),
+                uploaded_part_ids: vec!["first".into(), "second".into()],
+                total_length: 3,
+                sha256_state,
+            });
+        }
+        assert_eq!(
+            serde_json::to_vec(&session.reliability_snapshot_v1()).unwrap(),
+            serde_json::to_vec(&session).unwrap(),
+        );
+    }
+}

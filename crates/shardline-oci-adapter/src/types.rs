@@ -37,39 +37,39 @@ pub struct OciUploadSession {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct OciUploadSessionSnapshotV1 {
-    repository: String,
-    scope_namespace: String,
+pub(crate) struct OciUploadSessionSnapshotV1<'session> {
+    repository: &'session str,
+    scope_namespace: &'session str,
     created_at_unix_seconds: u64,
     last_touched_unix_seconds: u64,
     use_s3_multipart: bool,
-    s3_multipart: Option<OciS3MultipartUploadSessionSnapshotV1>,
+    s3_multipart: Option<OciS3MultipartUploadSessionSnapshotV1<'session>>,
 }
 
 #[derive(Debug, Serialize)]
-struct OciS3MultipartUploadSessionSnapshotV1 {
-    temporary_object_key: String,
-    upload_id: String,
-    uploaded_part_ids: Vec<String>,
+struct OciS3MultipartUploadSessionSnapshotV1<'session> {
+    temporary_object_key: &'session str,
+    upload_id: &'session str,
+    uploaded_part_ids: &'session [String],
     total_length: u64,
-    sha256_state: SerializableSha256State,
+    sha256_state: &'session SerializableSha256State,
 }
 
 impl OciUploadSession {
-    pub(crate) fn reliability_snapshot_v1(&self) -> OciUploadSessionSnapshotV1 {
+    pub(crate) fn reliability_snapshot_v1(&self) -> OciUploadSessionSnapshotV1<'_> {
         OciUploadSessionSnapshotV1 {
-            repository: self.repository.clone(),
-            scope_namespace: self.scope_namespace.clone(),
+            repository: &self.repository,
+            scope_namespace: &self.scope_namespace,
             created_at_unix_seconds: self.created_at_unix_seconds,
             last_touched_unix_seconds: self.last_touched_unix_seconds,
             use_s3_multipart: self.use_s3_multipart,
             s3_multipart: self.s3_multipart.as_ref().map(|multipart| {
                 OciS3MultipartUploadSessionSnapshotV1 {
-                    temporary_object_key: multipart.temporary_object_key.clone(),
-                    upload_id: multipart.upload_id.clone(),
-                    uploaded_part_ids: multipart.uploaded_part_ids.clone(),
+                    temporary_object_key: &multipart.temporary_object_key,
+                    upload_id: &multipart.upload_id,
+                    uploaded_part_ids: &multipart.uploaded_part_ids,
                     total_length: multipart.total_length,
-                    sha256_state: multipart.sha256_state.clone(),
+                    sha256_state: &multipart.sha256_state,
                 }
             }),
         }
