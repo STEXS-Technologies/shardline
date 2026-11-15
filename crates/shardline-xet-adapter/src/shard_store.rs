@@ -1865,39 +1865,48 @@ mod tests {
 
     // ── parse_uploaded_shard_with_metrics ─────────────────────────────────
 
-    #[test]
-    fn parse_uploaded_shard_with_metrics_delegates_success() {
+    fn stored_single_chunk_shard(
+        object_store: &ServerObjectStore,
+        verification: Vec<FileVerificationEntry>,
+    ) -> Vec<u8> {
         use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
 
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        // Store a xorb
         let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
         let serialized =
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let xorb_hash = serialized.hash;
-        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
+        store_xorb_sync(object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
-        // Build a shard referencing it
         let chunk_hash = compute_data_hash(&[0_u8; 256]);
         let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
-        let shard = serialize_test_shard(
+        serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                metadata: FileDataSequenceHeader::new(
+                    file_hash,
+                    1u64,
+                    !verification.is_empty(),
+                    false,
+                ),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
-                verification: Vec::new(),
+                verification,
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
                 metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
                 chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
             }],
-        );
+        )
+    }
+
+    #[test]
+    fn parse_uploaded_shard_with_metrics_delegates_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        let shard = stored_single_chunk_shard(&object_store, Vec::new());
 
         let result = super::parse_uploaded_shard_with_metrics(
             &object_store,
@@ -1929,46 +1938,16 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_success_with_xorb_lookup() {
-        use shardline_xet_core::xorb_object::{
-            CompressionScheme, SerializedXorbObject,
-            xorb_format_test_utils::{ChunkSize, build_raw_xorb},
-        };
-
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        let shard = stored_single_chunk_shard(&object_store, Vec::new());
 
-        // 1. Store a xorb
-        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let xorb_hash = serialized.hash;
-        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
-
-        // 2. Build a shard referencing that xorb
-        let chunk_hash = compute_data_hash(&[0_u8; 256]);
-        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
-        let shard = serialize_test_shard(
-            vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
-                verification: Vec::new(),
-                metadata_ext: None,
-            }],
-            vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
-            }],
-        );
-
-        // 3. Verify the shard can be parsed for retained hashes (tests read_bounded_shard_sections)
         let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
         assert!(
             hashes.is_ok(),
             "retained hashes should parse OK: {hashes:?}"
         );
 
-        // 4. Parse the shard (tests full flow including build_file_records_from_infos)
         let result =
             parse_uploaded_shard(&object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS);
         assert!(result.is_ok(), "parse_uploaded_shard failed: {result:?}");
@@ -1981,35 +1960,9 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_already_exists_returns_result_zero() {
-        use shardline_xet_core::xorb_object::{
-            CompressionScheme, SerializedXorbObject,
-            xorb_format_test_utils::{ChunkSize, build_raw_xorb},
-        };
-
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let xorb_hash = serialized.hash;
-        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
-
-        let chunk_hash = compute_data_hash(&[0_u8; 256]);
-        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
-        let shard = serialize_test_shard(
-            vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
-                verification: Vec::new(),
-                metadata_ext: None,
-            }],
-            vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
-            }],
-        );
+        let shard = stored_single_chunk_shard(&object_store, Vec::new());
 
         // Store the shard once
         let first =
@@ -2065,35 +2018,11 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_with_verification_and_no_metadata_ext() {
-        use shardline_xet_core::xorb_object::{
-            CompressionScheme, SerializedXorbObject,
-            xorb_format_test_utils::{ChunkSize, build_raw_xorb},
-        };
-
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let xorb_hash = serialized.hash;
-        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
-
-        let chunk_hash = compute_data_hash(&[0_u8; 256]);
-        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
-        // Create file info with verification=true, metadata_ext=false
-        let shard = serialize_test_shard(
-            vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, true, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
-                verification: vec![FileVerificationEntry::new(MerkleHash::default())],
-                metadata_ext: None,
-            }],
-            vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
-            }],
+        let shard = stored_single_chunk_shard(
+            &object_store,
+            vec![FileVerificationEntry::new(MerkleHash::default())],
         );
 
         let result =
