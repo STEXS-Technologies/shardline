@@ -37,10 +37,10 @@ where
         latest_records: _,
         version_records,
     } = collect_repository_records(record_store, event.repository()).await?;
-    let mut file_versions = 0_u64;
     let mut chunk_hashes = HashSet::new();
     let renamed_records =
         prepare_renamed_records(record_store, &version_records, new_repository).await?;
+    let file_versions = u64::try_from(renamed_records.len())?;
 
     for renamed_record in renamed_records {
         RecordMutation::write_version_record(record_store, &renamed_record)
@@ -50,9 +50,6 @@ where
             .await
             .map_err(Into::into)?;
 
-        file_versions = file_versions
-            .checked_add(1)
-            .ok_or(ProviderEventsError::Overflow)?;
         for chunk in &renamed_record.chunks {
             chunk_hashes.insert(chunk.hash.clone());
         }
@@ -87,14 +84,11 @@ pub(super) async fn plan_postgres_repository_renamed(
         latest_records: _,
         version_records,
     } = collect_repository_records(record_store, event.repository()).await?;
-    let mut file_versions = 0_u64;
     let mut chunk_hashes = HashSet::new();
     let renamed_records =
         prepare_renamed_records(record_store, &version_records, new_repository).await?;
+    let file_versions = u64::try_from(renamed_records.len())?;
     for renamed_record in renamed_records {
-        file_versions = file_versions
-            .checked_add(1)
-            .ok_or(ProviderEventsError::Overflow)?;
         for chunk in &renamed_record.chunks {
             chunk_hashes.insert(chunk.hash.clone());
         }
@@ -223,7 +217,6 @@ where
         latest_records.iter().chain(&version_records),
     )?;
 
-    let mut applied_holds = 0_u64;
     for object_key in &held_object_keys {
         let hold = RetentionHold::new(
             ObjectKey::parse(object_key)
@@ -236,9 +229,6 @@ where
             .upsert_retention_hold(&hold)
             .await
             .map_err(Into::into)?;
-        applied_holds = applied_holds
-            .checked_add(1)
-            .ok_or(ProviderEventsError::Overflow)?;
     }
 
     delete_repository_records(record_store, old_latest_locators, old_version_locators).await?;
@@ -254,7 +244,7 @@ where
     Ok(ProviderWebhookOutcome {
         affected_file_versions: file_versions,
         affected_chunks: u64::try_from(chunk_hashes.len())?,
-        applied_holds,
+        applied_holds: u64::try_from(held_object_keys.len())?,
         retention_seconds: Some(DEFAULT_LOCAL_GC_RETENTION_SECONDS),
         ..ProviderWebhookOutcome::for_event(event, ProviderWebhookOutcomeKind::RepositoryDeleted)
     })
