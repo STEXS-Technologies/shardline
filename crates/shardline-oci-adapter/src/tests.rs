@@ -665,14 +665,42 @@ async fn append_upload_bytes_returns_not_found_for_missing_session() {
 }
 
 #[tokio::test]
-async fn upload_length_returns_correct_value() {
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-    append_upload_bytes(root.path(), &session_id, b"abcdef")
-        .await
-        .unwrap();
-    let len = upload_length(root.path(), &session_id).await.unwrap();
-    assert_eq!(len, 6);
+async fn upload_length_and_integrity_match_empty_text_binary_and_multibuffer_content() {
+    for data in [
+        Vec::new(),
+        b"abcdef".to_vec(),
+        b"hello world".to_vec(),
+        b"integrity check".to_vec(),
+        (0_u8..=255).collect(),
+        vec![0xa5; 2 * 256 * 1024 + 1],
+    ] {
+        let root = temp_root();
+        let session_id = create_test_session(root.path(), false).await.unwrap();
+        let expected_length = data.len() as u64;
+        if !data.is_empty() {
+            assert_eq!(
+                append_upload_bytes(root.path(), &session_id, &data)
+                    .await
+                    .unwrap(),
+                expected_length,
+            );
+        }
+        assert_eq!(
+            upload_length(root.path(), &session_id).await.unwrap(),
+            expected_length
+        );
+        let (sha256_hex, integrity) = upload_body_integrity(root.path(), &session_id)
+            .await
+            .unwrap();
+        assert_eq!(sha256_hex, hex::encode(Sha256::digest(&data)));
+        assert_eq!(
+            integrity,
+            shardline_storage::ObjectIntegrity::new(
+                shardline_server_core::chunk_hash(&data),
+                expected_length
+            )
+        );
+    }
 }
 
 #[tokio::test]
@@ -796,25 +824,6 @@ async fn purge_expired_upload_sessions_handles_missing_upload_dir() {
     let result =
         purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now).await;
     assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn upload_body_integrity_matches_expected_sha256() {
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-    let data = b"hello world";
-    append_upload_bytes(root.path(), &session_id, data)
-        .await
-        .unwrap();
-    let (sha256_hex, integrity) = upload_body_integrity(root.path(), &session_id)
-        .await
-        .unwrap();
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let expected = hex::encode(hasher.finalize());
-    assert_eq!(sha256_hex, expected);
-    assert_eq!(integrity.length(), data.len() as u64);
 }
 
 #[test]
@@ -1709,28 +1718,6 @@ async fn append_upload_bytes_large_content() {
         .await
         .unwrap();
     assert_eq!(len, 1_000_000);
-}
-
-#[tokio::test]
-async fn upload_body_integrity_handles_various_content() {
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-
-    // Write some data and check integrity
-    let data = b"integrity check";
-    append_upload_bytes(root.path(), &session_id, data)
-        .await
-        .unwrap();
-    let (sha256_hex, integrity) = upload_body_integrity(root.path(), &session_id)
-        .await
-        .unwrap();
-
-    // Verify the SHA-256 matches
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let expected = hex::encode(hasher.finalize());
-    assert_eq!(sha256_hex, expected);
-    assert_eq!(integrity.length(), data.len() as u64);
 }
 
 #[tokio::test]
@@ -2678,20 +2665,6 @@ async fn append_upload_bytes_invalid_session_id_returns_invalid_upload_session()
     assert!(matches!(result, Err(OciAdapterError::InvalidUploadSession)));
 }
 
-#[tokio::test]
-async fn upload_body_integrity_empty_session() {
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-    let (sha256_hex, integrity) = upload_body_integrity(root.path(), &session_id)
-        .await
-        .unwrap();
-    let mut hasher = Sha256::new();
-    hasher.update(b"");
-    let expected = hex::encode(hasher.finalize());
-    assert_eq!(sha256_hex, expected);
-    assert_eq!(integrity.length(), 0);
-}
-
 // ── Additional edge case tests ─────────────────────────────────────────────
 
 #[test]
@@ -2728,14 +2701,6 @@ fn upload_body_path_for_session_contains_bin_extension() {
     let path = super::upload_body_path_for_session(root.path(), "0123456789abcdef").unwrap();
     let name = path.file_name().unwrap().to_string_lossy();
     assert_eq!(name, "0123456789abcdef.bin");
-}
-
-#[tokio::test]
-async fn upload_length_with_zero_length_body() {
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-    let len = upload_length(root.path(), &session_id).await.unwrap();
-    assert_eq!(len, 0, "fresh session should have zero length");
 }
 
 #[tokio::test]

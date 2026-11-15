@@ -936,16 +936,11 @@ pub(crate) fn delete_file_anchored(root: &Path, path: &Path) -> std::io::Result<
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
     })?;
     let final_path = anchored.final_path();
-    match std::fs::remove_file(&final_path) {
-        Ok(()) => {
-            ensure_parent_path_matches_anchor(
-                &anchored,
-                "upload directory path changed during anchored delete",
-            )?;
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
+    std::fs::remove_file(&final_path)?;
+    ensure_parent_path_matches_anchor(
+        &anchored,
+        "upload directory path changed during anchored delete",
+    )
 }
 
 /// Appends bytes to a file under `root` using anchored (symlink-resistant) path resolution.
