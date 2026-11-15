@@ -1037,7 +1037,7 @@ impl TreeStore for MemoryIndexStore {
             created_at_unix_seconds: entry.updated_at_unix_seconds,
             updated_at_unix_seconds: entry.updated_at_unix_seconds,
         };
-        let revision_key = MemoryRevisionKey::from_record(&rev);
+        let revision_key = revision_key(&rev);
         let count_revisions = state
             .revisions
             .keys()
@@ -1075,7 +1075,7 @@ impl TreeStore for MemoryIndexStore {
         max_revisions: usize,
     ) -> Result<RevisionCreationOutcome, Self::Error> {
         let mut state = self.lock_state()?;
-        let key = MemoryRevisionKey::from_record(rev);
+        let key = revision_key(rev);
         if state.revisions.contains_key(&key) {
             return Ok(RevisionCreationOutcome::AlreadyExists);
         }
@@ -1094,9 +1094,8 @@ impl TreeStore for MemoryIndexStore {
     async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
         let key = MemoryTreeKey::from_entry(entry);
         let mut state = self.lock_state()?;
-        let existed = state.tree_entries.contains_key(&key);
-        state.tree_entries.insert(key, entry.clone());
-        Ok(TreeEntryOutcome { created: !existed })
+        let created = state.tree_entries.insert(key, entry.clone()).is_none();
+        Ok(TreeEntryOutcome { created })
     }
 
     async fn tree_entry(
@@ -1180,7 +1179,7 @@ impl TreeStore for MemoryIndexStore {
     }
 
     async fn upsert_revision(&self, rev: &RevisionRecord) -> Result<bool, Self::Error> {
-        let key = MemoryRevisionKey::from_record(rev);
+        let key = revision_key(rev);
         let mut state = self.lock_state()?;
         let existed = state.revisions.contains_key(&key);
         state
@@ -1196,7 +1195,7 @@ impl TreeStore for MemoryIndexStore {
         key: &RepoKey,
         rev: &str,
     ) -> Result<Option<RevisionRecord>, Self::Error> {
-        let search = MemoryRevisionKey::from_key(key, rev);
+        let search = TreeKey::new(&key.provider, &key.owner, &key.repo, rev);
         Ok(self.lock_state()?.revisions.get(&search).cloned())
     }
 
@@ -1231,7 +1230,7 @@ impl TreeStore for MemoryIndexStore {
         limit: usize,
     ) -> Result<Vec<RevisionRecord>, Self::Error> {
         let state = self.lock_state()?;
-        // MemoryRevisionKey orders by (provider, owner, repo, revision), so a
+        // TreeKey orders by (provider, owner, repo, revision), so a
         // filtered BTreeMap iteration is already ordered by revision name and a
         // keyset cursor on the revision name resumes correctly.
         Ok(state
@@ -1248,7 +1247,7 @@ impl TreeStore for MemoryIndexStore {
 
     async fn delete_revision(&self, key: &RepoKey, rev: &str) -> Result<u64, Self::Error> {
         let mut state = self.lock_state()?;
-        let revision_key = MemoryRevisionKey::from_key(key, rev);
+        let revision_key = TreeKey::new(&key.provider, &key.owner, &key.repo, rev);
         let removed = state.revisions.remove(&revision_key).is_some();
         state.tree_entries.retain(|k, _| {
             !(k.provider == key.provider
@@ -1268,33 +1267,24 @@ impl TreeStore for MemoryIndexStore {
         // Collect this repo's rows and sort oldest-created-first (created-at,
         // then revision name as the deterministic tiebreaker) — the same
         // eviction order the SQL backends use.
-        let mut rows: Vec<(MemoryRevisionKey, u64, String)> = state
+        let mut rows: Vec<_> = state
             .revisions
             .iter()
             .filter(|(k, _)| {
                 k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
             })
-            .map(|(k, v)| (k.clone(), v.created_at_unix_seconds, v.revision.clone()))
+            .map(|(key, revision)| (revision.created_at_unix_seconds, key.clone()))
             .collect();
-        rows.sort_by(
-            |(_, left_created, left_revision), (_, right_created, right_revision)| {
-                left_created
-                    .cmp(right_created)
-                    .then_with(|| left_revision.cmp(right_revision))
-            },
-        );
-        let Some(over_cap) = rows.len().checked_sub(max_revisions) else {
-            return Ok(0);
-        };
+        rows.sort_unstable();
+        let over_cap = rows.len().saturating_sub(max_revisions);
         let removed = u64::try_from(over_cap).unwrap_or(u64::MAX);
-        for (pruned_key, _, _) in rows.into_iter().take(over_cap) {
-            let pruned_revision = pruned_key.revision.clone();
+        for (_, pruned_key) in rows.into_iter().take(over_cap) {
             state.revisions.remove(&pruned_key);
             state.tree_entries.retain(|k, _| {
                 !(k.provider == key.provider
                     && k.owner == key.owner
                     && k.repo == key.repo
-                    && k.revision == pruned_revision)
+                    && k.revision == pruned_key.revision)
             });
         }
         Ok(removed)
@@ -1360,7 +1350,7 @@ struct MemoryIndexState {
     upload_intents: HashMap<String, UploadIntent>,
     reliability_events: HashMap<String, Vec<LifecycleEvent>>,
     tree_entries: BTreeMap<MemoryTreeKey, TreeEntry>,
-    revisions: BTreeMap<MemoryRevisionKey, RevisionRecord>,
+    revisions: BTreeMap<TreeKey, RevisionRecord>,
 }
 
 impl MemoryIndexState {
@@ -1499,32 +1489,13 @@ impl MemoryTreeKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct MemoryRevisionKey {
-    provider: String,
-    owner: String,
-    repo: String,
-    revision: String,
-}
-
-impl MemoryRevisionKey {
-    fn from_record(rev: &RevisionRecord) -> Self {
-        Self {
-            provider: rev.provider.clone(),
-            owner: rev.owner.clone(),
-            repo: rev.repo.clone(),
-            revision: rev.revision.clone(),
-        }
-    }
-
-    fn from_key(key: &RepoKey, rev: &str) -> Self {
-        Self {
-            provider: key.provider.clone(),
-            owner: key.owner.clone(),
-            repo: key.repo.clone(),
-            revision: rev.to_owned(),
-        }
-    }
+fn revision_key(revision: &RevisionRecord) -> TreeKey {
+    TreeKey::new(
+        &revision.provider,
+        &revision.owner,
+        &revision.repo,
+        &revision.revision,
+    )
 }
 
 /// Opaque in-memory file-record locator.
