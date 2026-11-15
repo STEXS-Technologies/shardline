@@ -64,7 +64,10 @@ fn required_analytical_missing_curl_fails_instead_of_passing() {
         std::time::Duration::from_secs(10),
     )
     .unwrap();
-    assert!(hf.status.success(), "prerequisite contract requires installed hf");
+    assert!(
+        hf.status.success(),
+        "prerequisite contract requires installed hf"
+    );
     let hf = String::from_utf8(hf.stdout).unwrap();
     let tools = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(hf.trim(), tools.path().join("hf")).unwrap();

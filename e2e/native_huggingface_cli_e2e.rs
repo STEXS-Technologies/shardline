@@ -1440,7 +1440,11 @@ async fn verify_plain_xet_downloads(
         .get("x-xet-hash")
         .and_then(|value| value.to_str().ok())
         .ok_or("Xet-backed resolve HEAD omitted X-Xet-Hash")?;
-    assert_eq!(xet_hash.len(), 64, "X-Xet-Hash must be a 64-character hex identity");
+    assert_eq!(
+        xet_hash.len(),
+        64,
+        "X-Xet-Hash must be a 64-character hex identity"
+    );
     assert!(
         xet_hash
             .bytes()
@@ -1467,13 +1471,15 @@ async fn verify_plain_xet_downloads(
         .collect::<Vec<_>>();
     assert_eq!(
         refresh_segments.get(..5),
-        Some(&[
-            "api",
-            "models",
-            repo_path[0],
-            repo_path[1],
-            "xet-read-token",
-        ][..]),
+        Some(
+            &[
+                "api",
+                "models",
+                repo_path[0],
+                repo_path[1],
+                "xet-read-token",
+            ][..]
+        ),
         "Xet refresh route must be scoped to this model repository"
     );
     let commit = refresh_segments
@@ -1485,7 +1491,11 @@ async fn verify_plain_xet_downloads(
         *commit,
         "Xet refresh scope and Hub resolve must identify the same commit"
     );
-    assert_eq!(commit.len(), 40, "Xet refresh must use the immutable Git commit");
+    assert_eq!(
+        commit.len(),
+        40,
+        "Xet refresh must use the immutable Git commit"
+    );
     assert!(
         commit
             .bytes()
@@ -1515,7 +1525,10 @@ async fn verify_plain_xet_downloads(
             "rel=\"xet-reconstruction-info\"" => &mut reconstruction_link,
             other => panic!("unexpected or malformed Xet discovery relation: {other}"),
         };
-        assert!(slot.replace(target.to_owned()).is_none(), "duplicate {relation}");
+        assert!(
+            slot.replace(target.to_owned()).is_none(),
+            "duplicate {relation}"
+        );
         assert_eq!(
             reqwest::Url::parse(target)?.origin(),
             response_origin,
@@ -1523,8 +1536,12 @@ async fn verify_plain_xet_downloads(
         );
     }
     let auth_link = auth_link.ok_or("missing Xet auth Link relation")?;
-    assert_eq!(auth_link, refresh, "Xet auth Link and refresh header differ");
-    let reconstruction_link = reconstruction_link.ok_or("missing Xet reconstruction Link relation")?;
+    assert_eq!(
+        auth_link, refresh,
+        "Xet auth Link and refresh header differ"
+    );
+    let reconstruction_link =
+        reconstruction_link.ok_or("missing Xet reconstruction Link relation")?;
     let reconstruction_url = reqwest::Url::parse(&reconstruction_link)?;
     let reconstruction_segments = reconstruction_url
         .path_segments()
