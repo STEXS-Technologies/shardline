@@ -22,10 +22,9 @@ impl TryFrom<&str> for AuthScheme {
     type Error = ();
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let bytes = value.as_bytes();
-        if bytes.get(.."Bearer ".len()) == Some(b"Bearer ") {
+        if value.starts_with("Bearer ") {
             Ok(Self::Bearer)
-        } else if bytes.get(.."AWS4-HMAC-SHA256 ".len()) == Some(b"AWS4-HMAC-SHA256 ") {
+        } else if value.starts_with("AWS4-HMAC-SHA256 ") {
             Ok(Self::SigV4)
         } else {
             Err(())
