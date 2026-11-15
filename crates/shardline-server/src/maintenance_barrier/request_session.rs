@@ -25,7 +25,7 @@ pub(crate) struct RequestConnection {
     connection: Option<PoolConnection<Postgres>>,
     // A mapped resource guard may outlive its request. Retain admission with
     // the connection state until the final borrower releases ownership.
-    _slot: Option<tokio::sync::OwnedSemaphorePermit>,
+    _slot: tokio::sync::OwnedSemaphorePermit,
 }
 
 pub(crate) type RequestConnectionGuard =
@@ -40,22 +40,14 @@ impl RequestSession {
         backend: &Arc<()>,
         future: impl std::future::Future<Output = Result<T, ServerError>>,
     ) -> Result<T, ServerError> {
-        Self::scope_inner(pool, backend, None, future).await
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        Self::scope_bounded_if_needed(pool, backend, &slots, future).await
     }
 
     pub(crate) async fn scope_bounded_if_needed<T>(
         pool: &PgPool,
         backend: &Arc<()>,
         slots: &Arc<tokio::sync::Semaphore>,
-        future: impl std::future::Future<Output = Result<T, ServerError>>,
-    ) -> Result<T, ServerError> {
-        Self::scope_inner(pool, backend, Some(slots), future).await
-    }
-
-    async fn scope_inner<T>(
-        pool: &PgPool,
-        backend: &Arc<()>,
-        slots: Option<&Arc<tokio::sync::Semaphore>>,
         future: impl std::future::Future<Output = Result<T, ServerError>>,
     ) -> Result<T, ServerError> {
         let already_owned = REQUEST_SESSION
@@ -65,7 +57,7 @@ impl RequestSession {
             Self::verify_for(backend).await?;
             return future.await;
         }
-        let session = Self::acquire_inner(pool, backend.clone(), slots).await?;
+        let session = Self::acquire_bounded(pool, backend.clone(), slots).await?;
         let result = session.scope(future).await;
         session.finish().await;
         result
@@ -95,7 +87,8 @@ impl RequestSession {
     }
     #[cfg(test)]
     pub(crate) async fn acquire(pool: &PgPool, backend: Arc<()>) -> Result<Self, ServerError> {
-        Self::acquire_inner(pool, backend, None).await
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        Self::acquire_bounded(pool, backend, &slots).await
     }
 
     pub(crate) async fn acquire_bounded(
@@ -103,27 +96,14 @@ impl RequestSession {
         backend: Arc<()>,
         slots: &Arc<tokio::sync::Semaphore>,
     ) -> Result<Self, ServerError> {
-        Self::acquire_inner(pool, backend, Some(slots)).await
-    }
-
-    async fn acquire_inner(
-        pool: &PgPool,
-        backend: Arc<()>,
-        slots: Option<&Arc<tokio::sync::Semaphore>>,
-    ) -> Result<Self, ServerError> {
         // Admission and checkout share the existing timeout. A queued owner
         // must not occupy metadata headroom before it receives admission.
         let (mut connection, slot) =
             tokio::time::timeout(pool.options().get_acquire_timeout(), async {
-                let slot = match slots {
-                    Some(slots) => Some(
-                        Arc::clone(slots)
-                            .acquire_owned()
-                            .await
-                            .map_err(|_error| sqlx::Error::PoolClosed)?,
-                    ),
-                    None => None,
-                };
+                let slot = Arc::clone(slots)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_error| sqlx::Error::PoolClosed)?;
                 Ok::<_, sqlx::Error>((pool.acquire().await?, slot))
             })
             .await
