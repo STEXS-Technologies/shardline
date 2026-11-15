@@ -625,11 +625,23 @@ mod tests {
     }
 
     #[test]
-    fn xorb_object_key_rejects_uppercase_hashes() {
-        let hash = "AA".repeat(32);
-        let key = xorb_object_key(&hash);
-
-        assert!(key.is_err());
+    fn xorb_object_key_rejects_invalid_hashes() {
+        for hash in [
+            "AA".repeat(32),
+            "zz".repeat(32),
+            "abc".to_owned(),
+            String::new(),
+            "ab!@#cd".to_owned(),
+            "ab    cd".to_owned(),
+            "ab_".repeat(21),
+            "ab".repeat(33),
+            "a".to_owned(),
+        ] {
+            assert!(
+                xorb_object_key(&hash).is_err(),
+                "accepted invalid hash {hash:?}"
+            );
+        }
     }
 
     #[test]
@@ -718,27 +730,6 @@ mod tests {
             let msg = mapped.to_string();
             assert!(msg.contains("hash"), "msg '{msg}' missing 'hash'");
         }
-    }
-
-    // ── xorb_object_key hash validation ──────────────────────────────────
-
-    #[test]
-    fn xorb_object_key_rejects_non_hex_characters() {
-        let hash = "zz".repeat(32);
-        let key = xorb_object_key(&hash);
-        assert!(key.is_err());
-    }
-
-    #[test]
-    fn xorb_object_key_rejects_short_hash() {
-        let key = xorb_object_key("abc");
-        assert!(key.is_err());
-    }
-
-    #[test]
-    fn xorb_object_key_rejects_empty_hash() {
-        let key = xorb_object_key("");
-        assert!(key.is_err());
     }
 
     // ── visit_stored_xorb_chunk_hashes ───────────────────────────────────
@@ -1010,12 +1001,26 @@ mod tests {
     // ── xorb_object_key edge cases ─────────────────────────────────────
 
     #[test]
-    fn xorb_object_key_constructs_valid_key() {
-        let hash = "ab".repeat(32);
-        let key = xorb_object_key(&hash);
-        let key = key.unwrap();
-        assert!(key.as_str().starts_with("xorbs/default/ab/"));
-        assert!(key.as_str().ends_with(".xorb"));
+    fn xorb_object_key_preserves_layout_and_round_trips() {
+        let hashes = ["ab", "aa", "ff", "00", "cd", "ef"]
+            .into_iter()
+            .map(|pair| pair.repeat(32))
+            .chain(
+                ["aa", "ff", "10", "99", "ac", "00", "0a", "f0"]
+                    .into_iter()
+                    .map(|prefix| format!("{prefix}{}", "0".repeat(62))),
+            );
+        for hash in hashes {
+            let key = xorb_object_key(&hash).unwrap();
+            assert_eq!(
+                key.as_str(),
+                format!("xorbs/default/{}/{hash}.xorb", &hash[..2])
+            );
+            assert_eq!(
+                xorb_hash_from_object_key_if_present(&key).unwrap(),
+                Some(hash.as_str())
+            );
+        }
     }
 
     // ── Canonicalization and validation ──────────────────────────────
@@ -1047,24 +1052,6 @@ mod tests {
         );
         assert!(result.is_ok(), "expected Ok for missing key");
         assert!(!visited, "visitor should not be called");
-    }
-
-    // ── xorb_object_key with various valid prefixes ────────────────────
-
-    #[test]
-    fn xorb_object_key_various_prefixes() {
-        let prefixes = ["aa", "ff", "10", "99", "ac"];
-        for prefix in prefixes {
-            let hash = format!("{}{}", prefix, "0".repeat(62));
-            let key = xorb_object_key(&hash);
-            assert!(key.is_ok(), "failed for prefix {prefix}: {key:?}");
-            let key = key.unwrap();
-            assert!(
-                key.as_str().contains(&format!("xorbs/default/{prefix}/")),
-                "key '{}' missing expected prefix segment",
-                key.as_str()
-            );
-        }
     }
 
     // ── xorb_hash_from_object_key_if_present zero-segment ──────────────
@@ -1424,19 +1411,6 @@ mod tests {
     // ── xorb_object_key with edge cases ────────────────────────────────
 
     #[test]
-    fn xorb_object_key_boundary_prefixes() {
-        for prefix in ["00", "ff", "0a", "f0"] {
-            let hash = format!("{}{}", prefix, "0".repeat(62));
-            let key = xorb_object_key(&hash).unwrap();
-            assert!(
-                key.as_str().contains(&format!("xorbs/default/{prefix}/")),
-                "key missing prefix {prefix}: {}",
-                key.as_str()
-            );
-        }
-    }
-
-    #[test]
     fn xorb_hash_from_object_key_none_for_empty_segments_after_namespace() {
         let key = shardline_storage::ObjectKey::parse("xorbs").unwrap();
         let extracted = xorb_hash_from_object_key_if_present(&key);
@@ -1766,53 +1740,6 @@ mod tests {
         assert_eq!(count, 3);
     }
 
-    // ── xorb_object_key with edge case hash lengths ─────────────────────
-
-    #[test]
-    fn xorb_object_key_constructs_correct_format() {
-        let tests = vec![
-            ("aa".repeat(32), "xorbs/default/aa/"),
-            ("ff".repeat(32), "xorbs/default/ff/"),
-            ("00".repeat(32), "xorbs/default/00/"),
-        ];
-        for (hash, expected_prefix) in tests {
-            let key = xorb_object_key(&hash).unwrap();
-            assert!(
-                key.as_str().starts_with(expected_prefix),
-                "key {} should start with {}",
-                key.as_str(),
-                expected_prefix
-            );
-            assert!(
-                key.as_str().ends_with(".xorb"),
-                "key {} should end with .xorb",
-                key.as_str()
-            );
-            assert_eq!(
-                key.as_str().len(),
-                expected_prefix.len() + 64 + ".xorb".len()
-            );
-        }
-    }
-
-    // ─── xorb_object_key round-trip with xorb_hash_from_object_key_if_present ─
-
-    #[test]
-    fn xorb_object_key_round_trip_reconstructs_hash() {
-        let hash = "cd".repeat(32);
-        let key = xorb_object_key(&hash).unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key).unwrap();
-        assert_eq!(extracted, Some(hash.as_str()));
-    }
-
-    #[test]
-    fn xorb_object_key_round_trip_reconstructs_hash_other_prefix() {
-        let hash = "ef".repeat(32);
-        let key = xorb_object_key(&hash).unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key).unwrap();
-        assert_eq!(extracted, Some(hash.as_str()));
-    }
-
     // ── store_uploaded_xorb idempotent detailed check ──────────────────
 
     #[test]
@@ -1915,22 +1842,6 @@ mod tests {
         let result = xorb_hash_from_object_key_if_present(&key);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
-    }
-
-    // ── additional xorb_object_key rejection tests ─────────────────────
-
-    #[test]
-    fn xorb_object_key_rejects_string_with_special_chars() {
-        let hash = format!("ab{}cd", "!@#");
-        let result = xorb_object_key(&hash);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn xorb_object_key_rejects_hash_with_whitespace() {
-        let hash = format!("ab {} cd", "  ");
-        let result = xorb_object_key(&hash);
-        assert!(result.is_err());
     }
 
     // ── visit_stored_xorb_chunk_hashes with stored xorb (coverage boost) ─
@@ -2132,26 +2043,6 @@ mod tests {
             assert!(result.was_inserted, "chunks={num_chunks}");
             assert!(result.stored_bytes > 0, "chunks={num_chunks}");
         }
-    }
-
-    // ── xorb_object_key edge behavior ─────────────────────────────────
-
-    #[test]
-    fn xorb_object_key_rejects_hash_with_underscore() {
-        let result = xorb_object_key("ab_".repeat(21).as_str());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn xorb_object_key_rejects_too_long_hash() {
-        let result = xorb_object_key(&"ab".repeat(33));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn xorb_object_key_rejects_too_short_hash() {
-        let result = xorb_object_key("a");
-        assert!(result.is_err());
     }
 
     // ── idempotent store with visit verification ────────────────────────
