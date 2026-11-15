@@ -881,8 +881,8 @@ async fn test_s3_streaming_content_addressed_already_exists() {
 // 3. S3-specific error conversions (object_store.rs From impl)
 // ===========================================================================
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_s3_server_error_from_s3_store_error() {
+#[test]
+fn test_s3_server_error_from_s3_store_error() {
     // ServerObjectStoreError::S3 -> ServerError::ObjectStore(ObjectStoreError::S3)
     let s3_err = shardline_storage::S3ObjectStoreError::EmptyBucket;
     let store_err = ServerObjectStoreError::S3(s3_err);
@@ -893,20 +893,20 @@ async fn test_s3_server_error_from_s3_store_error() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_s3_server_error_not_found() {
+#[test]
+fn test_s3_server_error_not_found() {
     let err: ServerError = ServerObjectStoreError::NotFound.into();
     assert!(matches!(err, ServerError::NotFound));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_s3_server_error_overflow() {
+#[test]
+fn test_s3_server_error_overflow() {
     let err: ServerError = ServerObjectStoreError::Overflow.into();
     assert!(matches!(err, ServerError::Overflow));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_s3_server_error_stored_length_mismatch() {
+#[test]
+fn test_s3_server_error_stored_length_mismatch() {
     let err: ServerError = ServerObjectStoreError::StoredObjectLengthMismatch.into();
     assert!(matches!(
         err,
@@ -914,8 +914,8 @@ async fn test_s3_server_error_stored_length_mismatch() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_s3_server_error_local() {
+#[test]
+fn test_s3_server_error_local() {
     let io_err = std::io::Error::other("local store error");
     let err: ServerError = ServerObjectStoreError::Local(io_err.into()).into();
     assert!(matches!(
@@ -924,8 +924,8 @@ async fn test_s3_server_error_local() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_s3_server_error_io() {
+#[test]
+fn test_s3_server_error_io() {
     let io_err = std::io::Error::other("disk io");
     let err: ServerError = ServerObjectStoreError::Io(io_err).into();
     assert!(matches!(err, ServerError::Io(_)));

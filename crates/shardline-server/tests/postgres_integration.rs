@@ -149,11 +149,6 @@ fn blake3_hash(data: &[u8]) -> String {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_migration_bundled_not_empty() {
-    assert!(!bundled_database_migrations().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_migration_all_applied() {
     let pool = fresh_pool().await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM shardline_schema_migrations")
@@ -981,19 +976,20 @@ async fn test_record_ops_duplicate_upload_idempotent() {
 // Database migration — version ordering, SQL validity
 // ===========================================================================
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_migration_version_ordering() {
+#[test]
+fn test_migration_version_ordering() {
     let migrations = bundled_database_migrations();
     assert!(!migrations.is_empty());
     assert!(
         migrations
             .windows(2)
-            .all(|w| w.first().unwrap().version < w.get(1).unwrap().version)
+            .all(|w| w.first().unwrap().version < w.get(1).unwrap().version),
+        "migration versions must be strictly increasing and unique"
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_migration_each_has_valid_sql() {
+#[test]
+fn test_migration_each_has_valid_sql() {
     for m in bundled_database_migrations() {
         assert!(!m.up_sql.is_empty(), "{} up_sql empty", m.version);
         assert!(!m.down_sql.is_empty(), "{} down_sql empty", m.version);
@@ -1011,8 +1007,8 @@ async fn test_migration_each_has_valid_sql() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_migration_find_by_version_iteration() {
+#[test]
+fn test_migration_find_by_version_iteration() {
     let migrations = bundled_database_migrations();
     // Simulate migration_by_version via linear search.
     let found = migrations.iter().find(|m| m.version == "20260417000000");
@@ -1022,8 +1018,8 @@ async fn test_migration_find_by_version_iteration() {
     assert!(not_found.is_none(), "unknown version should not be found");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_migration_status_entry_accessors() {
+#[test]
+fn test_migration_status_entry_accessors() {
     use shardline_server::DatabaseMigrationStatusEntry;
     let entry = DatabaseMigrationStatusEntry {
         version: "v1".to_owned(),
@@ -1037,8 +1033,8 @@ async fn test_migration_status_entry_accessors() {
     assert!(entry.applied_at_utc.is_some());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_migration_options_new() {
+#[test]
+fn test_migration_options_new() {
     use shardline_server::{DatabaseMigrationCommand, DatabaseMigrationOptions};
     let opts = DatabaseMigrationOptions::new(
         "postgres://localhost/test".to_owned(),
@@ -2161,8 +2157,8 @@ async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
     admin_pool.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_migration_options_up_down_commands() {
+#[test]
+fn test_migration_options_up_down_commands() {
     // Verify that DatabaseMigrationCommand::Up and Down accessors work
     let up_opts = DatabaseMigrationOptions::new(
         "postgres://localhost/test".to_owned(),
@@ -2181,23 +2177,6 @@ async fn test_migration_options_up_down_commands() {
         down_opts.command(),
         DatabaseMigrationCommand::Down { steps: 2 }
     ));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_migration_version_uniqueness() {
-    let migrations = bundled_database_migrations();
-    let mut versions: Vec<&str> = migrations.iter().map(|m| m.version).collect();
-    versions.sort();
-    let deduped = {
-        let mut v = versions.clone();
-        v.dedup();
-        v
-    };
-    assert_eq!(
-        versions.len(),
-        deduped.len(),
-        "all migration versions must be unique"
-    );
 }
 
 // ===========================================================================
