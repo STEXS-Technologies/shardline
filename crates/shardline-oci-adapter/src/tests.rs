@@ -1085,23 +1085,44 @@ async fn s3_multipart_append_and_finalize() {
 
 #[tokio::test]
 async fn s3_multipart_append_triggers_part_at_chunk_boundary() {
-    let root = temp_root();
-    let backend = MockS3Backend::new();
-    let session_id = create_s3_session(root.path(), &backend).await;
-
-    // Write enough bytes to trigger a part upload (chunk size is 8 MiB).
-    let chunk = vec![b'x'; 8 * 1024 * 1024 + 100];
-    let session = read_session(root.path(), &session_id).await;
-    let (_session, length) =
-        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, &chunk)
+    let part_size = crate::types::OCI_S3_MULTIPART_CHUNK_BYTES;
+    for length in [
+        part_size - 1,
+        part_size,
+        part_size + 100,
+        3 * part_size + 100,
+    ] {
+        let root = temp_root();
+        let backend = MockS3Backend::new();
+        let session_id = create_s3_session(root.path(), &backend).await;
+        let chunk: Vec<u8> = (0..length).map(|i| ((i / 997) % 251) as u8).collect();
+        let session = read_session(root.path(), &session_id).await;
+        let (session, observed_length) =
+            append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, &chunk)
+                .await
+                .unwrap();
+        assert_eq!(usize::try_from(observed_length).unwrap(), length);
+        let multipart = session.s3_multipart.as_ref().unwrap();
+        assert_eq!(multipart.uploaded_part_ids.len(), length / part_size);
+        let upload_id = multipart.upload_id.clone();
+        let digest = sha256_hex(&chunk);
+        let object_key = ObjectKey::parse("protocols/oci/test/blob").unwrap();
+        assert_eq!(
+            finalize_s3_multipart_upload_session(
+                root.path(),
+                &backend,
+                &session_id,
+                session,
+                &object_key,
+                &digest,
+                b"",
+            )
             .await
-            .unwrap();
-    assert_eq!(usize::try_from(length).unwrap(), chunk.len());
-
-    // One full 8 MiB part should have been uploaded.
-    let s = read_session(root.path(), &session_id).await;
-    let uploaded = s.s3_multipart.as_ref().unwrap().uploaded_part_ids.len();
-    assert_eq!(uploaded, 1, "expected 1 full part, got {uploaded}");
+            .unwrap(),
+            PutOutcome::Inserted
+        );
+        backend.assert_completed(&upload_id, &chunk.chunks(part_size).collect::<Vec<_>>());
+    }
 }
 
 #[tokio::test]

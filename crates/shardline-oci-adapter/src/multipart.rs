@@ -83,18 +83,20 @@ pub async fn append_s3_multipart_upload_bytes_owned<B: OciBackend>(
         let temporary_object_key = ObjectKey::parse(&multipart.temporary_object_key)
             .map_err(|_error| OciAdapterError::InvalidContentHash)?;
         let upload_id = multipart.upload_id.clone();
-        while tail.len() >= OCI_S3_MULTIPART_CHUNK_BYTES {
-            let part_bytes: Vec<u8> = tail.drain(..OCI_S3_MULTIPART_CHUNK_BYTES).collect();
+        let (parts, remainder) = tail.as_chunks::<OCI_S3_MULTIPART_CHUNK_BYTES>();
+        for part_bytes in parts {
             let part_id = backend
                 .upload_resumable_object_part(
                     &temporary_object_key,
                     &upload_id,
                     multipart.uploaded_part_ids.len(),
-                    retain_source(part_bytes, bytes.clone()),
+                    retain_source(part_bytes.to_vec(), bytes.clone()),
                 )
                 .await?;
             multipart.uploaded_part_ids.push(part_id);
         }
+        let consumed = tail.len().saturating_sub(remainder.len());
+        drop(tail.drain(..consumed));
         multipart.total_length
     };
     write_upload_tail(root, session_id, retain_source(tail, bytes)).await?;
