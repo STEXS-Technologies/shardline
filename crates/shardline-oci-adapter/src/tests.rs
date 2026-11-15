@@ -633,10 +633,18 @@ async fn create_upload_session_rejects_invalid_repository_scope() {
 }
 
 #[tokio::test]
-async fn read_upload_session_returns_not_found_for_nonexistent() {
-    let root = temp_root();
-    let result = read_upload_session(root.path(), "10000000000000000000000000000000", ttl()).await;
-    assert!(matches!(result, Err(OciAdapterError::NotFound)));
+async fn read_upload_session_returns_not_found_for_missing() {
+    for session_id in [
+        "10000000000000000000000000000000",
+        "00000000000000000000000000000000",
+    ] {
+        let root = temp_root();
+        let result = read_upload_session(root.path(), session_id, ttl()).await;
+        assert!(
+            matches!(result, Err(OciAdapterError::NotFound)),
+            "{session_id}: {result:?}"
+        );
+    }
 }
 
 #[allow(clippy::shadow_unrelated)]
@@ -737,13 +745,6 @@ async fn tampered_upload_session_cannot_be_read_or_deleted() {
                 .unwrap()
         );
     }
-}
-
-#[tokio::test]
-async fn read_upload_session_returns_not_found_for_missing() {
-    let root = temp_root();
-    let result = read_upload_session(root.path(), "00000000000000000000000000000000", ttl()).await;
-    assert!(matches!(result, Err(OciAdapterError::NotFound)));
 }
 
 #[tokio::test]
@@ -1352,34 +1353,30 @@ fn upload_body_path_for_session_rejects_invalid_id() {
 }
 
 #[test]
-fn upload_session_length_without_multipart_returns_none() {
-    let session = upload_session_fixture();
-    assert_eq!(super::upload_session_length(&session), None);
-}
-
-#[test]
-fn upload_session_length_with_multipart_returns_length() {
-    let session = OciUploadSession {
-        use_s3_multipart: true,
-        s3_multipart: Some(crate::OciS3MultipartUploadSession {
-            temporary_object_key: "tmp/key".to_owned(),
-            upload_id: "upload-1".to_owned(),
-            uploaded_part_ids: vec![],
-            total_length: 42,
-            sha256_state: crate::SerializableSha256State::default(),
-        }),
-        ..upload_session_fixture()
-    };
-    assert_eq!(super::upload_session_length(&session), Some(42));
-}
-
-#[test]
-fn upload_session_length_with_multipart_no_data_returns_zero() {
-    let session = OciUploadSession {
-        use_s3_multipart: true,
-        ..upload_session_fixture()
-    };
-    assert_eq!(super::upload_session_length(&session), Some(0));
+fn upload_session_length_tracks_multipart_state() {
+    for (use_s3_multipart, total_length, expected) in [
+        (false, None, None),
+        (true, None, Some(0)),
+        (true, Some(0), Some(0)),
+        (true, Some(42), Some(42)),
+    ] {
+        let session = OciUploadSession {
+            use_s3_multipart,
+            s3_multipart: total_length.map(|total_length| crate::OciS3MultipartUploadSession {
+                temporary_object_key: "tmp/key".to_owned(),
+                upload_id: "upload-1".to_owned(),
+                uploaded_part_ids: vec![],
+                total_length,
+                sha256_state: crate::SerializableSha256State::default(),
+            }),
+            ..upload_session_fixture()
+        };
+        assert_eq!(
+            super::upload_session_length(&session),
+            expected,
+            "{session:?}"
+        );
+    }
 }
 
 #[tokio::test]
