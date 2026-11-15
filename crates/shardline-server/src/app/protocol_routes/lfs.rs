@@ -485,26 +485,22 @@ fn bounded_file_stream(
         (file, 0_u64, max_bytes),
         move |(mut file, mut read, max_bytes)| async move {
             let mut buffer = vec![0_u8; chunk_size];
-            match file.read(&mut buffer) {
-                Ok(0) => None,
+            let result = match file.read(&mut buffer) {
+                Ok(0) => return None,
                 Ok(read_bytes) => {
                     buffer.truncate(read_bytes);
-                    match checked_add(read, read_bytes as u64) {
-                        Ok(next) => {
-                            read = next;
-                            if read > max_bytes {
-                                return Some((
-                                    Err(ServerError::RequestBodyTooLarge),
-                                    (file, read, max_bytes),
-                                ));
-                            }
-                            Some((Ok(Bytes::from(buffer)), (file, read, max_bytes)))
+                    checked_add(read, read_bytes as u64).and_then(|next| {
+                        read = next;
+                        if read > max_bytes {
+                            Err(ServerError::RequestBodyTooLarge)
+                        } else {
+                            Ok(Bytes::from(buffer))
                         }
-                        Err(error) => Some((Err(error), (file, read, max_bytes))),
-                    }
+                    })
                 }
-                Err(error) => Some((Err(ServerError::Io(error)), (file, read, max_bytes))),
-            }
+                Err(error) => Err(ServerError::Io(error)),
+            };
+            Some((result, (file, read, max_bytes)))
         },
     );
     Ok(RequestBodyReader::from_stream(stream))
