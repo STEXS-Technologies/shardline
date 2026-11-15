@@ -7,9 +7,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use shardline_storage::ObjectKey;
+
 use crate::{
     BazelCacheKind, ServerError,
     admission::weights,
+    backend::ObjectReadSnapshot,
     bazel_cache_object_key,
     object_store::put_reader_if_absent_s3,
     upload_ingest::{RequestBodyReader, stage_bounded_body},
@@ -163,30 +166,15 @@ pub(crate) async fn bazel_get(
     repo: BazelRepository,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    // Try AC first, then CAS.
-    if let Ok(ac_key) = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())
-        && let Ok(snapshot) = state.backend.object_read_snapshot(&ac_key).await
-    {
-        return direct_object_response_from_snapshot(
-            &state,
-            &headers,
-            &ac_key,
-            "application/octet-stream",
-            None,
-            "bazel",
-            snapshot,
-        )
-        .await;
-    }
-
-    let cas_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
-    direct_object_response(
+    let (key, snapshot) = flat_object_snapshot(&state, &hash, &repo).await?;
+    direct_object_response_from_snapshot(
         &state,
         &headers,
-        &cas_key,
+        &key,
         "application/octet-stream",
         None,
         "bazel",
+        snapshot,
     )
     .await
 }
@@ -202,16 +190,25 @@ pub(crate) async fn bazel_head(
     repo: BazelRepository,
     _headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    // Try AC first, then CAS.
-    if let Ok(ac_key) = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())
-        && let Ok(total_length) = state.backend.object_length(&ac_key).await
-    {
-        return Ok(super::helpers::object_head_response(total_length));
-    }
+    let (_, snapshot) = flat_object_snapshot(&state, &hash, &repo).await?;
+    Ok(super::helpers::object_head_response(snapshot.total_length))
+}
 
-    let cas_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
-    let total_length = state.backend.object_length(&cas_key).await?;
-    Ok(super::helpers::object_head_response(total_length))
+async fn flat_object_snapshot(
+    state: &AppState,
+    hash: &str,
+    repo: &BazelRepository,
+) -> Result<(ObjectKey, ObjectReadSnapshot), ServerError> {
+    let ac_key = bazel_cache_object_key(BazelCacheKind::Ac, hash, repo.capability())?;
+    match state.backend.object_read_snapshot(&ac_key).await {
+        Ok(snapshot) => Ok((ac_key, snapshot)),
+        Err(ServerError::NotFound) => {
+            let cas_key = bazel_cache_object_key(BazelCacheKind::Cas, hash, repo.capability())?;
+            let snapshot = state.backend.object_read_snapshot(&cas_key).await?;
+            Ok((cas_key, snapshot))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -848,7 +845,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn flat_put_to_cas_and_get_from_flat() {
+    async fn flat_routes_fall_back_only_when_action_cache_is_missing() {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state.clone());
         let content = test_content();
@@ -898,6 +895,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body.as_ref(), content.as_slice());
+
+        let ac_key = bazel_cache_object_key(
+            BazelCacheKind::Ac,
+            &hash,
+            &AuthorizedRepository::anonymous_full_access(),
+        )
+        .unwrap();
+        let ac_path = state
+            .backend
+            .object_store()
+            .local_path_for_key(&ac_key)
+            .unwrap();
+        // A directory in place of an object is a storage failure, not a cache miss.
+        std::fs::create_dir_all(ac_path).unwrap();
+        for method in ["GET", "HEAD"] {
+            for (route, expected) in [
+                (format!("cache/cas/{hash}"), StatusCode::OK),
+                (
+                    format!("cache/ac/{hash}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (hash.clone(), StatusCode::INTERNAL_SERVER_ERROR),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(format!("/v1/bazel/{route}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected, "{method} {route}");
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
