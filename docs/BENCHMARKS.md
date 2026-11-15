@@ -4024,6 +4024,39 @@ isolation under load, and PostgreSQL/object-store throughput and read
 amplification still require a separate measured run. The local physical-reuse
 benchmark above remains a separate result.
 
+### PostgreSQL/MinIO upload recovery qualification (2026-11-15)
+
+Four more existing deployment drills passed against the same frozen `45fd33b4`
+binary and real PostgreSQL/MinIO topology described above:
+
+| Existing drill | Result | Test elapsed time |
+| --- | --- | ---: |
+| `drill_deploy_a_postgres_kill_mid_upload_no_lost_commits` | Passed | 36.478 s |
+| `drill_deploy_b_minio_kill_mid_upload_durability` | Passed | 12.019 s |
+| `drill_deploy_postgres_kill_mid_lfs_patch` | Passed | 14.425 s |
+| `drill_deploy_postgres_kill_mid_s3_multipart` | Passed | 15.204 s |
+
+The S3 upload drills verify that acknowledged content survives dependency
+outages, in-flight failures are handled, and service recovers. The LFS PATCH
+and S3 multipart drills verify durable resumable state and byte-exact content
+after PostgreSQL recovery. These are fault-drill elapsed times, not performance
+measurements.
+
+After the build and environment setup in the previous subsection, reproduce
+this selection with:
+
+```bash
+cargo nextest run --locked -p shardline-server --all-features \
+  --test deployment_chaos \
+  -E 'test(drill_deploy_a_postgres_kill_mid_upload_no_lost_commits) | test(drill_deploy_b_minio_kill_mid_upload_durability) | test(drill_deploy_postgres_kill_mid_lfs_patch) | test(drill_deploy_postgres_kill_mid_s3_multipart)' \
+  --test-threads 1 --success-output immediate --failure-output immediate
+```
+
+All four selected tests executed and passed in 78.128 seconds overall; 46 other
+deployment tests were excluded by the filter. No selected test reported a
+missing-prerequisite skip. This extends the local recovery evidence; it does
+not qualify the complete distributed integrity gate or concurrent throughput.
+
 ### Standalone index checks without inherited S3 dependencies (2026-11-15)
 
 Compared `b38e851f` with `e83bdc5a`. Workspace storage dependencies no longer
