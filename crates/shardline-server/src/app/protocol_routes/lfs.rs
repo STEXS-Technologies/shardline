@@ -160,6 +160,12 @@ impl FromRequestParts<Arc<AppState>> for LfsWriteRepository {
     }
 }
 
+fn request_object_key(oid: &str, repository: &AuthorizedRepository) -> Option<ObjectKey> {
+    lfs_object_key(oid, repository)
+        .inspect_err(|error| tracing::debug!(%error, "LFS OID parsing failed"))
+        .ok()
+}
+
 /// Returns a 422 UNPROCESSABLE_ENTITY response for LFS validation errors.
 fn lfs_validation_response(message: &str) -> Response {
     (
@@ -1073,12 +1079,8 @@ pub(crate) async fn lfs_get_object(
     repo: LfsRepository,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let object_key = match lfs_object_key(&oid, repo.capability()) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::debug!(error = %e, "LFS OID parsing failed");
-            return Ok(lfs_validation_response("invalid oid"));
-        }
+    let Some(object_key) = request_object_key(&oid, repo.capability()) else {
+        return Ok(lfs_validation_response("invalid oid"));
     };
     metrics::record_lfs_download();
     direct_object_response(
@@ -1099,12 +1101,8 @@ pub(crate) async fn lfs_head_object(
     repo: LfsRepository,
     _headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let object_key = match lfs_object_key(&oid, repo.capability()) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::debug!(error = %e, "LFS OID parsing failed");
-            return Ok(lfs_validation_response("invalid oid"));
-        }
+    let Some(object_key) = request_object_key(&oid, repo.capability()) else {
+        return Ok(lfs_validation_response("invalid oid"));
     };
     let total_length = state.backend.object_length(&object_key).await?;
     Ok((
@@ -1135,12 +1133,8 @@ pub(crate) async fn lfs_put_object(
     // regardless of Content-Type. Accept any Content-Type, including no
     // Content-Type, to interoperate with git-lfs and other LFS clients.
 
-    let object_key = match lfs_object_key(&oid, repo.capability()) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::debug!(error = %e, "LFS OID parsing failed");
-            return Ok(lfs_validation_response("invalid oid"));
-        }
+    let Some(object_key) = request_object_key(&oid, repo.capability()) else {
+        return Ok(lfs_validation_response("invalid oid"));
     };
     let content_length = match headers.get(CONTENT_LENGTH) {
         Some(value) => match value
@@ -1187,12 +1181,8 @@ pub(crate) async fn lfs_delete_object(
     repo: LfsWriteRepository,
     _headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
-    let object_key = match lfs_object_key(&oid, repo.capability()) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::debug!(error = %e, "LFS OID parsing failed");
-            return Ok(lfs_validation_response("invalid oid"));
-        }
+    let Some(object_key) = request_object_key(&oid, repo.capability()) else {
+        return Ok(lfs_validation_response("invalid oid"));
     };
     match state.backend.delete_object_if_present(&object_key).await? {
         DeleteOutcome::Deleted => Ok(StatusCode::ACCEPTED.into_response()),
@@ -1218,17 +1208,13 @@ pub(crate) async fn lfs_patch_object(
         .try_acquire(weights::XORB_UPLOAD)
         .ok_or(ServerError::WorkQueueSaturated)?;
 
-    let object_key = match lfs_object_key(&oid, repo.capability()) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::debug!(error = %e, "LFS OID parsing failed");
-            return Ok(lfs_validation_response("invalid oid"));
-        }
+    let Some(object_key) = request_object_key(&oid, repo.capability()) else {
+        return Ok(lfs_validation_response("invalid oid"));
     };
 
     // Validate Content-Range header is present.
     let content_range = match single_range_header(&headers, CONTENT_RANGE)? {
-        Some(value) => value.to_str().unwrap_or("").to_owned(),
+        Some(value) => value.to_str().unwrap_or(""),
         None => {
             return Ok((
                 StatusCode::RANGE_NOT_SATISFIABLE,
@@ -1240,7 +1226,7 @@ pub(crate) async fn lfs_patch_object(
     };
 
     // Parse the Content-Range header: "bytes start-end/total".
-    let (offset, end, total) = match parse_content_range(&content_range) {
+    let (offset, end, total) = match parse_content_range(content_range) {
         Ok(range) => range,
         Err(()) => {
             return Ok((
@@ -1847,12 +1833,8 @@ pub(crate) async fn lfs_verify_object(
     repo: LfsWriteRepository,
     _headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
-    let object_key = match lfs_object_key(&oid, repo.capability()) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::debug!(error = %e, "LFS OID parsing failed");
-            return Ok(lfs_validation_response("invalid oid"));
-        }
+    let Some(object_key) = request_object_key(&oid, repo.capability()) else {
+        return Ok(lfs_validation_response("invalid oid"));
     };
 
     // Check object existence and size before reading.
