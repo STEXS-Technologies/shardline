@@ -1475,40 +1475,76 @@ fn into_response_saturated_includes_retry_guidance() {
 
 // ---- OciError tests ----
 
-#[test]
-fn oci_error_from_server_error() {
-    let oci = OciError(ServerError::NotFound);
-    let response = oci.into_response();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
+#[tokio::test]
+async fn oci_error_http_contract_preserves_envelope_and_challenges() {
+    use axum::http::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
 
-#[test]
-fn oci_error_from_server_error_unauthorized_challenge() {
-    let oci = OciError(ServerError::UnauthorizedChallenge("Bearer test".to_owned()));
-    let response = oci.into_response();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oci_error_response_body_contains_code() {
-    let oci = OciError(ServerError::NotFound);
-    let response = oci.into_response();
-    let (_parts, body) = response.into_parts();
-    let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-    let text = String::from_utf8(body_bytes.to_vec()).unwrap();
-    assert!(text.contains("MANIFEST_UNKNOWN"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oci_error_body_has_expected_structure() {
-    let oci = OciError(ServerError::InvalidDigest);
-    let response = oci.into_response();
-    let (_parts, body) = response.into_parts();
-    let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-    let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert!(parsed.get("errors").is_some());
-    let errors = parsed["errors"].as_array().unwrap();
-    assert_eq!(errors[0]["code"], "DIGEST_INVALID");
+    let default_challenge = Some("Bearer realm=\"shardline\"");
+    for (error, status, code, challenge) in [
+        (
+            ServerError::NotFound,
+            StatusCode::NOT_FOUND,
+            "MANIFEST_UNKNOWN",
+            None,
+        ),
+        (
+            ServerError::InvalidDigest,
+            StatusCode::BAD_REQUEST,
+            "DIGEST_INVALID",
+            None,
+        ),
+        (
+            ServerError::MissingAuthorization,
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            default_challenge,
+        ),
+        (
+            ServerError::InvalidAuthorizationHeader,
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            default_challenge,
+        ),
+        (
+            ServerError::InvalidToken(shardline_protocol::TokenCodecError::Expired),
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            default_challenge,
+        ),
+        (
+            ServerError::UnauthorizedChallenge("Bearer test".to_owned()),
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            Some("Bearer test"),
+        ),
+        (
+            ServerError::UnauthorizedChallenge("invalid\r\nchallenge".to_owned()),
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            None,
+        ),
+    ] {
+        let message = error.to_string();
+        let response = OciError::from(error).into_response();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(
+            response
+                .headers()
+                .get(WWW_AUTHENTICATE)
+                .map(|value| value.to_str().unwrap()),
+            challenge
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "errors": [{"code": code, "message": message, "detail": null}]
+            })
+        );
+    }
 }
 
 // ---- Additional From implementation tests ----
@@ -2019,30 +2055,6 @@ fn from_parse_stored_file_record_error_json() {
     )
     .into();
     assert!(matches!(err, ServerError::Json(_)));
-}
-
-#[test]
-fn oci_error_from_server_error_with_missing_auth_attaches_default_challenge() {
-    use axum::http::HeaderValue;
-    let oci = OciError(ServerError::MissingAuthorization);
-    let response = oci.into_response();
-    let www_auth = response.headers().get(axum::http::header::WWW_AUTHENTICATE);
-    assert_eq!(
-        www_auth,
-        Some(&HeaderValue::from_static("Bearer realm=\"shardline\""))
-    );
-}
-
-#[test]
-fn oci_error_not_found_has_no_www_auth() {
-    let oci = OciError(ServerError::NotFound);
-    let response = oci.into_response();
-    assert!(
-        response
-            .headers()
-            .get(axum::http::header::WWW_AUTHENTICATE)
-            .is_none()
-    );
 }
 
 // ---- Additional From implementation tests for uncovered variants ----
