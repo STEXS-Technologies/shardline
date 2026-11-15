@@ -504,8 +504,9 @@ impl LifecycleStore for MemoryIndexStore {
             .cloned()
             .collect::<Vec<_>>();
         deliveries.sort_by(|left, right| {
-            provider_sort_key(left.provider())
-                .cmp(provider_sort_key(right.provider()))
+            left.provider()
+                .as_str()
+                .cmp(right.provider().as_str())
                 .then_with(|| left.owner().cmp(right.owner()))
                 .then_with(|| left.repo().cmp(right.repo()))
                 .then_with(|| left.delivery_id().cmp(right.delivery_id()))
@@ -572,8 +573,9 @@ impl LifecycleStore for MemoryIndexStore {
             .cloned()
             .collect::<Vec<_>>();
         states.sort_by(|left, right| {
-            provider_sort_key(left.provider())
-                .cmp(provider_sort_key(right.provider()))
+            left.provider()
+                .as_str()
+                .cmp(right.provider().as_str())
                 .then_with(|| left.owner().cmp(right.owner()))
                 .then_with(|| left.repo().cmp(right.repo()))
         });
@@ -1044,6 +1046,7 @@ impl TreeStore for MemoryIndexStore {
             .filter(|k| {
                 k.provider == entry.provider && k.owner == entry.owner && k.repo == entry.repo
             })
+            .take(max_revisions)
             .count();
         let count_entries = state
             .tree_entries
@@ -1053,6 +1056,7 @@ impl TreeStore for MemoryIndexStore {
                     && k.namespace.owner == entry.owner
                     && k.namespace.repo == entry.repo
             })
+            .take(max_tree_entries)
             .count();
         if (count_revisions >= max_revisions && !state.revisions.contains_key(&revision_key))
             || count_entries >= max_tree_entries
@@ -1085,6 +1089,7 @@ impl TreeStore for MemoryIndexStore {
             .revisions
             .keys()
             .filter(|k| k.provider == rev.provider && k.owner == rev.owner && k.repo == rev.repo)
+            .take(max_revisions)
             .count();
         if count >= max_revisions {
             return Ok(RevisionCreationOutcome::LimitExceeded);
@@ -1277,19 +1282,8 @@ impl TreeStore for MemoryIndexStore {
             .keys()
             .map(|k| RepoKey::new(&k.provider, &k.owner, &k.repo))
             .collect();
-        keys.sort();
         keys.dedup();
         Ok(keys)
-    }
-}
-
-const fn provider_sort_key(provider: RepositoryProvider) -> &'static str {
-    match provider {
-        RepositoryProvider::GitHub => "github",
-        RepositoryProvider::Gitea => "gitea",
-        RepositoryProvider::GitLab => "gitlab",
-        RepositoryProvider::Codeberg => "codeberg",
-        RepositoryProvider::Generic => "generic",
     }
 }
 
