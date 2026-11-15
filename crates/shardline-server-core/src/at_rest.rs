@@ -150,23 +150,18 @@ impl AtRestCipher {
                 needs_upgrade: true,
             });
         };
-        let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-            // Not valid base64, so this is legacy plaintext that merely begins
-            // with the magic prefix. Strip the prefix to return the actual plaintext.
-            let stripped = stored.strip_prefix(MAGIC_PREFIX).unwrap_or(stored);
+        let Some(blob) = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()
+            .filter(|blob| blob.len() >= NONCE_LEN)
+        else {
+            // Legacy values beginning with the magic prefix retain the suffix
+            // as their plaintext on the upgrade path.
             return Ok(DecryptedSecret {
-                secret: SecretString::from_secret(stripped),
+                secret: SecretString::from_secret(encoded),
                 needs_upgrade: true,
             });
         };
-        if blob.len() < NONCE_LEN {
-            // Decodes as base64 but is too short to carry a nonce + ciphertext.
-            let stripped = stored.strip_prefix(MAGIC_PREFIX).unwrap_or(stored);
-            return Ok(DecryptedSecret {
-                secret: SecretString::from_secret(stripped),
-                needs_upgrade: true,
-            });
-        }
         let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
         let cipher = Aes256Gcm::new(GenericArray::<u8, U32>::from_slice(
             self.key.expose_secret(),
@@ -181,15 +176,12 @@ impl AtRestCipher {
         // Wrap the raw plaintext in `SecretBytes` so the buffer is zeroized on
         // drop regardless of whether UTF-8 conversion succeeds.
         let secret_bytes = SecretBytes::new(plain);
-        String::from_utf8(secret_bytes.expose_secret().to_vec()).map_or_else(
-            |_| Err(CipherError::NotUtf8),
-            |secret| {
-                Ok(DecryptedSecret {
-                    secret: SecretString::new(secret),
-                    needs_upgrade: false,
-                })
-            },
-        )
+        let secret = std::str::from_utf8(secret_bytes.expose_secret())
+            .map_err(|_invalid_utf8| CipherError::NotUtf8)?;
+        Ok(DecryptedSecret {
+            secret: SecretString::from_secret(secret),
+            needs_upgrade: false,
+        })
     }
 }
 
@@ -322,6 +314,16 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode("short")
         );
         assert!(!is_ciphertext(&short));
+        // A nonce-sized blob must attempt authentication, never legacy fallback.
+        let nonce_only = format!(
+            "{MAGIC_PREFIX}{}",
+            base64::engine::general_purpose::STANDARD.encode([0; NONCE_LEN])
+        );
+        assert!(is_ciphertext(&nonce_only));
+        assert!(matches!(
+            cipher.decrypt("org/model", &nonce_only),
+            Err(CipherError::Decrypt(_))
+        ));
     }
 
     #[test]
