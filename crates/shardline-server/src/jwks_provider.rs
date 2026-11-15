@@ -26,6 +26,7 @@ const MAX_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
 ///
 /// Validates tokens against a JWKS endpoint, caching keys and refreshing
 /// them in the background using ETag-based conditional requests.
+#[derive(Clone)]
 pub struct JwksProvider {
     pub(crate) claim_mapping: crate::external_jwt_claims::ExternalJwtClaims,
     client: Client,
@@ -35,21 +36,6 @@ pub struct JwksProvider {
     cached_keys: Arc<RwLock<Option<CachedJwks>>>,
     background_handle: Arc<RefreshTask>,
     shutdown: Arc<AtomicBool>,
-}
-
-impl Clone for JwksProvider {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            jwks_url: self.jwks_url.clone(),
-            issuer: self.issuer.clone(),
-            audience: self.audience.clone(),
-            claim_mapping: self.claim_mapping.clone(),
-            cached_keys: Arc::clone(&self.cached_keys),
-            background_handle: Arc::clone(&self.background_handle),
-            shutdown: Arc::clone(&self.shutdown),
-        }
-    }
 }
 
 struct CachedJwks {

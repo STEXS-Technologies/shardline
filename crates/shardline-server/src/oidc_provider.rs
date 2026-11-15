@@ -27,6 +27,7 @@ const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(1800);
 /// Validates tokens against an OIDC issuer by fetching JWKS keys from the
 /// issuer's discovery endpoint.  Keys are refreshed in a background task to
 /// prevent auth outages when the cache TTL expires.
+#[derive(Clone)]
 pub struct OidcProvider {
     pub(crate) claim_mapping: crate::external_jwt_claims::ExternalJwtClaims,
     client: Client,
@@ -47,33 +48,10 @@ pub struct OidcProvider {
     shutdown: Arc<AtomicBool>,
 }
 
-impl Clone for OidcProvider {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            issuer: self.issuer.clone(),
-            claim_mapping: self.claim_mapping.clone(),
-            audience: self.audience.clone(),
-            cached_keys: Arc::clone(&self.cached_keys),
-            jwks_url: self.jwks_url.clone(),
-            _background_handle: Arc::clone(&self._background_handle),
-            shutdown: Arc::clone(&self.shutdown),
-        }
-    }
-}
-
+#[derive(Clone)]
 struct CachedJwks {
     keys: Arc<Vec<Jwk>>,
     fetched_at: Instant,
-}
-
-impl Clone for CachedJwks {
-    fn clone(&self) -> Self {
-        Self {
-            keys: Arc::clone(&self.keys),
-            fetched_at: self.fetched_at,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]

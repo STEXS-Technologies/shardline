@@ -90,22 +90,12 @@ impl fmt::Debug for RedisTlsConfig {
 }
 
 /// Redis-backed reconstruction cache adapter.
+#[derive(Clone)]
 pub struct RedisReconstructionCache {
     client: redis::Client,
     connection: Arc<tokio::sync::OnceCell<redis::aio::ConnectionManager>>,
     ttl_seconds: NonZeroU64,
     operation_timeout: Duration,
-}
-
-impl Clone for RedisReconstructionCache {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            connection: Arc::clone(&self.connection),
-            ttl_seconds: self.ttl_seconds,
-            operation_timeout: self.operation_timeout,
-        }
-    }
 }
 
 impl fmt::Debug for RedisReconstructionCache {
