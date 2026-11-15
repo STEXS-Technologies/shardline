@@ -122,26 +122,6 @@ mod tests {
         ));
     }
 
-    // ── BlobUploads ─────────────────────────────────────────────────────
-
-    #[test]
-    fn blob_uploads_path_parses() {
-        let result = parse_oci_path("team/assets/blobs/uploads");
-        assert!(matches!(
-            result,
-            Ok(OciPath::BlobUploads { repository }) if repository == "team/assets"
-        ));
-    }
-
-    #[test]
-    fn blob_uploads_path_strips_trailing_slash() {
-        let result = parse_oci_path("team/assets/blobs/uploads/");
-        assert!(matches!(
-            result,
-            Ok(OciPath::BlobUploads { repository }) if repository == "team/assets"
-        ));
-    }
-
     // ── BlobUploadSession ───────────────────────────────────────────────
 
     #[test]
@@ -180,37 +160,6 @@ mod tests {
                 repository,
                 reference
             }) if repository == "team/assets" && reference == VALID_DIGEST
-        ));
-    }
-
-    // ── TagsList ────────────────────────────────────────────────────────
-
-    #[test]
-    fn tags_list_path_parses() {
-        let result = parse_oci_path("team/assets/tags/list");
-        assert!(matches!(
-            result,
-            Ok(OciPath::TagsList { repository }) if repository == "team/assets"
-        ));
-    }
-
-    #[test]
-    fn tags_list_path_strips_trailing_slash() {
-        let result = parse_oci_path("team/assets/tags/list/");
-        assert!(matches!(
-            result,
-            Ok(OciPath::TagsList { repository }) if repository == "team/assets"
-        ));
-    }
-
-    // ── Deeply nested repositories ──────────────────────────────────────
-
-    #[test]
-    fn deeply_nested_repository_parses() {
-        let result = parse_oci_path("a/b/c/d/tags/list");
-        assert!(matches!(
-            result,
-            Ok(OciPath::TagsList { repository }) if repository == "a/b/c/d"
         ));
     }
 
@@ -269,34 +218,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn tags_list_with_repository_having_hyphens_and_dots() {
-        // Repository names commonly contain hyphens and dots.
-        let result = parse_oci_path("my-team/my-repo.v2/tags/list");
-        assert!(matches!(
-            result,
-            Ok(OciPath::TagsList { repository }) if repository == "my-team/my-repo.v2"
-        ));
-    }
-
-    #[test]
-    fn repository_with_underscores_accepted() {
-        let result = parse_oci_path("team/my_repo/tags/list");
-        assert!(matches!(
-            result,
-            Ok(OciPath::TagsList { repository }) if repository == "team/my_repo"
-        ));
-    }
-
-    #[test]
-    fn repository_with_numbers_accepted() {
-        let result = parse_oci_path("team2/project3/blobs/uploads");
-        assert!(matches!(
-            result,
-            Ok(OciPath::BlobUploads { repository }) if repository == "team2/project3"
-        ));
-    }
-
     // ── Null byte rejection ──────────────────────────────────────────────
 
     #[test]
@@ -311,6 +232,36 @@ mod tests {
             result,
             Ok(OciPath::Manifest { reference, .. }) if reference == "v1\0tag"
         ));
+    }
+
+    #[test]
+    fn upload_initiation_paths_preserve_repository() {
+        for (path, expected) in [
+            ("team/assets/blobs/uploads", "team/assets"),
+            ("team/assets/blobs/uploads/", "team/assets"),
+            ("team2/project3/blobs/uploads", "team2/project3"),
+        ] {
+            assert!(
+                matches!(parse_oci_path(path), Ok(OciPath::BlobUploads { repository }) if repository == expected),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_listing_paths_preserve_repository() {
+        for (path, expected) in [
+            ("team/assets/tags/list", "team/assets"),
+            ("team/assets/tags/list/", "team/assets"),
+            ("a/b/c/d/tags/list", "a/b/c/d"),
+            ("my-team/my-repo.v2/tags/list", "my-team/my-repo.v2"),
+            ("team/my_repo/tags/list", "team/my_repo"),
+        ] {
+            assert!(
+                matches!(parse_oci_path(path), Ok(OciPath::TagsList { repository }) if repository == expected),
+                "{path}"
+            );
+        }
     }
 
     #[test]
