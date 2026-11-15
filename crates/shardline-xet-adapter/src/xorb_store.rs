@@ -534,49 +534,46 @@ mod tests {
 
     // ---- store_uploaded_xorb tests ----
 
-    #[test]
-    fn store_uploaded_xorb_stores_only_the_verified_container() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-
-        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok(), "store_uploaded_xorb failed: {result:?}");
-        let stored = result.unwrap();
-        assert!(stored.was_inserted, "xorb should be newly inserted");
-        assert_eq!(stored.stored_bytes, serialized.serialized_data.len() as u64);
-        let objects = shardline_storage::ObjectStore::list_prefix(
-            &object_store,
-            &shardline_storage::ObjectPrefix::parse("").unwrap(),
-        )
-        .unwrap();
-        assert_eq!(objects.len(), 1);
-    }
-
-    #[test]
-    fn store_uploaded_xorb_idempotent_returns_was_inserted_false() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-
-        let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(first.was_inserted);
-
-        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(
-            !second.was_inserted,
-            "second store should report was_inserted=false"
-        );
+    #[tokio::test]
+    async fn store_uploaded_xorb_accounts_only_for_new_verified_containers() {
+        for (num_chunks, chunk_bytes, compression) in [
+            (1, 256, CompressionScheme::None),
+            (2, 256, CompressionScheme::None),
+            (3, 512, CompressionScheme::LZ4),
+            (2, 512, CompressionScheme::None),
+            (1, 128, CompressionScheme::None),
+            (2, 128, CompressionScheme::None),
+            (4, 128, CompressionScheme::None),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+            let raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(chunk_bytes));
+            let serialized =
+                SerializedXorbObject::from_xorb_with_compression(raw, compression, true).unwrap();
+            let hash = serialized.hash.hex();
+            let first =
+                super::store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data)
+                    .await
+                    .unwrap();
+            assert!(first.was_inserted);
+            assert_eq!(first.stored_bytes, serialized.serialized_data.len() as u64);
+            let second =
+                super::store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data)
+                    .await
+                    .unwrap();
+            assert!(!second.was_inserted);
+            assert_eq!(second.stored_bytes, 0);
+            let objects = ObjectStore::list_prefix(
+                &object_store,
+                &shardline_storage::ObjectPrefix::parse("").unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                objects.len(),
+                1,
+                "only the verified container should be retained"
+            );
+        }
     }
 
     #[test]
@@ -1010,26 +1007,6 @@ mod tests {
 
     // ── store_uploaded_xorb unpacked_length sanity checks ────────────────
 
-    #[test]
-    fn store_uploaded_xorb_stores_zero_bytes_for_existing_container() {
-        // A retry verifies the retained container without counting it again.
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-
-        let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(first.was_inserted);
-
-        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(!second.was_inserted);
-        assert_eq!(second.stored_bytes, 0);
-    }
-
     // ── canonicalize_uploaded_xorb with complete error path ──────────────
 
     #[test]
@@ -1062,27 +1039,6 @@ mod tests {
     }
 
     // ── store_uploaded_xorb with stored_bytes accumulation ─────────────
-
-    #[test]
-    fn store_uploaded_xorb_stored_bytes_count_only_the_container() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-
-        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(result.was_inserted);
-        assert_eq!(result.stored_bytes, serialized.serialized_data.len() as u64);
-
-        // Reusing the retained container inserts no additional payload bytes.
-        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(!second.was_inserted);
-        assert_eq!(second.stored_bytes, 0);
-    }
 
     #[test]
     fn store_uploaded_xorb_with_lz4_compression() {
@@ -1152,36 +1108,6 @@ mod tests {
     }
 
     // ── store_uploaded_xorb with edge cases ───────────────────────────
-
-    #[test]
-    fn store_uploaded_xorb_unpacked_length_check() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-
-        // Store it once - should succeed
-        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok(), "first store should succeed: {result:?}");
-        let stored = result.unwrap();
-        assert!(stored.was_inserted);
-        assert!(
-            stored.stored_bytes > 0,
-            "stored_bytes should be > 0, got {}",
-            stored.stored_bytes
-        );
-
-        // An idempotent retry adds no payload bytes.
-        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
-        assert!(second.is_ok(), "second store should succeed: {second:?}");
-        let second = second.unwrap();
-        assert!(!second.was_inserted);
-        assert_eq!(second.stored_bytes, 0);
-    }
 
     // ── store_uploaded_xorb_with_metrics full round-trip ─────────────────
 
@@ -1386,21 +1312,6 @@ mod tests {
     // ── store_uploaded_xorb idempotent detailed check ──────────────────
 
     #[test]
-    fn store_uploaded_xorb_first_inserts_second_already_exists() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-        let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(first.was_inserted);
-        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(!second.was_inserted);
-    }
-
-    #[test]
     fn store_uploaded_xorb_different_xorbs_independent() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
@@ -1535,21 +1446,6 @@ mod tests {
 
     // ── store_uploaded_xorb with LZ4 and footer ─────────────────────────
 
-    #[test]
-    fn store_uploaded_xorb_lz4_with_footer_idempotent() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let raw = build_raw_xorb(3, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, true)
-                .unwrap();
-        let hash = serialized.hash.hex();
-        let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(first.was_inserted);
-        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-        assert!(!second.was_inserted);
-    }
-
     // ── canonicalize_uploaded_xorb with LZ4 footerless bytes ──────────
 
     #[test]
@@ -1567,26 +1463,6 @@ mod tests {
     }
 
     // ── Container persistence accounting ─────────────────────────────
-
-    #[test]
-    fn store_uploaded_xorb_multiple_chunks_counts_stored_bytes() {
-        for num_chunks in [1, 2, 4] {
-            let temp = tempfile::tempdir().unwrap();
-            let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-            let raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(128));
-            let serialized = SerializedXorbObject::from_xorb_with_compression(
-                raw,
-                CompressionScheme::None,
-                true,
-            )
-            .unwrap();
-            let hash = serialized.hash.hex();
-            let result =
-                async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
-            assert!(result.was_inserted, "chunks={num_chunks}");
-            assert!(result.stored_bytes > 0, "chunks={num_chunks}");
-        }
-    }
 
     // ── idempotent store with visit verification ────────────────────────
 
