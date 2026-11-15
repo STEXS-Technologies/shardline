@@ -386,23 +386,19 @@ mod tests {
     fn sigv4_header_ignores_extra_commas_and_malformed_dates() {
         // Extra commas / malformed date segments after the access key are
         // irrelevant — only the first Credential path segment is the key.
-        let headers = header_map(&[(
-            AUTHORIZATION.as_str(),
+        for authorization in [
             "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/,,,/us-east-1/s3/aws4_request, \
              SignedHeaders=host, Signature=abc",
-        )]);
-        assert_eq!(extract_access_key(&headers), Some("AKIDEXAMPLE"));
-        let headers = header_map(&[(
-            AUTHORIZATION.as_str(),
             "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/not-a-date/us-east-1/s3/aws4_request",
-        )]);
-        assert_eq!(extract_access_key(&headers), Some("AKIDEXAMPLE"));
-        // A trailing credential scope with extra slash segments is fine too.
-        let headers = header_map(&[(
-            AUTHORIZATION.as_str(),
             "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260813//s3///aws4_request",
-        )]);
-        assert_eq!(extract_access_key(&headers), Some("AKIDEXAMPLE"));
+        ] {
+            let headers = header_map(&[(AUTHORIZATION.as_str(), authorization)]);
+            assert_eq!(
+                extract_access_key(&headers),
+                Some("AKIDEXAMPLE"),
+                "authorization: {authorization}"
+            );
+        }
     }
 
     #[test]
