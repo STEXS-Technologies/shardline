@@ -132,7 +132,6 @@ strip = "none"
 debug = 2
 opt-level = 0
 overflow-checks = true
-incremental = false
 panic = "unwind"
 lto = false
 

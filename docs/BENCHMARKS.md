@@ -4856,3 +4856,28 @@ repeated, changed-source and corrupted-source scans, with zero HEADs throughout.
 All three selected tests passed; 111 other library tests were excluded by the
 ignored-only selection. Fixtures were removed after the run. This qualifies
 these local MinIO regression scenarios, not production throughput or scale.
+
+### Incremental development recompilation
+
+On November 16, 2026, source `b9820832049726a53818dd6bcf07f40709e6e478`
+was measured with Rust/Cargo 1.99.0 on the shared x86_64 Linux development host.
+Removing the workspace's `profile.dev.incremental = false` restores Cargo's
+incremental development/test default. Release settings are unchanged.
+
+The controlled workload appended a distinct comment to the S3 adapter's
+`src/multipart.rs`, then ran `cargo +1.99.0 test --no-run --lib --offline --locked
+-p shardline-s3-adapter`. Each mode had a preparation build and three edited-source
+samples, with source restored afterward. Both modes used the same existing target
+directory and dependency caches, four jobs, no compiler wrapper, and disabled
+dev/test debug information. `CARGO_INCREMENTAL=0` and `1` selected the modes.
+
+| Edited-source compilation | Disabled | Enabled |
+| --- | ---: | ---: |
+| Median of three samples | 1.816 s | 0.817 s |
+| Range | 1.814–1.834 s | 0.809–0.822 s |
+
+This is about 55% less elapsed time for this small, comment-only adapter rebuild.
+It does not measure fresh builds, semantic edits, the full server/CLI build, or
+production throughput. Incremental compilation uses additional cache space and
+its preparation cost is excluded from the table. The repository's normal debug
+information setting was not measured here.
