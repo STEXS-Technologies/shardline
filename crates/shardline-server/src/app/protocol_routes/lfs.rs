@@ -545,11 +545,7 @@ fn load_lfs_patch_ranges_from_disk(
             )
         })?;
     if stored_total != total {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "inconsistent LFS patch total length",
-        )
-        .into());
+        return Err(lfs_patch_ranges_inconsistent_total());
     }
     let mut state = PatchRangesState {
         total,
@@ -621,6 +617,24 @@ fn lfs_patch_ranges_inconsistent_total() -> ServerError {
     .into()
 }
 
+/// Loads a cached session and verifies the request's declared size.
+fn load_lfs_patch_ranges<'cache>(
+    map: &'cache mut HashMap<PathBuf, PatchRangesState>,
+    ranges_path: &FsPath,
+    total: u64,
+) -> Result<&'cache mut PatchRangesState, ServerError> {
+    let state = match map.entry(ranges_path.to_owned()) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(load_lfs_patch_ranges_from_disk(ranges_path, total)?)
+        }
+    };
+    if state.total != total {
+        return Err(lfs_patch_ranges_inconsistent_total());
+    }
+    Ok(state)
+}
+
 /// Inspects a session's merged-range bookkeeping for the pre-write checks.
 ///
 /// Returns `(high_water_mark, already_complete)` where the high-water mark is
@@ -632,15 +646,7 @@ fn inspect_lfs_patch_ranges(ranges_path: &FsPath, total: u64) -> Result<(u64, bo
     let mut map = LFS_PATCH_RANGES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let state = match map.entry(ranges_path.to_owned()) {
-        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(load_lfs_patch_ranges_from_disk(ranges_path, total)?)
-        }
-    };
-    if state.total != total {
-        return Err(lfs_patch_ranges_inconsistent_total());
-    }
+    let state = load_lfs_patch_ranges(&mut map, ranges_path, total)?;
     let high_water_mark = state
         .ranges
         .last()
@@ -665,15 +671,7 @@ fn record_lfs_patch_range(
     let mut map = LFS_PATCH_RANGES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let state = match map.entry(ranges_path.to_owned()) {
-        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(load_lfs_patch_ranges_from_disk(ranges_path, total)?)
-        }
-    };
-    if state.total != total {
-        return Err(lfs_patch_ranges_inconsistent_total());
-    }
+    let state = load_lfs_patch_ranges(&mut map, ranges_path, total)?;
     insert_merged_range(&mut state.ranges, start, end_exclusive);
     if state.ranges.len() > MAX_LFS_PATCH_RANGES {
         return Err(std::io::Error::new(
