@@ -839,22 +839,28 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
             }
         }
     }
-    // Apply the budget over the scanned state, oldest first.
-    while state.total_bytes > budget_bytes {
-        let Some((oldest_key, size)) = state
+    // Order once when reopening over budget, rather than scanning the whole
+    // index again for every evicted entry.
+    if state.total_bytes > budget_bytes {
+        let mut oldest_first: Vec<_> = state
             .entries
             .iter()
-            .min_by_key(|(_, entry)| entry.last_accessed)
-            .map(|(oldest_key, entry)| (oldest_key.clone(), entry.size))
-        else {
-            break;
-        };
-        state.entries.remove(&oldest_key);
-        state.total_bytes = state.total_bytes.saturating_sub(size);
-        let prefix2 = oldest_key.0.get(..2);
-        let dir = prefix2.map(|prefix| cache_dir.join("xorbs").join(prefix));
-        if let Some(dir) = dir {
-            drop(std::fs::remove_file(dir.join(entry_file_name(&oldest_key))));
+            .map(|(key, entry)| (key.clone(), *entry))
+            .collect();
+        oldest_first.sort_unstable_by_key(|(_, entry)| entry.last_accessed);
+        for (key, entry) in oldest_first {
+            if state.total_bytes <= budget_bytes {
+                break;
+            }
+            state.entries.remove(&key);
+            state.total_bytes = state.total_bytes.saturating_sub(entry.size);
+            if let Some(prefix) = key.0.get(..2) {
+                let path = cache_dir
+                    .join("xorbs")
+                    .join(prefix)
+                    .join(entry_file_name(&key));
+                drop(std::fs::remove_file(path));
+            }
         }
     }
     Ok(state)
@@ -1038,10 +1044,18 @@ mod tests {
         let cache = ChunkCache::new(directory.path(), 1024).unwrap();
         put(&cache, &hash('a'), b"first").await;
         put(&cache, &hash('b'), b"second").await;
+        put(&cache, &hash('c'), b"third").await;
+        put(&cache, &hash('d'), b"fourth").await;
+        for (digit, seconds) in [('a', 1), ('b', 2), ('c', 3), ('d', 4)] {
+            let path = cache.item_path(&cache_key(&hash(digit), (0, 1))).unwrap();
+            let times = std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds));
+            File::open(path).unwrap().set_times(times).unwrap();
+        }
         drop(cache);
         let reopened = ChunkCache::new(directory.path(), 1024).unwrap();
-        assert_eq!(reopened.entry_count().await.unwrap(), 2);
-        assert_eq!(reopened.total_bytes().await.unwrap(), 107);
+        assert_eq!(reopened.entry_count().await.unwrap(), 4);
+        assert_eq!(reopened.total_bytes().await.unwrap(), 214);
         assert_eq!(
             get(&reopened, &hash('a')).await.unwrap().data.as_ref(),
             b"first"
@@ -1050,6 +1064,13 @@ mod tests {
         let reduced = ChunkCache::new(directory.path(), 54).unwrap();
         assert_eq!(reduced.entry_count().await.unwrap(), 1);
         assert!(reduced.total_bytes().await.unwrap() <= 54);
+        assert!(get(&reduced, &hash('a')).await.is_none());
+        assert!(get(&reduced, &hash('b')).await.is_none());
+        assert!(get(&reduced, &hash('c')).await.is_none());
+        assert_eq!(
+            get(&reduced, &hash('d')).await.unwrap().data.as_ref(),
+            b"fourth"
+        );
         drop(reduced);
         let checked = ChunkCache::new(directory.path(), 1024).unwrap();
         assert_eq!(checked.entry_count().await.unwrap(), 1);
