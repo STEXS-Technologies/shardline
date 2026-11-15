@@ -2046,108 +2046,27 @@ mod tests {
         assert_ne!(sha1, sha2);
     }
 
-    // ---------------------------------------------------------------------------
-    // HubRepoType::as_str
-    // ---------------------------------------------------------------------------
-
     #[test]
-    fn hub_repo_type_as_str() {
-        assert_eq!(HubRepoType::Model.as_str(), "model");
-        assert_eq!(HubRepoType::Dataset.as_str(), "dataset");
-        assert_eq!(HubRepoType::Space.as_str(), "space");
-    }
-
-    // ---------------------------------------------------------------------------
-    // HubRepoType::parse_str
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn parse_str_valid_singular() {
-        assert_eq!(HubRepoType::parse_str("model"), Some(HubRepoType::Model));
-        assert_eq!(
-            HubRepoType::parse_str("dataset"),
-            Some(HubRepoType::Dataset)
-        );
-        assert_eq!(HubRepoType::parse_str("space"), Some(HubRepoType::Space));
+    fn hub_repo_type_names() {
+        for (kind, singular, plural) in [
+            (HubRepoType::Model, "model", "models"),
+            (HubRepoType::Dataset, "dataset", "datasets"),
+            (HubRepoType::Space, "space", "spaces"),
+        ] {
+            assert_eq!(kind.as_str(), singular);
+            for name in [singular, plural] {
+                assert_eq!(HubRepoType::parse_str(name), Some(kind), "{name}");
+                assert_eq!(HubRepoType::from_api_repo_type(name), Some(kind), "{name}");
+            }
+        }
     }
 
     #[test]
-    fn parse_str_valid_plural() {
-        assert_eq!(HubRepoType::parse_str("models"), Some(HubRepoType::Model));
-        assert_eq!(
-            HubRepoType::parse_str("datasets"),
-            Some(HubRepoType::Dataset)
-        );
-        assert_eq!(HubRepoType::parse_str("spaces"), Some(HubRepoType::Space));
-    }
-
-    #[test]
-    fn parse_str_invalid() {
-        assert_eq!(HubRepoType::parse_str("invalid"), None);
-        assert_eq!(HubRepoType::parse_str(""), None);
-        assert_eq!(HubRepoType::parse_str("unknown"), None);
-    }
-
-    // ---------------------------------------------------------------------------
-    // HubRepo fields
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn hub_repo_fields() {
-        let repo = HubRepo {
-            repo_id: "owner/name".to_owned(),
-            repo_type: HubRepoType::Model,
-            private: false,
-            default_branch: "main".to_owned(),
-            created_at_unix_seconds: 1000,
-            updated_at_unix_seconds: 2000,
-        };
-        assert_eq!(repo.repo_id, "owner/name");
-        assert_eq!(repo.repo_type, HubRepoType::Model);
-        assert!(!repo.private);
-        assert_eq!(repo.default_branch, "main");
-        assert_eq!(repo.created_at_unix_seconds, 1000);
-        assert_eq!(repo.updated_at_unix_seconds, 2000);
-    }
-
-    #[test]
-    fn hub_repo_private_flag() {
-        let public = HubRepo {
-            repo_id: "a/b".to_owned(),
-            repo_type: HubRepoType::Dataset,
-            private: false,
-            default_branch: String::new(),
-            created_at_unix_seconds: 0,
-            updated_at_unix_seconds: 0,
-        };
-        assert!(!public.private);
-
-        let private = HubRepo {
-            repo_id: "a/b".to_owned(),
-            repo_type: HubRepoType::Dataset,
-            private: true,
-            default_branch: String::new(),
-            created_at_unix_seconds: 0,
-            updated_at_unix_seconds: 0,
-        };
-        assert!(private.private);
-    }
-
-    // ---------------------------------------------------------------------------
-    // HubRepoType::from_api_repo_type
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn from_api_repo_type() {
-        assert_eq!(
-            HubRepoType::from_api_repo_type("model"),
-            Some(HubRepoType::Model)
-        );
-        assert_eq!(
-            HubRepoType::from_api_repo_type("dataset"),
-            Some(HubRepoType::Dataset)
-        );
-        assert_eq!(HubRepoType::from_api_repo_type("invalid"), None);
+    fn hub_repo_type_rejects_unknown_and_case_mismatched_names() {
+        for name in ["invalid", "", "unknown", "Model", "MODEL", "Spaces"] {
+            assert_eq!(HubRepoType::parse_str(name), None, "{name}");
+            assert_eq!(HubRepoType::from_api_repo_type(name), None, "{name}");
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -2155,37 +2074,18 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn canonical_ref_name_preserves_short_branch_name() {
-        assert_eq!(canonical_ref_name("main"), "main");
-        assert_eq!(canonical_ref_name("feature"), "feature");
-    }
-
-    #[test]
-    fn canonical_ref_name_strips_refs_heads_prefix() {
-        assert_eq!(canonical_ref_name("refs/heads/main"), "main");
-        assert_eq!(
-            canonical_ref_name("refs/heads/feature/branch"),
-            "feature/branch"
-        );
-    }
-
-    #[test]
-    fn canonical_ref_name_preserves_tag_refs() {
-        assert_eq!(canonical_ref_name("refs/tags/v1.0"), "refs/tags/v1.0");
-    }
-
-    #[test]
-    fn canonical_ref_name_handles_empty_after_strip() {
-        // "refs/heads/" with nothing after strips to "", but filter rejects it
-        assert_eq!(canonical_ref_name("refs/heads/"), "refs/heads/");
-    }
-
-    #[test]
-    fn canonical_ref_name_preserves_other_ref_prefixes() {
-        assert_eq!(
-            canonical_ref_name("refs/notes/commits"),
-            "refs/notes/commits"
-        );
+    fn canonical_ref_names() {
+        for (input, expected) in [
+            ("main", "main"),
+            ("feature", "feature"),
+            ("refs/heads/main", "main"),
+            ("refs/heads/feature/branch", "feature/branch"),
+            ("refs/tags/v1.0", "refs/tags/v1.0"),
+            ("refs/heads/", "refs/heads/"),
+            ("refs/notes/commits", "refs/notes/commits"),
+        ] {
+            assert_eq!(canonical_ref_name(input), expected, "{input}");
+        }
     }
 
     #[test]
@@ -2938,21 +2838,6 @@ mod tests {
         assert!(store.get_repo("blanket/repo").unwrap().is_none());
     }
 
-    // ── HubRepoType extra edge cases ───────────────────────────────────────
-
-    #[test]
-    fn parse_str_case_sensitive() {
-        assert_eq!(HubRepoType::parse_str("Model"), None);
-        assert_eq!(HubRepoType::parse_str("MODEL"), None);
-    }
-
-    #[test]
-    fn from_api_repo_type_unknown() {
-        assert_eq!(HubRepoType::from_api_repo_type("unknown"), None);
-        assert_eq!(HubRepoType::from_api_repo_type("Spaces"), None);
-        assert_eq!(HubRepoType::from_api_repo_type(""), None);
-    }
-
     // ── HubRepo::compute_commit_sha edge cases ─────────────────────────────
 
     #[test]
@@ -2993,53 +2878,6 @@ mod tests {
         assert_eq!(models.len(), 1);
     }
 
-    // ── HubRevision and HubFileEntry field access ──────────────────────────
-
-    #[test]
-    fn hub_revision_fields() {
-        let rev = HubRevision {
-            repo_id: "owner/repo".to_owned(),
-            ref_name: "main".to_owned(),
-            sha: "abc123".to_owned(),
-            parent_sha: Some("parent0".to_owned()),
-            message: Some("my commit".to_owned()),
-            created_at_unix_seconds: 1000,
-        };
-        assert_eq!(rev.sha, "abc123");
-        assert_eq!(rev.parent_sha.as_deref(), Some("parent0"));
-        assert_eq!(rev.message.as_deref(), Some("my commit"));
-    }
-
-    #[test]
-    fn hub_file_entry_fields() {
-        let entry = HubFileEntry {
-            path: "src/lib.rs".to_owned(),
-            size: 1024,
-            sha: "filehash".to_owned(),
-            is_lfs: true,
-        };
-        assert_eq!(entry.path, "src/lib.rs");
-        assert!(entry.is_lfs);
-        assert_eq!(entry.sha, "filehash");
-    }
-
-    #[test]
-    fn hub_webhook_fields() {
-        let wh = HubWebhook {
-            id: "wh-1".to_owned(),
-            repo_id: "repo".to_owned(),
-            url: "https://hook.example.com".to_owned(),
-            events: vec!["push".to_owned()],
-            secret: Some(SecretString::from_secret("s3kr3t")),
-            active: true,
-            created_at_unix_seconds: 500,
-        };
-        assert_eq!(
-            wh.secret.as_ref().map(SecretString::expose_secret),
-            Some("s3kr3t")
-        );
-        assert!(wh.active);
-    }
     #[test]
     fn atomic_create_override_is_forwarded_by_both_boxed_constructors() {
         for store in [
