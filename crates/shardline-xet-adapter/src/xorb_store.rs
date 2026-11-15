@@ -645,73 +645,37 @@ mod tests {
     }
 
     #[test]
-    fn xorb_hash_from_object_key_extracts_hash_for_native_xorb_layout() {
-        let hash = "ab".repeat(32);
-        let key = xorb_object_key(&hash);
-
-        let key = key.expect("expected valid key");
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-
-        let extracted = extracted.expect("expected valid extracted");
-        assert_eq!(extracted, Some(hash.as_str()));
-    }
-
-    // ── xorb_hash_from_object_key_if_present edge cases ──────────────────
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_non_xorb_namespace() {
-        let key = shardline_storage::ObjectKey::parse("shards/ab/abhash.shard").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_too_many_segments() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa/hash.xorb/extra").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_non_default_namespace() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/custom/aa/hash.xorb").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_invalid_prefix() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/xyz/hash.xorb").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_missing_xorb_extension() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa/hash").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_prefix_mismatch() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/bb/aahash.xorb").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_invalid_hash_characters() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/gg/gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.xorb").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
+    fn xorb_hash_from_object_key_ignores_unrelated_layouts() {
+        for path in [
+            "shards/ab/abhash.shard",
+            "xorbs/default/aa/hash.xorb/extra",
+            "xorbs/custom/aa/hash.xorb",
+            "xorbs/default/xyz/hash.xorb",
+            "xorbs/default/aa/hash",
+            "xorbs/default/bb/aahash.xorb",
+            "xorbs/default/gg/gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.xorb",
+            "a",
+            "xorbs",
+            "xorbs/default",
+            "xorbs/default/ab",
+            "xorbs/default/ag/aggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.xorb",
+            "xorbs/default/a/ahash.xorb",
+            "xorbs/default/a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.xorb",
+            "shards/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.xorb",
+            "xorbs/custom/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.xorb",
+            "xorbs/default/aa/ahash.xorb/extra",
+            "xorbs/default/aa/ahash",
+            "xorbs/default/gh/ghash.xorb",
+            "xorbs/default/z1/z1hash.xorb",
+            "xorbs/default/aa",
+        ] {
+            let key = shardline_storage::ObjectKey::parse(path).unwrap();
+            assert_eq!(
+                xorb_hash_from_object_key_if_present(&key).unwrap(),
+                None,
+                "unrelated layout {path:?}"
+            );
+        }
     }
 
     // ── map_object_key_error ────────────────────────────────────────────
@@ -1054,45 +1018,6 @@ mod tests {
         assert!(!visited, "visitor should not be called");
     }
 
-    // ── xorb_hash_from_object_key_if_present zero-segment ──────────────
-
-    #[test]
-    fn xorb_hash_from_object_key_none_for_empty_string() {
-        use shardline_storage::ObjectKey;
-        // ObjectKey::parse("") returns Err(Empty), so we skip empty keys
-        let key = ObjectKey::parse("a").unwrap(); // single segment, not a valid xorb path
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert!(extracted.unwrap().is_none());
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_one_segment() {
-        use shardline_storage::ObjectKey;
-        let key = ObjectKey::parse("xorbs").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_two_segments() {
-        use shardline_storage::ObjectKey;
-        let key = ObjectKey::parse("xorbs/default").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_three_segments() {
-        use shardline_storage::ObjectKey;
-        let key = ObjectKey::parse("xorbs/default/ab").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
     // ── ObjectKey error mapping ──────────────────────────────────────────
 
     #[test]
@@ -1410,14 +1335,6 @@ mod tests {
 
     // ── xorb_object_key with edge cases ────────────────────────────────
 
-    #[test]
-    fn xorb_hash_from_object_key_none_for_empty_segments_after_namespace() {
-        let key = shardline_storage::ObjectKey::parse("xorbs").unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key);
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap(), None);
-    }
-
     // ── store_uploaded_xorb with edge cases ───────────────────────────
 
     #[test]
@@ -1511,8 +1428,6 @@ mod tests {
         assert_eq!(count, 2);
     }
 
-    // ── xorb_hash_from_object_key_if_present with valid error check ─────
-
     #[test]
     fn xorb_hash_from_object_key_with_uppercase_hash_returns_err() {
         // A key where the hash has uppercase chars after a valid lowercase prefix
@@ -1526,18 +1441,6 @@ mod tests {
             result.is_err(),
             "expected error for uppercase hash, got {result:?}"
         );
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_with_non_hex_second_char_returns_none() {
-        // Prefix "ag" is not valid hex
-        let key = shardline_storage::ObjectKey::parse(
-            "xorbs/default/ag/aggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.xorb",
-        )
-        .unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
     }
 
     // ── normalize_serialized_xorb edge cases ────────────────────────────
@@ -1634,35 +1537,6 @@ mod tests {
         // returns Ok(None) because key lacks .xorb suffix
         assert!(result.is_ok());
         assert!(!visited);
-    }
-
-    // ── xorb_hash_from_object_key_if_present edge cases ─────────────────
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_prefix_not_two_chars() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/a/ahash.xorb").unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_prefix_one_char() {
-        let key = shardline_storage::ObjectKey::parse(
-            "xorbs/default/a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.xorb",
-        )
-        .unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_accepts_valid_xorb_key_round_trip() {
-        let hash = "ab".repeat(32);
-        let key = xorb_object_key(&hash).unwrap();
-        let extracted = xorb_hash_from_object_key_if_present(&key).unwrap();
-        assert_eq!(extracted, Some(hash.as_str()));
     }
 
     // ── store_uploaded_xorb with varied setup ────────────────────────────
@@ -1820,30 +1694,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── xorb_hash_from_object_key_if_present returns None for wrong ns ─
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_shards_namespace() {
-        let key = shardline_storage::ObjectKey::parse(
-            "shards/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.xorb",
-        )
-        .unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_non_default_namespace_variant() {
-        let key = shardline_storage::ObjectKey::parse(
-            "xorbs/custom/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.xorb",
-        )
-        .unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
     // ── visit_stored_xorb_chunk_hashes with stored xorb (coverage boost) ─
 
     #[test]
@@ -1989,40 +1839,6 @@ mod tests {
         assert_eq!(validated.hash(), expected_hash);
     }
 
-    // ── xorb_hash_from_object_key_if_present with edge case paths ──────
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_extra_segment_after_filename() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa/ahash.xorb/extra").unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_missing_file_extension() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa/ahash").unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_non_hex_prefix_chars() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/gh/ghash.xorb").unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_non_hex_prefix_char_first() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/z1/z1hash.xorb").unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
     // ── Container persistence accounting ─────────────────────────────
 
     #[test]
@@ -2116,31 +1932,5 @@ mod tests {
         })
         .unwrap();
         assert_eq!(count, 3);
-    }
-
-    // ── xorb_hash_from_object_key_if_present more edge cases ────────────
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_no_prefix_segment() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default").unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_only_namespace() {
-        let key = shardline_storage::ObjectKey::parse("xorbs").unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn xorb_hash_from_object_key_rejects_no_file_name() {
-        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa").unwrap();
-        let result = xorb_hash_from_object_key_if_present(&key);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
     }
 }
