@@ -1631,12 +1631,8 @@ impl FileTerm {
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when the data-retrieval task cannot be spawned.
-    async fn get_data_task(
-        &self,
-        ctx: &StreamContext,
-        token: &str,
-    ) -> Result<DataFuture, SdxError> {
+    /// Returns [`SdxError`] when already-decoded data cannot cover this term.
+    fn data_future(&self, ctx: &StreamContext, token: &str) -> Result<DataFuture, SdxError> {
         if let Some(block_data) = self.xorb_block.data.get() {
             let bytes = self.extract_bytes(block_data)?;
             return Ok(Box::pin(async move { Ok(bytes) }));
@@ -2171,19 +2167,16 @@ pub(crate) struct FileReconstructor {
     file_id: String,
     token: String,
     byte_range: Option<Range<u64>>,
-    chunk_cache: Option<Arc<ChunkCache>>,
     cancellation_token: CancellationToken,
 }
 
 impl FileReconstructor {
     pub(crate) fn new(ctx: StreamContext, file_id: String, token: String) -> Self {
-        let chunk_cache = ctx.chunk_cache.clone();
         Self {
             ctx,
             file_id,
             token,
             byte_range: None,
-            chunk_cache,
             cancellation_token: CancellationToken::new(),
         }
     }
@@ -2272,16 +2265,8 @@ impl FileReconstructor {
             file_id,
             token,
             byte_range,
-            chunk_cache,
             cancellation_token: _,
         } = self;
-        // Per-reconstructor cache override wins; otherwise the client-configured
-        // cache (already seeded into `ctx`) applies.
-        let ctx = StreamContext {
-            chunk_cache: chunk_cache.or_else(|| ctx.chunk_cache.clone()),
-            ..ctx
-        };
-
         run_state.check_run_state()?;
         let requested_range = byte_range.unwrap_or(0..u64::MAX);
         let mut term_manager = ReconstructionTermManager::new(
@@ -2363,7 +2348,7 @@ impl FileReconstructor {
                     file_term.xorb_block.clone(),
                 );
 
-                let data_future = file_term.get_data_task(&ctx, &token).await?;
+                let data_future = file_term.data_future(&ctx, &token)?;
                 let relative_start = file_term
                     .byte_range
                     .start
