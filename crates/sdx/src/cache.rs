@@ -672,14 +672,8 @@ fn read_entry_bounded(
         .map(|window| u32::from_le_bytes(*window))
         .collect();
     let data_start = offsets_end;
-    let data_end = offsets_end
-        .checked_add(usize::try_from(header.data_len).unwrap_or(usize::MAX))
-        .ok_or_else(|| {
-            SdxError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "cache data end overflow",
-            ))
-        })?;
+    // The checked total above already includes the header, offsets, and data.
+    let data_end = length;
     let data = bytes.get(data_start..data_end).ok_or_else(|| {
         SdxError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -744,13 +738,12 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), SdxError> {
         let mut file = File::create(&temp_path)?;
         file.write_all(data)?;
         file.sync_all()?;
-        Ok::<(), std::io::Error>(())
+        // Close before renaming, including on platforms that disallow moving
+        // an open file. Both write and rename failures share cleanup below.
+        drop(file);
+        std::fs::rename(&temp_path, path)
     })();
     if let Err(error) = write_result {
-        drop(std::fs::remove_file(&temp_path));
-        return Err(SdxError::Io(error));
-    }
-    if let Err(error) = std::fs::rename(&temp_path, path) {
         drop(std::fs::remove_file(&temp_path));
         return Err(SdxError::Io(error));
     }
