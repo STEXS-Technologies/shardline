@@ -2611,51 +2611,22 @@ async fn upload_file_exists_async_rejects_escaped_path() {
     assert!(result.is_err(), "path escaping root should be rejected");
 }
 
-// ── create_upload_session metadata write failure cleanup (lines 481-482) ──
-// This tests that create_upload_session cleans up properly when
-// write_upload_metadata fails (e.g., metadata path is a directory).
-// We pre-create a directory at the metadata path by first creating a
-// session, noting its ID, then recreating the scenario.
-
 #[tokio::test]
-async fn create_upload_session_metadata_write_failure_cleans_up() {
+async fn persist_upload_session_rejects_metadata_directory() {
     let root = temp_root();
-
-    // Create the oci-uploads directory
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
-
-    // We cannot predict the session_id, so we create a session, grab its ID,
-    // delete the session files, then create a directory at the metadata path.
-    // Then we try to call persist_upload_session (which calls
-    // write_upload_metadata) and verify the error propagates.
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-
-    // Delete the session's files so we can recreate the metadata path as dir
-    delete_upload_session(root.path(), &session_id)
-        .await
-        .unwrap();
-
-    // Create a directory at the metadata path (makes write fail)
-    let meta_path = crate::upload_metadata_path(root.path(), &session_id);
-    tokio::fs::create_dir_all(&meta_path).await.unwrap();
-
-    // Create a minimal session object and try to persist it
+    let session_id = "0123456789abcdef";
+    let metadata_path = crate::upload_metadata_path(root.path(), session_id);
+    tokio::fs::create_dir_all(&metadata_path).await.unwrap();
     let session = OciUploadSession {
         created_at_unix_seconds: 1,
         last_touched_unix_seconds: 1,
         ..upload_session_fixture()
     };
-    let result = super::persist_upload_session(root.path(), &session_id, &session).await;
-    assert!(
-        result.is_err(),
-        "persist should fail when metadata path is a directory"
-    );
-    match &result {
-        Err(OciAdapterError::Io(_)) | Err(OciAdapterError::BlockingTask(_)) => {} // expected
-        Err(other) => panic!("expected Io or BlockingTask error, got: {other:?}"),
-        Ok(_) => panic!("expected error"),
-    }
+    assert!(matches!(
+        super::persist_upload_session(root.path(), session_id, &session).await,
+        Err(OciAdapterError::Io(_) | OciAdapterError::BlockingTask(_))
+    ));
+    assert!(metadata_path.is_dir());
 }
 
 #[tokio::test]
