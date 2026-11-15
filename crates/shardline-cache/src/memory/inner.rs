@@ -99,6 +99,7 @@ impl CacheInner {
     pub(super) fn insert(&mut self, key: &ReconstructionCacheKey, entry: MemoryEntry) {
         let inserted_at = entry.inserted_at;
         let seq = entry.seq;
+        let payload_len = entry.payload.len();
         if let Some(old) = self.entries.insert(key.clone(), entry) {
             self.total_bytes = self.total_bytes.saturating_sub(old.payload.len());
             self.eviction_order
@@ -106,20 +107,15 @@ impl CacheInner {
         }
         self.eviction_order
             .insert(EvictionKey(inserted_at, seq), key.clone());
-        if let Some(current) = self.entries.get(key) {
-            self.total_bytes = self.total_bytes.saturating_add(current.payload.len());
-        }
+        self.total_bytes = self.total_bytes.saturating_add(payload_len);
     }
 
     pub(super) fn remove(&mut self, key: &ReconstructionCacheKey) -> Option<MemoryEntry> {
-        if let Some(entry) = self.entries.remove(key) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.payload.len());
-            self.eviction_order
-                .remove(&EvictionKey(entry.inserted_at, entry.seq));
-            Some(entry)
-        } else {
-            None
-        }
+        let entry = self.entries.remove(key)?;
+        self.total_bytes = self.total_bytes.saturating_sub(entry.payload.len());
+        self.eviction_order
+            .remove(&EvictionKey(entry.inserted_at, entry.seq));
+        Some(entry)
     }
 
     pub(super) fn evict_oldest(&mut self) {

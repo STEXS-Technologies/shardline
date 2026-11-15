@@ -1967,22 +1967,35 @@ async fn cache_inner_evict_oldest_all_stale_clears_eviction_order() {
     assert_eq!(cache.get(&k3).await.unwrap(), Some(b"three".to_vec()));
 }
 
-// ── CacheInner insert overwrites existing key correctly ────────────────
-
-#[tokio::test]
-async fn cache_inner_insert_overwrites_existing_key() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
-    );
+#[test]
+fn cache_inner_replacement_and_removal_preserve_accounting() {
+    let mut inner = super::inner::CacheInner::new();
     let key = ReconstructionCacheKey::latest("overwrite", None);
-
-    // Insert twice — the first entry is replaced in insert()
-    cache.put(&key, b"first").await.unwrap();
-    cache.put(&key, b"second").await.unwrap();
-
-    let result = cache.get(&key).await.unwrap();
-    assert_eq!(result, Some(b"second".to_vec()));
+    let now = tokio::time::Instant::now();
+    for (seq, payload) in [(0, b"first".as_slice()), (1, b"second".as_slice())] {
+        inner.insert(
+            &key,
+            super::inner::MemoryEntry {
+                payload: std::sync::Arc::new(payload.to_vec()),
+                inserted_at: now,
+                seq,
+            },
+        );
+        assert_eq!(inner.entries.len(), 1);
+        assert_eq!(inner.total_bytes, payload.len());
+        assert_eq!(inner.eviction_order.len(), 1);
+        assert!(
+            inner
+                .eviction_order
+                .contains_key(&super::inner::EvictionKey(now, seq))
+        );
+    }
+    assert_eq!(inner.remove(&key).unwrap().payload.as_slice(), b"second");
+    assert!(inner.entries.is_empty());
+    assert!(inner.eviction_order.is_empty());
+    assert_eq!(inner.total_bytes, 0);
+    assert!(inner.remove(&key).is_none());
+    assert_eq!(inner.total_bytes, 0);
 }
 
 #[tokio::test(start_paused = true)]
