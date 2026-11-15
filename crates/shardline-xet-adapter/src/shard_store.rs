@@ -1098,7 +1098,7 @@ struct XorbRangeInfo {
 
 impl XorbRangeInfo {
     fn descriptor(&self, hash: &str) -> shardline_index::XetXorbDescriptor {
-        crate::xorb::descriptor_from_chunks(hash, self.total_length, &self.verified_chunks)
+        dedup::descriptor_from_chunks(hash, self.total_length, &self.verified_chunks)
     }
     fn packed_start(&self, range_start: u64) -> Result<u64, XetAdapterError> {
         let range_start = usize::try_from(range_start)?;

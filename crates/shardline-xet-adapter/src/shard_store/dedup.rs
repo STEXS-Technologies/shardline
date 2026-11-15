@@ -5,6 +5,40 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
+impl crate::ValidatedXorb {
+    /// Converts fully validated member metadata into a native lookup descriptor.
+    /// This derived metadata does not establish storage durability or authorization.
+    #[must_use]
+    pub fn descriptor(&self) -> shardline_index::XetXorbDescriptor {
+        descriptor_from_chunks(
+            &shardline_index::xet_hash_hex_string(self.hash()),
+            self.total_length(),
+            self.chunks(),
+        )
+    }
+}
+
+pub(super) fn descriptor_from_chunks(
+    hash: &str,
+    total_length: u64,
+    chunks: &[ValidatedXorbChunk],
+) -> shardline_index::XetXorbDescriptor {
+    shardline_index::XetXorbDescriptor {
+        hash: hash.to_owned(),
+        total_bytes: total_length,
+        chunks: chunks
+            .iter()
+            .map(|chunk| shardline_index::XetXorbChunk {
+                hash: shardline_index::xet_hash_hex_string(chunk.hash()),
+                packed_start: chunk.packed_start(),
+                packed_end: chunk.packed_end(),
+                unpacked_start: chunk.unpacked_start(),
+                unpacked_end: chunk.unpacked_end(),
+            })
+            .collect(),
+    }
+}
+
 /// Rebuilds a native descriptor by authenticating its complete immutable Xorb.
 /// The result is derived metadata, not proof of repository authorization.
 ///
