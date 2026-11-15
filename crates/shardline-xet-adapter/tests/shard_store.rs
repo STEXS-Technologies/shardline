@@ -37,10 +37,6 @@ use shardline_xet_core::{
 };
 use tempfile::TempDir;
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
 /// Serialize a shard from file info and xorb info vectors.
 fn serialize_shard(file_infos: Vec<MDBFileInfo>, xorb_infos: Vec<MDBXorbInfo>) -> Vec<u8> {
     let mut shard = MDBInMemoryShard::default();
@@ -58,7 +54,7 @@ fn serialize_shard(file_infos: Vec<MDBFileInfo>, xorb_infos: Vec<MDBXorbInfo>) -
 }
 
 /// Build and store a xorb, returning the xorb hash.
-fn store_simple_xorb(
+async fn store_simple_xorb(
     object_store: &ServerObjectStore,
     num_chunks: u32,
     chunk_size: u32,
@@ -82,31 +78,23 @@ fn store_simple_xorb(
         SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
             .expect("xorb serialization");
     let hash_hex = serialized.hash.hex();
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    rt.block_on(store_uploaded_xorb_bytes(
-        object_store,
-        &hash_hex,
-        &serialized.serialized_data,
-    ))
-    .expect("store xorb for shard test");
+    store_uploaded_xorb_bytes(object_store, &hash_hex, &serialized.serialized_data)
+        .await
+        .expect("store xorb for shard test");
     MDBXorbInfo {
         metadata: XorbChunkSequenceHeader::new(serialized.hash, u64::from(num_chunks), offset),
         chunks,
     }
 }
 
-// ---------------------------------------------------------------------------
-// shard upload round-trip
-// ---------------------------------------------------------------------------
-
-#[test]
-fn shard_upload_round_trip() {
+#[tokio::test]
+async fn shard_upload_round_trip() {
     let temp = TempDir::new().expect("tempdir");
     let object_store =
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
     // 1. Store a xorb so the shard parser can look up chunk range info.
-    let xorb_info = store_simple_xorb(&object_store, 2, 512);
+    let xorb_info = store_simple_xorb(&object_store, 2, 512).await;
     let xorb_hash = xorb_info.metadata.xorb_hash;
 
     // 2. Build a single-file shard referencing that xorb.
@@ -126,20 +114,19 @@ fn shard_upload_round_trip() {
     let mut committed_records = None;
     let mut committed_mappings = None;
 
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let response = rt
-        .block_on(register_uploaded_shard_bytes(
-            &object_store,
-            &shard_bytes,
-            None,
-            DEFAULT_SHARD_METADATA_LIMITS,
-            |records, mappings| {
-                committed_records = Some(records);
-                committed_mappings = Some(mappings);
-                async { Ok(()) }
-            },
-        ))
-        .expect("register_uploaded_shard_bytes should succeed");
+    let response = register_uploaded_shard_bytes(
+        &object_store,
+        &shard_bytes,
+        None,
+        DEFAULT_SHARD_METADATA_LIMITS,
+        |records, mappings| {
+            committed_records = Some(records);
+            committed_mappings = Some(mappings);
+            async { Ok(()) }
+        },
+    )
+    .await
+    .expect("register_uploaded_shard_bytes should succeed");
 
     assert_eq!(response.result, 1, "shard should be newly inserted");
 
@@ -171,18 +158,14 @@ fn shard_upload_round_trip() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// multi-file shard
-// ---------------------------------------------------------------------------
-
-#[test]
-fn shard_upload_multi_file() {
+#[tokio::test]
+async fn shard_upload_multi_file() {
     let temp = TempDir::new().expect("tempdir");
     let object_store =
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
     // Store one xorb that both files will reference.
-    let xorb_info = store_simple_xorb(&object_store, 3, 256);
+    let xorb_info = store_simple_xorb(&object_store, 3, 256).await;
     let xorb_hash = xorb_info.metadata.xorb_hash;
 
     let chunk_a_hash = xorb_info.chunks[0].chunk_hash;
@@ -212,19 +195,18 @@ fn shard_upload_multi_file() {
     );
 
     let mut file_count = 0_usize;
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let response = rt
-        .block_on(register_uploaded_shard_bytes(
-            &object_store,
-            &shard_bytes,
-            None,
-            DEFAULT_SHARD_METADATA_LIMITS,
-            |records, _mappings| {
-                file_count = records.len();
-                async { Ok(()) }
-            },
-        ))
-        .expect("multi-file shard registration should succeed");
+    let response = register_uploaded_shard_bytes(
+        &object_store,
+        &shard_bytes,
+        None,
+        DEFAULT_SHARD_METADATA_LIMITS,
+        |records, _mappings| {
+            file_count = records.len();
+            async { Ok(()) }
+        },
+    )
+    .await
+    .expect("multi-file shard registration should succeed");
 
     assert_eq!(response.result, 1, "shard should be newly inserted");
     assert_eq!(file_count, 2, "should commit two file records");
@@ -241,17 +223,13 @@ fn shard_upload_multi_file() {
     assert!(retained.contains(&chunk_b_hash.hex()));
 }
 
-// ---------------------------------------------------------------------------
-// shard upload with repository scope
-// ---------------------------------------------------------------------------
-
-#[test]
-fn shard_upload_with_repository_scope() {
+#[tokio::test]
+async fn shard_upload_with_repository_scope() {
     let temp = TempDir::new().expect("tempdir");
     let object_store =
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
-    let xorb_info = store_simple_xorb(&object_store, 1, 256);
+    let xorb_info = store_simple_xorb(&object_store, 1, 256).await;
     let xorb_hash = xorb_info.metadata.xorb_hash;
 
     let chunk_hash = xorb_info.chunks[0].chunk_hash;
@@ -270,19 +248,18 @@ fn shard_upload_with_repository_scope() {
         .expect("valid RepositoryScope");
 
     let mut committed_scope: Option<Option<RepositoryScope>> = None;
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let response = rt
-        .block_on(register_uploaded_shard_bytes(
-            &object_store,
-            &shard_bytes,
-            Some(&scope),
-            DEFAULT_SHARD_METADATA_LIMITS,
-            |records, _mappings| {
-                committed_scope = Some(records[0].repository_scope.clone());
-                async { Ok(()) }
-            },
-        ))
-        .expect("register with scope should succeed");
+    let response = register_uploaded_shard_bytes(
+        &object_store,
+        &shard_bytes,
+        Some(&scope),
+        DEFAULT_SHARD_METADATA_LIMITS,
+        |records, _mappings| {
+            committed_scope = Some(records[0].repository_scope.clone());
+            async { Ok(()) }
+        },
+    )
+    .await
+    .expect("register with scope should succeed");
 
     assert_eq!(response.result, 1, "shard should be newly inserted");
     let actual_scope = committed_scope.expect("commit should have been called");
@@ -293,34 +270,26 @@ fn shard_upload_with_repository_scope() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// shard rejects empty bytes
-// ---------------------------------------------------------------------------
-
-#[test]
-fn shard_upload_rejects_empty_bytes() {
+#[tokio::test]
+async fn shard_upload_rejects_empty_bytes() {
     let temp = TempDir::new().expect("tempdir");
     let object_store =
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let result = rt.block_on(register_uploaded_shard_bytes(
+    let result = register_uploaded_shard_bytes(
         &object_store,
         b"",
         None,
         DEFAULT_SHARD_METADATA_LIMITS,
         |_records, _mappings| async { Ok(()) },
-    ));
+    )
+    .await;
 
     assert!(result.is_err(), "register with empty shard must fail");
 }
 
-// ---------------------------------------------------------------------------
-// shard rejects missing referenced xorb
-// ---------------------------------------------------------------------------
-
-#[test]
-fn shard_upload_rejects_missing_referenced_xorb() {
+#[tokio::test]
+async fn shard_upload_rejects_missing_referenced_xorb() {
     let temp = TempDir::new().expect("tempdir");
     let object_store =
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
@@ -342,14 +311,14 @@ fn shard_upload_rejects_missing_referenced_xorb() {
         }],
     );
 
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let result = rt.block_on(register_uploaded_shard_bytes(
+    let result = register_uploaded_shard_bytes(
         &object_store,
         &shard_bytes,
         None,
         DEFAULT_SHARD_METADATA_LIMITS,
         |_records, _mappings| async { Ok(()) },
-    ));
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -357,17 +326,13 @@ fn shard_upload_rejects_missing_referenced_xorb() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// shard idempotent store
-// ---------------------------------------------------------------------------
-
-#[test]
-fn shard_upload_is_idempotent() {
+#[tokio::test]
+async fn shard_upload_is_idempotent() {
     let temp = TempDir::new().expect("tempdir");
     let object_store =
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
-    let xorb_info = store_simple_xorb(&object_store, 1, 256);
+    let xorb_info = store_simple_xorb(&object_store, 1, 256).await;
     let xorb_hash = xorb_info.metadata.xorb_hash;
 
     let chunk_hash = xorb_info.chunks[0].chunk_hash;
@@ -382,39 +347,33 @@ fn shard_upload_is_idempotent() {
         vec![xorb_info],
     );
 
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-
     // First registration.
-    let first = rt
-        .block_on(register_uploaded_shard_bytes(
-            &object_store,
-            &shard_bytes,
-            None,
-            DEFAULT_SHARD_METADATA_LIMITS,
-            |_records, _mappings| async { Ok(()) },
-        ))
-        .expect("first shard registration");
+    let first = register_uploaded_shard_bytes(
+        &object_store,
+        &shard_bytes,
+        None,
+        DEFAULT_SHARD_METADATA_LIMITS,
+        |_records, _mappings| async { Ok(()) },
+    )
+    .await
+    .expect("first shard registration");
     assert_eq!(first.result, 1, "first registration should be new");
 
     // Second registration of identical shard.
-    let second = rt
-        .block_on(register_uploaded_shard_bytes(
-            &object_store,
-            &shard_bytes,
-            None,
-            DEFAULT_SHARD_METADATA_LIMITS,
-            |_records, _mappings| async { Ok(()) },
-        ))
-        .expect("second shard registration");
+    let second = register_uploaded_shard_bytes(
+        &object_store,
+        &shard_bytes,
+        None,
+        DEFAULT_SHARD_METADATA_LIMITS,
+        |_records, _mappings| async { Ok(()) },
+    )
+    .await
+    .expect("second shard registration");
     assert_eq!(
         second.result, 0,
         "second registration should report already exists"
     );
 }
-
-// ---------------------------------------------------------------------------
-// retained_shard_chunk_hashes as standalone parse
-// ---------------------------------------------------------------------------
 
 #[test]
 fn retained_shard_chunk_hashes_standalone() {
@@ -442,10 +401,6 @@ fn retained_shard_chunk_hashes_standalone() {
     assert_eq!(hashes.len(), 1, "one chunk should be retained");
     assert_eq!(hashes[0], chunk_hash.hex(), "retained hash must match");
 }
-
-// ---------------------------------------------------------------------------
-// retained_shard_chunk_hashes rejects empty bytes
-// ---------------------------------------------------------------------------
 
 #[test]
 fn retained_shard_chunk_hashes_rejects_empty() {
