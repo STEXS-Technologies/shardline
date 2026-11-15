@@ -460,24 +460,8 @@ fn dotenv_lookup_preserves_native_finder_behavior() {
 }
 
 fn shardline_binary() -> String {
-    if let Ok(path) = var("CARGO_BIN_EXE_shardline") {
-        return path;
-    }
-
-    // Cargo sets CARGO_BIN_EXE_* for `cargo test`, but nextest intentionally
-    // does not. Derive the sibling binary from the integration-test path so
-    // the CLI tests remain valid in both runners.
-    let test_executable = std::env::current_exe().expect("test executable path");
-    let binary = test_executable
-        .parent()
-        .and_then(Path::parent)
-        .map(|target| target.join("shardline"))
-        .expect("test executable should be under target/debug/deps");
-    assert!(
-        binary.is_file(),
-        "shardline binary does not exist: {binary:?}"
-    );
-    binary.to_string_lossy().into_owned()
+    // Preserve explicit overrides; Cargo's compiled-in path also works in Nextest.
+    var("CARGO_BIN_EXE_shardline").unwrap_or_else(|_| env!("CARGO_BIN_EXE_shardline").to_owned())
 }
 
 #[test]
