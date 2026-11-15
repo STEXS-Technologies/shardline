@@ -24,50 +24,42 @@ where
             FsckIssueKind::MissingChunk,
             FsckIssueDetail::ReferencedByNativeXetXorb { xorb_location },
         ) = (&issue.kind, &issue.detail)
-        {
-            let member = Path::new(&issue.location)
+            && let Some(member) = Path::new(&issue.location)
                 .file_name()
-                .and_then(|name| name.to_str());
-            let source = Path::new(xorb_location)
+                .and_then(|name| name.to_str())
+            && let Some(source) = Path::new(xorb_location)
                 .file_stem()
-                .and_then(|name| name.to_str());
-            if let (Some(member), Some(source)) = (member, source) {
-                if parse_xet_hash_hex(member).is_ok() && parse_xet_hash_hex(source).is_ok() {
-                    if records.supports_native_locations() {
-                        if cached.as_ref().is_none_or(|(hash, _)| hash != source) {
-                            let descriptor = records
-                                .native_indexed_xorb(source)
-                                .await
-                                .map_err(Into::into)?;
-                            let members = descriptor
-                                .filter(|descriptor| authenticates_descriptor(descriptor, source))
-                                .map(|descriptor| {
-                                    descriptor
-                                        .chunks
-                                        .into_iter()
-                                        .map(|chunk| chunk.hash)
-                                        .collect()
-                                });
-                            cached = Some((source.to_owned(), members));
-                        }
-                        cached
-                            .as_ref()
-                            .and_then(|(_, members)| members.as_ref())
-                            .is_some_and(|members| members.contains(member))
-                    } else {
-                        records
-                            .native_chunk_location(member, source)
-                            .await
-                            .map_err(Into::into)?
-                            .is_some_and(|descriptor| {
-                                authenticates_member(&descriptor, source, member)
-                            })
-                    }
-                } else {
-                    false
+                .and_then(|name| name.to_str())
+            && parse_xet_hash_hex(member).is_ok()
+            && parse_xet_hash_hex(source).is_ok()
+        {
+            if records.supports_native_locations() {
+                if cached.as_ref().is_none_or(|(hash, _)| hash != source) {
+                    let descriptor = records
+                        .native_indexed_xorb(source)
+                        .await
+                        .map_err(Into::into)?;
+                    let members = descriptor
+                        .filter(|descriptor| authenticates_descriptor(descriptor, source))
+                        .map(|descriptor| {
+                            descriptor
+                                .chunks
+                                .into_iter()
+                                .map(|chunk| chunk.hash)
+                                .collect()
+                        });
+                    cached = Some((source.to_owned(), members));
                 }
+                cached
+                    .as_ref()
+                    .and_then(|(_, members)| members.as_ref())
+                    .is_some_and(|members| members.contains(member))
             } else {
-                false
+                records
+                    .native_chunk_location(member, source)
+                    .await
+                    .map_err(Into::into)?
+                    .is_some_and(|descriptor| authenticates_member(&descriptor, source, member))
             }
         } else {
             false
