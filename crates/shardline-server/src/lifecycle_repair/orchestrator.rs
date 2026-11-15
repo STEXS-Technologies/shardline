@@ -17,14 +17,13 @@ use crate::{
 
 use super::WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS;
 use super::classification::{
-    classify_quarantine_repair_action, classify_retention_hold_repair_action,
-    classify_webhook_delivery_repair_action,
+    classify_quarantine_repair_action, classify_webhook_delivery_repair_action,
 };
 use super::fault_injection::lifecycle_repair_failpoint;
 use super::reachability::collect_referenced_object_keys;
 use super::types::{
     LifecycleRepairBoundary, LifecycleRepairOptions, LifecycleRepairReport, QuarantineRepairAction,
-    RepairReachability, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
+    RepairReachability, WebhookDeliveryRepairAction,
 };
 
 /// Repairs stale lifecycle metadata against the configured metadata backend.
@@ -163,41 +162,18 @@ where
     let mut active_hold_object_keys = HashSet::new();
     for hold in retention_holds {
         report.scanned_retention_holds = checked_increment(report.scanned_retention_holds)?;
-        match classify_retention_hold_repair_action(
-            hold.release_after_unix_seconds(),
-            hold.held_at_unix_seconds(),
-            true, // Hold validity is independent of current object existence.
-            now_unix_seconds,
-        ) {
-            RetentionHoldRepairAction::Keep => {
-                active_hold_object_keys.insert(hold.object_key().clone());
-            }
-            RetentionHoldRepairAction::DeleteExpired => {
-                let deleted = index_store
-                    .delete_retention_hold_if_matches(&hold)
-                    .await
-                    .map_err(Into::into)?;
-                if deleted {
-                    report.removed_expired_retention_holds =
-                        checked_increment(report.removed_expired_retention_holds)?;
-                    lifecycle_repair_failpoint(
-                        LifecycleRepairBoundary::AfterRetentionHoldMutation,
-                    )?;
-                }
-            }
-            RetentionHoldRepairAction::DeleteMissing => {
-                let deleted = index_store
-                    .delete_retention_hold_if_matches(&hold)
-                    .await
-                    .map_err(Into::into)?;
-                if deleted {
-                    report.removed_missing_retention_holds =
-                        checked_increment(report.removed_missing_retention_holds)?;
-                    lifecycle_repair_failpoint(
-                        LifecycleRepairBoundary::AfterRetentionHoldMutation,
-                    )?;
-                }
-            }
+        // Holds can protect objects that have not arrived yet. Only expiry
+        // or explicit release ends that protection.
+        if hold.is_active_at(now_unix_seconds) {
+            active_hold_object_keys.insert(hold.object_key().clone());
+        } else if index_store
+            .delete_retention_hold_if_matches(&hold)
+            .await
+            .map_err(Into::into)?
+        {
+            report.removed_expired_retention_holds =
+                checked_increment(report.removed_expired_retention_holds)?;
+            lifecycle_repair_failpoint(LifecycleRepairBoundary::AfterRetentionHoldMutation)?;
         }
     }
 

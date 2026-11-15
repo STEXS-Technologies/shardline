@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use shardline_index::{FileRecord, parse_xet_hash_hex};
+use shardline_index::{FileRecord, RetentionHold, parse_xet_hash_hex};
 use shardline_protocol::{ByteRange, ShardlineHash};
 use shardline_server_core::AuthorizedRepository;
 
@@ -15,10 +15,9 @@ use crate::{
     lfs_object_key,
     lifecycle_repair::{
         classification::{
-            classify_quarantine_repair_action, classify_retention_hold_repair_action,
-            classify_webhook_delivery_repair_action,
+            classify_quarantine_repair_action, classify_webhook_delivery_repair_action,
         },
-        types::{QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction},
+        types::{QuarantineRepairAction, WebhookDeliveryRepairAction},
     },
     oci_adapter::{oci_blob_key, oci_manifest_key, parse_reference},
     protocol_support::{parse_sha256_digest, validate_oci_repository_name, validate_oci_tag},
@@ -159,17 +158,6 @@ impl From<QuarantineRepairAction> for FuzzQuarantineAction {
 pub enum FuzzRetentionAction {
     Keep,
     DeleteExpired,
-    DeleteMissing,
-}
-
-impl From<RetentionHoldRepairAction> for FuzzRetentionAction {
-    fn from(action: RetentionHoldRepairAction) -> Self {
-        match action {
-            RetentionHoldRepairAction::Keep => Self::Keep,
-            RetentionHoldRepairAction::DeleteExpired => Self::DeleteExpired,
-            RetentionHoldRepairAction::DeleteMissing => Self::DeleteMissing,
-        }
-    }
 }
 
 /// Classification result for webhook delivery repair, exposed for fuzzing.
@@ -644,23 +632,14 @@ pub fn fuzz_lifecycle_repair_summary(
         }
     }
 
-    for &(release_after_unix_seconds, held_at_unix_seconds, object_exists) in retention_states {
-        match classify_retention_hold_repair_action(
-            release_after_unix_seconds,
-            held_at_unix_seconds,
-            object_exists,
-            now_unix_seconds,
-        ) {
-            RetentionHoldRepairAction::Keep => {
+    for &(release_after_unix_seconds, _, _) in retention_states {
+        match fuzz_classify_retention(release_after_unix_seconds, now_unix_seconds)? {
+            FuzzRetentionAction::Keep => {
                 summary.retention_keep = increment_counter(summary.retention_keep)?;
             }
-            RetentionHoldRepairAction::DeleteExpired => {
+            FuzzRetentionAction::DeleteExpired => {
                 summary.retention_delete_expired =
                     increment_counter(summary.retention_delete_expired)?;
-            }
-            RetentionHoldRepairAction::DeleteMissing => {
-                summary.retention_delete_missing =
-                    increment_counter(summary.retention_delete_missing)?;
             }
         }
     }
@@ -696,21 +675,27 @@ pub fn fuzz_classify_quarantine(
     classify_quarantine_repair_action(object_exists, is_reachable, is_held).into()
 }
 
-/// Fuzz-target wrapper for retention hold classification.
-#[must_use]
+/// Exercises the retention type's expiry rule with any release timestamp.
+///
+/// # Errors
+///
+/// Returns an error if the fixed hold fixture cannot be constructed.
 pub fn fuzz_classify_retention(
     release_after_unix_seconds: Option<u64>,
-    held_at_unix_seconds: u64,
-    object_exists: bool,
     now_unix_seconds: u64,
-) -> FuzzRetentionAction {
-    classify_retention_hold_repair_action(
+) -> Result<FuzzRetentionAction, ServerError> {
+    let hold = RetentionHold::new(
+        shardline_storage::ObjectKey::parse("fuzz-retention")
+            .map_err(|_error| ServerError::InvalidPath)?,
+        "fuzz expiry".to_owned(),
+        0,
         release_after_unix_seconds,
-        held_at_unix_seconds,
-        object_exists,
-        now_unix_seconds,
-    )
-    .into()
+    )?;
+    Ok(if hold.is_active_at(now_unix_seconds) {
+        FuzzRetentionAction::Keep
+    } else {
+        FuzzRetentionAction::DeleteExpired
+    })
 }
 
 /// Fuzz-target wrapper for webhook delivery classification.
@@ -769,9 +754,7 @@ mod tests {
     use super::*;
     use crate::{
         InvalidReconstructionResponseError, ServerError,
-        lifecycle_repair::types::{
-            QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
-        },
+        lifecycle_repair::types::{QuarantineRepairAction, WebhookDeliveryRepairAction},
     };
 
     #[test]
@@ -796,24 +779,6 @@ mod tests {
     fn fuzz_quarantine_action_from_delete_held() {
         let result: FuzzQuarantineAction = QuarantineRepairAction::DeleteHeld.into();
         assert_eq!(result, FuzzQuarantineAction::DeleteHeld);
-    }
-
-    #[test]
-    fn fuzz_retention_action_from_keep() {
-        let result: FuzzRetentionAction = RetentionHoldRepairAction::Keep.into();
-        assert_eq!(result, FuzzRetentionAction::Keep);
-    }
-
-    #[test]
-    fn fuzz_retention_action_from_delete_expired() {
-        let result: FuzzRetentionAction = RetentionHoldRepairAction::DeleteExpired.into();
-        assert_eq!(result, FuzzRetentionAction::DeleteExpired);
-    }
-
-    #[test]
-    fn fuzz_retention_action_from_delete_missing() {
-        let result: FuzzRetentionAction = RetentionHoldRepairAction::DeleteMissing.into();
-        assert_eq!(result, FuzzRetentionAction::DeleteMissing);
     }
 
     #[test]
@@ -900,24 +865,24 @@ mod tests {
 
     #[test]
     fn fuzz_classify_retention_keep() {
-        let result = fuzz_classify_retention(Some(200), 100, true, 150);
+        let result = fuzz_classify_retention(Some(200), 150).unwrap();
         assert_eq!(result, FuzzRetentionAction::Keep);
     }
 
     #[test]
     fn fuzz_classify_retention_delete_expired() {
-        let result = fuzz_classify_retention(Some(100), 50, true, 150);
+        let result = fuzz_classify_retention(Some(100), 150).unwrap();
         assert_eq!(result, FuzzRetentionAction::DeleteExpired);
     }
 
     #[test]
     fn fuzz_classify_retention_keeps_future_object_hold() {
         for release_after in [None, Some(200)] {
-            let result = fuzz_classify_retention(release_after, 100, false, 150);
+            let result = fuzz_classify_retention(release_after, 150).unwrap();
             assert_eq!(result, FuzzRetentionAction::Keep);
         }
         assert_eq!(
-            fuzz_classify_retention(Some(150), 100, false, 150),
+            fuzz_classify_retention(Some(150), 150).unwrap(),
             FuzzRetentionAction::DeleteExpired
         );
     }

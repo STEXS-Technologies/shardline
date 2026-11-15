@@ -50,7 +50,7 @@ pub struct LifecycleRepairReport {
     pub scanned_retention_holds: u64,
     /// Number of expired retention holds removed.
     pub removed_expired_retention_holds: u64,
-    /// Number of retention holds removed because the protected object was already missing.
+    /// Compatibility counter, always zero: missing objects do not invalidate holds.
     pub removed_missing_retention_holds: u64,
     /// Number of webhook delivery claims inspected.
     pub scanned_webhook_deliveries: u64,
@@ -73,17 +73,6 @@ pub(crate) enum QuarantineRepairAction {
     DeleteMissing,
     DeleteReachable,
     DeleteHeld,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RetentionHoldRepairAction {
-    Keep,
-    DeleteExpired,
-    #[allow(
-        dead_code,
-        reason = "Retained repair action shape; future holds no longer require existing objects"
-    )]
-    DeleteMissing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

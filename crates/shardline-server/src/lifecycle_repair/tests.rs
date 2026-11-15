@@ -5,17 +5,11 @@ use crate::{ServerError, ServerFrontend, object_store::ServerObjectStore};
 use super::{
     DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairBoundary, LifecycleRepairOptions,
     LifecycleRepairReport, WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS,
-    classification::{
-        classify_quarantine_repair_action, classify_retention_hold_repair_action,
-        classify_webhook_delivery_repair_action,
-    },
+    classification::{classify_quarantine_repair_action, classify_webhook_delivery_repair_action},
     fault_injection::interrupt_at,
     orchestrator::run_lifecycle_repair_with_stores_at_time,
     reachability::{collect_record_object_references, collect_referenced_object_keys},
-    types::{
-        QuarantineRepairAction, RepairReachability, RetentionHoldRepairAction,
-        WebhookDeliveryRepairAction,
-    },
+    types::{QuarantineRepairAction, RepairReachability, WebhookDeliveryRepairAction},
 };
 
 // ── classify_quarantine_repair_action ──────────────────────────────────
@@ -58,68 +52,6 @@ fn classify_quarantine_missing_takes_precedence_over_reachable() {
     assert_eq!(
         classify_quarantine_repair_action(false, true, false),
         QuarantineRepairAction::DeleteMissing
-    );
-}
-
-// ── classify_retention_hold_repair_action ──────────────────────────────
-
-#[test]
-fn classify_retention_hold_expired_release_is_delete_expired() {
-    assert_eq!(
-        classify_retention_hold_repair_action(Some(50), 10, true, 100),
-        RetentionHoldRepairAction::DeleteExpired
-    );
-}
-
-#[test]
-fn classify_retention_hold_future_object_is_kept() {
-    assert_eq!(
-        classify_retention_hold_repair_action(Some(150), 10, false, 100),
-        RetentionHoldRepairAction::Keep
-    );
-}
-
-#[test]
-fn classify_retention_hold_expired_takes_precedence_over_missing() {
-    // release_after (50) <= now (100) → DeleteExpired (checked first)
-    assert_eq!(
-        classify_retention_hold_repair_action(Some(50), 10, false, 100),
-        RetentionHoldRepairAction::DeleteExpired
-    );
-}
-
-#[test]
-fn classify_retention_hold_keep_when_not_expired_and_object_exists() {
-    assert_eq!(
-        classify_retention_hold_repair_action(Some(150), 10, true, 100),
-        RetentionHoldRepairAction::Keep
-    );
-}
-
-#[test]
-fn classify_retention_hold_no_release_is_keep_when_object_exists() {
-    assert_eq!(
-        classify_retention_hold_repair_action(None, 10, true, 100),
-        RetentionHoldRepairAction::Keep
-    );
-}
-
-#[test]
-fn classify_retention_hold_permanent_hold_kept_when_object_missing() {
-    // Permanent holds (release_after = None) are NEVER removed by lifecycle repair,
-    // even if the object is temporarily missing — preventing transient metadata
-    // backend hiccups from silently dropping operator-placed protection.
-    assert_eq!(
-        classify_retention_hold_repair_action(None, 10, false, 100),
-        RetentionHoldRepairAction::Keep
-    );
-}
-
-#[test]
-fn classify_retention_hold_exact_expiry_is_delete_expired() {
-    assert_eq!(
-        classify_retention_hold_repair_action(Some(100), 10, true, 100),
-        RetentionHoldRepairAction::DeleteExpired
     );
 }
 
@@ -181,24 +113,6 @@ fn classify_webhook_delivery_all_zero_boundaries() {
     assert_eq!(
         classify_webhook_delivery_repair_action(0, 0, 0),
         WebhookDeliveryRepairAction::DeleteStale
-    );
-}
-
-#[test]
-fn classify_retention_hold_release_at_epoch_is_expired() {
-    // release_after = 0 (epoch), now = 0 → 0 <= 0 → expired
-    assert_eq!(
-        classify_retention_hold_repair_action(Some(0), 0, true, 0),
-        RetentionHoldRepairAction::DeleteExpired
-    );
-}
-
-#[test]
-fn classify_retention_hold_release_at_epoch_object_missing() {
-    // release_after = 0, now = 0 → expired (takes priority over missing)
-    assert_eq!(
-        classify_retention_hold_repair_action(Some(0), 0, false, 0),
-        RetentionHoldRepairAction::DeleteExpired
     );
 }
 
@@ -266,19 +180,6 @@ fn quarantine_repair_action_debug_format() {
     assert_eq!(
         format!("{:?}", QuarantineRepairAction::DeleteHeld),
         "DeleteHeld"
-    );
-}
-
-#[test]
-fn retention_hold_repair_action_debug_format() {
-    assert_eq!(format!("{:?}", RetentionHoldRepairAction::Keep), "Keep");
-    assert_eq!(
-        format!("{:?}", RetentionHoldRepairAction::DeleteExpired),
-        "DeleteExpired"
-    );
-    assert_eq!(
-        format!("{:?}", RetentionHoldRepairAction::DeleteMissing),
-        "DeleteMissing"
     );
 }
 

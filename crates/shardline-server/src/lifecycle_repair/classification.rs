@@ -1,6 +1,4 @@
-use super::types::{
-    QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
-};
+use super::types::{QuarantineRepairAction, WebhookDeliveryRepairAction};
 
 pub(crate) const fn classify_quarantine_repair_action(
     object_exists: bool,
@@ -17,23 +15,6 @@ pub(crate) const fn classify_quarantine_repair_action(
         return QuarantineRepairAction::DeleteHeld;
     }
     QuarantineRepairAction::Keep
-}
-
-pub(crate) const fn classify_retention_hold_repair_action(
-    release_after_unix_seconds: Option<u64>,
-    _held_at_unix_seconds: u64,
-    _object_exists: bool,
-    now_unix_seconds: u64,
-) -> RetentionHoldRepairAction {
-    if let Some(release_after_unix_seconds) = release_after_unix_seconds
-        && release_after_unix_seconds <= now_unix_seconds
-    {
-        return RetentionHoldRepairAction::DeleteExpired;
-    }
-    // The object-existence input is ignored for compatibility with callers.
-    // Both finite and permanent holds may protect keys whose bytes arrive later.
-    // Only expiry or explicit release ends that protection.
-    RetentionHoldRepairAction::Keep
 }
 
 pub(crate) const fn classify_webhook_delivery_repair_action(

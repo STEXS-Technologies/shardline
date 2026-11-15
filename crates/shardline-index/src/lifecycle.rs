@@ -778,15 +778,16 @@ mod tests {
     #[test]
     fn retention_hold_release_at_exact_boundary_is_inactive() {
         let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
-        let hold = RetentionHold::new(key, "exact release".to_owned(), 10, Some(20)).unwrap();
-        assert!(
-            !hold.is_active_at(20),
-            "hold with release_at=20 should be inactive at t=20"
-        );
-        assert!(
-            !hold.is_active_at(21),
-            "hold with release_at=20 should be inactive at t=21"
-        );
+        for release in [0, 20, u64::MAX] {
+            let hold =
+                RetentionHold::new(key.clone(), "exact release".to_owned(), 0, Some(release))
+                    .unwrap();
+            if release > 0 {
+                assert!(hold.is_active_at(release - 1));
+            }
+            assert!(!hold.is_active_at(release));
+            assert!(!hold.is_active_at(release.saturating_add(1)));
+        }
     }
 
     #[test]
