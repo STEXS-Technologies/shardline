@@ -1,26 +1,16 @@
-//! Global dedup query + eligibility (M3a).
+//! Global deduplication lookups, query eligibility, and fragmentation control.
 //!
-//! [`DedupClient::query_for_global_dedup_shard`] hits **`GET
-//! /v1/chunks/default-merkledb/{hash}`** (GET, not POST — matching shardline
-//! `app.rs:406` and upstream `remote_client.rs:159`; a POST would 405), with
-//! HTTP 404 reported as a cache **miss** and every other non-success status
-//! surfaced as a typed [`TransferError`](crate::error::TransferError). 429 is
-//! surfaced without retry (retry policies arrive in M4).
+//! [`DedupClient`] queries `GET /v1/chunks/default-merkledb/{hash}`. HTTP 404
+//! means a cache miss; other failures retain their typed transfer errors.
+//! Upload retries use this same transport, with 429 treated as a failure.
 //!
-//! The eligibility helper ([`is_global_dedup_eligible`]) mirrors
-//! `docs/SDX_PLAN.md` §4.4.2 and §7 item 4 plus upstream
-//! `file_deduplication.rs`: **global chunk index 0** is always eligible (not
-//! the first chunk of every 8 MiB ingest batch); later chunks are eligible
-//! when their hash passes the modulus test (`last-8-bytes-LE % 1024 == 0`) and
-//! they are spaced at least [`MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES`] (256)
-//! chunks (~16 MiB at a 64 KiB target) from the last query.
+//! [`is_global_dedup_eligible`] always admits file chunk 0. Later chunks must
+//! pass the hash modulus test and be at least 256 chunks past the last query.
+//! Indices count across the whole file, rather than restarting in each ingest
+//! batch. Unlike upstream 1.5.4's unwired spacing setting, sdx enforces this gap.
 //!
-//! **Delta vs upstream:** upstream 1.5.4 hardcodes
-//! `min_spacing_between_global_dedup_queries` to 0 and never wires the config;
-//! sdx applies the documented default itself.
-//!
-//! [`DefragPrevention`] mirrors upstream `defrag_prevention.rs` (min 8 chunks
-//! per range, 0.5 hysteresis, 128-range window) as pure logic.
+//! [`DefragPrevention`] tracks deduplication ranges with an eight-chunk minimum,
+//! 0.5 hysteresis factor, and 128-range window, matching the upstream algorithm.
 
 use std::collections::VecDeque;
 
@@ -49,7 +39,7 @@ pub const DEFRAG_HYSTERESIS_FACTOR: f32 = 0.5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DedupOutcome {
     /// The chunk is already stored globally; the raw dedup-shard body is
-    /// returned for import (shard import is M3b).
+    /// returned for import.
     Present {
         /// Raw dedup-shard bytes returned by the server.
         shard_body: Bytes,
@@ -79,8 +69,7 @@ impl DedupClient {
     ///
     /// HTTP 200 returns [`DedupOutcome::Present`] with the raw shard body;
     /// HTTP 404 returns [`DedupOutcome::Miss`]. Other non-success statuses are
-    /// surfaced as typed errors; 429 is **not** retried (M4 adds retry
-    /// policies).
+    /// surfaced as typed errors; this method does not retry requests.
     ///
     /// # Errors
     ///
@@ -95,15 +84,7 @@ impl DedupClient {
     ) -> Result<DedupOutcome, SdxError> {
         // Validate the hash before spending a request.
         let _ = crate::hash::parse_xet_hash_hex(hash_hex)?;
-        let path = format!("/v1/chunks/{GLOBAL_DEDUP_PREFIX}/{hash_hex}");
-        let body = self
-            .transfer
-            .get_optional_bytes(base_url, token, &path)
-            .await?;
-        Ok(body.map_or_else(
-            || DedupOutcome::Miss,
-            |shard_body| DedupOutcome::Present { shard_body },
-        ))
+        Ok(self.query_raw(base_url, token, hash_hex).await?)
     }
 
     /// Retry-layer variant of [`query_for_global_dedup_shard`]: returns
