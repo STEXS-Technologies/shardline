@@ -1489,27 +1489,26 @@ mod tests {
     // ===== Invalid identifier / missing record errors =====
 
     #[tokio::test]
-    async fn reconstruction_rejects_invalid_file_id() {
+    async fn file_read_apis_reject_invalid_identifiers_before_database_access() {
         let (backend, _root) = make_backend().await;
-        // read_record() internally calls validate_identifier() which should reject "/".
-        let result = backend
-            .reconstruction("/absolute/path", None, None, None)
-            .await;
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[tokio::test]
-    async fn file_total_bytes_rejects_invalid_file_id() {
-        let (backend, _root) = make_backend().await;
-        let result = backend.file_total_bytes("../traverse", None, None).await;
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[tokio::test]
-    async fn download_file_rejects_invalid_file_id() {
-        let (backend, _root) = make_backend().await;
-        let result = backend.download_file("\0null", None, None).await;
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+        for file_id in ["/absolute/path", "../traverse", "\0null"] {
+            for result in [
+                backend
+                    .reconstruction(file_id, None, None, None)
+                    .await
+                    .map(|_| ()),
+                backend
+                    .file_total_bytes(file_id, None, None)
+                    .await
+                    .map(|_| ()),
+                backend.download_file(file_id, None, None).await.map(|_| ()),
+            ] {
+                assert!(
+                    matches!(result, Err(ServerError::InvalidFileId)),
+                    "{file_id:?}: {result:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1584,13 +1583,29 @@ mod tests {
     // ── reconstruction with content_hash (version locator branch) ──
 
     #[tokio::test]
-    async fn reconstruction_with_invalid_content_hash() {
+    async fn file_read_apis_reject_invalid_content_hashes_before_database_access() {
         let (backend, _root) = make_backend().await;
-        // An invalid content_hash should be caught before any PG call.
-        let result = backend
-            .reconstruction("test-file.bin", Some("not-a-valid-hash"), None, None)
-            .await;
-        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
+        for hash in ["not-a-valid-hash", "bad", "invalid!"] {
+            for result in [
+                backend
+                    .reconstruction("test-file.bin", Some(hash), None, None)
+                    .await
+                    .map(|_| ()),
+                backend
+                    .file_total_bytes("test-file.bin", Some(hash), None)
+                    .await
+                    .map(|_| ()),
+                backend
+                    .download_file("test-file.bin", Some(hash), None)
+                    .await
+                    .map(|_| ()),
+            ] {
+                assert!(
+                    matches!(result, Err(ServerError::InvalidContentHash)),
+                    "{hash}: {result:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1610,15 +1625,6 @@ mod tests {
     // ── file_total_bytes with/without content_hash ──────────
 
     #[tokio::test]
-    async fn file_total_bytes_with_invalid_content_hash() {
-        let (backend, _root) = make_backend().await;
-        let result = backend
-            .file_total_bytes("test-file.bin", Some("bad"), None)
-            .await;
-        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
-    }
-
-    #[tokio::test]
     async fn file_total_bytes_with_valid_params_fails_without_postgres() {
         let (backend, _root) = make_backend().await;
         let result = backend
@@ -1629,15 +1635,6 @@ mod tests {
     }
 
     // ── download_file ──────────────────────────────────────
-
-    #[tokio::test]
-    async fn download_file_with_invalid_content_hash() {
-        let (backend, _root) = make_backend().await;
-        let result = backend
-            .download_file("test-file.bin", Some("invalid!"), None)
-            .await;
-        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
-    }
 
     #[tokio::test]
     async fn download_file_without_content_hash_fails_without_postgres() {
