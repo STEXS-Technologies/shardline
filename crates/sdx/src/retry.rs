@@ -599,34 +599,39 @@ mod tests {
 
     #[tokio::test]
     async fn retryable_status_retried_until_success() {
-        let server = Arc::new(MockServer::start().await);
-        Mock::given(method("GET"))
-            .and(path("/probe"))
-            .respond_with(ResponseTemplate::new(503).set_body_json(json!({"error": "x"})))
-            .up_to_n_times(3)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/probe"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok"))
-            .mount(&server)
-            .await;
-        let ctx = retry_context(
-            RetryPolicy::new()
-                .with_max_attempts(5)
-                .with_base_delay(Duration::from_millis(1))
-                .with_jitter(false),
-            None,
-        );
-        let result = ctx
-            .run("tok".to_owned(), |tok| {
-                let server = server.clone();
-                async move { probe(&server, &tok).await }
-            })
-            .await;
-        assert!(result.is_ok());
-        // 3 failures + 1 success = 4 requests.
-        assert_eq!(request_count(&server).await, 4);
+        for jitter in [false, true] {
+            let server = Arc::new(MockServer::start().await);
+            Mock::given(method("GET"))
+                .and(path("/probe"))
+                .respond_with(ResponseTemplate::new(503).set_body_json(json!({"error": "x"})))
+                .up_to_n_times(3)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/probe"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok"))
+                .mount(&server)
+                .await;
+            let ctx = retry_context(
+                RetryPolicy::new()
+                    .with_max_attempts(5)
+                    .with_base_delay(Duration::from_millis(1))
+                    .with_jitter(jitter),
+                None,
+            );
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                ctx.run("tok".to_owned(), |tok| {
+                    let server = server.clone();
+                    async move { probe(&server, &tok).await }
+                }),
+            )
+            .await
+            .expect("retry backoff exceeded timeout");
+            assert!(result.is_ok());
+            // 3 failures + 1 success = 4 requests.
+            assert_eq!(request_count(&server).await, 4);
+        }
     }
 
     #[tokio::test]
@@ -826,40 +831,5 @@ mod tests {
             assert!(matches!(result, Err(TransferError::Forbidden(_))));
             assert_eq!(request_count(&server).await, expected_requests);
         }
-    }
-
-    #[tokio::test]
-    async fn jitter_produces_bounded_no_panic_sanity() {
-        // Just exercise the jitter path end-to-end without asserting exact
-        // delays; it must stay bounded and not panic.
-        let server = Arc::new(MockServer::start().await);
-        Mock::given(method("GET"))
-            .and(path("/probe"))
-            .respond_with(ResponseTemplate::new(503).set_body_json(json!({"error": "x"})))
-            .up_to_n_times(2)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/probe"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok"))
-            .mount(&server)
-            .await;
-        let ctx = retry_context(
-            RetryPolicy::new()
-                .with_max_attempts(5)
-                .with_base_delay(Duration::from_millis(1))
-                .with_jitter(true),
-            None,
-        );
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            ctx.run("tok".to_owned(), |tok| {
-                let server = server.clone();
-                async move { probe(&server, &tok).await }
-            }),
-        )
-        .await
-        .expect("jittered backoff exceeded timeout");
-        assert!(result.is_ok());
     }
 }
