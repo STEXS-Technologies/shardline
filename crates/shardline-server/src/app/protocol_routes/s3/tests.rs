@@ -69,7 +69,7 @@ async fn build_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
     let tmp = TempDir::new().expect("configured PostgreSQL fixture scratch directory");
     let object_store = crate::object_store::ServerObjectStore::local(tmp.path().join("objects"))
         .expect("configured PostgreSQL fixture object store");
-    let state = build_postgres_state(&database_url, tmp.path(), object_store).await?;
+    let state = build_postgres_state(&database_url, tmp.path(), object_store).await;
     Some((state, tmp))
 }
 
@@ -77,7 +77,7 @@ async fn build_postgres_state(
     database_url: &str,
     root: &Path,
     object_store: crate::object_store::ServerObjectStore,
-) -> Option<Arc<AppState>> {
+) -> Arc<AppState> {
     let chunk_size = NonZeroUsize::new(65_536).unwrap();
     let config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -104,7 +104,7 @@ async fn build_postgres_state(
     .unwrap_or_else(|_error| panic!("configured PostgreSQL fixture backend initialization"));
     let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY)
         .expect("configured PostgreSQL fixture authentication");
-    let state = Arc::new(AppState {
+    Arc::new(AppState {
         config,
         role: ServerRole::All,
         backend: crate::ServerBackend::Postgres(backend),
@@ -116,8 +116,7 @@ async fn build_postgres_state(
         admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256).unwrap()),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
-    });
-    Some(state)
+    })
 }
 
 #[tokio::test]
@@ -2386,15 +2385,8 @@ async fn s3_postgres_multipart_resumes_across_nodes_without_shared_rwx() {
         crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
     let node_a_root = tmp.path().join("node-a");
     let node_b_root = tmp.path().join("node-b");
-    let Some(node_a) =
-        build_postgres_state(&database_url, &node_a_root, shared_objects.clone()).await
-    else {
-        return;
-    };
-    let Some(node_b) = build_postgres_state(&database_url, &node_b_root, shared_objects).await
-    else {
-        return;
-    };
+    let node_a = build_postgres_state(&database_url, &node_a_root, shared_objects.clone()).await;
+    let node_b = build_postgres_state(&database_url, &node_b_root, shared_objects).await;
     let app_a = s3_router(node_a);
     let app_b = s3_router(node_b);
 
@@ -2440,20 +2432,14 @@ async fn s3_postgres_delete_and_put_are_one_cross_replica_order() {
     let tmp = TempDir::new().unwrap();
     let shared_objects =
         crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
-    let Some(node_a) = build_postgres_state(
+    let node_a = build_postgres_state(
         &database_url,
         &tmp.path().join("node-a"),
         shared_objects.clone(),
     )
-    .await
-    else {
-        return;
-    };
-    let Some(node_b) =
-        build_postgres_state(&database_url, &tmp.path().join("node-b"), shared_objects).await
-    else {
-        return;
-    };
+    .await;
+    let node_b =
+        build_postgres_state(&database_url, &tmp.path().join("node-b"), shared_objects).await;
     let app_a = s3_router(node_a);
     let app_b = s3_router(node_b);
     let suffix = hex::encode(blake3::hash(tmp.path().as_os_str().as_encoded_bytes()).as_bytes());
@@ -5291,12 +5277,9 @@ async fn s3_postgres_multipart_completion_conditional_race_has_one_winner() {
     crate::apply_database_migrations(&pool).await.unwrap();
     let tmp = TempDir::new().unwrap();
     let shared = crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
-    let state_a = build_postgres_state(&database_url, &tmp.path().join("node-a"), shared.clone())
-        .await
-        .unwrap();
-    let state_b = build_postgres_state(&database_url, &tmp.path().join("node-b"), shared)
-        .await
-        .unwrap();
+    let state_a =
+        build_postgres_state(&database_url, &tmp.path().join("node-a"), shared.clone()).await;
+    let state_b = build_postgres_state(&database_url, &tmp.path().join("node-b"), shared).await;
     let app_a = s3_router(state_a.clone());
     let app_b = s3_router(state_b);
     let delete = Request::builder()
