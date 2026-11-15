@@ -2359,26 +2359,32 @@ async fn purge_expired_session_stem_validation_skips_json() {
 }
 
 #[tokio::test]
-async fn purge_expired_session_read_error_deletes() {
-    // purge_expired_upload_sessions: read error on .json file → delete (lines 1028-1030)
+async fn purge_preserves_session_files_when_metadata_read_fails() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
+    append_upload_bytes(root.path(), &session_id, b"retained body")
+        .await
+        .unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    tokio::fs::remove_file(&metadata_path).await.unwrap();
+    tokio::fs::create_dir(&metadata_path).await.unwrap();
 
-    // Replace the metadata file with a directory (read will fail, should trigger delete)
-    let meta_path = crate::upload_metadata_path(root.path(), &session_id);
-    let _ = tokio::fs::remove_file(&meta_path).await;
-    tokio::fs::create_dir(&meta_path).await.unwrap();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    // purge may return an error (delete_upload_session may fail on the directory)
-    let result =
-        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now).await;
-    // The function may error because delete_upload_session failed on the directory content
-    // but we should hit the read-error branch regardless
-    let _ = result;
+    let result = purge_expired_upload_sessions::<TestBackend>(
+        root.path(),
+        NO_BACKEND,
+        ttl(),
+        crate::fs::unix_now_seconds_checked().unwrap(),
+    )
+    .await;
+    assert!(matches!(result, Err(OciAdapterError::Io(_))));
+    assert!(metadata_path.is_dir());
+    assert_eq!(
+        tokio::fs::read(crate::upload_body_path(root.path(), &session_id))
+            .await
+            .unwrap(),
+        b"retained body",
+    );
+    assert!(crate::fs::upload_evidence_journal_path(root.path(), &session_id).is_file());
 }
 
 #[tokio::test]
