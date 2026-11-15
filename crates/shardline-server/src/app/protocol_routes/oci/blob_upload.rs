@@ -893,33 +893,13 @@ mod tests {
         body::Body,
         http::{Method, StatusCode, header},
     };
-    use sha2::{Digest, Sha256};
     use tower::ServiceExt;
 
     use super::super::test_helpers::{
-        build_oci_postgres_test_cluster, build_oci_test_state, oci_test_router,
+        build_oci_postgres_test_cluster, build_oci_test_state, oci_test_router, send, sha256_hex,
     };
 
     const REPO: &str = "team/assets";
-
-    fn sha256_hex(bytes: &[u8]) -> String {
-        hex::encode(Sha256::digest(bytes))
-    }
-
-    async fn send(
-        app: &axum::Router,
-        method: Method,
-        uri: &str,
-        body: Body,
-    ) -> axum::http::Response<Body> {
-        let request = axum::http::Request::builder()
-            .method(method)
-            .uri(uri)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .body(body)
-            .unwrap();
-        app.clone().oneshot(request).await.unwrap()
-    }
 
     async fn upload_blob_direct(
         app: &axum::Router,

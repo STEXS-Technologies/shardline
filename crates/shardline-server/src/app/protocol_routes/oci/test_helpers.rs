@@ -1,6 +1,11 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-use axum::{Router, routing};
+use axum::{
+    Router,
+    body::Body,
+    http::{Method, header},
+    routing,
+};
 use tokio::sync::Semaphore;
 
 use crate::{
@@ -131,4 +136,35 @@ pub(crate) fn oci_test_router(state: &Arc<AppState>) -> Router {
             crate::app::gc_write_barrier_middleware,
         ))
         .with_state(Arc::clone(state))
+}
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+pub(crate) async fn send(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    body: Body,
+) -> axum::http::Response<Body> {
+    send_with_content_type(app, method, uri, body, "application/octet-stream").await
+}
+
+pub(crate) async fn send_with_content_type(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    body: Body,
+    content_type: &str,
+) -> axum::http::Response<Body> {
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(body)
+        .unwrap();
+    app.clone().oneshot(request).await.unwrap()
 }

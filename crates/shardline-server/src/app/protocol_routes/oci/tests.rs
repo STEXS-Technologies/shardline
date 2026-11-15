@@ -5,7 +5,10 @@ use axum::{
 use shardline_index::OciTagStore as _;
 use tower::ServiceExt;
 
-use super::test_helpers::{build_oci_postgres_test_cluster, build_oci_test_state, oci_test_router};
+use super::test_helpers::{
+    build_oci_postgres_test_cluster, build_oci_test_state, oci_test_router, send,
+    send_with_content_type, sha256_hex,
+};
 
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const REPO: &str = "team/assets";
@@ -537,39 +540,6 @@ fn test_manifest_json(config_digest: &str, layer_digest: &str) -> String {
         ]
     })
     .to_string()
-}
-
-/// Computes the SHA-256 hex digest of `bytes`.
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(bytes))
-}
-
-// ── helpers ─────────────────────────────────────────────────────────
-
-async fn send(
-    app: &axum::Router,
-    method: Method,
-    uri: &str,
-    body: Body,
-) -> axum::http::Response<Body> {
-    send_with_content_type(app, method, uri, body, "application/octet-stream").await
-}
-
-async fn send_with_content_type(
-    app: &axum::Router,
-    method: Method,
-    uri: &str,
-    body: Body,
-    content_type: &str,
-) -> axum::http::Response<Body> {
-    let request = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(body)
-        .unwrap();
-    app.clone().oneshot(request).await.unwrap()
 }
 
 /// Uploads a blob directly to the registry via POST with `?digest=` query.
