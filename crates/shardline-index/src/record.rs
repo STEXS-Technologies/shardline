@@ -705,6 +705,18 @@ mod tests {
         StorageRepresentation,
     };
 
+    fn valid_chunk() -> FileChunkRecord {
+        FileChunkRecord {
+            hash: "a".repeat(64),
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }
+    }
+
     fn whole_file_record(total_bytes: u64, chunks: Vec<FileChunkRecord>) -> FileRecord {
         FileRecord {
             deduplication_domain: None,
@@ -762,13 +774,9 @@ mod tests {
         let record = whole_file_record(
             0,
             vec![FileChunkRecord {
-                hash: "a".repeat(64),
-                offset: 0,
                 length: 0,
-                range_start: 0,
-                range_end: 1,
-                packed_start: 0,
                 packed_end: 1,
+                ..valid_chunk()
             }],
         );
         assert!(matches!(
@@ -782,13 +790,8 @@ mod tests {
         let record = whole_file_record(
             4,
             vec![FileChunkRecord {
-                hash: "a".repeat(64),
-                offset: 0,
-                length: 4,
                 range_start: 2,
-                range_end: 1,
-                packed_start: 0,
-                packed_end: 4,
+                ..valid_chunk()
             }],
         );
         assert!(matches!(
@@ -802,13 +805,9 @@ mod tests {
         let record = whole_file_record(
             4,
             vec![FileChunkRecord {
-                hash: "a".repeat(64),
-                offset: 0,
-                length: 4,
-                range_start: 0,
-                range_end: 1,
                 packed_start: 4,
                 packed_end: 2,
+                ..valid_chunk()
             }],
         );
         assert!(matches!(
@@ -830,23 +829,11 @@ mod tests {
     fn file_record_preserves_repository_scope_and_chunk_order() {
         let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", Some("main"))
             .unwrap();
-        let first = FileChunkRecord {
-            hash: "a".repeat(64),
-            offset: 0,
-            length: 4,
-            range_start: 0,
-            range_end: 1,
-            packed_start: 0,
-            packed_end: 4,
-        };
+        let first = valid_chunk();
         let second = FileChunkRecord {
             hash: "b".repeat(64),
             offset: 4,
-            length: 4,
-            range_start: 0,
-            range_end: 1,
-            packed_start: 0,
-            packed_end: 4,
+            ..valid_chunk()
         };
 
         let record = FileRecord {
@@ -869,15 +856,7 @@ mod tests {
         let record = whole_file_record(
             8,
             vec![
-                FileChunkRecord {
-                    hash: "a".repeat(64),
-                    offset: 0,
-                    length: 4,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 4,
-                },
+                valid_chunk(),
                 FileChunkRecord {
                     hash: "b".repeat(64),
                     offset: 4,
@@ -898,15 +877,7 @@ mod tests {
         let record = whole_file_record(
             8,
             vec![
-                FileChunkRecord {
-                    hash: "a".repeat(64),
-                    offset: 0,
-                    length: 4,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
-                    packed_end: 4,
-                },
+                valid_chunk(),
                 FileChunkRecord {
                     hash: "b".repeat(64),
                     offset: 5,
@@ -928,61 +899,37 @@ mod tests {
     // ── FileRecordInvariantError Display ─────────────────────────────────
 
     #[test]
-    fn file_record_invariant_error_chunk_hash_display() {
-        let err =
-            FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength);
-        assert_eq!(err.to_string(), "file record chunk hash is invalid");
-    }
-
-    #[test]
-    fn file_record_invariant_error_empty_chunk_display() {
-        let err = FileRecordInvariantError::EmptyChunk;
-        assert_eq!(
-            err.to_string(),
-            "file record chunk length must be greater than zero"
-        );
-    }
-
-    #[test]
-    fn file_record_invariant_error_non_contiguous_display() {
-        let err = FileRecordInvariantError::NonContiguousChunkOffsets;
-        assert_eq!(
-            err.to_string(),
-            "file record chunk offsets must be contiguous"
-        );
-    }
-
-    #[test]
-    fn file_record_invariant_error_invalid_chunk_range_display() {
-        let err = FileRecordInvariantError::InvalidChunkRange;
-        assert_eq!(
-            err.to_string(),
-            "file record chunk range must be non-empty and ordered"
-        );
-    }
-
-    #[test]
-    fn file_record_invariant_error_invalid_packed_range_display() {
-        let err = FileRecordInvariantError::InvalidPackedRange;
-        assert_eq!(
-            err.to_string(),
-            "file record packed byte range must be non-empty and ordered"
-        );
-    }
-
-    #[test]
-    fn file_record_invariant_error_length_overflow_display() {
-        let err = FileRecordInvariantError::LengthOverflow;
-        assert_eq!(err.to_string(), "file record chunk lengths overflowed");
-    }
-
-    #[test]
-    fn file_record_invariant_error_total_bytes_mismatch_display() {
-        let err = FileRecordInvariantError::TotalBytesMismatch;
-        assert_eq!(
-            err.to_string(),
-            "file record total bytes did not match chunk lengths"
-        );
+    fn file_record_invariant_errors_preserve_display_messages() {
+        use FileRecordInvariantError::*;
+        for (error, expected) in [
+            (
+                ChunkHash(shardline_protocol::HashParseError::InvalidLength),
+                "file record chunk hash is invalid",
+            ),
+            (
+                EmptyChunk,
+                "file record chunk length must be greater than zero",
+            ),
+            (
+                NonContiguousChunkOffsets,
+                "file record chunk offsets must be contiguous",
+            ),
+            (
+                InvalidChunkRange,
+                "file record chunk range must be non-empty and ordered",
+            ),
+            (
+                InvalidPackedRange,
+                "file record packed byte range must be non-empty and ordered",
+            ),
+            (LengthOverflow, "file record chunk lengths overflowed"),
+            (
+                TotalBytesMismatch,
+                "file record total bytes did not match chunk lengths",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected, "{error:?}");
+        }
     }
 
     #[test]
@@ -991,22 +938,16 @@ mod tests {
             0,
             vec![
                 FileChunkRecord {
-                    hash: "a".repeat(64),
-                    offset: 0,
                     length: u64::MAX,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
                     packed_end: 1,
+                    ..valid_chunk()
                 },
                 FileChunkRecord {
                     hash: "b".repeat(64),
                     offset: u64::MAX,
                     length: 1,
-                    range_start: 0,
-                    range_end: 1,
-                    packed_start: 0,
                     packed_end: 1,
+                    ..valid_chunk()
                 },
             ],
         );
@@ -1075,13 +1016,9 @@ mod tests {
         let record = whole_file_record(
             10,
             vec![FileChunkRecord {
-                hash: "a".repeat(64),
-                offset: 0,
                 length: 8,
-                range_start: 0,
-                range_end: 1,
-                packed_start: 0,
                 packed_end: 8,
+                ..valid_chunk()
             }],
         );
         assert!(matches!(
@@ -1497,27 +1434,21 @@ mod tests {
         assert!(!called);
     }
 
-    #[tokio::test]
-    async fn file_record_validate_rejects_invalid_chunk_hash() {
+    #[test]
+    fn file_record_validate_rejects_invalid_chunk_hash() {
         let record = whole_file_record(
             1,
             vec![FileChunkRecord {
                 hash: "not-a-valid-hex-string".to_owned(),
-                offset: 0,
                 length: 1,
-                range_start: 0,
-                range_end: 1,
-                packed_start: 0,
                 packed_end: 1,
+                ..valid_chunk()
             }],
         );
-        let result = record.validate_reconstruction_plan();
-        assert!(result.is_err());
-        // The error should wrap a HashParseError via #[from]
-        match result {
-            Err(FileRecordInvariantError::ChunkHash(_)) => {} // expected
-            other => panic!("Expected ChunkHash error, got: {other:?}"),
-        }
+        assert!(matches!(
+            record.validate_reconstruction_plan(),
+            Err(FileRecordInvariantError::ChunkHash(_))
+        ));
     }
 
     #[test]
