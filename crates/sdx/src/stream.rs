@@ -779,30 +779,25 @@ impl SyncWriterThread {
                 mut receiver,
                 permit,
             }) => {
-                if should_block {
-                    let data = match receiver.blocking_recv() {
-                        Ok(data) => data,
-                        Err(_) => {
-                            self.run_state.check_background_error()?;
-                            return Err(SdxError::StreamInternal(
-                                "data sender was dropped before sending data".to_owned(),
-                            ));
-                        }
-                    };
-                    Ok(Some((data, permit)))
+                let received = if should_block {
+                    receiver.blocking_recv().map_err(|_error| ())
                 } else {
                     match receiver.try_recv() {
-                        Ok(data) => Ok(Some((data, permit))),
+                        Ok(data) => Ok(data),
                         Err(oneshot::error::TryRecvError::Empty) => {
                             self.pending = Some(SequentialRetrievalItem::Data { receiver, permit });
-                            Ok(None)
+                            return Ok(None);
                         }
-                        Err(oneshot::error::TryRecvError::Closed) => {
-                            self.run_state.check_background_error()?;
-                            Err(SdxError::StreamInternal(
-                                "data sender was dropped before sending data".to_owned(),
-                            ))
-                        }
+                        Err(oneshot::error::TryRecvError::Closed) => Err(()),
+                    }
+                };
+                match received {
+                    Ok(data) => Ok(Some((data, permit))),
+                    Err(()) => {
+                        self.run_state.check_background_error()?;
+                        Err(SdxError::StreamInternal(
+                            "data sender was dropped before sending data".to_owned(),
+                        ))
                     }
                 }
             }
@@ -842,9 +837,6 @@ impl SyncWriterThread {
             }
             // The buffer permit is released only after the data is written.
             drop(permit);
-            if self.finished {
-                break;
-            }
         }
         self.run_state.check_background_error()?;
         if !self.run_state.is_cancelled() {
