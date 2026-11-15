@@ -207,13 +207,9 @@ async fn append_upload_bytes_impl(
 pub async fn upload_length(root: &Path, session_id: &str) -> Result<u64, OciAdapterError> {
     validate_upload_session_id(session_id)?;
     let path = upload_body_path(root, session_id);
-    upload_file_len_async(root, &path).await.map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            OciAdapterError::NotFound
-        } else {
-            OciAdapterError::Io(error)
-        }
-    })
+    upload_file_len_async(root, &path)
+        .await
+        .map_err(map_not_found)
 }
 
 /// # Errors
@@ -239,48 +235,19 @@ pub async fn upload_body_integrity(
     upload_body_integrity_impl(root, path).await
 }
 
-#[cfg(unix)]
 async fn upload_body_integrity_impl(
     root: &Path,
     path: PathBuf,
 ) -> Result<(String, ObjectIntegrity), OciAdapterError> {
+    #[cfg(unix)]
     let root = root.to_path_buf();
-    spawn_blocking(move || {
-        let mut file = open_anchored_file(&root, &path)?;
-        let mut sha256 = Sha256::new();
-        let mut blake3 = Blake3Hasher::new();
-        let mut buffer = [0_u8; 256 * 1024];
-        let mut total_length = 0_u64;
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            let slice = buffer.get(..read).ok_or(OciAdapterError::Overflow)?;
-            sha256.update(slice);
-            blake3.update(slice);
-            total_length = total_length
-                .checked_add(u64::try_from(read).map_err(|_error| OciAdapterError::Overflow)?)
-                .ok_or(OciAdapterError::Overflow)?;
-        }
-        let sha256_hex = hex::encode(sha256.finalize());
-        let blake3_hash =
-            shardline_protocol::ShardlineHash::from_bytes(*blake3.finalize().as_bytes());
-        Ok::<_, OciAdapterError>((sha256_hex, ObjectIntegrity::new(blake3_hash, total_length)))
-    })
-    .await
-    .map_err(OciAdapterError::BlockingTask)?
-}
-
-#[cfg(not(unix))]
-async fn upload_body_integrity_impl(
-    root: &Path,
-    path: PathBuf,
-) -> Result<(String, ObjectIntegrity), OciAdapterError> {
-    use std::fs::File;
+    #[cfg(not(unix))]
     let _ = root;
     spawn_blocking(move || {
-        let mut file = File::open(&path)?;
+        #[cfg(unix)]
+        let mut file = open_anchored_file(&root, &path)?;
+        #[cfg(not(unix))]
+        let mut file = std::fs::File::open(&path)?;
         let mut sha256 = Sha256::new();
         let mut blake3 = Blake3Hasher::new();
         let mut buffer = [0_u8; 256 * 1024];
