@@ -747,7 +747,6 @@ async fn append_evidence_journal(
     .map_err(OciAdapterError::Io)
 }
 
-#[cfg(unix)]
 fn append_journal_file(
     root: &Path,
     path: &Path,
@@ -755,50 +754,33 @@ fn append_journal_file(
     committed_bytes: Option<u64>,
     bytes: &[u8],
 ) -> std::io::Result<u64> {
+    #[cfg(unix)]
     let anchored = open_anchored_target(
         root,
         path,
         AnchoredPathOptions::new(Some(0o750), Some(0o600)),
         || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
     )?;
-    let old_len = prepare_journal_append(&anchored.final_path(), committed_head, committed_bytes)?;
+    #[cfg(unix)]
+    let journal_path: &Path = &anchored.final_path();
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    #[cfg(not(unix))]
+    let journal_path = path;
+    let old_len = prepare_journal_append(journal_path, committed_head, committed_bytes)?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(anchored.final_path())?;
+        .open(journal_path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    #[cfg(unix)]
     ensure_parent_path_matches_anchor(&anchored, "journal parent changed during append")?;
-    old_len
-        .checked_add(u64::try_from(bytes.len()).map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("journal byte length overflow: {error}"),
-            )
-        })?)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "journal byte length overflow",
-            )
-        })
-}
-
-#[cfg(not(unix))]
-fn append_journal_file(
-    _root: &Path,
-    path: &Path,
-    committed_head: u64,
-    committed_bytes: Option<u64>,
-    bytes: &[u8],
-) -> std::io::Result<u64> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let old_len = prepare_journal_append(path, committed_head, committed_bytes)?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
     old_len
         .checked_add(u64::try_from(bytes.len()).map_err(|error| {
             std::io::Error::new(
