@@ -2066,7 +2066,6 @@ async fn s3_publication_rejects_a_chunk_deleted_after_staging() {
         .backend
         .prepare_s3_object_stream(&logical, RequestBodyReader::from_bytes(bytes), None)
         .await;
-    assert!(matches!(retry, Err(error) if error.is_remote_delete_pending()));
     let prepared = seed;
     let entry = S3ObjectEntry {
         scope_namespace: namespace,
@@ -2078,6 +2077,26 @@ async fn s3_publication_rejects_a_chunk_deleted_after_staging() {
         user_metadata: Vec::new(),
         updated_at_unix_seconds: 1,
     };
+    // Staging may independently repack unpublished bytes without discovering a
+    // reusable source. Both that retry and the original staged record must be
+    // fenced at publication while their backing object is being deleted.
+    match retry {
+        Err(error) => assert!(error.is_remote_delete_pending(), "{error}"),
+        Ok(retry) => {
+            let error = fixture
+                .backend
+                .publish_s3_object_locked(
+                    &mut guard,
+                    &retry,
+                    &entry,
+                    &S3PublishCondition::Unconditional,
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.is_remote_delete_pending(), "{error}");
+        }
+    }
     let pending = fixture
         .backend
         .publish_s3_object_locked(

@@ -760,6 +760,7 @@ async fn try_boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
                 "-p".to_owned(),
                 project,
                 "ps".to_owned(),
+                "--all".to_owned(),
                 "-q".to_owned(),
                 service.to_owned(),
             ])
@@ -807,6 +808,17 @@ async fn try_boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
         cleanup_compose_project(&compose_file, &project);
         return None;
     };
+    // MinIO's health endpoint can be ready before the one-shot client creates
+    // the bucket. Released servers require that bucket on their first upload.
+    let Some(initializer) = service_container("chaos-minio-init").await else {
+        eprintln!("SKIPPED: {drill} — isolated bucket initializer is unavailable");
+        return None;
+    };
+    let initialized = docker_run_owned(vec!["wait".to_owned(), initializer]).await;
+    if !initialized.status.success() || String::from_utf8_lossy(&initialized.stdout).trim() != "0" {
+        eprintln!("SKIPPED: {drill} — isolated bucket initializer did not succeed");
+        return None;
+    }
     if !ensure_chaos_stack_ready(drill, &stack).await {
         cleanup_compose_project(&compose_file, &project);
         return None;
@@ -2253,7 +2265,14 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     let token = mint_token("drill", "drill", TokenScope::Write);
     let old_bytes = deterministic_bytes(98_323, 601);
     let seed_put = s3_put(&seed_node.base_url(), &token, "f-old", old_bytes.clone()).await;
-    assert_eq!(seed_put.status().as_u16(), 200, "N-1 seed write");
+    let seed_status = seed_put.status();
+    assert_eq!(
+        seed_status.as_u16(),
+        200,
+        "N-1 seed write: response={}, server log={}",
+        seed_put.text().await.unwrap(),
+        seed_node.log_contents(),
+    );
     drop(seed_node);
 
     let old_a_root = TempDir::new().unwrap();

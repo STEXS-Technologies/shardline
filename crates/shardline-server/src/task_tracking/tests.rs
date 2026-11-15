@@ -1747,7 +1747,8 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
         "ALTER ROLE {first_role} SET search_path TO public;
          ALTER ROLE {second_role} SET search_path TO public;
          GRANT SELECT ON public.shardline_schema_migrations,
-             public.shardline_frontend_schema_v1 TO {first_role}, {second_role};"
+             public.shardline_frontend_schema_v1,
+             public.shardline_upload_intents TO {first_role}, {second_role};"
     )))
     .execute(&pool)
     .await
@@ -1937,7 +1938,8 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "DROP SCHEMA {first_role} CASCADE; DROP SCHEMA {second_role} CASCADE;
          REVOKE SELECT ON public.shardline_schema_migrations,
-             public.shardline_frontend_schema_v1 FROM {first_role}, {second_role};
+             public.shardline_frontend_schema_v1,
+             public.shardline_upload_intents FROM {first_role}, {second_role};
          DROP ROLE {first_role}; DROP ROLE {second_role};"
     )))
     .execute(&pool)

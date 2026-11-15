@@ -17,17 +17,12 @@ use std::{
 
 fn helper() -> PathBuf {
     let executable = std::env::current_exe().unwrap();
-    let path = executable
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples/process_test_worker");
-    assert!(
-        path.is_file(),
-        "build the process_test_worker example before this test suite"
-    );
-    path
+    // Cargo may place test executables in deps/ or build/<crate>/<hash>/out/.
+    executable
+        .ancestors()
+        .map(|directory| directory.join("examples/process_test_worker"))
+        .find(|path| path.is_file())
+        .expect("build the process_test_worker example before this test suite")
 }
 
 fn fixture(input: &[u8]) -> (tempfile::TempDir, PathBuf, TaskScope, TaskDefinition) {

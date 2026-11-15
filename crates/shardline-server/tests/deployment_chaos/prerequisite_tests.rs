@@ -146,3 +146,32 @@ fn failed_compose_cannot_pass_or_expose_private_driver_errors() {
     assert!(!stdout.contains(private_error));
     assert!(!stderr.contains(private_error));
 }
+
+#[test]
+fn failed_bucket_initializer_cannot_pass_or_expose_private_driver_errors() {
+    let script = r#"#!/bin/sh
+case "$1" in
+  compose)
+    for argument do last="$argument"; done
+    case "$*" in
+      *" ps --all -q "*) printf '%s\n' "$last" ;;
+    esac ;;
+  port) printf '127.0.0.1:9\n' ;;
+  wait)
+    [ "$2" = chaos-minio-init ] || exit 1
+    echo private-initializer-error-must-not-escape >&2
+    printf '23\n' ;;
+esac
+"#;
+    for required in [false, true] {
+        let output = run(required, Some(script));
+        assert_eq!(output.status.success(), !required);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("isolated bucket initializer did not succeed"));
+        assert!(!stderr.contains("private-initializer-error-must-not-escape"));
+        assert!(
+            !String::from_utf8_lossy(&output.stdout)
+                .contains("private-initializer-error-must-not-escape")
+        );
+    }
+}
