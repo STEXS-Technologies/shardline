@@ -309,30 +309,30 @@ impl TransferClient {
 
         if content_type.starts_with("multipart/byteranges") {
             let body = read_response_bounded(response, body_limit).await?;
-            let parts = parse_multipart_byteranges(&content_type, &body)?;
-            let first = parts.first().ok_or_else(|| {
+            let parts = multipart_slices(&content_type, &body)?;
+            let (first_range, _) = parts.first().ok_or_else(|| {
                 TransferError::MalformedMultipart(
                     "multipart response contains no ranges".to_owned(),
                 )
             })?;
-            let start = first.range.start;
-            let mut end = first.range.end;
-            let mut data = Vec::new();
-            for (index, part) in parts.into_iter().enumerate() {
-                if part.range.is_empty()
-                    || part.range.len() != u64::try_from(part.data.len()).unwrap_or(u64::MAX)
+            let start = first_range.start;
+            let mut end = first_range.end;
+            let mut data = Vec::with_capacity(parts.iter().map(|(_, part)| part.len()).sum());
+            for (index, (part_range, part)) in parts.into_iter().enumerate() {
+                if part_range.is_empty()
+                    || part_range.len() != u64::try_from(part.len()).unwrap_or(u64::MAX)
                 {
                     return Err(TransferError::MalformedMultipart(
                         "multipart range length disagrees with its body".to_owned(),
                     ));
                 }
-                if index != 0 && end.checked_add(1) != Some(part.range.start) {
+                if index != 0 && end.checked_add(1) != Some(part_range.start) {
                     return Err(TransferError::MalformedMultipart(
                         "multipart ranges must be contiguous and non-overlapping".to_owned(),
                     ));
                 }
-                end = part.range.end;
-                data.extend_from_slice(&part.data);
+                end = part_range.end;
+                data.extend_from_slice(part);
             }
             return Ok(RangedXorb {
                 data,
@@ -354,8 +354,7 @@ impl TransferClient {
         } else {
             None
         };
-        let body = read_response_bounded(response, body_limit).await?;
-        let data = body;
+        let data = read_response_bounded(response, body_limit).await?;
         let length = u64::try_from(data.len()).unwrap_or(u64::MAX);
         let full_body_end = length.checked_sub(1).ok_or_else(|| {
             TransferError::InvalidResponse("xorb range response contains no bytes".to_owned())
@@ -1095,6 +1094,21 @@ pub fn parse_multipart_byteranges(
     content_type: &str,
     body: &[u8],
 ) -> Result<Vec<MultipartPart>, TransferError> {
+    Ok(multipart_slices(content_type, body)?
+        .into_iter()
+        .map(|(range, data)| MultipartPart {
+            range,
+            data: data.to_vec(),
+        })
+        .collect())
+}
+
+// Downloads concatenate borrowed parts directly, avoiding an intermediate
+// allocation and copy for every part. The public parser retains owned output.
+fn multipart_slices<'body>(
+    content_type: &str,
+    body: &'body [u8],
+) -> Result<Vec<(ByteRange, &'body [u8])>, TransferError> {
     let boundary = extract_boundary(content_type).ok_or_else(|| {
         TransferError::MalformedMultipart(format!("no boundary in Content-Type: {content_type}"))
     })?;
@@ -1139,10 +1153,7 @@ pub fn parse_multipart_byteranges(
             TransferError::MalformedMultipart("part data out of bounds".to_owned())
         })?;
         let range = parse_part_content_range(headers)?;
-        parts.push(MultipartPart {
-            range,
-            data: data.to_vec(),
-        });
+        parts.push((range, data));
         match next_boundary {
             Some(position) => {
                 let after = position.checked_add(delimiter.len()).ok_or_else(|| {
@@ -1155,7 +1166,7 @@ pub fn parse_multipart_byteranges(
             None => break,
         }
     }
-    parts.sort_by_key(|part| part.range.start);
+    parts.sort_by_key(|(range, _)| range.start);
     Ok(parts)
 }
 
@@ -2012,6 +2023,17 @@ mod tests {
         assert_eq!(parts[0].data, b"Part1Data");
         assert_eq!(parts[1].range, super::ByteRange::new(100, 199));
         assert_eq!(parts[1].data, b"Part2Data");
+        let borrowed = super::multipart_slices(&content_type, body.as_bytes()).unwrap();
+        assert_eq!(
+            borrowed,
+            parts
+                .iter()
+                .map(|part| (part.range, part.data.as_slice()))
+                .collect::<Vec<_>>()
+        );
+        for (_, data) in borrowed {
+            assert!(body.as_bytes().as_ptr_range().contains(&data.as_ptr()));
+        }
     }
 
     #[test]
