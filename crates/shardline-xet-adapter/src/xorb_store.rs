@@ -443,33 +443,45 @@ mod tests {
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 
     #[test]
-    fn normalize_serialized_xorb_accepts_footerless_uploads() {
-        let raw = build_raw_xorb(4, ChunkSize::Fixed(1024));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false);
-        let serialized = serialized.expect("expected valid serialized");
-        assert!(serialized.footer_start.is_none());
-        let expected_hash = parse_xet_hash_hex(&serialized.hash.hex());
-        let expected_hash = expected_hash.expect("expected valid expected_hash");
-
-        let normalized = normalize_serialized_xorb(expected_hash, &serialized.serialized_data);
-        let normalized = normalized.expect("expected valid normalized");
-        assert!(normalized.len() > serialized.serialized_data.len());
-
-        let validated = validate_serialized_xorb(&mut Cursor::new(normalized), expected_hash);
-        assert!(validated.is_ok());
+    fn normalize_serialized_xorb_validates_reconstructed_footers() {
+        for (num_chunks, chunk_bytes) in [(4, 1024), (2, 512), (3, 512)] {
+            let raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(chunk_bytes));
+            let serialized = SerializedXorbObject::from_xorb_with_compression(
+                raw,
+                CompressionScheme::LZ4,
+                false,
+            )
+            .unwrap();
+            assert!(serialized.footer_start.is_none());
+            let expected = parse_xet_hash_hex(&serialized.hash.hex()).unwrap();
+            let normalized =
+                normalize_serialized_xorb(expected, &serialized.serialized_data).unwrap();
+            assert!(normalized.len() > serialized.serialized_data.len());
+            let validated =
+                validate_serialized_xorb(&mut Cursor::new(normalized), expected).unwrap();
+            assert_eq!(validated.hash(), expected);
+        }
     }
 
     #[test]
-    fn normalize_serialized_xorb_rejects_wrong_hash() {
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(768));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, false);
-        let serialized = serialized.expect("expected valid serialized");
-        let wrong_hash = ShardlineHash::from_bytes([9; 32]);
-
-        let normalized = normalize_serialized_xorb(wrong_hash, &serialized.serialized_data);
-        assert!(matches!(normalized, Err(XetAdapterError::XorbHashMismatch)));
+    fn normalize_serialized_xorb_rejects_wrong_hash_with_or_without_footer() {
+        for (chunk_bytes, footer, wrong_byte) in
+            [(768, false, 9), (512, true, 0x99), (512, false, 0x42)]
+        {
+            let raw = build_raw_xorb(2, ChunkSize::Fixed(chunk_bytes));
+            let serialized = SerializedXorbObject::from_xorb_with_compression(
+                raw,
+                CompressionScheme::None,
+                footer,
+            )
+            .unwrap();
+            let wrong_hash = ShardlineHash::from_bytes([wrong_byte; 32]);
+            let result = normalize_serialized_xorb(wrong_hash, &serialized.serialized_data);
+            assert!(
+                matches!(result, Err(XetAdapterError::XorbHashMismatch)),
+                "footer {footer}: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -496,23 +508,22 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_uploaded_xorb_normalizes_footerless_bytes() {
-        let raw = build_raw_xorb(3, ChunkSize::Fixed(640));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false);
-        let serialized = serialized.expect("expected valid serialized");
-        let expected_hash = parse_xet_hash_hex(&serialized.hash.hex());
-        let expected_hash = expected_hash.expect("expected valid expected_hash");
-
-        let canonicalized = canonicalize_uploaded_xorb(expected_hash, &serialized.serialized_data);
-
-        assert!(canonicalized.is_ok());
-        let Ok((canonicalized, validated)) = canonicalized else {
-            return;
-        };
-        assert!(matches!(canonicalized, Cow::Owned(_)));
-        assert!(canonicalized.len() > serialized.serialized_data.len());
-        assert_eq!(validated.hash(), expected_hash);
+    fn canonicalize_uploaded_xorb_owns_normalized_footerless_bytes() {
+        for (num_chunks, chunk_bytes) in [(3, 640), (4, 256)] {
+            let raw = build_raw_xorb(num_chunks, ChunkSize::Fixed(chunk_bytes));
+            let serialized = SerializedXorbObject::from_xorb_with_compression(
+                raw,
+                CompressionScheme::LZ4,
+                false,
+            )
+            .unwrap();
+            let expected = parse_xet_hash_hex(&serialized.hash.hex()).unwrap();
+            let (canonical, validated) =
+                canonicalize_uploaded_xorb(expected, &serialized.serialized_data).unwrap();
+            assert!(matches!(canonical, Cow::Owned(_)));
+            assert!(canonical.len() > serialized.serialized_data.len());
+            assert_eq!(validated.hash(), expected);
+        }
     }
 
     // ---- store_uploaded_xorb tests ----
@@ -943,10 +954,11 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_uploaded_xorb_rejects_invalid_hash() {
-        let hash = parse_xet_hash_hex(&"ab".repeat(32)).unwrap();
-        let result = canonicalize_uploaded_xorb(hash, b"garbage");
-        assert!(result.is_err());
+    fn canonicalize_uploaded_xorb_rejects_garbage() {
+        let expected = ShardlineHash::from_bytes([0xab; 32]);
+        for body in [b"garbage".as_slice(), b"garbage data"] {
+            assert!(canonicalize_uploaded_xorb(expected, body).is_err());
+        }
     }
 
     #[tokio::test]
@@ -971,33 +983,6 @@ mod tests {
         let stored = result.unwrap();
         assert!(stored.was_inserted);
         assert!(stored.stored_bytes > 0, "stored_bytes should be > 0");
-    }
-
-    #[test]
-    fn canonicalize_uploaded_xorb_rejects_garbage_bytes_directly() {
-        use shardline_protocol::ShardlineHash;
-        let hash = ShardlineHash::from_bytes([0xab; 32]);
-        // Test that canonicalize with garbage -> normalization attempt -> error
-        let result = super::canonicalize_uploaded_xorb(hash, b"garbage data");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn normalize_serialized_xorb_accepts_valid_footerless_xorb() {
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false)
-                .unwrap();
-        assert!(serialized.footer_start.is_none());
-        let expected_hash = parse_xet_hash_hex(&serialized.hash.hex()).unwrap();
-
-        let normalized = normalize_serialized_xorb(expected_hash, &serialized.serialized_data);
-        let normalized = normalized.unwrap();
-        assert!(normalized.len() > serialized.serialized_data.len());
-
-        // Verify the normalized data validates
-        let validated = validate_serialized_xorb(&mut Cursor::new(normalized), expected_hash);
-        assert!(validated.is_ok());
     }
 
     #[tokio::test]
@@ -1091,22 +1076,6 @@ mod tests {
         assert!(
             result.is_err(),
             "expected error for uppercase hash, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn normalize_serialized_xorb_rejects_already_normalized_wrong_hash() {
-        // Create a valid xorb WITH footer, then check with wrong hash
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
-                .unwrap();
-        let wrong_hash = ShardlineHash::from_bytes([0x99; 32]);
-
-        let result = normalize_serialized_xorb(wrong_hash, &serialized.serialized_data);
-        assert!(
-            matches!(result, Err(XetAdapterError::XorbHashMismatch)),
-            "expected XorbHashMismatch, got {result:?}"
         );
     }
 
@@ -1205,29 +1174,6 @@ mod tests {
         assert_eq!(c2, 1);
     }
 
-    #[test]
-    fn normalize_serialized_xorb_with_valid_footerless_bytes_succeeds() {
-        let raw = build_raw_xorb(3, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false)
-                .unwrap();
-        let hash = parse_xet_hash_hex(&serialized.hash.hex()).unwrap();
-        let normalized = normalize_serialized_xorb(hash, &serialized.serialized_data).unwrap();
-        assert!(!normalized.is_empty());
-        assert!(normalized.len() > serialized.serialized_data.len());
-    }
-
-    #[test]
-    fn normalize_serialized_xorb_rejects_bad_hash_after_normalization() {
-        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, false)
-                .unwrap();
-        let wrong_hash = ShardlineHash::from_bytes([0x42; 32]);
-        let result = normalize_serialized_xorb(wrong_hash, &serialized.serialized_data);
-        assert!(result.is_err());
-    }
-
     #[tokio::test]
     async fn persisted_member_cache_cannot_hide_members_or_bypass_container_validation() {
         let temp = tempfile::tempdir().unwrap();
@@ -1298,20 +1244,6 @@ mod tests {
             .is_err()
         );
         assert_eq!(visited, 0);
-    }
-
-    #[test]
-    fn canonicalize_uploaded_xorb_lz4_footerless_normalizes() {
-        let raw = build_raw_xorb(4, ChunkSize::Fixed(256));
-        let serialized =
-            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false)
-                .unwrap();
-        let expected_hash = parse_xet_hash_hex(&serialized.hash.hex()).unwrap();
-        let result = super::canonicalize_uploaded_xorb(expected_hash, &serialized.serialized_data);
-        assert!(result.is_ok());
-        let (cow, validated) = result.unwrap();
-        assert!(matches!(cow, Cow::Owned(_)));
-        assert_eq!(validated.hash(), expected_hash);
     }
 
     #[tokio::test]
