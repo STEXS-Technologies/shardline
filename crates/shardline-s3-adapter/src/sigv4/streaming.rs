@@ -125,13 +125,12 @@ impl SigV4ChunkVerifier {
                     let count =
                         remaining.min(u64::try_from(bytes.len()).map_err(|_overflow| denied())?);
                     let count_usize = usize::try_from(count).map_err(|_overflow| denied())?;
+                    let (chunk, rest) = bytes.split_at_checked(count_usize).ok_or_else(denied)?;
                     if !self.context.unsigned_chunks {
-                        self.hasher
-                            .update(bytes.get(..count_usize).ok_or_else(denied)?);
+                        self.hasher.update(chunk);
                     }
-                    self.trailers
-                        .update(bytes.get(..count_usize).ok_or_else(denied)?);
-                    bytes = bytes.get(count_usize..).ok_or_else(denied)?;
+                    self.trailers.update(chunk);
+                    bytes = rest;
                     self.decoded = self.decoded.checked_add(count).ok_or_else(denied)?;
                     let remaining = remaining.checked_sub(count).ok_or_else(denied)?;
                     self.phase = if remaining == 0 {
@@ -190,10 +189,8 @@ impl SigV4ChunkVerifier {
             return Err(denied());
         }
         if let Some(signature) = signature {
-            self.signature = hex::decode(signature)
-                .map_err(|_invalid_signature| denied())?
-                .try_into()
-                .map_err(|_invalid_length| denied())?;
+            hex::decode_to_slice(signature, &mut self.signature)
+                .map_err(|_invalid_signature| denied())?;
         }
         if size == 0 {
             self.verify_chunk()?;
