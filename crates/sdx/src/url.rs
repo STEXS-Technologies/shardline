@@ -100,35 +100,24 @@ impl XetUrl {
             .path_segments()
             .map(|segments| segments.collect())
             .unwrap_or_default();
-        if raw_segments.len() < 4 {
+        let [provider, owner, repo, revision, path_segments @ ..] = raw_segments.as_slice() else {
             return Err(SdxError::InvalidEndpoint(format!(
                 "expected provider/owner/repo/revision (plus optional path) in {input:?}, got {} segment(s)",
                 raw_segments.len()
             )));
-        }
-        let (identity, path_segments) = raw_segments.split_at(4);
-        let identity: Vec<String> = identity
-            .iter()
-            .map(|segment| decode_segment(segment, input))
-            .collect::<Result<_, _>>()?;
-        if identity.iter().any(|segment| segment.is_empty()) {
+        };
+        let provider = decode_segment(provider, input)?;
+        let owner = decode_segment(owner, input)?;
+        let repo = decode_segment(repo, input)?;
+        let revision = decode_segment(revision, input)?;
+        if [&provider, &owner, &repo, &revision]
+            .into_iter()
+            .any(String::is_empty)
+        {
             return Err(SdxError::InvalidEndpoint(format!(
                 "empty segment in repository identity in {input:?}"
             )));
         }
-        let (provider, owner, repo, revision) = match identity.as_slice() {
-            [provider, owner, repo, revision] => (
-                provider.clone(),
-                owner.clone(),
-                repo.clone(),
-                revision.clone(),
-            ),
-            _ => {
-                return Err(SdxError::InvalidEndpoint(format!(
-                    "invalid repository identity in {input:?}"
-                )));
-            }
-        };
         // Path segments may include a trailing empty segment for a trailing
         // slash; drop trailing empties, decode the rest, and re-append a single
         // trailing slash to denote a directory.
@@ -193,13 +182,8 @@ impl XetUrl {
     #[must_use]
     pub fn with_path(&self, path: &str) -> XetUrl {
         let path = path.trim_matches('/');
-        let trailing_dir = path.is_empty() && self.path.ends_with('/');
         let mut url = self.clone();
-        url.path = if trailing_dir {
-            String::new()
-        } else {
-            path.to_owned()
-        };
+        url.path = path.to_owned();
         url.raw = url.display();
         url
     }
@@ -207,14 +191,7 @@ impl XetUrl {
     /// Returns the canonical `xet://` form of this URL.
     #[must_use]
     pub fn display(&self) -> String {
-        let mut out = format!(
-            "xet://{}/{}/{}/{}/{}",
-            self.authority(),
-            crate::tree::encode_path_segment(&self.provider),
-            crate::tree::encode_path_segment(&self.owner),
-            crate::tree::encode_path_segment(&self.repo),
-            crate::tree::encode_path_segment(&self.revision)
-        );
+        let mut out = self.endpoint_url();
         if !self.path.is_empty() {
             out.push('/');
             out.push_str(&crate::tree::encode_path_segments(&self.path));
