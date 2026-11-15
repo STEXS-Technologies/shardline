@@ -1025,7 +1025,7 @@ impl OpsRecordStore for LocalRecordStore {
         Option<shardline_index::XetXorbDescriptor>,
         <Self as RecordTraversal>::Error,
     > {
-        Box::pin(async move { self.xet_indexed_xorb_descriptor(xorb).await })
+        Box::pin(self.xet_indexed_xorb_descriptor(xorb))
     }
 
     fn supports_native_locations(&self) -> bool {
@@ -1051,7 +1051,7 @@ impl OpsRecordStore for LocalRecordStore {
         Option<shardline_index::XetXorbDescriptor>,
         <Self as RecordTraversal>::Error,
     > {
-        Box::pin(async move { self.xet_chunk_location(member, xorb).await })
+        Box::pin(self.xet_chunk_location(member, xorb))
     }
     fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String {
         locator.record_key().to_owned()
@@ -1087,7 +1087,7 @@ impl OpsRecordStore for PostgresRecordStore {
         Option<shardline_index::XetXorbDescriptor>,
         <Self as RecordTraversal>::Error,
     > {
-        Box::pin(async move { self.xet_indexed_xorb_descriptor(xorb).await })
+        Box::pin(self.xet_indexed_xorb_descriptor(xorb))
     }
 
     fn supports_native_locations(&self) -> bool {
@@ -1112,7 +1112,7 @@ impl OpsRecordStore for PostgresRecordStore {
         Option<shardline_index::XetXorbDescriptor>,
         <Self as RecordTraversal>::Error,
     > {
-        Box::pin(async move { self.xet_chunk_location(member, xorb).await })
+        Box::pin(self.xet_chunk_location(member, xorb))
     }
     fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String {
         locator.record_key().to_owned()
