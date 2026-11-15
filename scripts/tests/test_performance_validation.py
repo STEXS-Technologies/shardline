@@ -10,12 +10,13 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shardline"))
 from performance_validation.measurements import (  # noqa: E402
     RequestTrace, inventory_summary, percentiles, request_summary, scale_efficiency,
 )
+from performance_validation.retention import expiry_deadline, qualify_retention_expiry
 from performance_validation.workload import payload  # noqa: E402
 from performance_validation.database import resource_delta  # noqa: E402
 
@@ -88,6 +89,52 @@ class PerformanceValidationTest(unittest.TestCase):
         self.assertEqual(result["objects"], 3)
         self.assertEqual(result["by_class"]["individual_chunks"]["bytes"], 100)
         self.assertEqual(result["by_class"]["xorbs"]["bytes"], 110)
+
+    def test_retention_expiry_waits_for_latest_lane_then_verifies_resumed_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment = Mock()
+            deployment.output = Path(directory)
+            deployment.sql.side_effect = [
+                '{"objects": 2, "latest_delete_after_unix_seconds": 120}',
+                '{"objects": 1, "latest_delete_after_unix_seconds": 5000}',
+                '{"objects": 0, "latest_delete_after_unix_seconds": 0}',
+                '{"objects": 0, "latest_delete_after_unix_seconds": 0}',
+            ]
+            deployment.inventory.return_value = {"stored_payload_bytes": 16}
+            deployment.gc.return_value = 0.1
+            deployment.trace.snapshot.return_value = {}
+            deployment.trace.validate.return_value = {}
+            rows = [{"label": f"lane-{replicas}", "replicas": replicas,
+                     "dataset": "repeated", "final_logical_bytes": 96}
+                    for replicas in [1, 2]]
+            for row in rows:
+                lane = deployment.output / row["label"]
+                lane.mkdir()
+            deployment.lane.side_effect = lambda name, replicas, resume: deployment.output / name
+            with patch("performance_validation.retention.time.time", side_effect=[100, 100, 100, 5001]), \
+                    patch("performance_validation.retention.time.sleep") as sleep, \
+                    patch("performance_validation.retention.verify_all", return_value=12) as verify:
+                qualify_retention_expiry(deployment, rows, 4, 8)
+            sleep.assert_called_once_with(30)
+            self.assertEqual(deployment.lane.call_args_list[0].kwargs, {"resume": True})
+            self.assertEqual(deployment.gc.call_count, 4)
+            self.assertEqual(verify.call_count, 2)
+            self.assertEqual(rows[0]["retention_expiry"]["verified_responses"], 12)
+            self.assertIn('"status": "complete"', (deployment.output / "retention-expiry.json").read_text())
+            self.assertEqual(expiry_deadline([]), 0)
+
+    def test_empty_quarantine_still_observes_the_minimum_retention_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment = Mock(output=Path(directory))
+            with patch("performance_validation.retention.time.time", side_effect=[100, 100, 100, 3701]), \
+                    patch("performance_validation.retention.time.sleep") as sleep:
+                qualify_retention_expiry(deployment, [], 4, 8)
+            import json
+            checkpoint = json.loads((deployment.output / "retention-expiry.json").read_text())
+            self.assertEqual(checkpoint["delete_after_unix_seconds"], 3700)
+            self.assertEqual(checkpoint["minimum_observation_seconds"], 3600)
+            sleep.assert_called_once_with(30)
+            deployment.lane.assert_not_called()
 
     def test_tail_latency_uses_nearest_rank(self):
         self.assertEqual(percentiles(list(reversed(range(1, 101)))),

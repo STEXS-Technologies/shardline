@@ -4432,6 +4432,25 @@ ratio. GC overlap measures process lifetime, including startup and ownership
 waits; it does not prove every request overlapped an active scan. No historical
 before/after speedup is claimed.
 
+To measure the later retained footprint, add `--retention-expiry` to the same
+matrix command. This optional phase leaves all lane databases and buckets intact
+with API writers stopped, waits for the latest database-recorded quarantine
+expiry and at least one hour even when quarantine is empty, then resumes each
+lane with fresh credentials. It runs two more normal
+GC passes, records before/after inventory and remaining quarantine, then checks
+every object through every replica again. It neither backdates rows nor changes
+the minimum retention policy. Lanes age together, so this adds approximately one
+hour after the short matrix rather than one hour per lane.
+
+`retention-expiry.json` records the pending deadline and completed results;
+per-lane `result.json` and `summary.md` include the optional measurements after
+completion. Initial request traces are preserved separately from expiry-phase
+traces. All three upload phases remain live, so the final logical denominator
+is three times the initial-ingest denominator. Compare retained physical bytes
+across replica counts before attributing the initial ratio difference to either
+transient quarantine or persistent packing/reference behavior. This phase does
+not establish sustained throughput, cloud cost or a production margin.
+
 ### Reusing validated upload descriptors (2026-11-15)
 
 Candidate `128f7c5eea9d2807b97ef3299d333c9ddae05f72` removes the second full

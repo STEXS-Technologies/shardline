@@ -14,6 +14,7 @@ from .database import Sampler, query_mix, snapshot, top_queries
 from .fixtures import Deployment
 from .measurements import RequestTrace, scale_efficiency, utc_now
 from .workload import ConcurrentGc, run_direct, run_http, verify_all
+from .retention import qualify_retention_expiry
 
 
 def measured_phase(deployment, name, operation, logical_bytes):
@@ -97,6 +98,19 @@ def write_summary(output, results, direct):
                      f'{row["maintenance"]["aggregate_mib_per_second"]:.2f} | '
                      f'{row["maintenance"]["latency"]["put"]["p99_ms"]:.2f} | '
                      f'{row["initial_stored_to_logical_ratio"]:.3f} |')
+    if any("retention_expiry" in row for row in results):
+        lines += ["", "## Footprint after real quarantine expiry", "",
+                  "All three upload phases remain live; logical bytes include all three sets of object names.", "",
+                  "| Data | Replicas | Repeat | Before expiry bytes | After expiry GC bytes | Live logical bytes | Quarantine remaining | Verified reads |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+        for row in results:
+            aged = row["retention_expiry"]
+            lines.append(f'| {row["dataset"]} | {row["replicas"]} | {row["repeat"]} | '
+                         f'{aged["before_gc"]["stored_payload_bytes"]} | '
+                         f'{aged["after_gc"]["stored_payload_bytes"]} | '
+                         f'{row["final_logical_bytes"]} | '
+                         f'{aged["quarantine_after_gc"]["objects"]} | '
+                         f'{aged["verified_responses"]} |')
     lines += ["", "## Scale-out efficiency", "",
               "70% is an engineering target, not a measured production guarantee.", "",
               "| Data | Replicas | Repeat | Initial ingest efficiency | Mixed efficiency | GC mixed efficiency |",
@@ -159,6 +173,8 @@ def arguments():
     parser.add_argument("--object-bytes", type=int, default=1024 * 1024)
     parser.add_argument("--clients", type=int, default=16)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--retention-expiry", action="store_true",
+                        help="also wait for real quarantine expiry, rerun GC and verify all reads (at least one hour when objects are quarantined)")
     parser.add_argument("--replica-cpus", type=float, default=1)
     parser.add_argument("--replica-memory", default="1g")
     args = parser.parse_args()
@@ -231,6 +247,8 @@ def main():
                     results.append(lane_result(deployment, name, replicas, dataset, repeat, args))
                     print(f"PASS {name}", flush=True)
                     (args.output / "partial-results.json").write_text(json.dumps(results, indent=2) + "\n")
+        if args.retention_expiry:
+            qualify_retention_expiry(deployment, results, args.objects, args.object_bytes)
         write_summary(args.output, results, direct)
         print(f"PASS: measurements and scope in {args.output / 'summary.md'}", flush=True)
     finally:

@@ -84,16 +84,18 @@ class Deployment:
         return command("docker", "exec", self.pg, "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
                        "-U", "postgres", "-d", database, "-c", query.strip())
 
-    def lane(self, name, replicas, frontend="s3"):
+    def lane(self, name, replicas, frontend="s3", *, resume=False):
         if frontend not in ("s3", "hub"):
             raise ValueError("unsupported benchmark frontend")
         lane = self.output / name
-        lane.mkdir()
-        (lane / "empty.toml").touch()
-        command("docker", "exec", self.pg, "createdb", "-U", "postgres", name)
-        self.sql(name, "CREATE EXTENSION pg_stat_statements")
+        if not resume:
+            lane.mkdir()
+            (lane / "empty.toml").touch()
+            command("docker", "exec", self.pg, "createdb", "-U", "postgres", name)
+            self.sql(name, "CREATE EXTENSION pg_stat_statements")
         database = f"postgres://postgres:owned_performance_password@127.0.0.1:{port(self.pg, 5432)}/{name}"
-        self.client.create_bucket(Bucket=name)
+        if not resume:
+            self.client.create_bucket(Bucket=name)
         self.env = {"PATH": os.environ["PATH"], "RUST_LOG": "error",
                     "SHARDLINE_ROOT_DIR": str(lane / "maintenance-root"),
                     "SHARDLINE_INDEX_POSTGRES_URL": database,
@@ -107,10 +109,11 @@ class Deployment:
         if frontend == "hub":
             # Disposable loopback fixture still exercises encrypted secrets.
             self.env["SHARDLINE_HUB_WEBHOOK_SECRET_KEY"] = "0123456789abcdef0123456789abcdef"
-        with (lane / "migration.log").open("w") as log:
-            command(self.binary, "--config", self.config, "db", "migrate", "up",
-                    "--database-url", database, env=self.env, stdout=log,
-                    stderr=subprocess.STDOUT, timeout=120)
+        if not resume:
+            with (lane / "migration.log").open("w") as log:
+                command(self.binary, "--config", self.config, "db", "migrate", "up",
+                        "--database-url", database, env=self.env, stdout=log,
+                        stderr=subprocess.STDOUT, timeout=120)
         self.token = command(self.binary, "--config", self.config, "admin", "token", "--issuer", "fixture",
                              "--subject", "fixture", "--scope", "write", "--provider",
                              "github" if frontend == "hub" else "generic",
@@ -151,6 +154,8 @@ class Deployment:
                 finally:
                     connection.close()
             ready(healthy)
+        self.trace_filename = ("retention-backend-request-trace.json" if resume
+                               else "backend-request-trace.json")
         mc_env = dict(os.environ, MC_HOST_performance=self.endpoint.replace(
             "http://", "http://performance:owned_performance_password@"))
         self.trace = RequestTrace(subprocess.Popen(
@@ -177,11 +182,12 @@ class Deployment:
             self.trace.close()
             # Preserve sanitized observations even when a lane fails before it
             # can publish results. These are diagnostics, not a qualified run.
-            (lane / "backend-request-trace.json").write_text(
+            (lane / self.trace_filename).write_text(
                 json.dumps(self.trace.events, indent=2) + "\n")
             del self.trace
         for index, server in enumerate(self.servers):
-            (lane / f"server-{index}.log").write_text(command("docker", "logs", server, stderr=subprocess.STDOUT))
+            with (lane / f"server-{index}.log").open("a") as log:
+                log.write(command("docker", "logs", server, stderr=subprocess.STDOUT))
             self.remove(server)
         self.servers = []
 
