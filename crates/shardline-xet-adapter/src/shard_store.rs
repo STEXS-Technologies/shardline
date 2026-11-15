@@ -248,7 +248,14 @@ pub fn parse_uploaded_shard(
     limits: ShardMetadataLimits,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
     let mut reader = Cursor::new(uploaded_shard);
-    parse_uploaded_shard_from_reader(&mut reader, object_store, repository_scope, limits, None)
+    parse_uploaded_shard_with_descriptors(
+        &mut reader,
+        object_store,
+        repository_scope,
+        limits,
+        None,
+        None,
+    )
 }
 
 /// Parses a shard from a seekable file without copying the uploaded bytes into
@@ -265,22 +272,12 @@ pub fn parse_uploaded_shard_file(
     limits: ShardMetadataLimits,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
     let mut file = File::open(path).map_err(XetAdapterError::Io)?;
-    parse_uploaded_shard_from_reader(&mut file, object_store, repository_scope, limits, None)
-}
-
-pub(crate) fn parse_uploaded_shard_from_reader<R: Read + Seek>(
-    reader: &mut R,
-    object_store: &ServerObjectStore,
-    repository_scope: Option<&RepositoryScope>,
-    limits: ShardMetadataLimits,
-    member_references: Option<&mut HashSet<ObjectKey>>,
-) -> Result<ParsedShardUpload, XetAdapterError> {
     parse_uploaded_shard_with_descriptors(
-        reader,
+        &mut file,
         object_store,
         repository_scope,
         limits,
-        member_references,
+        None,
         None,
     )
 }
@@ -293,13 +290,17 @@ pub(crate) fn parse_uploaded_shard_with_descriptors<R: Read + Seek>(
     member_references: Option<&mut HashSet<ObjectKey>>,
     descriptors: Option<&mut Vec<shardline_index::XetXorbDescriptor>>,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
-    let parsed_shard = parse_shard_records_from_reader(
+    let parsed_shard = parse_shard_records_with_checkpoint(
         reader,
         object_store,
         repository_scope,
         limits,
         member_references,
         descriptors,
+        VerificationWork {
+            checkpoint: &|| Ok(()),
+            parallel_digest: false,
+        },
     )?;
     persist_normalized_shard(object_store, parsed_shard)
 }
@@ -412,28 +413,6 @@ struct NormalizedShardUpload {
     records: Vec<FileRecord>,
     file_identities: Vec<XetFileIdentity>,
     dedupe_chunk_hashes: Vec<String>,
-}
-
-fn parse_shard_records_from_reader<R: Read + Seek>(
-    shard_reader: &mut R,
-    object_store: &ServerObjectStore,
-    repository_scope: Option<&RepositoryScope>,
-    limits: ShardMetadataLimits,
-    member_references: Option<&mut HashSet<ObjectKey>>,
-    descriptors: Option<&mut Vec<shardline_index::XetXorbDescriptor>>,
-) -> Result<NormalizedShardUpload, XetAdapterError> {
-    parse_shard_records_with_checkpoint(
-        shard_reader,
-        object_store,
-        repository_scope,
-        limits,
-        member_references,
-        descriptors,
-        VerificationWork {
-            checkpoint: &|| Ok(()),
-            parallel_digest: false,
-        },
-    )
 }
 
 #[derive(Clone, Copy)]
@@ -1279,7 +1258,7 @@ mod tests {
                 }],
             );
             let mut descriptors = Vec::new();
-            let parsed = super::parse_shard_records_from_reader(
+            let parsed = super::parse_shard_records_with_checkpoint(
                 &mut std::io::Cursor::new(shard),
                 &objects,
                 None,
@@ -1290,6 +1269,10 @@ mod tests {
                     None
                 },
                 Some(&mut descriptors),
+                super::VerificationWork {
+                    checkpoint: &|| Ok(()),
+                    parallel_digest: false,
+                },
             )
             .unwrap();
             assert!(parsed.file_identities.is_empty());
