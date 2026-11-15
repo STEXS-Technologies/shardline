@@ -135,10 +135,7 @@ impl ReconstructionCacheService {
         let reservation = if self.writes_enabled {
             match self.adapter.get_or_reserve(key).await {
                 Ok(ReconstructionCacheLookup::Hit(payload)) => {
-                    if payload_within_bound(&payload)
-                        && let Ok(response) = from_slice::<FileReconstructionResponse>(&payload)
-                    {
-                        shardline_metrics::record_reconstruction_cache_hit();
+                    if let Some(response) = decode_cache_hit(&payload) {
                         return Ok(response);
                     }
                     // A cache value is never authoritative. Remove malformed or
@@ -146,19 +143,14 @@ impl ReconstructionCacheService {
                     // reservation instead of allowing every replica to rebuild it.
                     self.adapter.delete(key).await.ok();
                     match self.adapter.get_or_reserve(key).await {
-                        Ok(ReconstructionCacheLookup::Hit(refetched))
-                            if payload_within_bound(&refetched) =>
-                        {
-                            if let Ok(response) =
-                                from_slice::<FileReconstructionResponse>(&refetched)
-                            {
-                                shardline_metrics::record_reconstruction_cache_hit();
+                        Ok(ReconstructionCacheLookup::Hit(refetched)) => {
+                            if let Some(response) = decode_cache_hit(&refetched) {
                                 return Ok(response);
                             }
                             None
                         }
                         Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
-                        Ok(ReconstructionCacheLookup::Hit(_)) | Err(_) => None,
+                        Err(_) => None,
                     }
                 }
                 Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
@@ -169,31 +161,22 @@ impl ReconstructionCacheService {
         };
 
         shardline_metrics::record_reconstruction_cache_miss();
-        // If THIS caller's future is dropped mid-load (client disconnect,
-        // request timeout, shutdown), the loading latch the adapter registered
-        // during get() must be released synchronously — otherwise the next
-        // caller for the same key stalls for the full orphan bound and the
-        // adapter's loading map grows without bound (F-112).
+        // Release this reservation synchronously on cancellation so waiters
+        // can retry without waiting for the orphan timeout (F-112).
         let _latch_release = LoadingLatchReleaseGuard {
             adapter: Arc::clone(&self.adapter),
             key: key.clone(),
             reservation: reservation.clone(),
         };
-        // Run the loader with a heartbeat that refreshes the loading latch the
-        // adapter registered during get() (F-90): a slow-but-alive load must
-        // never be mistaken for a dead one at a concurrent waiter's orphan
-        // bound, or the latch is stolen and a second reconstruction starts.
+        // Refresh the fenced reservation while loading so a slow, live loader
+        // is not mistaken for an orphan and duplicated by a waiter (F-90).
         let response = match self
             .run_load_with_heartbeat(key, reservation.as_ref(), load)
             .await
         {
             Ok(response) => response,
             Err(error) => {
-                // The adapter may have registered an in-flight loading latch for
-                // `key` during get(). If the loader failed, that latch is never
-                // released by a put(); without cleanup, concurrent callers wait on
-                // it until the adapter's stall timeout. Delete the key so the
-                // latch is removed and waiters wake and retry promptly.
+                // Wake waiters after failure, without deleting a newer owner's reservation.
                 if let Some(reservation) = reservation.as_ref() {
                     self.adapter.delete_reserved(key, reservation).await.ok();
                 }
@@ -209,11 +192,8 @@ impl ReconstructionCacheService {
                     let _ignored = self.adapter.put(key, &payload).await;
                 }
             } else {
-                // The payload exceeds the cache bound, so the put() is skipped —
-                // but the loading latch registered during get() must still be
-                // cleared, otherwise it lingers until a waiter steals it at the
-                // orphan bound (F-91). Delete restores the cache to its pre-get()
-                // state.
+                // Skipping an oversized write must still release our loading
+                // reservation so waiters can retry promptly (F-91).
                 if let Some(reservation) = reservation.as_ref() {
                     self.adapter.delete_reserved(key, reservation).await.ok();
                 }
@@ -322,6 +302,15 @@ pub(crate) const DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES: NonZeroUsize =
         Some(value) => value,
         None => NonZeroUsize::MIN,
     };
+
+fn decode_cache_hit(payload: &[u8]) -> Option<FileReconstructionResponse> {
+    if !payload_within_bound(payload) {
+        return None;
+    }
+    let response = from_slice(payload).ok()?;
+    shardline_metrics::record_reconstruction_cache_hit();
+    Some(response)
+}
 
 fn payload_within_bound(payload: &[u8]) -> bool {
     let observed_bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
