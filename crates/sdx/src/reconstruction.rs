@@ -178,15 +178,12 @@ async fn assemble(
 ) -> Result<ReconstructedFile, SdxError> {
     let mut decoded_fetches: HashMap<usize, Vec<DecodedChunk>> = HashMap::new();
     for (fetch_index, fetch) in plan.fetches.iter().enumerate() {
-        let fetch_url = fetch.url.clone();
+        let fetch_url = &fetch.url;
         let fetch_bytes = fetch.bytes;
-        let ranged = run_with_retry(retry, token, move |tok| {
-            let fetch_url = fetch_url.clone();
-            async move {
-                transfer
-                    .fetch_xorb_range(&fetch_url, &tok, fetch_bytes)
-                    .await
-            }
+        let ranged = run_with_retry(retry, token, |tok| async move {
+            transfer
+                .fetch_xorb_range(fetch_url, &tok, fetch_bytes)
+                .await
         })
         .await?;
         let chunks = XorbReader::new(ranged.data).decode_chunks()?;

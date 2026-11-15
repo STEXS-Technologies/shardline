@@ -612,13 +612,12 @@ impl FileUploadPipeline {
             let hash_hex = xet_hash_hex_string(hash);
             // Dedup queries are 429-fail-fast and treat 404 as a miss.
             let retry = session.inner.dedup_retry_context();
-            let dedup = session.inner.dedup.clone();
+            let dedup = &session.inner.dedup;
             let outcome = retry
                 .run(token, |tok| {
-                    let dedup = dedup.clone();
-                    let base = base.clone();
-                    let hash_hex = hash_hex.clone();
-                    async move { dedup.query_raw(&base, &tok, &hash_hex).await }
+                    let base = &base;
+                    let hash_hex = &hash_hex;
+                    async move { dedup.query_raw(base, &tok, hash_hex).await }
                 })
                 .await?;
             if let DedupOutcome::Present { shard_body } = outcome
@@ -723,15 +722,12 @@ impl FileUploadPipeline {
         // HEAD-first idempotency probe (retried on transient failures).
         let (base, token) = self.session.inner.cas_credentials().await?;
         let retry = self.session.inner.upload_retry_context();
-        let transfer = self.session.inner.transfer.clone();
-        let xorb_hash_hex = built.xorb_hash_hex.clone();
-        let base_head = base.clone();
+        let transfer = &self.session.inner.transfer;
+        let xorb_hash_hex = &built.xorb_hash_hex;
+        let base_head = &base;
         let exists = retry
-            .run(token.clone(), move |tok| {
-                let hclient = transfer.clone();
-                let b = base_head.clone();
-                let hash = xorb_hash_hex.clone();
-                async move { hclient.head_xorb(&b, &tok, &hash).await }
+            .run(token.clone(), |tok| async move {
+                transfer.head_xorb(base_head, &tok, xorb_hash_hex).await
             })
             .await?;
         if exists {
@@ -763,12 +759,12 @@ impl FileUploadPipeline {
                 // Retry the streaming xorb POST with backoff/refresh; the
                 // serialized bytes are in memory, so replays are safe.
                 retry
-                    .run(token, move |tok| {
-                        let tclient = upload_transfer.clone();
-                        let base = base.clone();
-                        let hash = hash.clone();
+                    .run(token, |tok| {
+                        let tclient = &upload_transfer;
+                        let base = &base;
+                        let hash = &hash;
                         let body = body.clone();
-                        async move { tclient.upload_xorb(&base, &tok, &hash, body).await }
+                        async move { tclient.upload_xorb(base, &tok, hash, body).await }
                     })
                     .await?;
                 Ok(())
@@ -1150,13 +1146,13 @@ impl UploadSession {
                 })?;
             let retry = self.inner.upload_retry_context();
             retry
-                .run(token, move |tok| {
+                .run(token, |tok| {
                     let shard = shard.clone();
-                    let base = base.clone();
+                    let base = &base;
                     async move {
                         self.inner
                             .shard_transfer
-                            .upload_shard(&base, &tok, shard)
+                            .upload_shard(base, &tok, shard)
                             .await
                     }
                 })

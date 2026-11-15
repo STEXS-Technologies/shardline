@@ -1507,16 +1507,13 @@ impl XorbBlock {
                             ))
                         })?;
                 let retry = ctx.retry_context();
-                let url = self.url.clone();
+                let url = &self.url;
                 let bytes = self.bytes;
                 let ranged = retry
-                    .run(token.to_owned(), move |tok| {
-                        let url = url.clone();
-                        async move {
-                            ctx.transfer
-                                .fetch_xorb_range_bounded(&url, &tok, bytes)
-                                .await
-                        }
+                    .run(token.to_owned(), |tok| async move {
+                        ctx.transfer
+                            .fetch_xorb_range_bounded(url, &tok, bytes)
+                            .await
                     })
                     .await?;
                 ctx.xorb_fetch_count.fetch_add(1, Ordering::Relaxed);
