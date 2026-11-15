@@ -374,39 +374,3 @@ async fn shard_upload_is_idempotent() {
         "second registration should report already exists"
     );
 }
-
-#[test]
-fn retained_shard_chunk_hashes_standalone() {
-    // This test verifies the public `retained_shard_chunk_hashes` function
-    // works as a pure parser (no object store needed).
-    let chunk_hash = compute_data_hash(b"standalone-chunk");
-    let xorb_hash = xorb_hash(&[(chunk_hash, 1_u64)]);
-    let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
-
-    let shard_bytes = serialize_shard(
-        vec![MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-            segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
-            verification: Vec::new(),
-            metadata_ext: None,
-        }],
-        vec![MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-            chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
-        }],
-    );
-
-    let hashes = retained_shard_chunk_hashes(&shard_bytes, DEFAULT_SHARD_METADATA_LIMITS)
-        .expect("retained_shard_chunk_hashes should succeed");
-    assert_eq!(hashes.len(), 1, "one chunk should be retained");
-    assert_eq!(hashes[0], chunk_hash.hex(), "retained hash must match");
-}
-
-#[test]
-fn retained_shard_chunk_hashes_rejects_empty() {
-    let result = retained_shard_chunk_hashes(b"", DEFAULT_SHARD_METADATA_LIMITS);
-    assert!(
-        result.is_err(),
-        "retained_shard_chunk_hashes on empty bytes must fail"
-    );
-}

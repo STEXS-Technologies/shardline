@@ -1490,6 +1490,17 @@ mod tests {
             let hashes =
                 retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS).unwrap();
             assert_eq!(hashes, vec![chunk_hash.hex()]);
+
+            let mut reader = std::io::Cursor::new(&shard);
+            reader.set_position(1);
+            assert_eq!(
+                super::retained_shard_chunk_hashes_from_reader(
+                    &mut reader,
+                    DEFAULT_SHARD_METADATA_LIMITS
+                )
+                .unwrap(),
+                hashes
+            );
         }
     }
 
