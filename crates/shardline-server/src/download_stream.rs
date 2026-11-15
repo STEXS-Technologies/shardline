@@ -340,7 +340,7 @@ impl Seek for XorbReadFile {
 /// once. Logical file offsets do not have to equal container-relative offsets.
 async fn read_xorb_backed_chunks(
     object_store: ServerObjectStore,
-    record: FileRecord,
+    record: &mut FileRecord,
     range: Option<ByteRange>,
     pool: BoundedPool,
     decoded_byte_budget: usize,
@@ -432,7 +432,7 @@ async fn read_xorb_backed_chunks(
         |value| Ok(value.end_inclusive()),
     )?;
     if let Some(decoded) = decoded
-        && collect::covers_complete_xorb(&record, &validated)?
+        && collect::covers_complete_xorb(record, &validated)?
     {
         let start = usize::try_from(requested_start)?;
         let end = usize::try_from(requested_end.checked_add(1).ok_or(ServerError::Overflow)?)?;
@@ -447,7 +447,7 @@ async fn read_xorb_backed_chunks(
     let state = DecodedXorbStreamState {
         file,
         descriptors: validated.chunks().to_vec(),
-        chunks: record.chunks,
+        chunks: std::mem::take(&mut record.chunks),
         next_chunk_index: 0,
         next_descriptor_index: None,
         requested_start,
@@ -585,7 +585,7 @@ pub(crate) async fn file_record_byte_stream(
 
 async fn single_container_file_stream(
     object_store: ServerObjectStore,
-    record: FileRecord,
+    mut record: FileRecord,
     range: Option<ByteRange>,
     pool: BoundedPool,
     decoded_byte_budget: usize,
@@ -618,7 +618,7 @@ async fn single_container_file_stream(
         );
         if let Some(stream) = read_xorb_backed_chunks(
             object_store.clone(),
-            record.clone(),
+            &mut record,
             range,
             pool.clone(),
             decoded_byte_budget,
