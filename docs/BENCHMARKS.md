@@ -4057,6 +4057,75 @@ deployment tests were excluded by the filter. No selected test reported a
 missing-prerequisite skip. This extends the local recovery evidence; it does
 not qualify the complete distributed integrity gate or concurrent throughput.
 
+### Concurrent S3 and GC measurements (2026-11-15)
+
+The existing `validate_performance.py` harness completed 12 lanes against the
+same frozen `45fd33b4` all-features dev binary used above. Each lane used fresh
+PostgreSQL metadata and a MinIO bucket, 32 objects of 1 MiB, eight concurrent
+clients, and one or two resource-limited API replicas (one CPU and 1 GiB each).
+There were three repetitions per dataset/replica combination. Replica order and
+mixed-workload/GC order alternate across repetitions. The unique dataset is
+deterministic incompressible content; repeated content has four identical
+copies of each of eight distinct objects.
+
+All lanes passed cross-replica mixed-workload reads and final byte comparisons:
+1,728 post-GC reads in total. Fourteen GC processes completed across the twelve
+maintenance workloads; each workload had an overlapping completed collector.
+MinIO trace counts were checked against independent server API counters.
+
+Median throughput across three repetitions, in MiB/s:
+
+| Data | Replicas | Initial PUT-only ingest | Mixed PUT/GET | Mixed PUT/GET with GC |
+| --- | ---: | ---: | ---: | ---: |
+| Unique | 1 | 16.24 | 41.86 | 37.68 |
+| Unique | 2 | 28.79 | 77.81 | 64.66 |
+| Repeated | 1 | 17.49 | 41.16 | 37.55 |
+| Repeated | 2 | 31.24 | 66.41 | 64.87 |
+
+Backend and PostgreSQL observations:
+
+| Data | Replicas | Median initial S3 requests/decimal GB | Median initial SQL calls | Peak connections | Maximum sampled GC lock waiters | Initial stored/logical ratio range |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Unique | 1 | 4,768 | 2,950 | 15 | 1 | 1.001–1.001 |
+| Unique | 2 | 4,768 | 2,950 | 26 | 8 | 1.001–1.001 |
+| Repeated | 1 | 4,411 | 2,318 | 15 | 1 | 0.252–0.314 |
+| Repeated | 2 | 5,543 | 2,385 | 25 | 6 | 0.381–0.442 |
+
+Each unique initial-ingest lane issued 64 successful backend GETs for 32
+uploaded objects. Median MinIO trace response bytes were 2.002 times the logical
+upload bytes, including protocol overhead. This establishes a read-amplification
+cost to investigate; it does not identify which integrity checks can safely be
+removed. SQL calls include nested trigger/function statements and are not client
+round trips. Connection and lock peaks are sampled every 0.5 seconds and can
+miss shorter spikes.
+
+Reproduce the matrix after freezing the binary as above:
+
+```bash
+python3 -B scripts/shardline/validate_performance.py \
+  "$CARGO_BIN_EXE_shardline" /tmp/shardline-performance-new-output \
+  --binary-source-revision 45fd33b484df17ec439bb3d5606a9bee97d7b646 \
+  --replicas 1 2 --datasets unique repeated --objects 32 \
+  --object-bytes 1048576 --clients 8 --repeats 3
+```
+
+Docker, boto3 and the MinIO `mc` client are required. The output directory must
+be new and outside the checkout. The harness records binary provenance, host
+metadata, direct-S3 comparisons, per-lane results, query samples, inventories,
+and `summary.md`; retain those artifacts with access restricted because service
+configuration contains disposable fixture credentials.
+
+These short same-host bursts use a debug build and only 32 observations per
+operation, so p99 is the slowest sample. They are not sustained-load, production
+capacity, cloud-cost, multi-tenant isolation, or native Xet/LFS measurements.
+PostgreSQL, MinIO and clients share the host. Stored/logical ratios include
+reliability evidence and quarantined objects: the CLI enforces at least one hour
+of retention, which did not expire during this run. Their variation does not
+establish a final retained-footprint regression or a fixed customer savings
+ratio. GC overlap measures process lifetime, including startup and ownership
+waits; it does not prove every request overlapped an active scan. No historical
+before/after speedup is claimed.
+
 ### Standalone index checks without inherited S3 dependencies (2026-11-15)
 
 Compared `b38e851f` with `e83bdc5a`. Workspace storage dependencies no longer
