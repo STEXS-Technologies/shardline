@@ -3,18 +3,9 @@
 //! [`build_xorb`] produces a fully serialized xorb (chunk payload + footer)
 //! that is **byte-identical** to the shardline server's
 //! `shardline_server::upload_ingest::xorb_packer::pack_chunks_into_xorb` on
-//! the same chunk inputs, via the pinned upstream `xet-core-structures` crate
-//! (this crate does **not** depend on the server's `shardline-xet-core` fork).
-//!
-//! The chunk payload stream (`XorbChunkHeader` + compressed data per chunk,
-//! BG4+LZ4) is identical between the fork and upstream 1.5.2. The footer is
-//! **not**: the shardline fork serializes format-v2 footers with `u64` scalar
-//! and offset fields while upstream 1.5.2 emits format-v1 `u32` footers, so
-//! [`build_xorb`] assembles the fork's v2 footer layout directly (the private
-//! `append_footer` helper). The xorb hash (Merkle root over
-//! `"{hex} : {size}\n"` lines) and the per-chunk content hashes are computed
-//! with the upstream primitives, which M0 golden tests already pin
-//! byte-identical to the fork.
+//! the same chunk inputs. Chunk compression and content hashes use pinned
+//! upstream primitives; the format-v2 footer uses the shared
+//! `shardline-xet-core` writer used by the server.
 //!
 //! This module also provides the xorb cut-condition and body-limit safety
 //! helpers the M3b upload path needs (`docs/SDX_PLAN.md` §4.4.2): cut at
@@ -25,6 +16,7 @@
 //! safety cap, default [`SERIALIZED_XORB_SAFETY_CAP_BYTES`] = 60 MiB).
 
 use bytes::Bytes;
+use shardline_xet_core::xorb_object::{XorbObject, XorbObjectInfoV1};
 use xet_core_structures::merklehash::MerkleHash;
 use xet_core_structures::merklehash::xorb_hash;
 use xet_core_structures::xorb_object::CompressionScheme;
@@ -53,21 +45,6 @@ const XORB_FOOTER_FIXED_BYTES: usize = 120;
 /// Footer overhead per chunk: 32-byte hash + 8-byte boundary + 8-byte
 /// unpacked offset = 48.
 const XORB_FOOTER_PER_CHUNK_BYTES: usize = 48;
-
-/// `XETBLOB` footer ident.
-const XORB_FORMAT_IDENT: [u8; 7] = *b"XETBLOB";
-/// `XBLBHSH` hashes-section ident.
-const XORB_HASHES_SECTION_IDENT: [u8; 7] = *b"XBLBHSH";
-/// `XBLBBND` boundaries-section ident.
-const XORB_BOUNDARIES_SECTION_IDENT: [u8; 7] = *b"XBLBBND";
-/// Fork footer format version (shardline-xet-core `XORB_OBJECT_FORMAT_VERSION`).
-const XORB_FORMAT_VERSION: u8 = 2;
-/// Hashes-section version.
-const XORB_HASHES_SECTION_VERSION: u8 = 0;
-/// Boundaries-section version (with unpacked offsets).
-const XORB_BOUNDARIES_SECTION_VERSION: u8 = 1;
-/// Trailing footer extensibility buffer (excluded from the xorb hash).
-const XORB_FOOTER_BUFFER_LEN: usize = 16;
 
 /// Metadata for one chunk packed inside a xorb.
 #[derive(Debug, Clone)]
@@ -128,7 +105,6 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
 
     // Serialize the chunk payload stream and collect footer metadata.
     let mut payload = Vec::new();
-    let mut chunk_hashes = Vec::with_capacity(chunks.len());
     let mut chunk_boundary_offsets = Vec::with_capacity(chunks.len());
     let mut unpacked_chunk_offsets = Vec::with_capacity(chunks.len());
     let mut chunk_entries = Vec::with_capacity(chunks.len());
@@ -137,7 +113,6 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
 
     for (index, (data, raw_offset)) in chunks.iter().enumerate() {
         let hash = compute_chunk_hash(data);
-        chunk_hashes.push(hash);
 
         let written = serialize_chunk(data, &mut payload, CompressionScheme::ByteGrouping4LZ4)
             .map_err(|error| {
@@ -161,28 +136,26 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
         unpacked_chunk_offsets.push(unpacked_total);
     }
 
-    // Xorb hash: Merkle root over (chunk hash, size) pairs.
+    // Reuse the hashes computed while serializing each chunk.
     let xorb_hash = xorb_hash(
-        &chunks
+        &chunk_entries
             .iter()
-            .map(|(data, _)| {
-                (
-                    compute_chunk_hash(data),
-                    u64::try_from(data.len()).unwrap_or(u64::MAX),
-                )
-            })
+            .map(|entry| (entry.hash, entry.raw_length))
             .collect::<Vec<_>>(),
     );
-
-    // Append the fork-format v2 footer.
-    let footer = append_footer(
-        xorb_hash,
-        &chunk_hashes,
-        &chunk_boundary_offsets,
-        &unpacked_chunk_offsets,
-    );
+    let mut footer = XorbObjectInfoV1::default();
+    footer.xorb_hash = <[u8; 32]>::from(xorb_hash).into();
+    footer.num_chunks = u64::try_from(chunk_entries.len()).unwrap_or(u64::MAX);
+    footer.chunk_hashes = chunk_entries
+        .iter()
+        .map(|entry| <[u8; 32]>::from(entry.hash).into())
+        .collect();
+    footer.chunk_boundary_offsets = chunk_boundary_offsets;
+    footer.unpacked_chunk_offsets = unpacked_chunk_offsets;
+    footer.fill_in_boundary_offsets();
     let footer_start = payload.len();
-    payload.extend_from_slice(&footer);
+    XorbObject::serialize_given_info(&mut payload, footer)
+        .map_err(|error| SdxError::XorbBuild(format!("footer serialization failed: {error}")))?;
 
     Ok(BuiltXorb {
         serialized: payload,
@@ -190,89 +163,6 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
         footer_start,
         chunk_entries,
     })
-}
-
-/// Appends the shardline format-v2 xorb footer to `out`.
-///
-/// Layout (LE scalars, matching `shardline-xet-core`'s
-/// `XorbObjectInfoV1::serialize` + `XorbObject::serialize_given_info`):
-///
-/// ```text
-/// "XETBLOB" | version=2 | xorb_hash(32) |
-/// "XBLBHSH" | hashes_version=0 | num_chunks(u64) | chunk_hashes(32·n) |
-/// "XBLBBND" | boundaries_version=1 | num_chunks(u64) |
-///   chunk_boundary_offsets(u64·n) | unpacked_chunk_offsets(u64·n) |
-/// num_chunks(u64) | hashes_section_offset_from_end(u64) |
-///   boundary_section_offset_from_end(u64) | buffer(16) |
-/// info_length(u64)
-/// ```
-fn append_footer(
-    xorb_hash: MerkleHash,
-    chunk_hashes: &[MerkleHash],
-    chunk_boundary_offsets: &[u64],
-    unpacked_chunk_offsets: &[u64],
-) -> Vec<u8> {
-    let num_chunks = u64::try_from(chunk_hashes.len()).unwrap_or(u64::MAX);
-
-    let boundary_section_offset_from_end = (XORB_BOUNDARIES_SECTION_IDENT.len() as u64)
-        .saturating_add(1)
-        .saturating_add(8) // boundaries_version + num_chunks
-        .saturating_add(
-            8u64.saturating_mul(u64::try_from(chunk_boundary_offsets.len()).unwrap_or(u64::MAX)),
-        )
-        .saturating_add(
-            8u64.saturating_mul(u64::try_from(unpacked_chunk_offsets.len()).unwrap_or(u64::MAX)),
-        )
-        .saturating_add(8) // num_chunks
-        .saturating_add(8) // hashes_section_offset_from_end
-        .saturating_add(8) // boundary_section_offset_from_end
-        .saturating_add(XORB_FOOTER_BUFFER_LEN as u64);
-
-    let hashes_section_offset_from_end = (XORB_HASHES_SECTION_IDENT.len() as u64)
-        .saturating_add(1)
-        .saturating_add(8) // hashes_version + num_chunks
-        .saturating_add(32u64.saturating_mul(u64::try_from(chunk_hashes.len()).unwrap_or(u64::MAX)))
-        .saturating_add(boundary_section_offset_from_end);
-
-    let mut out = Vec::with_capacity(
-        XORB_FOOTER_FIXED_BYTES
-            .saturating_add(XORB_FOOTER_PER_CHUNK_BYTES.saturating_mul(chunk_hashes.len())),
-    );
-
-    out.extend_from_slice(&XORB_FORMAT_IDENT);
-    out.push(XORB_FORMAT_VERSION);
-    out.extend_from_slice(&merkle_bytes(xorb_hash));
-
-    out.extend_from_slice(&XORB_HASHES_SECTION_IDENT);
-    out.push(XORB_HASHES_SECTION_VERSION);
-    out.extend_from_slice(&num_chunks.to_le_bytes());
-    for hash in chunk_hashes {
-        out.extend_from_slice(&merkle_bytes(*hash));
-    }
-
-    out.extend_from_slice(&XORB_BOUNDARIES_SECTION_IDENT);
-    out.push(XORB_BOUNDARIES_SECTION_VERSION);
-    out.extend_from_slice(&num_chunks.to_le_bytes());
-    for offset in chunk_boundary_offsets {
-        out.extend_from_slice(&offset.to_le_bytes());
-    }
-    for offset in unpacked_chunk_offsets {
-        out.extend_from_slice(&offset.to_le_bytes());
-    }
-
-    out.extend_from_slice(&num_chunks.to_le_bytes());
-    out.extend_from_slice(&hashes_section_offset_from_end.to_le_bytes());
-    out.extend_from_slice(&boundary_section_offset_from_end.to_le_bytes());
-    out.extend_from_slice(&[0u8; XORB_FOOTER_BUFFER_LEN]);
-
-    // Trailing info length (u64), the last 8 bytes of a serialized xorb.
-    let info_length = u64::try_from(out.len()).unwrap_or(u64::MAX);
-    out.extend_from_slice(&info_length.to_le_bytes());
-    out
-}
-
-fn merkle_bytes(hash: MerkleHash) -> [u8; 32] {
-    hash.into()
 }
 
 /// Returns `true` when adding a chunk of `next_chunk_size` to a xorb holding

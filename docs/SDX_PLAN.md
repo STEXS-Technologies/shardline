@@ -215,7 +215,8 @@ Shipped crate: **`crates/sdx`** (package name `sdx`). Dependencies (as built):
   `XET_REVISIONS_ROUTE` / `XET_REVISION_ROUTE`), which transitively bring in
   `shardline-server-core` (an allowed dependency; the forbidden dependency is
   `shardline-server`, which is **not** a library dependency of `sdx`)
-- `shardline-xet-core` — the shared client/server CDC boundary finder
+- `shardline-xet-core` — the shared client/server CDC boundary finder and
+  format-v2 Xorb footer writer
 - `xet-core-structures` (**pinned exact version `=1.5.2`**, per §11 Q3/Q6) — Merkle
   hash, `xorb_object` (`ByteGrouping4LZ4`), chunk-format constants; BG4 is not
   reimplemented
@@ -224,9 +225,9 @@ Shipped crate: **`crates/sdx`** (package name `sdx`). Dependencies (as built):
   `crc32fast` (chunk-cache corruption detection), `tokio-util`, `futures-util`,
   `async-trait`, `tracing`, `thiserror`
 
-Must **not** depend on `shardline-server`. `shardline-server` and
-`shardline-protocol` appear only as **dev-dependencies** for byte-identity and
-end-to-end tests (established workspace test pattern).
+Must **not** depend on `shardline-server`. Server byte-identity and end-to-end
+qualification live in the separate `e2e` workspace; standalone `sdx` tests use
+shared core primitives and mock HTTP servers.
 
 **Chunker source decision (as built):** the client-side `Chunker`
 (`crates/sdx/src/chunker.rs`) manages streaming buffers and delegates boundary
