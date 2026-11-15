@@ -108,11 +108,12 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
     let mut chunk_boundary_offsets = Vec::with_capacity(chunks.len());
     let mut unpacked_chunk_offsets = Vec::with_capacity(chunks.len());
     let mut chunk_entries = Vec::with_capacity(chunks.len());
-    let mut packed_offset: u64 = 0;
     let mut unpacked_total: u64 = 0;
 
     for (index, (data, raw_offset)) in chunks.iter().enumerate() {
         let hash = compute_chunk_hash(data);
+        let packed_offset = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+        let raw_length = u64::try_from(data.len()).unwrap_or(u64::MAX);
 
         let written = serialize_chunk(data, &mut payload, CompressionScheme::ByteGrouping4LZ4)
             .map_err(|error| {
@@ -123,16 +124,14 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
         chunk_entries.push(XorbChunkEntry {
             chunk_index: u32::try_from(index).unwrap_or(u32::MAX),
             raw_offset: *raw_offset,
-            raw_length: u64::try_from(data.len()).unwrap_or(u64::MAX),
+            raw_length,
             packed_offset,
             packed_length: written,
             hash,
         });
 
-        packed_offset = packed_offset.saturating_add(written);
-        chunk_boundary_offsets.push(packed_offset);
-        unpacked_total =
-            unpacked_total.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        chunk_boundary_offsets.push(packed_offset.saturating_add(written));
+        unpacked_total = unpacked_total.saturating_add(raw_length);
         unpacked_chunk_offsets.push(unpacked_total);
     }
 

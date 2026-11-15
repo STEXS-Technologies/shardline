@@ -171,20 +171,14 @@ impl XorbReader {
     pub fn decode_chunks(&self) -> Result<Vec<DecodedChunk>, XorbError> {
         let (data, offsets) = deserialize_chunks(&mut Cursor::new(self.bytes.as_slice()))?;
         let mut chunks = Vec::with_capacity(offsets.len().saturating_sub(1));
-        let mut previous_offset: Option<u32> = None;
-        for offset in offsets {
-            if let Some(start) = previous_offset {
-                let end = offset;
-                let chunk_bytes = data
-                    .get(start as usize..end as usize)
-                    .ok_or(XorbError::InconsistentChunkOffsets)?;
-                let hash = compute_chunk_hash(chunk_bytes);
-                chunks.push(DecodedChunk {
-                    data: chunk_bytes.to_vec(),
-                    hash,
-                });
-            }
-            previous_offset = Some(offset);
+        for (&start, &end) in offsets.iter().zip(offsets.iter().skip(1)) {
+            let chunk_bytes = data
+                .get(start as usize..end as usize)
+                .ok_or(XorbError::InconsistentChunkOffsets)?;
+            chunks.push(DecodedChunk {
+                data: chunk_bytes.to_vec(),
+                hash: compute_chunk_hash(chunk_bytes),
+            });
         }
         Ok(chunks)
     }
