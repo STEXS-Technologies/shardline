@@ -201,34 +201,27 @@ impl Chunker {
     #[must_use]
     pub fn next(&mut self, data: &[u8], is_final: bool) -> (Option<Chunk>, usize) {
         let prior_len = self.chunkbuf.len();
-        self.chunkbuf.extend_from_slice(data);
+        let append_len = self.max_chunk().saturating_sub(prior_len).min(data.len());
+        self.chunkbuf
+            .extend_from_slice(data.get(..append_len).unwrap_or_default());
 
         let boundary = self.cdc.find_boundary(&self.chunkbuf);
         match boundary {
             Some(boundary) => {
-                // combined[..boundary] is the chunk; combined[boundary..] is
-                // the unconsumed remainder (== data[consumed..]), which the
-                // caller re-feeds. The chunker reset its own hash/pending
-                // state when the boundary was found.
+                // Keep this chunk; the caller re-feeds unconsumed input.
+                // CDC already reset its state when it found the boundary.
                 let mut combined = std::mem::take(&mut self.chunkbuf);
-                let _remainder = combined.split_off(boundary);
+                combined.truncate(boundary);
                 let consumed = boundary.saturating_sub(prior_len);
                 (Some(Chunk::new(Bytes::from(combined))), consumed)
             }
-            None => {
-                if is_final {
-                    let combined = std::mem::take(&mut self.chunkbuf);
-                    self.reset();
-                    if combined.is_empty() {
-                        (None, data.len())
-                    } else {
-                        (Some(Chunk::new(Bytes::from(combined))), data.len())
-                    }
-                } else {
-                    // Everything is buffered in chunkbuf.
-                    (None, data.len())
-                }
+            None if is_final => {
+                let combined = std::mem::take(&mut self.chunkbuf);
+                self.reset();
+                let chunk = (!combined.is_empty()).then(|| Chunk::new(Bytes::from(combined)));
+                (chunk, data.len())
             }
+            None => (None, data.len()),
         }
     }
 
@@ -547,6 +540,23 @@ mod tests {
             let stream = my_stream_boundaries(&data, target, frame_size);
             assert_eq!(stream, batch, "frame size {frame_size} differs from batch");
         }
+    }
+
+    #[test]
+    fn next_keeps_chunk_allocations_bounded_for_large_input_blocks() {
+        let data = splitmix_data(1024 * 1024, 7);
+        let mut chunker = Chunker::new(1024);
+        let mut offset = 0;
+        while offset < data.len() {
+            let (chunk, consumed) = chunker.next(&data[offset..], true);
+            let chunk = chunk.unwrap();
+            assert!(consumed > 0);
+            assert_eq!(chunk.as_bytes(), &data[offset..offset + consumed]);
+            let allocation = chunk.data.try_into_mut().unwrap();
+            assert!(allocation.capacity() <= chunker.max_chunk());
+            offset += consumed;
+        }
+        assert!(chunker.finish().is_none());
     }
 
     #[test]
