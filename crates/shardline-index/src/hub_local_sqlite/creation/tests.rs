@@ -76,7 +76,7 @@ fn shared_policy_preserves_defaults_retries_visibility_revocation_and_rate_histo
         HubCreationOutcome::Denied
     ));
     assert!(store.get_repo("alice/three").unwrap().is_none());
-    let conn = open_hub_connection_rw(root.path()).unwrap();
+    let conn = open_hub_connection(root.path()).unwrap();
     let count: i64 = conn
         .query_row(
             "SELECT count(*) FROM shardline_hub_creation_events WHERE namespace='alice'",
@@ -168,7 +168,7 @@ fn a_waiting_creator_observes_revocation_and_failed_publication_spends_no_rate()
             }),
         )
         .unwrap();
-    let mut conn = open_hub_connection_rw(root.path()).unwrap();
+    let mut conn = open_hub_connection(root.path()).unwrap();
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();

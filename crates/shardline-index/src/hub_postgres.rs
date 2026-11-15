@@ -785,11 +785,10 @@ impl HubStore for PostgresIndexStore {
             let query_limit =
                 i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
             let mut entries = Vec::new();
-            if options.recursive {
-                let prefix_start =
-                    i32::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i32::MAX);
-                let mut rows = sqlx::query(
-                    "WITH filtered AS (
+            let prefix_start =
+                i32::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i32::MAX);
+            let sql = if options.recursive {
+                "WITH filtered AS (
                        SELECT substring(path FROM $4) COLLATE \"C\" AS relative,size,sha,is_lfs
                        FROM shardline_hub_file_entries WHERE commit_sha=$1 AND path COLLATE \"C\">=$2
                        AND ($3::text IS NULL OR path COLLATE \"C\"<$3) AND path COLLATE \"C\"<>$2),
@@ -802,26 +801,9 @@ impl HubStore for PostgresIndexStore {
                        UNION ALL SELECT 1,relative,size,sha,is_lfs FROM filtered)
                      SELECT kind,path,size,sha,is_lfs FROM entries
                      WHERE $5::text IS NULL OR (path>$5 AND EXISTS(SELECT 1 FROM entries WHERE path=$5))
-                     ORDER BY path LIMIT $6")
-                    .bind(&commit_sha).bind(&prefix).bind(&upper).bind(prefix_start).bind(&options.cursor).bind(query_limit).fetch(&mut *transaction);
-                while let Some(row) = rows.try_next().await? {
-                    let path: String = row.try_get("path")?;
-                    entries.push(if row.try_get::<i32, _>("kind")? == 0 {
-                        HubTreePageEntry::Directory { path }
-                    } else {
-                        HubTreePageEntry::File(HubFileEntry {
-                            path,
-                            size: i64_to_u64(row.try_get("size")?)?,
-                            sha: row.try_get("sha")?,
-                            is_lfs: row.try_get("is_lfs")?,
-                        })
-                    });
-                }
+                     ORDER BY path LIMIT $6"
             } else {
-                let prefix_start =
-                    i32::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i32::MAX);
-                let mut rows = sqlx::query(
-                    "WITH filtered AS (SELECT substring(path FROM $4) AS relative,size,sha,is_lfs
+                "WITH filtered AS (SELECT substring(path FROM $4) AS relative,size,sha,is_lfs
                        FROM shardline_hub_file_entries WHERE commit_sha=$1 AND path COLLATE \"C\">=$2
                        AND ($3::text IS NULL OR path COLLATE \"C\"<$3)),
                      entries AS (SELECT DISTINCT 0 AS kind,split_part(relative,'/',1) COLLATE \"C\" AS path,
@@ -831,8 +813,17 @@ impl HubStore for PostgresIndexStore {
                      SELECT kind,path,size,sha,is_lfs FROM entries
                      WHERE $5::text IS NULL OR kind>(SELECT kind FROM cursor_kind)
                        OR (kind=(SELECT kind FROM cursor_kind) AND path>$5)
-                     ORDER BY kind,path LIMIT $6")
-                    .bind(&commit_sha).bind(&prefix).bind(&upper).bind(prefix_start).bind(&options.cursor).bind(query_limit).fetch(&mut *transaction);
+                     ORDER BY kind,path LIMIT $6"
+            };
+            {
+                let mut rows = sqlx::query(sql)
+                    .bind(&commit_sha)
+                    .bind(&prefix)
+                    .bind(&upper)
+                    .bind(prefix_start)
+                    .bind(&options.cursor)
+                    .bind(query_limit)
+                    .fetch(&mut *transaction);
                 while let Some(row) = rows.try_next().await? {
                     let path: String = row.try_get("path")?;
                     entries.push(if row.try_get::<i32, _>("kind")? == 0 {

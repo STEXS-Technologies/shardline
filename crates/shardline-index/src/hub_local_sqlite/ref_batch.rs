@@ -11,7 +11,7 @@ pub(super) fn apply(
         return Ok(HubRefBatchOutcome::Conflict);
     }
     retry_sqlite_busy(|| {
-        let mut connection = open_hub_connection_rw(store.root())?;
+        let mut connection = open_hub_connection(store.root())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM shardline_hub_repos WHERE repo_id = ?1)",

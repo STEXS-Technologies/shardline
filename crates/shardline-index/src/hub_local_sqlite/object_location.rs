@@ -1,10 +1,7 @@
 use rusqlite::{OptionalExtension, params};
 use shardline_protocol::RepositoryScope;
 
-use super::{
-    LocalIndexStore, LocalIndexStoreError, open_hub_connection, open_hub_connection_rw,
-    retry_sqlite_busy,
-};
+use super::{LocalIndexStore, LocalIndexStoreError, open_hub_connection, retry_sqlite_busy};
 use crate::hub::{HubObjectKind, HubObjectLocation};
 
 impl LocalIndexStore {
@@ -52,7 +49,7 @@ pub(super) fn remember(
     object_id: &str,
 ) -> Result<(), LocalIndexStoreError> {
     retry_sqlite_busy(|| {
-        let connection = open_hub_connection_rw(store.root())?;
+        let connection = open_hub_connection(store.root())?;
         connection.execute(
             "INSERT INTO shardline_hub_object_locations(repository_key,object_kind,object_id,storage_revision)
              VALUES (?1,?2,?3,?4) ON CONFLICT(repository_key,object_kind,object_id)

@@ -28,24 +28,11 @@ fn sqlite_store_error(error: &LocalIndexStoreError) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(error.to_string())
 }
 
-/// Opens a read-only connection to the hub SQLite database.
+/// Opens a Hub SQLite connection with the shared busy timeout.
 ///
-/// Each call opens a new connection because `rusqlite::Connection` is `!Send` and
-/// cannot be cached across threads. SQLite file opens are fast for local files,
-/// so per-call overhead is acceptable.
+/// Connections are opened per operation. Ref mutations keep their bounded
+/// transaction retries at the call site so publication and evidence stay atomic.
 fn open_hub_connection(root: &Path) -> Result<Connection, LocalIndexStoreError> {
-    let connection = LocalIndexStore::open(root.to_path_buf()).open_connection()?;
-    connection.busy_timeout(std::time::Duration::from_secs(30))?;
-    Ok(connection)
-}
-
-/// Opens a read-write connection to the hub SQLite database.
-///
-/// Same constraints as [`open_hub_connection`]: `rusqlite::Connection` is `!Send`,
-/// so connections are opened per-call rather than cached. A busy-timeout and
-/// the shared transaction retry boundary ensure brief contention retries
-/// gracefully without splitting a ref transition from its evidence.
-fn open_hub_connection_rw(root: &Path) -> Result<Connection, LocalIndexStoreError> {
     let connection = LocalIndexStore::open(root.to_path_buf()).open_connection()?;
     connection.busy_timeout(std::time::Duration::from_secs(30))?;
     Ok(connection)
@@ -56,7 +43,7 @@ fn verify_hub_repo_heads(root: &Path, repos: &[HubRepo]) -> Result<(), LocalInde
         return Ok(());
     }
     retry_sqlite_busy(|| {
-        let mut conn = open_hub_connection_rw(root)?;
+        let mut conn = open_hub_connection(root)?;
         let tx = conn.transaction()?;
         let refs = repos
             .iter()
@@ -208,7 +195,7 @@ impl HubStore for LocalIndexStore {
         let root = self.root().to_owned();
         let repo_id = repo_id.to_owned();
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
+            let mut conn = open_hub_connection(&root)?;
             let tx = conn.transaction()?;
             let result = tx
             .query_row(
@@ -397,7 +384,7 @@ impl HubStore for LocalIndexStore {
         let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let root = self.root().to_owned();
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
+            let mut conn = open_hub_connection(&root)?;
             let tx = conn.transaction()?;
             let refs = {
                 let mut stmt = tx.prepare(
@@ -450,7 +437,7 @@ impl HubStore for LocalIndexStore {
         let ref_name = ref_name.to_owned();
         let expected_sha = expected_sha.to_owned();
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
+            let mut conn = open_hub_connection(&root)?;
             let tx = conn.transaction()?;
             let changed = tx.execute(
                 "DELETE FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2 AND sha = ?3",
@@ -522,7 +509,7 @@ impl HubStore for LocalIndexStore {
         let repo_id = repo_id.to_owned();
         let revision = revision.to_owned();
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
+            let mut conn = open_hub_connection(&root)?;
             let tx = conn.transaction()?;
 
             if revision.is_empty() || revision == "main" {
@@ -583,7 +570,7 @@ impl HubStore for LocalIndexStore {
         let commit_sha = commit_sha.to_owned();
         let files = files.to_owned();
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
+            let mut conn = open_hub_connection(&root)?;
             let tx = conn.transaction()?;
             {
                 let mut stmt = tx.prepare(
@@ -684,11 +671,10 @@ impl HubStore for LocalIndexStore {
         let upper = (!options.path.is_empty()).then(|| format!("{}0", options.path));
         let query_limit = i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
         let mut entries = Vec::new();
-        if options.recursive {
-            let prefix_start =
-                i64::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i64::MAX);
-            let mut statement = transaction.prepare(
-                "WITH RECURSIVE filtered AS (
+        let prefix_start =
+            i64::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i64::MAX);
+        let sql = if options.recursive {
+            "WITH RECURSIVE filtered AS (
                    SELECT substr(path,?4) AS relative,size,sha,is_lfs
                    FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path>=?2
                    AND (?3 IS NULL OR path<?3) AND path<>?2),
@@ -703,39 +689,9 @@ impl HubStore for LocalIndexStore {
                    UNION ALL SELECT 1,relative,size,sha,is_lfs FROM filtered)
                  SELECT kind,path,size,sha,is_lfs FROM entries
                  WHERE ?5 IS NULL OR (path>?5 AND EXISTS(SELECT 1 FROM entries WHERE path=?5))
-                 ORDER BY path LIMIT ?6")?;
-            let rows = statement.query_map(
-                params![
-                    commit_sha,
-                    prefix,
-                    upper,
-                    prefix_start,
-                    options.cursor,
-                    query_limit
-                ],
-                |row| {
-                    let path: String = row.get(1)?;
-                    if row.get::<_, i64>(0)? == 0 {
-                        Ok(HubTreePageEntry::Directory { path })
-                    } else {
-                        Ok(HubTreePageEntry::File(HubFileEntry {
-                            path,
-                            size: i64_to_u64(row.get(2)?)
-                                .map_err(|error| sqlite_store_error(&error))?,
-                            sha: row.get(3)?,
-                            is_lfs: row.get::<_, i64>(4)? != 0,
-                        }))
-                    }
-                },
-            )?;
-            for row in rows {
-                entries.push(row?);
-            }
+                 ORDER BY path LIMIT ?6"
         } else {
-            let prefix_start =
-                i64::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i64::MAX);
-            let mut statement = transaction.prepare(
-                "WITH filtered AS (SELECT substr(path,?4) AS relative,size,sha,is_lfs
+            "WITH filtered AS (SELECT substr(path,?4) AS relative,size,sha,is_lfs
                    FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path>=?2 AND (?3 IS NULL OR path<?3)),
                  entries AS (SELECT DISTINCT 0 AS kind,substr(relative,1,instr(relative,'/')-1) AS path,
                    NULL AS size,NULL AS sha,NULL AS is_lfs FROM filtered WHERE instr(relative,'/')>0
@@ -744,7 +700,10 @@ impl HubStore for LocalIndexStore {
                  SELECT kind,path,size,sha,is_lfs FROM entries
                  WHERE ?5 IS NULL OR kind>(SELECT kind FROM cursor_kind)
                     OR (kind=(SELECT kind FROM cursor_kind) AND path>?5)
-                 ORDER BY kind,path LIMIT ?6")?;
+                 ORDER BY kind,path LIMIT ?6"
+        };
+        {
+            let mut statement = transaction.prepare(sql)?;
             let rows = statement.query_map(
                 params![
                     commit_sha,
@@ -784,7 +743,7 @@ impl HubStore for LocalIndexStore {
         let root = self.root().to_owned();
         let repo_id = repo_id.to_owned();
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
+            let mut conn = open_hub_connection(&root)?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let ref_names = {
                 let mut statement =
@@ -839,7 +798,7 @@ impl HubStore for LocalIndexStore {
         let now = unix_now_seconds_lossy();
         let query_limit = i64::try_from(limit).unwrap_or(i64::MAX);
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(self.root())?;
+            let mut conn = open_hub_connection(self.root())?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let repo_exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM shardline_hub_repos WHERE repo_id = ?1)",
@@ -894,7 +853,7 @@ impl HubStore for LocalIndexStore {
     }
 
     fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
+        let conn = open_hub_connection(self.root())?;
         conn.execute(
             "DELETE FROM shardline_hub_webhooks WHERE repo_id = ?1 AND id = ?2",
             params![repo_id, webhook_id],
@@ -908,7 +867,7 @@ impl HubStore for LocalIndexStore {
         webhook_id: &str,
         secret: Option<&str>,
     ) -> Result<(), Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
+        let conn = open_hub_connection(self.root())?;
         conn.execute(
             "UPDATE shardline_hub_webhooks SET secret = ?1 WHERE repo_id = ?2 AND id = ?3",
             params![secret, repo_id, webhook_id],
@@ -923,7 +882,7 @@ impl HubStore for LocalIndexStore {
         expected_secret: &str,
         secret: Option<&str>,
     ) -> Result<Option<bool>, Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
+        let conn = open_hub_connection(self.root())?;
         let changed = conn.execute(
             "UPDATE shardline_hub_webhooks SET secret=?1 WHERE repo_id=?2 AND id=?3 AND secret=?4 COLLATE BINARY",
             params![secret, repo_id, webhook_id, expected_secret],
@@ -993,7 +952,7 @@ impl LocalIndexStore {
         secret: Option<&str>,
         now: u64,
     ) -> Result<HubWebhook, LocalIndexStoreError> {
-        let conn = open_hub_connection_rw(self.root())?;
+        let conn = open_hub_connection(self.root())?;
         insert_hub_webhook(&conn, repo_id, url, events, secret, now)
     }
     fn publish_hub_revision(
@@ -1030,7 +989,7 @@ impl LocalIndexStore {
         let ref_name = ref_name.to_owned();
         let message = message.to_owned();
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
+            let mut conn = open_hub_connection(&root)?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let current_ref: Option<String> = tx
                 .query_row(
@@ -1151,7 +1110,7 @@ mod tests {
         store
             .create_revision(repo, None, "old", "main", "Initial")
             .unwrap();
-        let connection = open_hub_connection_rw(store.root()).unwrap();
+        let connection = open_hub_connection(store.root()).unwrap();
         let before: i64 = connection
             .query_row(
                 "SELECT count(*) FROM shardline_reliability_events",
@@ -2998,7 +2957,7 @@ mod tests {
         let (_temp, store) = make_store();
         let repo = "owner/legacy";
         store.create_repo(HubRepoType::Model, repo, true).unwrap();
-        let conn = open_hub_connection_rw(store.root()).unwrap();
+        let conn = open_hub_connection(store.root()).unwrap();
         conn.execute("INSERT INTO shardline_hub_webhooks (id,repo_id,url,events,active,created_at_unix_seconds) VALUES ('wh-123-0',?1,'https://example.com/legacy','push',1,123)",params![repo]).unwrap();
         let new = store
             .create_webhook_at(repo, "https://example.com/new", &["push".into()], None, 123)

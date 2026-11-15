@@ -6,7 +6,7 @@ use shardline_protocol::unix_now_seconds_lossy;
 use shardline_reliability::HubRefEvidenceLog;
 
 use super::{
-    LocalIndexStore, LocalIndexStoreError, open_hub_connection_rw, retry_sqlite_busy, u64_to_i64,
+    LocalIndexStore, LocalIndexStoreError, open_hub_connection, retry_sqlite_busy, u64_to_i64,
 };
 use crate::{
     hub::{HubCreationActor, HubCreationPolicy, HubRepo, HubRepoType},
@@ -24,7 +24,7 @@ pub(super) fn create(
     let initial_sha = crate::hub::EMPTY_HUB_REVISION;
     let now = unix_now_seconds_lossy();
     retry_sqlite_busy(|| {
-        let mut conn = open_hub_connection_rw(store.root())?;
+        let mut conn = open_hub_connection(store.root())?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds, creation_authorized, creation_issuer, creation_subject)
@@ -76,7 +76,7 @@ impl LocalIndexStore {
         let effective = policy.unwrap_or(&defaults);
         effective.validate(namespace)?;
         retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(self.root())?;
+            let mut conn = open_hub_connection(self.root())?;
             let tx = conn.transaction()?;
             tx.execute(
                 "INSERT INTO shardline_hub_creation_policies(namespace,configured,enabled,max_repositories,max_creations,window_seconds)
@@ -105,7 +105,7 @@ impl LocalIndexStore {
         namespace: &str,
     ) -> Result<Option<HubCreationPolicy>, LocalIndexStoreError> {
         HubCreationPolicy::default().validate(namespace)?;
-        let mut conn = open_hub_connection_rw(self.root())?;
+        let mut conn = open_hub_connection(self.root())?;
         let tx = conn.transaction()?;
         let policy = tx.query_row(
             "SELECT enabled,max_repositories,max_creations,window_seconds FROM shardline_hub_creation_policies WHERE namespace=?1 AND configured=1",
