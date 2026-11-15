@@ -588,10 +588,7 @@ fn read_bounded_file_sections<R: Read>(
             return Ok(());
         }
 
-        let file_count = checked_increment(file_infos.len())?;
-        if file_count > limits.max_files().get() {
-            return Err(XetAdapterError::TooManyShardTerms);
-        }
+        checked_add_limit(file_infos.len(), 1, limits.max_files().get())?;
 
         let segment_count = usize::try_from(header.num_entries)?;
         reconstruction_terms = checked_add_limit(
@@ -661,10 +658,7 @@ fn read_bounded_xorb_sections<R: Read>(
             return Ok(dedupe_chunk_hashes.into_iter().collect());
         }
 
-        let xorb_count = checked_increment(xorb_infos.len())?;
-        if xorb_count > limits.max_xorbs().get() {
-            return Err(XetAdapterError::TooManyShardTerms);
-        }
+        checked_add_limit(xorb_infos.len(), 1, limits.max_xorbs().get())?;
 
         let chunk_count = usize::try_from(header.num_entries)?;
         xorb_chunks = checked_add_limit(xorb_chunks, chunk_count, limits.max_xorb_chunks().get())?;
@@ -721,10 +715,6 @@ fn collect_dedupe_chunk_hashes(
 
 fn checked_add(left: usize, right: usize) -> Result<usize, XetAdapterError> {
     left.checked_add(right).ok_or(XetAdapterError::Overflow)
-}
-
-fn checked_increment(value: usize) -> Result<usize, XetAdapterError> {
-    checked_add(value, 1)
 }
 
 fn checked_add_limit(left: usize, right: usize, limit: usize) -> Result<usize, XetAdapterError> {
@@ -1790,19 +1780,13 @@ mod tests {
     }
 
     #[test]
-    fn checked_increment_handles_zero_and_overflow() {
-        for (value, expected) in [(0, 1), (41, 42)] {
-            assert_eq!(super::checked_increment(value).unwrap(), expected);
-        }
-        assert!(matches!(
-            super::checked_increment(usize::MAX),
-            Err(XetAdapterError::Overflow),
-        ));
-    }
-
-    #[test]
     fn checked_add_limit_distinguishes_boundary_limit_and_overflow() {
-        for (left, right, limit, expected) in [(50, 50, 200, 100), (100, 100, 200, 200)] {
+        for (left, right, limit, expected) in [
+            (0, 1, 1, 1),
+            (41, 1, 42, 42),
+            (50, 50, 200, 100),
+            (100, 100, 200, 200),
+        ] {
             assert_eq!(
                 super::checked_add_limit(left, right, limit).unwrap(),
                 expected
