@@ -210,16 +210,14 @@ impl MetadataClient {
         body: Option<serde_json::Value>,
         response: (&'static str, usize),
     ) -> Result<T, SdxError> {
-        let transfer = self.transfer.clone();
         let decoded = retry
-            .run(token, move |tok| {
-                let transfer = transfer.clone();
-                let url = url.clone();
-                let method = method.clone();
-                let body = body.clone();
+            .run(token, |tok| {
+                let url = &url;
+                let method = &method;
+                let body = body.as_ref();
                 async move {
-                    transfer
-                        .request_json::<T>(&method, &url, &tok, body.as_ref(), response.1)
+                    self.transfer
+                        .request_json::<T>(method, url, &tok, body, response.1)
                         .await
                 }
             })
@@ -252,12 +250,13 @@ impl MetadataClient {
         let retry = self.read_retry();
         let token = self.tokens.read_token().await?;
         let route = self.repo_route(XET_TREE_ROUTE);
-        let mut query: Vec<(String, String)> = vec![("prefix".to_owned(), prefix.to_owned())];
-        if let Some(limit) = limit {
-            query.push(("limit".to_owned(), limit.to_string()));
+        let limit_value = limit.map(|limit| limit.to_string());
+        let mut query = vec![("prefix", prefix)];
+        if let Some(encoded_limit) = limit_value.as_deref() {
+            query.push(("limit", encoded_limit));
         }
         if let Some(cursor) = cursor {
-            query.push(("cursor".to_owned(), cursor.to_owned()));
+            query.push(("cursor", cursor));
         }
         let url = build_url(&self.api_base, &route, &query);
         self.send_json(

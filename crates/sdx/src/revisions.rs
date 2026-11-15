@@ -65,11 +65,8 @@ impl MetadataClient {
         let mut cursor: Option<String> = None;
         let mut cursors = HashSet::new();
         loop {
-            let query: Vec<(String, String)> = cursor
-                .as_deref()
-                .map(|c| vec![("cursor".to_owned(), c.to_owned())])
-                .unwrap_or_default();
-            let url = crate::tree::build_url(&self.api_base, &route, &query);
+            let query = cursor.as_deref().map(|cursor| ("cursor", cursor));
+            let url = crate::tree::build_url(&self.api_base, &route, query.as_slice());
             let response: RevisionsResponse = self
                 .send_json(
                     &retry,
