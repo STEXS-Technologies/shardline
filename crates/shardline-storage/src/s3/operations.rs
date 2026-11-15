@@ -347,11 +347,7 @@ impl S3ObjectStore {
                     break;
                 };
                 let item = self.metadata_from_external(&entry)?;
-                if !item.key().as_str().starts_with(prefix.as_str()) {
-                    continue;
-                }
-                let key_str = item.key().as_str();
-                let Some(remainder) = key_str.strip_prefix(prefix.as_str()) else {
+                let Some(remainder) = item.key().as_str().strip_prefix(prefix.as_str()) else {
                     continue;
                 };
                 if remainder.is_empty() || remainder.contains('/') {

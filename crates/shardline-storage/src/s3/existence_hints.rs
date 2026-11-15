@@ -70,15 +70,14 @@ impl ExistenceHints {
             .entries
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if entries.known.contains(&digest) {
+        if !entries.known.insert(digest) {
             return;
         }
-        if entries.known.len() == MAX_HINTS
+        if entries.known.len() > MAX_HINTS
             && let Some(oldest) = entries.order.pop_front()
         {
             entries.known.remove(&oldest);
         }
-        entries.known.insert(digest);
         entries.order.push_back(digest);
     }
 }
