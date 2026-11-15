@@ -3750,19 +3750,19 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`1b4f59c44a880d132b6554435b278a24e9a7024e`. It counts all tracked `.rs`
+`d55f5dcdab41af94b8ec388246068b8afc3c38f8`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 585,111 | 18,538 (3.07%) |
-| Server | 220,570 | 213,340 | 7,230 (3.28%) |
+| Entire repository | 603,649 | 584,860 | 18,789 (3.11%) |
+| Server | 220,570 | 213,090 | 7,480 (3.39%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
-| S3 adapter | 10,954 | 10,300 | 654 (5.97%) |
+| S3 adapter | 10,954 | 10,299 | 655 (5.98%) |
 | Xet adapter | 17,801 | 15,986 | 1,815 (10.20%) |
 | OCI adapter | 7,700 | 7,056 | 644 (8.36%) |
 | Cache | 6,573 | 5,866 | 707 (10.76%) |
@@ -3778,18 +3778,16 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
-This refresh includes 367 fewer Rust lines since the previously measured
-`7ad0579e` snapshot. Subsequent cleanup shares protocol fixtures, PostgreSQL schema
-setup, chaos payload generation and file inventories, and consolidates OCI read
-and upload-response handling. Stronger fixture requirements make configured
-PostgreSQL setup failures fail tests rather than silently skip qualification.
-Some changes add diagnostics or avoid allocations without reducing lines.
+This refresh includes 251 fewer Rust lines since the previously measured
+`1b4f59c4` snapshot. It shares OCI request fixtures, simplifies empty protocol
+responses and consolidates parser and routing cases while retaining their inputs
+and expected results. The S3 authentication prefix check also uses the standard
+string operation directly.
 
 The inventory revision is not a release qualification stamp. The complete local
-distributed gate below was repeated successfully at `6823c999`, after this source
-snapshot, including the later protocol fixture and OCI/S3 handler cleanup.
-Independent hosted CI and a multi-host PostgreSQL/S3 split-role topology remain
-separate qualification requirements.
+distributed gate below passed at `6823c999`; subsequent OCI and S3 changes received
+targeted tests and strict Clippy checks. Independent hosted CI and a multi-host
+PostgreSQL/S3 split-role topology remain separate qualification requirements.
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
@@ -3797,8 +3795,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 1b4f59c44a880d132b6554435b278a24e9a7024e -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 1b4f59c44a880d132b6554435b278a24e9a7024e -- '*.rs' | wc -l
+git grep -I -n '^' d55f5dcdab41af94b8ec388246068b8afc3c38f8 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' d55f5dcdab41af94b8ec388246068b8afc3c38f8 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
