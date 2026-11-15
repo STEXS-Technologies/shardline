@@ -1032,10 +1032,7 @@ impl OpsRecordStore for LocalRecordStore {
         &'operation self,
         descriptor: &'operation shardline_index::XetXorbDescriptor,
     ) -> shardline_index::RecordStoreFuture<'operation, (), <Self as RecordTraversal>::Error> {
-        Box::pin(async move {
-            self.cache_xet_xorb_descriptors(std::slice::from_ref(descriptor))
-                .await
-        })
+        Box::pin(self.cache_xet_xorb_descriptors(std::slice::from_ref(descriptor)))
     }
 
     fn native_chunk_location<'operation>(
@@ -1094,10 +1091,7 @@ impl OpsRecordStore for PostgresRecordStore {
         &'operation self,
         descriptor: &'operation shardline_index::XetXorbDescriptor,
     ) -> shardline_index::RecordStoreFuture<'operation, (), <Self as RecordTraversal>::Error> {
-        Box::pin(async move {
-            self.cache_xet_xorb_descriptors(std::slice::from_ref(descriptor))
-                .await
-        })
+        Box::pin(self.cache_xet_xorb_descriptors(std::slice::from_ref(descriptor)))
     }
     fn native_chunk_location<'operation>(
         &'operation self,
