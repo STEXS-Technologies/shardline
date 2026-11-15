@@ -544,14 +544,16 @@ impl XetClientBuilder {
         if !session_id.is_empty() {
             transfer = transfer.with_session_id(session_id);
         }
-        let buffer_semaphore = Arc::new(match self.buffer_capacity {
-            Some(capacity) => BufferSemaphore::new(capacity, capacity, capacity),
-            None => BufferSemaphore::new(
-                DEFAULT_DOWNLOAD_BUFFER_SIZE,
-                DEFAULT_DOWNLOAD_BUFFER_SIZE,
-                DEFAULT_DOWNLOAD_BUFFER_LIMIT,
-            ),
-        });
+        let buffer_semaphore = Arc::new(self.buffer_capacity.map_or_else(
+            || {
+                BufferSemaphore::new(
+                    DEFAULT_DOWNLOAD_BUFFER_SIZE,
+                    DEFAULT_DOWNLOAD_BUFFER_SIZE,
+                    DEFAULT_DOWNLOAD_BUFFER_LIMIT,
+                )
+            },
+            |capacity| BufferSemaphore::new(capacity, capacity, capacity),
+        ));
         let download_permits = Arc::new(tokio::sync::Semaphore::new(
             self.download_concurrency.max(1),
         ));
