@@ -13,9 +13,7 @@ use shardline_protocol::RepositoryScope;
 use shardline_server_core::{
     InvalidSerializedShardError, ServerObjectStore, ShardMetadataLimits, chunk_hash, content_hash,
 };
-use shardline_storage::{
-    ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore, PutOutcome,
-};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 use shardline_xet_core::{
     merklehash::{MerkleHash, compute_data_hash},
     metadata_shard::{
@@ -59,7 +57,7 @@ fn shard_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> 
         .get(..2)
         .ok_or(XetAdapterError::InvalidContentHash)?;
     let key = format!("shards/{prefix}/{hash_hex}.shard");
-    ObjectKey::parse(&key).map_err(map_object_key_error)
+    ObjectKey::parse(&key).map_err(XetAdapterError::from)
 }
 
 #[derive(Debug)]
@@ -1092,15 +1090,6 @@ pub fn dedupe_shard_mapping(
     Ok(DedupeShardMapping::new(chunk_hash, shard_key.clone()))
 }
 
-const fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
-    match error {
-        ObjectKeyError::Empty
-        | ObjectKeyError::UnsafePath
-        | ObjectKeyError::ControlCharacter
-        | ObjectKeyError::TooLong => XetAdapterError::InvalidContentHash,
-    }
-}
-
 #[derive(Debug, Clone)]
 struct XorbRangeInfo {
     total_length: u64,
@@ -1959,24 +1948,6 @@ mod tests {
         let result = hashes.unwrap();
         assert_eq!(result.len(), 1, "file start chunk should be retained");
         assert_eq!(result[0], chunk_hash.hex());
-    }
-
-    // ── map_object_key_error ─────────────────────────────────────────────
-
-    #[test]
-    fn map_object_key_error_maps_all_variants() {
-        use shardline_storage::ObjectKeyError;
-        let cases: &[(ObjectKeyError, &str)] = &[
-            (ObjectKeyError::Empty, "invalid"),
-            (ObjectKeyError::UnsafePath, "invalid"),
-            (ObjectKeyError::ControlCharacter, "invalid"),
-            (ObjectKeyError::TooLong, "invalid"),
-        ];
-        for (err, _) in cases {
-            let mapped = super::map_object_key_error(*err);
-            let msg = mapped.to_string();
-            assert!(msg.contains("hash"), "msg '{msg}' missing 'hash'");
-        }
     }
 
     // ── parse_uploaded_shard_with_metrics ─────────────────────────────────

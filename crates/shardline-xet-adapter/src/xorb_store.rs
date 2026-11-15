@@ -7,7 +7,7 @@ use std::{
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ShardlineHash;
 use shardline_server_core::ServerObjectStore;
-use shardline_storage::{ObjectKey, ObjectKeyError, PutOutcome};
+use shardline_storage::{ObjectKey, PutOutcome};
 use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer;
 
 use crate::{
@@ -54,7 +54,7 @@ pub fn xorb_object_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
         .get(..2)
         .ok_or(XetAdapterError::InvalidContentHash)?;
     let key = format!("xorbs/default/{prefix}/{hash_hex}.xorb");
-    ObjectKey::parse(&key).map_err(map_object_key_error)
+    ObjectKey::parse(&key).map_err(XetAdapterError::from)
 }
 
 /// # Errors
@@ -418,15 +418,6 @@ pub fn normalize_serialized_xorb(
     Ok(normalized)
 }
 
-const fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
-    match error {
-        ObjectKeyError::Empty
-        | ObjectKeyError::UnsafePath
-        | ObjectKeyError::ControlCharacter
-        | ObjectKeyError::TooLong => XetAdapterError::InvalidContentHash,
-    }
-}
-
 #[cfg(test)]
 mod encoding_tests;
 
@@ -674,26 +665,6 @@ mod tests {
                 xorb_hash_from_object_key_if_present(&key).unwrap(),
                 None,
                 "unrelated layout {path:?}"
-            );
-        }
-    }
-
-    // ── map_object_key_error ────────────────────────────────────────────
-
-    #[test]
-    fn xorb_store_maps_object_key_errors_to_invalid_content_hash() {
-        use shardline_storage::ObjectKeyError;
-        for error in [
-            ObjectKeyError::Empty,
-            ObjectKeyError::UnsafePath,
-            ObjectKeyError::ControlCharacter,
-            ObjectKeyError::TooLong,
-        ] {
-            let mapped = super::map_object_key_error(error);
-            assert!(matches!(mapped, XetAdapterError::InvalidContentHash));
-            assert!(
-                mapped.to_string().contains("hash"),
-                "missing hash message for {error:?}"
             );
         }
     }

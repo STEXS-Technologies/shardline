@@ -6,7 +6,7 @@ use shardline_index::{
 };
 use shardline_protocol::HashParseError;
 use shardline_server_core::{InvalidSerializedShardError, ServerObjectStoreError};
-use shardline_storage::{LocalObjectStoreError, S3ObjectStoreError};
+use shardline_storage::{LocalObjectStoreError, ObjectKeyError, S3ObjectStoreError};
 use thiserror::Error;
 
 use crate::xorb::{XorbInvalidFormatError, XorbParseError};
@@ -82,6 +82,17 @@ pub enum XetAdapterError {
     RangeNotSatisfiable,
 }
 
+impl From<ObjectKeyError> for XetAdapterError {
+    fn from(error: ObjectKeyError) -> Self {
+        match error {
+            ObjectKeyError::Empty
+            | ObjectKeyError::UnsafePath
+            | ObjectKeyError::ControlCharacter
+            | ObjectKeyError::TooLong => Self::InvalidContentHash,
+        }
+    }
+}
+
 impl From<XorbParseError> for XetAdapterError {
     fn from(value: XorbParseError) -> Self {
         match value {
@@ -103,7 +114,7 @@ mod tests {
     use shardline_index::FileRecordInvariantError;
     use shardline_protocol::HashParseError;
     use shardline_server_core::InvalidSerializedShardError;
-    use shardline_storage::{LocalObjectStoreError, S3ObjectStoreError};
+    use shardline_storage::{LocalObjectStoreError, ObjectKeyError, S3ObjectStoreError};
 
     #[test]
     fn xet_adapter_error_display_all_variants() {
@@ -192,6 +203,22 @@ mod tests {
         ] {
             let error: XetAdapterError = source.into();
             assert!(matches!(error, XetAdapterError::InvalidSerializedXorb));
+        }
+    }
+    #[test]
+    fn object_key_errors_become_invalid_content_hash() {
+        for error in [
+            ObjectKeyError::Empty,
+            ObjectKeyError::UnsafePath,
+            ObjectKeyError::ControlCharacter,
+            ObjectKeyError::TooLong,
+        ] {
+            let mapped = XetAdapterError::from(error);
+            assert!(matches!(mapped, XetAdapterError::InvalidContentHash));
+            assert!(
+                mapped.to_string().contains("hash"),
+                "missing hash message for {error:?}"
+            );
         }
     }
 }
