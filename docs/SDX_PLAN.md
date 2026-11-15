@@ -215,6 +215,7 @@ Shipped crate: **`crates/sdx`** (package name `sdx`). Dependencies (as built):
   `XET_REVISIONS_ROUTE` / `XET_REVISION_ROUTE`), which transitively bring in
   `shardline-server-core` (an allowed dependency; the forbidden dependency is
   `shardline-server`, which is **not** a library dependency of `sdx`)
+- `shardline-xet-core` — the shared client/server CDC boundary finder
 - `xet-core-structures` (**pinned exact version `=1.5.2`**, per §11 Q3/Q6) — Merkle
   hash, `xorb_object` (`ByteGrouping4LZ4`), chunk-format constants; BG4 is not
   reimplemented
@@ -227,13 +228,12 @@ Must **not** depend on `shardline-server`. `shardline-server` and
 `shardline-protocol` appear only as **dev-dependencies** for byte-identity and
 end-to-end tests (established workspace test pattern).
 
-**Chunker source decision (as built):** sdx implements its own client-side
-`Chunker` (`crates/sdx/src/chunker.rs`) that mirrors the server's `CdcChunker`
-algorithm verbatim, and its tests prove byte-identity against
-`shardline_server::upload_ingest::cdc::CdcChunker` directly. (The earlier plan
-proposed using the upstream `xet-data` `Chunker` instead; the shipped crate mirrors
-the server implementation so identity is proven by shared algorithm, not by a
-second implementation.)
+**Chunker source decision (as built):** the client-side `Chunker`
+(`crates/sdx/src/chunker.rs`) manages streaming buffers and delegates boundary
+finding to `shardline_xet_core::cdc::CdcChunker`, also used by the server.
+The server's existing public CDC path re-exports this same type. Independent
+scalar-reference and upstream golden-vector tests verify boundary compatibility;
+client/server tests also check streaming buffers, frame splits and emitted bytes.
 
 CLI surface lives in the existing CLI binary crate (`crates/shardline`; issue #19's
 `crates/cli` refers to this same surface), routed by `argv[0]` symlink detection per

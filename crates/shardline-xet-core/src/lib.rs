@@ -42,6 +42,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod cdc;
 pub mod error;
 pub mod merklehash;
 pub mod metadata_shard;
