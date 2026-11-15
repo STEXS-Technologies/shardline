@@ -128,51 +128,46 @@ pub(crate) async fn s3_get_bucket(
     object_headers::reject_unsupported_read_headers(&headers)?;
     let query = parse_s3_query(&uri)?;
     let resources = classify(&query);
-    if matches!(resources.as_slice(), [S3SubResource::Uploads]) {
-        return super::multipart::s3_list_uploads(&state, auth.capability(), &bucket, &query).await;
+    match resources.as_slice() {
+        [S3SubResource::Uploads] => {
+            super::multipart::s3_list_uploads(&state, auth.capability(), &bucket, &query).await
+        }
+        [S3SubResource::Location] => Ok(get_bucket_location_response()),
+        [S3SubResource::Versioning] => Ok(get_bucket_versioning_response()),
+        [S3SubResource::Acl] => {
+            let owner_id = scope_namespace(auth.capability().namespace());
+            Ok((
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+                super::acl::access_control_policy_xml(&owner_id),
+            )
+                .into_response())
+        }
+        [S3SubResource::Other]
+            if query
+                .iter()
+                .any(|(name, value)| name == "ownershipControls" && value.is_empty()) =>
+        {
+            Ok((
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+                super::acl::ownership_controls_xml(),
+            )
+                .into_response())
+        }
+        [S3SubResource::Other]
+            if query
+                .iter()
+                .any(|(name, value)| name == "versions" && value.is_empty()) =>
+        {
+            listing::s3_list_object_versions(auth, State(state), Path(bucket), uri, headers).await
+        }
+        [S3SubResource::ListObjects] => {
+            listing::s3_list_objects_v2(auth, State(state), Path(bucket), uri, headers).await
+        }
+        [] => listing::s3_list_objects_v1(auth, State(state), Path(bucket), uri, headers).await,
+        _ => Err(S3Error::not_implemented()),
     }
-    if resources.as_slice() == [S3SubResource::Location] {
-        return Ok(get_bucket_location_response());
-    }
-    if resources.as_slice() == [S3SubResource::Versioning] {
-        return Ok(get_bucket_versioning_response());
-    }
-    if resources.as_slice() == [S3SubResource::Acl] {
-        let owner_id = scope_namespace(auth.capability().namespace());
-        return Ok((
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
-            super::acl::access_control_policy_xml(&owner_id),
-        )
-            .into_response());
-    }
-    if resources.as_slice() == [S3SubResource::Other]
-        && query
-            .iter()
-            .any(|(name, value)| name == "ownershipControls" && value.is_empty())
-    {
-        return Ok((
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
-            super::acl::ownership_controls_xml(),
-        )
-            .into_response());
-    }
-    if resources.as_slice() == [S3SubResource::Other]
-        && query
-            .iter()
-            .any(|(name, value)| name == "versions" && value.is_empty())
-    {
-        return listing::s3_list_object_versions(auth, State(state), Path(bucket), uri, headers)
-            .await;
-    }
-    if resources.as_slice() == [S3SubResource::ListObjects] {
-        return listing::s3_list_objects_v2(auth, State(state), Path(bucket), uri, headers).await;
-    }
-    if resources.is_empty() {
-        return listing::s3_list_objects_v1(auth, State(state), Path(bucket), uri, headers).await;
-    }
-    Err(S3Error::not_implemented())
 }
 
 fn get_bucket_versioning_response() -> Response {
