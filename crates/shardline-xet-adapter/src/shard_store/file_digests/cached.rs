@@ -7,14 +7,14 @@ impl FileDigest {
         verifier: &mut FileDigestVerifier,
         store: &ServerObjectStore,
         terms: &[FileDataSequenceEntry],
-        info: &XorbRangeInfo,
+        info: &ValidatedXorb,
         checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
     ) -> Result<(), XetAdapterError> {
         // Match the prefix grouping used during first-time source validation.
         // Every original length must remain valid even when the prefix hits.
         for term in terms {
             checkpoint()?;
-            verification::verify_term_length(term, &info.verified_chunks)?;
+            verification::verify_term_length(term, info.chunks())?;
         }
         // Prefer a complete ordered prefix only when it already exists.
         // Otherwise retain the existing per-range prefix hits and snapshots,

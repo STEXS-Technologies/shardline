@@ -100,7 +100,7 @@ impl FileDigestVerifier {
         file: &MDBFileInfo,
         expected: Option<&str>,
         derive: bool,
-        verified: &HashMap<MerkleHash, XorbRangeInfo>,
+        verified: &HashMap<MerkleHash, ValidatedXorb>,
         checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
     ) -> Result<Option<String>, XetAdapterError> {
         let mut digest = FileDigest::new(expected.map(str::to_owned), derive);
@@ -221,7 +221,7 @@ impl FileDigest {
         verifier: &mut FileDigestVerifier,
         store: &ServerObjectStore,
         term: &FileDataSequenceEntry,
-        info: &XorbRangeInfo,
+        info: &ValidatedXorb,
         checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
     ) -> Result<(), XetAdapterError> {
         let reusing_prefix = self.reusing_prefix;
@@ -233,7 +233,7 @@ impl FileDigest {
         let hash = term.xorb_hash.hex();
         let start = usize::try_from(term.chunk_index_start)?;
         let end = usize::try_from(term.chunk_index_end)?;
-        let members = info.verified_chunks.get(start..end).ok_or_else(rejected)?;
+        let members = info.chunks().get(start..end).ok_or_else(rejected)?;
         if let ServerObjectStore::S3(remote) = store {
             streaming_source::visit_range(
                 remote,

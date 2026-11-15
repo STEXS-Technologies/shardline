@@ -138,7 +138,8 @@ fn cancelled_parallel_source_does_not_publish_a_prefix_and_can_retry() {
     let second = vec![47; 8 * 1024 * 1024];
     let (hash, _) = store_members(&objects, &[&first, &second]);
     let entry = FileDataSequenceEntry::new(hash, 16 * 1024 * 1024, 0, 2);
-    let (info, source) = load_xorb_range_info_with_source(&objects, &hash.hex(), None).unwrap();
+    let (info, source) =
+        load_verified_xorb_with_checkpoint(&objects, &hash.hex(), None, &|| Ok(())).unwrap();
     let scope = scope("parallel-source-cancellation");
     let mut cancelled = FileDigest::with_scope(None, Some(&scope));
     cancelled.enable_parallel(true);
@@ -229,7 +230,7 @@ fn warm_prefix_still_authenticates_source_members() {
             FileDataSequenceEntry::new(hash, 5, 0, 1),
             FileDataSequenceEntry::new(hash, 6, 1, 2),
         ];
-        let info = load_xorb_range_info(&objects, &hash.hex(), None).unwrap();
+        let info = load_verified_xorb(&objects, &hash.hex()).unwrap();
         let scope = scope(if parallel {
             "source-authentication-parallel"
         } else {
@@ -300,7 +301,7 @@ fn cached_ordered_gaps_reuse_sha_but_authenticate_each_selected_member() {
             FileDataSequenceEntry::new(hash, 5, 0, 1),
             FileDataSequenceEntry::new(hash, 6, 2, 3),
         ];
-        let info = load_xorb_range_info(&objects, &hash.hex(), None).unwrap();
+        let info = load_verified_xorb(&objects, &hash.hex()).unwrap();
         let scope = scope(&format!("cached-ordered-gaps-{parallel}"));
         let expected = format!("{:x}", Sha256::digest(b"firstsecond"));
         let mut short = FileDigest::with_scope(None, Some(&scope));

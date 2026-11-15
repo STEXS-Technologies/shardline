@@ -35,7 +35,7 @@ use crate::error::XetAdapterError;
 
 #[cfg(test)]
 use super::validate_serialized_xorb;
-use super::{ValidatedXorbChunk, xorb_object_key};
+use super::{ValidatedXorb, ValidatedXorbChunk, xorb_object_key};
 
 use crate::checkpoint_reader;
 mod dedup;
@@ -492,7 +492,7 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
         let verified = match xorb_cache.entry(xorb_info.metadata.xorb_hash) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let (verified, _source) = load_xorb_range_info_with_checkpoint(
+                let (verified, _source) = load_verified_xorb_with_checkpoint(
                     object_store,
                     &entry.key().hex(),
                     member_references.as_deref_mut(),
@@ -502,7 +502,7 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
             }
         };
         checkpoint()?;
-        verification::verify_xorb_members(&xorb_info, &verified.verified_chunks)?;
+        verification::verify_xorb_members(&xorb_info, verified.chunks())?;
         in_memory_shard
             .add_xorb_block(xorb_info)
             .map_err(|error| invalid_serialized_shard(&error))?;
@@ -513,15 +513,15 @@ fn parse_shard_records_with_checkpoint<R: Read + Seek>(
         .map_err(|error| invalid_serialized_shard(&error))?;
     let shard_hash_hex = compute_data_hash(&normalized_bytes).hex();
     if let Some(descriptors) = descriptors {
-        for (hash, info) in &xorb_cache {
+        for info in xorb_cache.values() {
             checkpoint()?;
             // The derived standard-protocol lookup has its own memory ceiling.
             // Do not tighten historical ingestion acceptance as a side effect
             // of installing an optional acceleration index.
-            if info.verified_chunks.len() > shardline_index::MAX_XET_DESCRIPTOR_CHUNKS {
+            if info.chunks().len() > shardline_index::MAX_XET_DESCRIPTOR_CHUNKS {
                 continue;
             }
-            descriptors.push(info.descriptor(&hash.hex()));
+            descriptors.push(info.descriptor());
         }
         descriptors.sort_unstable_by(|left, right| left.hash.cmp(&right.hash));
     }
@@ -788,7 +788,7 @@ fn build_file_records_with_cache(
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     mut member_references: Option<&mut HashSet<ObjectKey>>,
-    xorb_cache: &mut HashMap<MerkleHash, XorbRangeInfo>,
+    xorb_cache: &mut HashMap<MerkleHash, ValidatedXorb>,
     file_digests: &mut file_digests::FileDigestVerifier,
     checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
 ) -> Result<(Vec<FileRecord>, Vec<XetFileIdentity>), XetAdapterError> {
@@ -837,7 +837,7 @@ fn build_file_records_with_cache(
                     )?;
                     let mut remaining = ordered;
                     digest.begin_terms(ordered);
-                    let (loaded, source) = load_xorb_range_info_with_visitor(
+                    let (loaded, source) = load_verified_xorb_with_visitor(
                         object_store,
                         &hash,
                         member_references.as_deref_mut(),
@@ -858,7 +858,7 @@ fn build_file_records_with_cache(
             };
             let packed_start = xorb_info.packed_start(range_start)?;
             let packed_end = xorb_info.packed_end(range_end)?;
-            verification::verify_term_length(segment, &xorb_info.verified_chunks)?;
+            verification::verify_term_length(segment, xorb_info.chunks())?;
             if segment_index >= digested_through {
                 let ordered = file_digests::ordered_source_terms(
                     file_info
@@ -904,7 +904,7 @@ fn build_file_records_with_cache(
                     .get(&segment.xorb_hash)
                     .into_iter()
                     .flat_map(move |info| {
-                        info.verified_chunks
+                        info.chunks()
                             .iter()
                             .skip(usize::try_from(segment.chunk_index_start).unwrap_or(usize::MAX))
                             .take(
@@ -969,42 +969,27 @@ fn validate_referenced_xorb_count(
     Ok(())
 }
 
-fn load_xorb_range_info(
+fn load_verified_xorb(
     object_store: &ServerObjectStore,
     hash_hex: &str,
-    member_references: Option<&mut HashSet<ObjectKey>>,
-) -> Result<XorbRangeInfo, XetAdapterError> {
-    load_xorb_range_info_with_source(object_store, hash_hex, member_references)
+) -> Result<ValidatedXorb, XetAdapterError> {
+    load_verified_xorb_with_checkpoint(object_store, hash_hex, None, &|| Ok(()))
         .map(|(info, _source)| info)
 }
 
-fn load_xorb_range_info_with_source(
-    object_store: &ServerObjectStore,
-    hash_hex: &str,
-    member_references: Option<&mut HashSet<ObjectKey>>,
-) -> Result<
-    (
-        XorbRangeInfo,
-        Option<shardline_server_core::MaterializedObject>,
-    ),
-    XetAdapterError,
-> {
-    load_xorb_range_info_with_checkpoint(object_store, hash_hex, member_references, &|| Ok(()))
-}
-
-fn load_xorb_range_info_with_checkpoint(
+fn load_verified_xorb_with_checkpoint(
     object_store: &ServerObjectStore,
     hash_hex: &str,
     member_references: Option<&mut HashSet<ObjectKey>>,
     checkpoint: &(dyn Fn() -> std::io::Result<()> + Sync),
 ) -> Result<
     (
-        XorbRangeInfo,
+        ValidatedXorb,
         Option<shardline_server_core::MaterializedObject>,
     ),
     XetAdapterError,
 > {
-    load_xorb_range_info_with_visitor(
+    load_verified_xorb_with_visitor(
         object_store,
         hash_hex,
         member_references,
@@ -1013,7 +998,7 @@ fn load_xorb_range_info_with_checkpoint(
     )
 }
 
-fn load_xorb_range_info_with_visitor(
+fn load_verified_xorb_with_visitor(
     object_store: &ServerObjectStore,
     hash_hex: &str,
     member_references: Option<&mut HashSet<ObjectKey>>,
@@ -1021,7 +1006,7 @@ fn load_xorb_range_info_with_visitor(
     visitor: &mut (dyn FnMut(u64, &[u8]) -> std::io::Result<()> + Send),
 ) -> Result<
     (
-        XorbRangeInfo,
+        ValidatedXorb,
         Option<shardline_server_core::MaterializedObject>,
     ),
     XetAdapterError,
@@ -1074,13 +1059,7 @@ fn load_xorb_range_info_with_visitor(
             references.insert(shardline_server_core::chunk_object_key(&hash)?);
         }
     }
-    Ok((
-        XorbRangeInfo {
-            total_length: validated.total_length(),
-            verified_chunks: validated.chunks().to_vec(),
-        },
-        source,
-    ))
+    Ok((validated, source))
 }
 
 /// # Errors
@@ -1094,16 +1073,7 @@ pub fn dedupe_shard_mapping(
     Ok(DedupeShardMapping::new(chunk_hash, shard_key.clone()))
 }
 
-#[derive(Debug, Clone)]
-struct XorbRangeInfo {
-    total_length: u64,
-    verified_chunks: Vec<ValidatedXorbChunk>,
-}
-
-impl XorbRangeInfo {
-    fn descriptor(&self, hash: &str) -> shardline_index::XetXorbDescriptor {
-        dedup::descriptor_from_chunks(hash, self.total_length, &self.verified_chunks)
-    }
+impl ValidatedXorb {
     fn packed_start(&self, range_start: u64) -> Result<u64, XetAdapterError> {
         let range_start = usize::try_from(range_start)?;
         if range_start == 0 {
@@ -1114,7 +1084,7 @@ impl XorbRangeInfo {
                 InvalidSerializedShardError::ShardTermRangeStartedPastXorbChunkList,
             )
         })?;
-        self.verified_chunks
+        self.chunks()
             .get(previous_index)
             .map(ValidatedXorbChunk::packed_end)
             .ok_or_else(|| {
@@ -1126,7 +1096,7 @@ impl XorbRangeInfo {
 
     fn packed_end(&self, range_end: u64) -> Result<u64, XetAdapterError> {
         let range_end = usize::try_from(range_end)?;
-        self.verified_chunks
+        self.chunks()
             .get(range_end.saturating_sub(1))
             .map(ValidatedXorbChunk::packed_end)
             .ok_or_else(|| {
@@ -1733,9 +1703,9 @@ mod tests {
         }
     }
 
-    // ── XorbRangeInfo ────────────────────────────────────────────────────
+    // ── ValidatedXorb ────────────────────────────────────────────────────
 
-    fn range_info(ends: &[u64]) -> super::XorbRangeInfo {
+    fn range_info(ends: &[u64]) -> super::ValidatedXorb {
         let mut start = 0;
         let verified_chunks = ends
             .iter()
@@ -1751,10 +1721,14 @@ mod tests {
                 chunk
             })
             .collect();
-        super::XorbRangeInfo {
-            total_length: ends.last().copied().unwrap_or(0),
+        let length = ends.last().copied().unwrap_or(0);
+        super::ValidatedXorb::new(
+            shardline_protocol::ShardlineHash::from_bytes([0; 32]),
+            length,
+            length,
+            length,
             verified_chunks,
-        }
+        )
     }
 
     #[test]

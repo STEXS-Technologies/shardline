@@ -10,32 +10,21 @@ impl crate::ValidatedXorb {
     /// This derived metadata does not establish storage durability or authorization.
     #[must_use]
     pub fn descriptor(&self) -> shardline_index::XetXorbDescriptor {
-        descriptor_from_chunks(
-            &shardline_index::xet_hash_hex_string(self.hash()),
-            self.total_length(),
-            self.chunks(),
-        )
-    }
-}
-
-pub(super) fn descriptor_from_chunks(
-    hash: &str,
-    total_length: u64,
-    chunks: &[ValidatedXorbChunk],
-) -> shardline_index::XetXorbDescriptor {
-    shardline_index::XetXorbDescriptor {
-        hash: hash.to_owned(),
-        total_bytes: total_length,
-        chunks: chunks
-            .iter()
-            .map(|chunk| shardline_index::XetXorbChunk {
-                hash: shardline_index::xet_hash_hex_string(chunk.hash()),
-                packed_start: chunk.packed_start(),
-                packed_end: chunk.packed_end(),
-                unpacked_start: chunk.unpacked_start(),
-                unpacked_end: chunk.unpacked_end(),
-            })
-            .collect(),
+        shardline_index::XetXorbDescriptor {
+            hash: shardline_index::xet_hash_hex_string(self.hash()),
+            total_bytes: self.total_length(),
+            chunks: self
+                .chunks()
+                .iter()
+                .map(|chunk| shardline_index::XetXorbChunk {
+                    hash: shardline_index::xet_hash_hex_string(chunk.hash()),
+                    packed_start: chunk.packed_start(),
+                    packed_end: chunk.packed_end(),
+                    unpacked_start: chunk.unpacked_start(),
+                    unpacked_end: chunk.unpacked_end(),
+                })
+                .collect(),
+        }
     }
 }
 
@@ -48,8 +37,8 @@ pub fn recover_xorb_descriptor(
     store: &ServerObjectStore,
     hash: &str,
 ) -> Result<shardline_index::XetXorbDescriptor, XetAdapterError> {
-    let info = load_xorb_range_info(store, hash, None)?;
-    let descriptor = info.descriptor(hash);
+    let info = load_verified_xorb(store, hash)?;
+    let descriptor = info.descriptor();
     if !descriptor.has_valid_structure() {
         return Err(XetAdapterError::InvalidSerializedXorb);
     }
@@ -124,14 +113,14 @@ pub fn recover_dedup_xorb_descriptor_from_candidates(
             continue;
         }
         let hash = claimed.metadata.xorb_hash.hex();
-        let info = match load_xorb_range_info(store, &hash, None) {
+        let info = match load_verified_xorb(store, &hash) {
             Ok(info) => info,
             Err(XetAdapterError::MissingReferencedXorb) => continue,
             Err(error) => return Err(error),
         };
-        verification::verify_xorb_members(claimed, &info.verified_chunks)?;
-        if info.verified_chunks.len() <= shardline_index::MAX_XET_DESCRIPTOR_CHUNKS {
-            return Ok(Some(info.descriptor(&hash)));
+        verification::verify_xorb_members(claimed, info.chunks())?;
+        if info.chunks().len() <= shardline_index::MAX_XET_DESCRIPTOR_CHUNKS {
+            return Ok(Some(info.descriptor()));
         }
     }
     Ok(None)
