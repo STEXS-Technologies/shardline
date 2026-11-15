@@ -23,7 +23,7 @@ const REDIS_LOADING_POLL_INTERVAL: Duration = Duration::from_millis(25);
 ///
 /// Configure a root certificate for private certificate authorities. Configure
 /// a client certificate and key together when the Redis server requires mTLS.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RedisTlsConfig {
     root_cert: Option<SecretBytes>,
     client_cert: Option<SecretBytes>,
@@ -75,17 +75,6 @@ impl RedisTlsConfig {
             client_tls,
             root_cert: self.root_cert.map(|c| c.expose_secret().to_vec()),
         })
-    }
-}
-
-impl fmt::Debug for RedisTlsConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RedisTlsConfig")
-            .field("root_cert", &self.root_cert)
-            .field("client_cert", &self.client_cert)
-            .field("client_key", &self.client_key)
-            .finish()
     }
 }
 
