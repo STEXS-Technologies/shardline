@@ -24,7 +24,9 @@ const REVISION_RESPONSE_LIMIT: usize = 1152;
 const REVISION_PAGE_RESPONSE_LIMIT: usize = 1_153_152;
 
 /// A revision record (`{name,createdAt,updatedAt}`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(rename_all = "camelCase")]
 pub struct Revision {
     /// Revision name.
     pub name: String,
@@ -37,17 +39,8 @@ pub struct Revision {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
-struct RevisionJson {
-    name: String,
-    created_at: u64,
-    updated_at: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize))]
-#[serde(rename_all = "camelCase")]
 struct RevisionsResponse {
-    revisions: Vec<RevisionJson>,
+    revisions: Vec<Revision>,
     #[serde(default)]
     next_cursor: Option<String>,
 }
@@ -87,11 +80,7 @@ impl MetadataClient {
                     ("list_revisions", REVISION_PAGE_RESPONSE_LIMIT),
                 )
                 .await?;
-            revisions.extend(response.revisions.into_iter().map(|revision| Revision {
-                name: revision.name,
-                created_at: revision.created_at,
-                updated_at: revision.updated_at,
-            }));
+            revisions.extend(response.revisions);
             cursor = crate::tree::checked_next_cursor(
                 "list_revisions",
                 response.next_cursor,
@@ -112,7 +101,7 @@ impl MetadataClient {
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
         match self
-            .send_json::<RevisionJson>(
+            .send_json::<Revision>(
                 &retry,
                 token.token,
                 Method::POST,
@@ -122,11 +111,7 @@ impl MetadataClient {
             )
             .await
         {
-            Ok(revision) => Ok(Revision {
-                name: revision.name,
-                created_at: revision.created_at,
-                updated_at: revision.updated_at,
-            }),
+            Ok(revision) => Ok(revision),
             Err(SdxError::Transfer(TransferError::HttpStatus { status: 409, .. })) => {
                 Err(SdxError::RevisionExists(rev.to_owned()))
             }
@@ -199,7 +184,7 @@ mod tests {
         // Names permit quotes and backslashes (controls are rejected), both
         // serialized as two bytes. Cursor is the raw last revision name.
         let name = "\"\\".repeat(256);
-        let record = super::RevisionJson {
+        let record = super::Revision {
             name: name.clone(),
             created_at: u64::MAX,
             updated_at: u64::MAX,
@@ -210,7 +195,7 @@ mod tests {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Page<'wire> {
-            revisions: Vec<&'wire super::RevisionJson>,
+            revisions: Vec<&'wire super::Revision>,
             next_cursor: Option<&'wire str>,
         }
         let page = Page {

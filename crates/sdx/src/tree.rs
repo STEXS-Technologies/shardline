@@ -34,7 +34,9 @@ use crate::{
 };
 
 /// A resolved path → `file_id` mapping (`{path,fileId,size,updatedAt}`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(rename_all = "camelCase")]
 pub struct PathEntry {
     /// Canonical path (no leading/trailing slash).
     pub path: String,
@@ -47,7 +49,9 @@ pub struct PathEntry {
 }
 
 /// A single directory-listing entry (file or derived directory).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(rename_all = "camelCase")]
 pub struct DirEntry {
     /// Canonical child path; directories carry a trailing slash.
     pub path: String,
@@ -62,7 +66,9 @@ pub struct DirEntry {
 }
 
 /// One page of a directory listing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(rename_all = "camelCase")]
 pub struct DirListing {
     /// Entries for this page (already sorted by path).
     pub entries: Vec<DirEntry>,
@@ -91,37 +97,6 @@ fn tree_page_response_limit(limit: Option<usize>) -> usize {
     entries
         .saturating_mul(PATH_RESPONSE_LIMIT)
         .saturating_add(8_450)
-}
-
-// ── wire response shapes (camelCase) ────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize))]
-#[serde(rename_all = "camelCase")]
-struct ResolveResponse {
-    path: String,
-    file_id: String,
-    size: u64,
-    updated_at: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize))]
-#[serde(rename_all = "camelCase")]
-struct ListEntry {
-    path: String,
-    is_dir: bool,
-    file_id: Option<String>,
-    size: Option<u64>,
-    updated_at: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize))]
-#[serde(rename_all = "camelCase")]
-struct ListResponse {
-    entries: Vec<ListEntry>,
-    next_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,23 +232,15 @@ impl MetadataClient {
         let token = self.tokens.read_token().await?;
         let route = self.repo_route(XET_TREE_ROUTE);
         let url = build_url(&self.api_base, &route, &[("path", path)]);
-        let response: ResolveResponse = self
-            .send_json(
-                &retry,
-                token.token,
-                Method::GET,
-                url,
-                None,
-                ("resolve_path", PATH_RESPONSE_LIMIT),
-            )
-            .await?;
-
-        Ok(PathEntry {
-            path: response.path,
-            file_id: response.file_id,
-            size: response.size,
-            updated_at: response.updated_at,
-        })
+        self.send_json(
+            &retry,
+            token.token,
+            Method::GET,
+            url,
+            None,
+            ("resolve_path", PATH_RESPONSE_LIMIT),
+        )
+        .await
     }
 
     async fn list_paged(
@@ -293,31 +260,15 @@ impl MetadataClient {
             query.push(("cursor".to_owned(), cursor.to_owned()));
         }
         let url = build_url(&self.api_base, &route, &query);
-        let response: ListResponse = self
-            .send_json(
-                &retry,
-                token.token,
-                Method::GET,
-                url,
-                None,
-                ("list_dir", tree_page_response_limit(limit)),
-            )
-            .await?;
-
-        Ok(DirListing {
-            entries: response
-                .entries
-                .into_iter()
-                .map(|entry| DirEntry {
-                    path: entry.path,
-                    is_dir: entry.is_dir,
-                    file_id: entry.file_id,
-                    size: entry.size,
-                    updated_at: entry.updated_at,
-                })
-                .collect(),
-            next_cursor: response.next_cursor,
-        })
+        self.send_json(
+            &retry,
+            token.token,
+            Method::GET,
+            url,
+            None,
+            ("list_dir", tree_page_response_limit(limit)),
+        )
+        .await
     }
 
     pub(crate) async fn register_path(
@@ -599,14 +550,14 @@ mod tests {
     #[test]
     fn metadata_response_envelopes_cover_maximum_legal_paths_and_pages() {
         let path = "\"".repeat(4096);
-        let entry = super::ListEntry {
+        let entry = super::DirEntry {
             path: path.clone(),
             is_dir: false,
             file_id: Some("a".repeat(64)),
             size: Some(u64::MAX),
             updated_at: Some(u64::MAX),
         };
-        let resolve = super::ResolveResponse {
+        let resolve = super::PathEntry {
             path: path.clone(),
             file_id: "a".repeat(64),
             size: u64::MAX,
@@ -626,7 +577,7 @@ mod tests {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Page<'wire> {
-            entries: Vec<&'wire super::ListEntry>,
+            entries: Vec<&'wire super::DirEntry>,
             next_cursor: Option<&'wire str>,
         }
         struct Count(usize);
