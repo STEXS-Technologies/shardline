@@ -3750,7 +3750,7 @@ metadata.
 
 The November 16, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`588ebed9b7f233fdf40e547c454a1c1f70d349f3`. It counts all tracked `.rs`
+`39350ca8e590d57a73cb565f48fc678d529478e3`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
@@ -3760,14 +3760,14 @@ checked against the line count of every Rust blob in each Git snapshot.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 578,369 | 25,280 (4.19%) |
+| Entire repository | 603,649 | 578,072 | 25,577 (4.24%) |
 | Server | 220,570 | 210,914 | 9,656 (4.38%) |
 | Server core | 6,454 | 5,501 | 953 (14.77%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,391 | 982 (4.82%) |
-| S3 adapter | 10,954 | 10,002 | 952 (8.69%) |
+| S3 adapter | 10,954 | 9,983 | 971 (8.86%) |
 | Xet adapter | 17,801 | 15,866 | 1,935 (10.87%) |
-| OCI adapter | 7,700 | 6,927 | 773 (10.04%) |
+| OCI adapter | 7,700 | 6,649 | 1,051 (13.65%) |
 | Cache | 6,573 | 5,786 | 787 (11.97%) |
 | Index | 71,472 | 68,525 | 2,947 (4.12%) |
 | CAS | 3,447 | 2,858 | 589 (17.09%) |
