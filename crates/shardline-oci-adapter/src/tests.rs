@@ -2069,91 +2069,42 @@ async fn s3_write_upload_tail_remove_non_existent() {
     assert!(result.is_ok(), "exact chunk append should succeed");
 }
 
-// ── IO error branch tests ─────────────────────────────────────────────────
-
 #[tokio::test]
-async fn read_upload_session_io_error_on_inaccessible_metadata() {
-    // read_upload_session: non-NotFound IO error reading metadata → line 500
+async fn upload_operations_preserve_io_errors_when_upload_directory_is_a_file() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
-
-    // Replace the upload directory with a file so path resolution fails with ENOTDIR
     let upload_dir = crate::upload_dir(root.path());
-    let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+    tokio::fs::remove_dir_all(&upload_dir).await.unwrap();
     tokio::fs::write(&upload_dir, b"not-a-dir").await.unwrap();
 
-    let result = read_upload_session(root.path(), &session_id, ttl()).await;
-    assert!(result.is_err(), "expected error when upload_dir is a file");
-    // The error should NOT be NotFound (it's an Io error from failed path resolution)
-    match result {
-        Err(OciAdapterError::NotFound) => panic!("expected non-NotFound error"),
-        Err(OciAdapterError::Io(_)) => {} // expected
-        Err(other) => panic!("unexpected error: {other:?}"),
-        Ok(_) => panic!("expected error"),
+    for (operation, result) in [
+        (
+            "read",
+            read_upload_session(root.path(), &session_id, ttl())
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "length",
+            upload_length(root.path(), &session_id).await.map(|_| ()),
+        ),
+        (
+            "append",
+            append_upload_bytes(root.path(), &session_id, b"data")
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "delete",
+            delete_upload_session(root.path(), &session_id).await,
+        ),
+    ] {
+        assert!(
+            matches!(result, Err(OciAdapterError::Io(_))),
+            "{operation}: {result:?}"
+        );
     }
-}
-
-#[tokio::test]
-async fn upload_length_io_error_on_inaccessible_body() {
-    // upload_length: non-NotFound IO error (line 583)
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-
-    // Replace upload directory with a file so path resolution fails
-    let upload_dir = crate::upload_dir(root.path());
-    let _ = tokio::fs::remove_dir_all(&upload_dir).await;
-    tokio::fs::write(&upload_dir, b"not-a-dir").await.unwrap();
-
-    let result = upload_length(root.path(), &session_id).await;
-    assert!(result.is_err(), "expected error when upload_dir is a file");
-    match result {
-        Err(OciAdapterError::NotFound) => panic!("expected non-NotFound error"),
-        Err(OciAdapterError::Io(_)) => {} // expected
-        Err(other) => panic!("unexpected error: {other:?}"),
-        Ok(_) => panic!("expected error"),
-    }
-}
-
-#[tokio::test]
-async fn append_upload_bytes_io_error_on_inaccessible_body() {
-    // map_not_found: non-NotFound IO error → line 536
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-
-    // Replace upload directory with a file so path resolution fails
-    let upload_dir = crate::upload_dir(root.path());
-    let _ = tokio::fs::remove_dir_all(&upload_dir).await;
-    tokio::fs::write(&upload_dir, b"not-a-dir").await.unwrap();
-
-    let result = append_upload_bytes(root.path(), &session_id, b"data").await;
-    assert!(result.is_err(), "expected error when upload_dir is a file");
-    match result {
-        Err(OciAdapterError::NotFound) => panic!("expected non-NotFound error"),
-        Err(OciAdapterError::Io(_)) => {} // expected
-        Err(other) => panic!("unexpected error: {other:?}"),
-        Ok(_) => panic!("expected error"),
-    }
-}
-
-#[tokio::test]
-async fn delete_upload_session_returns_first_error() {
-    // delete_upload_session: first_error set on non-NotFound error (lines 699-702)
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-
-    // Replace upload directory with a file so deletion of all three paths fails
-    let upload_dir = crate::upload_dir(root.path());
-    let _ = tokio::fs::remove_dir_all(&upload_dir).await;
-    tokio::fs::write(&upload_dir, b"not-a-dir").await.unwrap();
-
-    let result = delete_upload_session(root.path(), &session_id).await;
-    assert!(result.is_err(), "expected error when upload_dir is a file");
-    match result {
-        Err(OciAdapterError::NotFound) => panic!("expected non-NotFound error"),
-        Err(OciAdapterError::Io(_)) => {} // expected
-        Err(other) => panic!("unexpected error: {other:?}"),
-        Ok(_) => panic!("expected error"),
-    }
+    assert_eq!(tokio::fs::read(&upload_dir).await.unwrap(), b"not-a-dir");
 }
 
 #[tokio::test]
