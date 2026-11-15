@@ -910,16 +910,6 @@ fn build_file_records_with_cache(
         verification::verify_file_hash(file_info.metadata.file_hash, members, checkpoint)?;
 
         let sha256 = digest.finish()?;
-        records.push(FileRecord {
-            deduplication_domain: None,
-            file_id: file_id.clone(),
-            content_hash: content_hash(offset, 0, &chunks),
-            total_bytes: offset,
-            chunk_size: 0,
-            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
-            repository_scope: repository_scope.cloned(),
-            chunks,
-        });
         if let (Some(repository_scope), Some(sha256)) = (repository_scope, sha256) {
             shardline_server_core::validate_content_hash_with(&sha256, || {
                 XetAdapterError::InvalidContentHash
@@ -927,10 +917,20 @@ fn build_file_records_with_cache(
             file_identities.push(XetFileIdentity {
                 repository_scope: repository_scope.clone(),
                 sha256,
-                file_id,
+                file_id: file_id.clone(),
                 total_bytes: offset,
             });
         }
+        records.push(FileRecord {
+            deduplication_domain: None,
+            file_id,
+            content_hash: content_hash(offset, 0, &chunks),
+            total_bytes: offset,
+            chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
+            repository_scope: repository_scope.cloned(),
+            chunks,
+        });
     }
 
     Ok((records, file_identities))
