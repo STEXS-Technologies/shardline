@@ -22,8 +22,8 @@ const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
 /// Maximum number of file segments (and, when verification is present, the same
 /// number of verification entries) a single file may declare in its shard
 /// header (`FileDataSequenceHeader::num_entries`). Each entry serializes to
-/// `MDB_FILE_INFO_ENTRY_SIZE` (60) bytes, so this caps a single file's entry
-/// table at ~60 MiB. A valid file's segments are bounded by the shard's xorb
+/// `MDB_FILE_INFO_ENTRY_SIZE` (64) bytes, so this caps a single file's entry
+/// table at 64 MiB. A valid file's segments are bounded by the shard's xorb
 /// count; 1 Mi entries is far beyond any legitimate file. This guards
 /// `Vec::with_capacity` against attacker-inflated counts read from a shard
 /// header before any bound is enforced.
@@ -136,6 +136,22 @@ impl FileDataSequenceHeader {
         } else {
             self.num_entries + num_metadata_ext
         }
+    }
+
+    fn checked_num_entries(&self) -> std::io::Result<usize> {
+        let num_entries = usize::try_from(self.num_entries).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("file num_entries does not fit in usize: {e}"),
+            )
+        })?;
+        if num_entries > MAX_FILE_SEGMENTS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file segment count exceeds maximum",
+            ));
+        }
+        Ok(num_entries)
     }
 }
 
@@ -397,25 +413,23 @@ impl MDBFileInfo {
             return Ok(None);
         }
 
-        let num_entries = usize::try_from(metadata.num_entries).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("file num_entries does not fit in usize: {e}"),
-            )
-        })?;
-        if num_entries > MAX_FILE_SEGMENTS {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "file segment count exceeds maximum",
-            ));
-        }
+        Self::deserialize_body(metadata, reader, version).map(Some)
+    }
+
+    fn deserialize_body<R: Read>(
+        metadata: FileDataSequenceHeader,
+        reader: &mut R,
+        version: u64,
+    ) -> std::io::Result<Self> {
+        let num_entries = metadata.checked_num_entries()?;
         let mut segments = Vec::with_capacity(num_entries);
         for _ in 0..num_entries {
             segments.push(FileDataSequenceEntry::deserialize(reader, version)?);
         }
 
-        let mut verification = Vec::with_capacity(num_entries);
+        let mut verification = Vec::new();
         if metadata.contains_verification() {
+            verification.reserve(num_entries);
             for _ in 0..num_entries {
                 verification.push(FileVerificationEntry::deserialize(reader, version)?);
             }
@@ -425,12 +439,12 @@ impl MDBFileInfo {
             .then(|| FileMetadataExt::deserialize(reader, version))
             .transpose()?;
 
-        Ok(Some(Self {
+        Ok(Self {
             metadata,
             segments,
             verification,
             metadata_ext,
-        }))
+        })
     }
 
     pub fn contains_verification(&self) -> bool {
@@ -458,38 +472,16 @@ impl MDBFileInfoView {
         header: FileDataSequenceHeader,
         data: Bytes,
     ) -> std::io::Result<Self> {
-        let n = header.num_entries as usize;
-        let contains_verification = header.contains_verification();
-        let contains_metadata_ext = header.contains_metadata_ext();
-
-        let n_structs = 1usize
-            .checked_add(n)
-            .and_then(|v| {
-                if contains_verification {
-                    v.checked_add(n)
-                } else {
-                    Some(v)
-                }
-            })
-            .and_then(|v| {
-                if contains_metadata_ext {
-                    v.checked_add(1)
-                } else {
-                    Some(v)
-                }
-            })
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "file entry count overflow")
-            })?;
-
-        if data.len() < n_structs * MDB_FILE_INFO_ENTRY_SIZE {
+        header.checked_num_entries()?;
+        let view = Self { header, data };
+        // The shared segment cap keeps the v3 layout below 129 MiB.
+        if view.data.len() < view.byte_size(true) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "Provided slice too small to read MDBFileInfoView",
             ));
         }
-
-        Ok(Self { header, data })
+        Ok(view)
     }
 
     pub fn header(&self) -> &FileDataSequenceHeader {
@@ -554,26 +546,12 @@ impl MDBFileInfoView {
 
 impl From<&MDBFileInfoView> for MDBFileInfo {
     fn from(view: &MDBFileInfoView) -> Self {
-        let segments: Vec<FileDataSequenceEntry> =
-            (0..view.num_entries()).map(|i| view.entry(i)).collect();
-        let verification = if view.contains_verification() {
-            (0..view.num_entries())
-                .map(|i| view.verification(i))
-                .collect()
-        } else {
-            vec![]
-        };
-        MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(
-                view.file_hash(),
-                segments.len() as u64,
-                view.contains_verification(),
-                view.contains_metadata_ext(),
-            ),
-            segments,
-            verification,
-            metadata_ext: None,
-        }
+        Self::deserialize_body(
+            view.header.clone(),
+            &mut Cursor::new(&view.data[MDB_FILE_INFO_ENTRY_SIZE..]),
+            3,
+        )
+        .expect("validated file view contains a complete body")
     }
 }
 
@@ -989,7 +967,10 @@ mod tests {
 
     #[test]
     fn view_with_verification_and_metadata_ext() {
-        let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, true);
+        let mut header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, true);
+        header.file_flags |= 0x123;
+        header._unused = 42;
+        header._pad = 17;
         let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100, 0, 50);
         let ver = FileVerificationEntry::new(compute_data_hash(b"v"));
         let met = FileMetadataExt::new(compute_data_hash(b"m"));
@@ -1010,6 +991,15 @@ mod tests {
         assert_eq!(e.unpacked_segment_bytes, 100);
         let v = view.verification(0);
         assert_eq!(v.range_hash, compute_data_hash(b"v"));
+        assert_eq!(
+            MDBFileInfo::from(&view),
+            MDBFileInfo {
+                metadata: header,
+                segments: vec![entry],
+                verification: vec![ver],
+                metadata_ext: Some(met),
+            }
+        );
     }
 
     #[test]
@@ -1037,6 +1027,21 @@ mod tests {
             view.byte_size(false),
             (1 + 2) * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE
         );
+    }
+
+    #[test]
+    fn view_rejects_oversized_entry_counts_without_panicking() {
+        for count in [
+            u64::MAX / MDB_FILE_INFO_ENTRY_SIZE as u64,
+            MAX_FILE_SEGMENTS as u64 + 1,
+            u64::MAX,
+        ] {
+            let header = FileDataSequenceHeader::new(MerkleHash::default(), count, false, false);
+            let mut bytes = Vec::new();
+            header.serialize(&mut bytes).unwrap();
+            let error = MDBFileInfoView::new(Bytes::from(bytes)).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
     }
 
     #[test]

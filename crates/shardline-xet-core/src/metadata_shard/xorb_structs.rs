@@ -319,16 +319,8 @@ impl From<&MDBXorbInfoView> for MDBXorbInfo {
     fn from(view: &MDBXorbInfoView) -> Self {
         let chunks: Vec<XorbChunkSequenceEntry> =
             (0..view.num_entries()).map(|i| view.chunk(i)).collect();
-        let total_bytes: u64 = chunks
-            .last()
-            .map(|c| c.chunk_byte_range_start + c.unpacked_segment_bytes)
-            .unwrap_or(0);
         MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(
-                view.xorb_hash(),
-                chunks.len() as u64,
-                total_bytes,
-            ),
+            metadata: view.header.clone(),
             chunks,
         }
     }
@@ -652,13 +644,17 @@ mod tests {
     #[test]
     fn view_into_mdb_xorb_info() {
         let entries = vec![make_entry(50, 0), make_entry(100, 50)];
-        let data = serialize_header_and_entries(&make_header(2, 150), &entries);
+        let mut header = make_header(2, 150);
+        header.xorb_flags = 0x123;
+        header.num_bytes_on_disk = 77;
+        let data = serialize_header_and_entries(&header, &entries);
         let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
         let info: MDBXorbInfo = (&view).into();
         assert_eq!(info.chunks.len(), 2);
         assert_eq!(info.chunks[0].unpacked_segment_bytes, 50);
         assert_eq!(info.chunks[1].unpacked_segment_bytes, 100);
-        assert_eq!(info.metadata.num_bytes_in_xorb, 150);
+        assert_eq!(info.metadata, header);
+        assert_eq!(info.chunks, entries);
     }
 
     #[test]
