@@ -14,13 +14,12 @@ pub(in crate::upload_ingest) struct RecoverableXorbBatch {
 impl RecoverableXorbBatch {
     pub(in crate::upload_ingest) fn new(chunks: Vec<(Vec<u8>, u64)>) -> Self {
         let offsets: Vec<_> = chunks.iter().map(|(_, offset)| *offset).collect();
-        let boundaries = offsets.iter().map(|offset| *offset as usize).collect();
         let data = chunks
             .into_iter()
             .map(|(data, _)| Cow::Owned(data))
             .collect();
         Self {
-            raw: RawXorbData::from_owned_data(data, boundaries),
+            raw: RawXorbData::from_owned_data(data, Vec::new()),
             offsets,
         }
     }

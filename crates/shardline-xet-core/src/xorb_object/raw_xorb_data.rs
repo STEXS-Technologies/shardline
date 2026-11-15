@@ -32,20 +32,10 @@ pub struct RawXorbData {
 
 impl RawXorbData {
     pub fn from_chunks(chunks: &[Chunk], file_boundaries: Vec<usize>) -> Self {
-        let data = chunks.iter().map(|c| c.data.clone()).collect();
-        let chunk_boundaries: Vec<u32> = chunks
-            .iter()
-            .scan(0u32, |acc, chunk| {
-                *acc += chunk.data.len() as u32;
-                Some(*acc)
-            })
-            .collect();
-        let xorb_info = XorbInfo { chunk_boundaries };
-        Self {
-            data,
-            xorb_info,
+        Self::from_owned_data(
+            chunks.iter().map(|chunk| chunk.data.clone()).collect(),
             file_boundaries,
-        }
+        )
     }
 
     /// Builds raw xorb data by taking ownership of the chunk payloads.

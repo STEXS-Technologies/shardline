@@ -352,14 +352,14 @@ mod tests {
 
     #[test]
     fn from_and_into_static_str_covers_all_variants() {
-        for scheme in [
-            CompressionScheme::None,
-            CompressionScheme::LZ4,
-            CompressionScheme::ByteGrouping4LZ4,
-            CompressionScheme::Auto,
+        for (scheme, expected) in [
+            (CompressionScheme::None, "none"),
+            (CompressionScheme::LZ4, "lz4"),
+            (CompressionScheme::ByteGrouping4LZ4, "bg4-lz4"),
+            (CompressionScheme::Auto, "auto"),
         ] {
             let s: &'static str = scheme.into();
-            assert!(!s.is_empty());
+            assert_eq!(s, expected);
             let s_ref: &'static str = (&scheme).into();
             assert_eq!(s, s_ref);
         }
@@ -374,6 +374,7 @@ mod tests {
             (99, CompressionScheme::Auto),
         ] {
             assert_eq!(CompressionScheme::try_from(val).unwrap(), expected);
+            assert_eq!(expected as u8, val);
         }
     }
 
@@ -408,7 +409,7 @@ mod tests {
 
     #[test]
     fn from_str_invalid_values() {
-        for s in ["gzip", "zstd", "lz5", "lz4-hc", "bg4", "unknown"] {
+        for s in ["gzip", "zstd", "lz5", "lz4-hc", "bg4", "unknown", "garbage"] {
             assert!(
                 s.parse::<CompressionScheme>().is_err(),
                 "should fail for: {s}"
@@ -532,8 +533,9 @@ mod tests {
     fn compress_none_uses_cow_borrowed() {
         let data = b"no compression test data";
         let compressed = CompressionScheme::None.compress_from_slice(data).unwrap();
-        // None scheme returns borrowed Cow
+        // None scheme returns the original bytes without copying.
         assert!(matches!(compressed, Cow::Borrowed(_)));
+        assert_eq!(compressed.as_ref(), data);
     }
 
     #[test]
