@@ -684,7 +684,7 @@ where
                     .saturating_sub(u64::try_from(data.len()).unwrap_or(u64::MAX));
                 std::task::Poll::Ready(Some(Ok(http_body::Frame::data(data))))
             }
-            std::task::Poll::Ready(Some(Err(error))) => std::task::Poll::Ready(Some(Err(error))),
+            std::task::Poll::Ready(Some(Err(error))) => match error {},
             std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }

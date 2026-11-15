@@ -57,7 +57,7 @@ pub const fn validate_chunk_size(chunk_size: NonZeroUsize) -> Result<(), ServerC
     if chunk_size.get() > MAX_TARGET_CHUNK_SIZE {
         return Err(ServerConfigError::ChunkSizeTooLarge);
     }
-    if !chunk_size.get().is_power_of_two() {
+    if !chunk_size.is_power_of_two() {
         return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
     }
     Ok(())

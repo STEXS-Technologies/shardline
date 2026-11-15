@@ -2204,7 +2204,7 @@ fn server_config_default_chunk_size_is_power_of_two() {
     );
     // The env default is "64KiB" (65536), a power of two required by the CDC
     // chunker; the builder default must stay power-of-two too.
-    assert!(config.chunk_size().get().is_power_of_two());
+    assert!(config.chunk_size().is_power_of_two());
     config.validate_runtime_requirements().unwrap();
 }
 

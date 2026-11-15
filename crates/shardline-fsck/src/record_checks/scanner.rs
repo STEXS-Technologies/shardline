@@ -363,7 +363,7 @@ pub(crate) fn inspect_chunks(
                 push_issue(
                     report,
                     FsckIssueKind::MissingChunk,
-                    chunk_location.clone(),
+                    chunk_location,
                     FsckIssueDetail::ReferencedByRecord {
                         record_location: record_location.to_owned(),
                     },

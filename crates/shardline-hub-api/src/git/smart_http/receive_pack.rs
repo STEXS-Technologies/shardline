@@ -175,7 +175,7 @@ pub async fn receive_pack(
                 } else {
                     Ok(HubRefChange {
                         ref_name: refname.clone(),
-                        expected_sha: Some(resolved_old.clone()),
+                        expected_sha: Some(resolved_old),
                         new_sha: None,
                         message: String::new(),
                     })

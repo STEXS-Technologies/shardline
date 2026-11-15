@@ -1853,7 +1853,7 @@ pub(super) async fn create_upload_intent_in_transaction(
                     let mut repaired_commits = Vec::with_capacity(repaired_rows.len());
                     for row in repaired_rows {
                         let value: serde_json::Value = row.try_get("event_json")?;
-                        repaired_events.push(value.clone());
+                        repaired_events.push(value);
                         repaired_commits.push(row.try_get("merkle_commit_json")?);
                     }
                     verify_persisted_event_merkle_chain(
