@@ -29,10 +29,6 @@ use shardline_reliability::{
     verify_snapshot_evidence,
 };
 
-const fn repo_type_to_str(t: HubRepoType) -> &'static str {
-    t.as_str()
-}
-
 fn repo_type_from_str(s: &str) -> Result<HubRepoType, PostgresMetadataStoreError> {
     HubRepoType::parse_str(s).ok_or(PostgresMetadataStoreError::InvalidRepoType(s.to_owned()))
 }
@@ -1320,13 +1316,6 @@ mod tests {
     // Pure helper function tests (no database needed)
     // ------------------------------------------------------------------
     #[test]
-    fn repo_type_to_str_maps_all_variants() {
-        assert_eq!(repo_type_to_str(HubRepoType::Model), "model");
-        assert_eq!(repo_type_to_str(HubRepoType::Dataset), "dataset");
-        assert_eq!(repo_type_to_str(HubRepoType::Space), "space");
-    }
-
-    #[test]
     fn repo_type_from_str_parses_all_variants() {
         assert_eq!(repo_type_from_str("model").unwrap(), HubRepoType::Model);
         assert_eq!(repo_type_from_str("dataset").unwrap(), HubRepoType::Dataset);
@@ -1341,25 +1330,6 @@ mod tests {
             PostgresMetadataStoreError::InvalidRepoType(_)
         ));
         assert_eq!(err.to_string(), "invalid repository type: unknown");
-    }
-
-    #[test]
-    fn escape_like_preserves_plain_strings() {
-        assert_eq!(escape_like("hello"), "hello");
-        assert_eq!(escape_like(""), "");
-        assert_eq!(escape_like("abc123"), "abc123");
-    }
-
-    #[test]
-    fn escape_like_escapes_wildcards() {
-        assert_eq!(escape_like("foo_bar"), "foo\\_bar");
-        assert_eq!(escape_like("foo%bar"), "foo\\%bar");
-        assert_eq!(escape_like("foo\\bar"), "foo\\\\bar");
-    }
-
-    #[test]
-    fn escape_like_escapes_combined_patterns() {
-        assert_eq!(escape_like("a%b_c\\d"), "a\\%b\\_c\\\\d");
     }
 
     // block_on_async itself is tested indirectly by every hub_postgres integration

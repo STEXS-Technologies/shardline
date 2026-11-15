@@ -25,7 +25,7 @@ pub(super) fn create(
             "INSERT INTO shardline_hub_repos(repo_id,repo_type,private,default_branch,created_at_unix_seconds,updated_at_unix_seconds,creation_authorized,creation_issuer,creation_subject)
              VALUES ($1,$2,$3,$4,EXTRACT(EPOCH FROM now())::bigint,EXTRACT(EPOCH FROM now())::bigint,$5,$6,$7)
              RETURNING created_at_unix_seconds,updated_at_unix_seconds",
-        ).bind(name).bind(super::repo_type_to_str(repo_type)).bind(private).bind(initial_sha).bind(authorized)
+        ).bind(name).bind(repo_type.as_str()).bind(private).bind(initial_sha).bind(authorized)
             .bind(actor.map(|a| a.issuer.as_str())).bind(actor.map(|a| a.subject.as_str()))
             .fetch_one(&mut *tx).await?;
         sqlx::query(

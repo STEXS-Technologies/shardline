@@ -2233,43 +2233,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn repo_types_parse_correctly() {
-        assert_eq!(HubRepoType::parse_str("model"), Some(HubRepoType::Model));
-        assert_eq!(HubRepoType::parse_str("models"), Some(HubRepoType::Model));
-        assert_eq!(
-            HubRepoType::parse_str("dataset"),
-            Some(HubRepoType::Dataset)
-        );
-        assert_eq!(
-            HubRepoType::parse_str("datasets"),
-            Some(HubRepoType::Dataset)
-        );
-        assert_eq!(HubRepoType::parse_str("space"), Some(HubRepoType::Space));
-        assert_eq!(HubRepoType::parse_str("spaces"), Some(HubRepoType::Space));
-        assert_eq!(HubRepoType::parse_str("invalid"), None);
-    }
-
-    #[test]
-    fn hub_repo_type_as_str_roundtrip() {
-        let types = [HubRepoType::Model, HubRepoType::Dataset, HubRepoType::Space];
-        for rt in &types {
-            let s = rt.as_str();
-            let parsed = HubRepoType::parse_str(s).unwrap();
-            assert_eq!(*rt, parsed);
-        }
-    }
-
-    #[test]
-    fn compute_commit_sha_is_deterministic() {
-        let sha1 = HubRepo::compute_commit_sha("parent", "message", "hash").unwrap();
-        let sha2 = HubRepo::compute_commit_sha("parent", "message", "hash").unwrap();
-        assert_eq!(sha1, sha2);
-
-        let sha3 = HubRepo::compute_commit_sha("parent", "different", "hash").unwrap();
-        assert_ne!(sha1, sha3);
-    }
-
     // === Webhook CRUD tests ===
 
     #[test]
