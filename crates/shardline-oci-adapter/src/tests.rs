@@ -2098,6 +2098,22 @@ async fn upload_operations_preserve_io_errors_when_upload_directory_is_a_file() 
             "delete",
             delete_upload_session(root.path(), &session_id).await,
         ),
+        (
+            "count",
+            super::count_active_upload_sessions(root.path(), ttl())
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "purge",
+            purge_expired_upload_sessions::<TestBackend>(
+                root.path(),
+                NO_BACKEND,
+                ttl(),
+                crate::fs::unix_now_seconds_checked().unwrap(),
+            )
+            .await,
+        ),
     ] {
         assert!(
             matches!(result, Err(OciAdapterError::Io(_))),
@@ -2139,24 +2155,6 @@ async fn canonical_key_matches_object_key() {
 }
 
 // ── count_active_upload_sessions branch tests ────────────────────────────
-
-#[tokio::test]
-async fn count_active_sessions_read_dir_error() {
-    // count_active_upload_sessions: read_dir fails with non-NotFound error (line 940)
-    let root = temp_root();
-    // Create a file at the upload_dir path so read_dir fails with ENOTDIR or similar
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(root.path().join("oci-uploads"))
-        .await
-        .unwrap();
-    // Remove the directory and replace with a file
-    let _ = tokio::fs::remove_dir(&upload_dir).await;
-    tokio::fs::write(&upload_dir, b"not-a-directory")
-        .await
-        .unwrap();
-    let result = super::count_active_upload_sessions(root.path(), ttl()).await;
-    assert!(result.is_err(), "expected error when upload_dir is a file");
-}
 
 #[tokio::test]
 async fn count_active_sessions_skips_unreadable_invalid_and_expired_metadata() {
@@ -2307,28 +2305,6 @@ async fn purge_expired_s3_multipart_abort() {
 
     // The S3 multipart upload should have been aborted
     backend.assert_aborted(&upload_id);
-}
-
-#[tokio::test]
-async fn purge_expired_read_dir_error() {
-    // purge_expired_upload_sessions: read_dir fails with non-NotFound error (line 995)
-    let root = temp_root();
-    // Create a file at the upload_dir path so read_dir fails
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(root.path().join("oci-uploads"))
-        .await
-        .unwrap();
-    let _ = tokio::fs::remove_dir(&upload_dir).await;
-    tokio::fs::write(&upload_dir, b"not-a-directory")
-        .await
-        .unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let result =
-        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now).await;
-    assert!(result.is_err(), "expected error when upload_dir is a file");
 }
 
 // ── write_upload_tail non-NotFound IO error (line 1163) ───────────────────
