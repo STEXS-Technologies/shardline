@@ -1627,6 +1627,40 @@ impl MemoryRecordStore {
         Ok(())
     }
 
+    fn visit_records<VisitorError>(
+        &self,
+        kind: MemoryRecordKind,
+        repository: Option<&RepositoryRecordScope>,
+        mut visitor: impl FnMut(StoredRecord<MemoryRecordLocator>) -> Result<(), VisitorError>,
+    ) -> Result<(), VisitorError>
+    where
+        MemoryRecordStoreError: Into<VisitorError>,
+    {
+        // Capture one ordered snapshot and release the lock before callbacks.
+        let records = {
+            let state = self.lock_state().map_err(Into::into)?;
+            let records = match kind {
+                MemoryRecordKind::Latest => &state.latest_records,
+                MemoryRecordKind::Version => &state.version_records,
+            };
+            records
+                .iter()
+                .filter(|(locator, _)| {
+                    repository.is_none_or(|repository| locator.matches_repository(repository))
+                })
+                .map(|(locator, entry)| StoredRecord {
+                    locator: locator.clone(),
+                    bytes: entry.bytes.clone(),
+                    modified_since_epoch: entry.modified_since_epoch,
+                })
+                .collect::<Vec<_>>()
+        };
+        for record in records {
+            visitor(record)?;
+        }
+        Ok(())
+    }
+
     fn lock_state(&self) -> Result<MutexGuard<'_, MemoryRecordState>, MemoryRecordStoreError> {
         self.state
             .lock()
@@ -1653,7 +1687,7 @@ impl RecordTraversal for MemoryRecordStore {
 
     fn visit_latest_records<'operation, Visitor, VisitorError>(
         &'operation self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> RecordStoreFuture<'operation, (), VisitorError>
     where
         Self: Sync,
@@ -1661,24 +1695,7 @@ impl RecordTraversal for MemoryRecordStore {
         Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let records = self
-                .lock_state()
-                .map_err(Into::into)?
-                .latest_records
-                .iter()
-                .map(|(locator, entry)| StoredRecord {
-                    locator: locator.clone(),
-                    bytes: entry.bytes.clone(),
-                    modified_since_epoch: entry.modified_since_epoch,
-                })
-                .collect::<Vec<_>>();
-            for record in records {
-                visitor(record)?;
-            }
-
-            Ok(())
-        })
+        Box::pin(async move { self.visit_records(MemoryRecordKind::Latest, None, visitor) })
     }
 
     fn list_version_record_locators(
@@ -1712,7 +1729,7 @@ impl RecordTraversal for MemoryRecordStore {
     fn visit_repository_latest_records<'operation, Visitor, VisitorError>(
         &'operation self,
         repository: &'operation RepositoryRecordScope,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> RecordStoreFuture<'operation, (), VisitorError>
     where
         Self: Sync,
@@ -1720,25 +1737,9 @@ impl RecordTraversal for MemoryRecordStore {
         Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let records = self
-                .lock_state()
-                .map_err(Into::into)?
-                .latest_records
-                .iter()
-                .filter(|(locator, _entry)| locator.matches_repository(repository))
-                .map(|(locator, entry)| StoredRecord {
-                    locator: locator.clone(),
-                    bytes: entry.bytes.clone(),
-                    modified_since_epoch: entry.modified_since_epoch,
-                })
-                .collect::<Vec<_>>();
-            for record in records {
-                visitor(record)?;
-            }
-
-            Ok(())
-        })
+        Box::pin(
+            async move { self.visit_records(MemoryRecordKind::Latest, Some(repository), visitor) },
+        )
     }
 
     fn list_repository_version_record_locators<'operation>(
@@ -1758,7 +1759,7 @@ impl RecordTraversal for MemoryRecordStore {
 
     fn visit_version_records<'operation, Visitor, VisitorError>(
         &'operation self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> RecordStoreFuture<'operation, (), VisitorError>
     where
         Self: Sync,
@@ -1766,30 +1767,13 @@ impl RecordTraversal for MemoryRecordStore {
         Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let records = self
-                .lock_state()
-                .map_err(Into::into)?
-                .version_records
-                .iter()
-                .map(|(locator, entry)| StoredRecord {
-                    locator: locator.clone(),
-                    bytes: entry.bytes.clone(),
-                    modified_since_epoch: entry.modified_since_epoch,
-                })
-                .collect::<Vec<_>>();
-            for record in records {
-                visitor(record)?;
-            }
-
-            Ok(())
-        })
+        Box::pin(async move { self.visit_records(MemoryRecordKind::Version, None, visitor) })
     }
 
     fn visit_repository_version_records<'operation, Visitor, VisitorError>(
         &'operation self,
         repository: &'operation RepositoryRecordScope,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> RecordStoreFuture<'operation, (), VisitorError>
     where
         Self: Sync,
@@ -1797,25 +1781,9 @@ impl RecordTraversal for MemoryRecordStore {
         Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let records = self
-                .lock_state()
-                .map_err(Into::into)?
-                .version_records
-                .iter()
-                .filter(|(locator, _entry)| locator.matches_repository(repository))
-                .map(|(locator, entry)| StoredRecord {
-                    locator: locator.clone(),
-                    bytes: entry.bytes.clone(),
-                    modified_since_epoch: entry.modified_since_epoch,
-                })
-                .collect::<Vec<_>>();
-            for record in records {
-                visitor(record)?;
-            }
-
-            Ok(())
-        })
+        Box::pin(
+            async move { self.visit_records(MemoryRecordKind::Version, Some(repository), visitor) },
+        )
     }
 
     fn read_record_bytes<'operation>(
@@ -1961,7 +1929,7 @@ pub enum MemoryRecordStoreError {
     Json(#[from] SerdeJsonError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum MemoryRecordKind {
     Latest,
     Version,
@@ -2824,37 +2792,94 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_record_store_visit_latest_records() {
-        let store = MemoryRecordStore::new();
-        let record = scoped_file_record().unwrap();
-        store.write_latest_record(&record).await.unwrap();
-
-        let mut visited = Vec::new();
-        store
-            .visit_latest_records(|stored| {
-                visited.push(stored);
-                Ok::<(), MemoryRecordStoreError>(())
-            })
-            .await
-            .unwrap();
-        assert_eq!(visited.len(), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_record_store_visit_version_records() {
-        let store = MemoryRecordStore::new();
-        let record = scoped_file_record().unwrap();
-        store.insert_version_record(&record).unwrap();
-
-        let mut visited = Vec::new();
-        store
-            .visit_version_records(|stored| {
-                visited.push(stored);
-                Ok::<(), MemoryRecordStoreError>(())
-            })
-            .await
-            .unwrap();
-        assert_eq!(visited.len(), 1);
+    async fn memory_record_visitors_preserve_scope_snapshot_and_callback_contract() {
+        for (version, scoped) in [(false, false), (false, true), (true, false), (true, true)] {
+            for stop_on_first in [false, true] {
+                let store = MemoryRecordStore::new();
+                for (provider, owner, name, revision) in [
+                    (Some(RepositoryProvider::GitHub), "team", "assets", "main"),
+                    (Some(RepositoryProvider::GitHub), "team", "assets", "dev"),
+                    (Some(RepositoryProvider::GitHub), "other", "assets", "main"),
+                    (Some(RepositoryProvider::GitHub), "team", "other", "main"),
+                    (Some(RepositoryProvider::Gitea), "team", "assets", "main"),
+                    (None, "", "", ""),
+                ] {
+                    let mut record = scoped_file_record().unwrap();
+                    record.repository_scope = provider.map(|provider| {
+                        RepositoryScope::new(provider, owner, name, Some(revision)).unwrap()
+                    });
+                    store.write_latest_record(&record).await.unwrap();
+                    store.insert_version_record(&record).unwrap();
+                }
+                let repository =
+                    RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
+                let locators = match (version, scoped) {
+                    (false, false) => store.list_latest_record_locators().await,
+                    (false, true) => {
+                        store
+                            .list_repository_latest_record_locators(&repository)
+                            .await
+                    }
+                    (true, false) => store.list_version_record_locators().await,
+                    (true, true) => {
+                        store
+                            .list_repository_version_record_locators(&repository)
+                            .await
+                    }
+                }
+                .unwrap();
+                assert_eq!(locators.len(), if scoped { 2 } else { 6 });
+                let mut expected = Vec::new();
+                for locator in locators {
+                    expected.push(crate::StoredRecord {
+                        bytes: store.read_record_bytes(&locator).await.unwrap(),
+                        modified_since_epoch: store.modified_since_epoch(&locator).await.unwrap(),
+                        locator,
+                    });
+                }
+                let last = expected.last().unwrap();
+                let locator = last.locator.clone();
+                let mut changed: FileRecord = serde_json::from_slice(&last.bytes).unwrap();
+                changed.total_bytes = 999;
+                let mut visited = Vec::new();
+                let mut visitor = |stored| {
+                    // A callback can overwrite a later row without changing this snapshot.
+                    store
+                        .insert_record(locator.clone(), serde_json::to_vec(&changed).unwrap())
+                        .unwrap();
+                    visited.push(stored);
+                    if stop_on_first {
+                        Err(MemoryRecordStoreError::RecordNotFound)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let result = match (version, scoped) {
+                    (false, false) => store.visit_latest_records(&mut visitor).await,
+                    (false, true) => {
+                        store
+                            .visit_repository_latest_records(&repository, &mut visitor)
+                            .await
+                    }
+                    (true, false) => store.visit_version_records(&mut visitor).await,
+                    (true, true) => {
+                        store
+                            .visit_repository_version_records(&repository, &mut visitor)
+                            .await
+                    }
+                };
+                if stop_on_first {
+                    assert!(matches!(
+                        result,
+                        Err(MemoryRecordStoreError::RecordNotFound)
+                    ));
+                    expected.truncate(1);
+                } else {
+                    result.unwrap();
+                }
+                assert_eq!(visited, expected);
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2891,58 +2916,6 @@ mod tests {
             .unwrap();
         assert_eq!(visited.len(), 1);
         assert_eq!(visited[0], store.version_record_locator(&record));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_record_store_visit_repository_latest_records() {
-        let store = MemoryRecordStore::new();
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        let scope = scope.unwrap();
-        let record = file_record_with_scope(scope, "a");
-        store.write_latest_record(&record).await.unwrap();
-
-        let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
-
-        // list_repository_latest_record_locators
-        let locators = store
-            .list_repository_latest_record_locators(&repository)
-            .await
-            .unwrap();
-        assert_eq!(locators.len(), 1);
-
-        // visit_repository_latest_records
-        let mut visited = Vec::new();
-        store
-            .visit_repository_latest_records(&repository, |stored| {
-                visited.push(stored);
-                Ok::<(), MemoryRecordStoreError>(())
-            })
-            .await
-            .unwrap();
-        assert_eq!(visited.len(), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_record_store_visit_repository_version_records() {
-        let store = MemoryRecordStore::new();
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        let scope = scope.unwrap();
-        let record = file_record_with_scope(scope, "a");
-        store.insert_version_record(&record).unwrap();
-
-        let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
-
-        let mut visited = Vec::new();
-        store
-            .visit_repository_version_records(&repository, |stored| {
-                visited.push(stored);
-                Ok::<(), MemoryRecordStoreError>(())
-            })
-            .await
-            .unwrap();
-        assert_eq!(visited.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
