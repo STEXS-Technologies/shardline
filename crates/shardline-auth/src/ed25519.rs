@@ -156,16 +156,8 @@ fn parse_verifying_keys(bytes: &[u8]) -> Result<Vec<VerifyingKey>, AuthError> {
     enforce_verifying_key_limit(encoded_keys.len())?;
     let mut keys = Vec::with_capacity(encoded_keys.len());
     for encoded in encoded_keys {
-        let decoded = hex::decode(encoded).map_err(|error| {
-            AuthError::ProviderError(format!("invalid Ed25519 hexadecimal key: {error}"))
-        })?;
-        let key = parse_raw_verifying_key(&decoded)?;
-        if key.is_weak() {
-            return Err(AuthError::ProviderError(
-                "Ed25519 public key must not be a weak small-order point".to_owned(),
-            ));
-        }
-        if !keys.iter().any(|existing: &VerifyingKey| existing == &key) {
+        let key = parse_verifying_key(encoded.as_bytes())?;
+        if !keys.contains(&key) {
             keys.push(key);
         }
     }
@@ -177,7 +169,7 @@ fn append_unique_verifying_keys(
     additional: Vec<VerifyingKey>,
 ) {
     for key in additional {
-        if !destination.iter().any(|existing| existing == &key) {
+        if !destination.contains(&key) {
             destination.push(key);
         }
     }
@@ -616,8 +608,29 @@ mod tests {
 
     #[test]
     fn rejects_weak_public_key() {
-        let error = Ed25519AuthProvider::with_public_key(&[0_u8; 32]).unwrap_err();
-        assert!(error.to_string().contains("weak"));
+        let raw = [0_u8; 32];
+        let hex = hex::encode(raw);
+        let pem = VerifyingKey::from_bytes(&raw)
+            .unwrap()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let ring = format!(
+            "{}\n{hex}",
+            hex::encode(
+                SigningKey::from_bytes(&test_seed())
+                    .verifying_key()
+                    .to_bytes()
+            )
+        );
+        for (format, bytes) in [
+            ("raw", raw.as_slice()),
+            ("hex", hex.as_bytes()),
+            ("PEM", pem.as_bytes()),
+            ("key ring", ring.as_bytes()),
+        ] {
+            let error = Ed25519AuthProvider::with_public_key(bytes).unwrap_err();
+            assert!(error.to_string().contains("weak"), "{format}: {error}");
+        }
     }
 
     #[test]
