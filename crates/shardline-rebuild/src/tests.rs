@@ -173,7 +173,7 @@ fn desired_reconstruction_file_ids_includes_valid_xet_hash() {
     let valid_hash = "a".repeat(64);
     let candidates = vec![make_candidate_with_file_id(&valid_hash)];
     let result = desired_reconstruction_file_ids(&candidates);
-    assert!(result.contains(&valid_hash));
+    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&valid_hash).unwrap()));
     assert_eq!(result.len(), 1);
 }
 
@@ -187,7 +187,7 @@ fn desired_reconstruction_file_ids_filters_non_hash_file_ids() {
     ];
     let result = desired_reconstruction_file_ids(&candidates);
     assert_eq!(result.len(), 1);
-    assert!(result.contains(&valid_hash));
+    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&valid_hash).unwrap()));
 }
 
 #[test]
@@ -215,9 +215,9 @@ fn desired_reconstruction_file_ids_multiple_unique_hashes() {
     ];
     let result = desired_reconstruction_file_ids(&candidates);
     assert_eq!(result.len(), 3);
-    assert!(result.contains(&hash1));
-    assert!(result.contains(&hash2));
-    assert!(result.contains(&hash3));
+    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&hash1).unwrap()));
+    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&hash2).unwrap()));
+    assert!(result.contains(&shardline_index::parse_xet_hash_hex(&hash3).unwrap()));
 }
 
 // ---- RebuildError From conversions ----
@@ -279,7 +279,7 @@ async fn prune_stale_reconstructions_returns_early_when_report_is_dirty() {
     use shardline_index::MemoryIndexStore;
 
     let index_store = MemoryIndexStore::new();
-    let desired = HashSet::from(["a".repeat(64)]);
+    let desired = HashSet::from([shardline_index::parse_xet_hash_hex(&"a".repeat(64)).unwrap()]);
 
     let mut report = empty_report();
     push_issue(
@@ -1095,10 +1095,7 @@ async fn prune_stale_reconstructions_preserves_desired() {
     index_store
         .insert_reconstruction(&file_id, &reconstruction)
         .unwrap();
-    // file_id_hex for ShardlineHash::from_bytes([3; 32])
-    let file_id_hex = format!("{:02x}", 3).repeat(64 / 2);
-    let mut desired = HashSet::new();
-    desired.insert(file_id_hex.clone());
+    let desired = HashSet::from([file_id.hash()]);
 
     let mut report = empty_report();
 

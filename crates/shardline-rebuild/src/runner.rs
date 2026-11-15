@@ -3,8 +3,8 @@ use std::hash::Hash;
 
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, RecordMutation, RecordTraversal, parse_xet_hash_hex,
-    xet_hash_hex_string,
 };
+use shardline_protocol::ShardlineHash;
 use shardline_server_core::{
     OpsRecordStore, ServerObjectStore, ShardMetadataLimits, checked_increment,
 };
@@ -149,24 +149,20 @@ where
 
 pub(super) fn desired_reconstruction_file_ids<'record, Locator, Records>(
     records: Records,
-) -> HashSet<String>
+) -> HashSet<ShardlineHash>
 where
     Records: IntoIterator<Item = &'record VersionCandidate<Locator>>,
     Locator: 'record,
 {
     records
         .into_iter()
-        .filter_map(|candidate| {
-            parse_xet_hash_hex(&candidate.record.file_id)
-                .ok()
-                .map(xet_hash_hex_string)
-        })
+        .filter_map(|candidate| parse_xet_hash_hex(&candidate.record.file_id).ok())
         .collect::<HashSet<_>>()
 }
 
 pub(super) async fn prune_stale_reconstructions<IndexAdapter>(
     index_store: &IndexAdapter,
-    desired_reconstructions: &HashSet<String>,
+    desired_reconstructions: &HashSet<ShardlineHash>,
     report: &mut IndexRebuildReport,
 ) -> Result<(), RebuildError>
 where
@@ -183,8 +179,7 @@ where
         .map_err(Into::into)?;
     for file_id in existing_file_ids {
         report.scanned_reconstructions = checked_increment(report.scanned_reconstructions)?;
-        let file_id_hex = xet_hash_hex_string(file_id.hash());
-        if desired_reconstructions.contains(&file_id_hex) {
+        if desired_reconstructions.contains(&file_id.hash()) {
             report.unchanged_reconstructions = checked_increment(report.unchanged_reconstructions)?;
             continue;
         }
@@ -221,7 +216,7 @@ where
 {
     let prefix =
         ObjectPrefix::parse("shards/").map_err(|_error| RebuildError::InvalidContentHash)?;
-    let mut desired = HashMap::<String, DedupeShardMapping>::new();
+    let mut desired = HashMap::<ShardlineHash, DedupeShardMapping>::new();
     let issue_count_before_scan = report.issue_count();
 
     object_store.visit_prefix(&prefix, |metadata| -> Result<(), RebuildError> {
@@ -253,14 +248,14 @@ where
             };
 
         for chunk_hash_hex in chunk_hashes {
-            let mapping =
-                DedupeShardMapping::new(parse_xet_hash_hex(&chunk_hash_hex)?, shard_key.clone());
-            match desired.get(&chunk_hash_hex) {
+            let chunk_hash = parse_xet_hash_hex(&chunk_hash_hex)?;
+            let mapping = DedupeShardMapping::new(chunk_hash, shard_key.clone());
+            match desired.get(&chunk_hash) {
                 Some(existing)
                     if existing.shard_object_key().as_str()
                         <= mapping.shard_object_key().as_str() => {}
                 _ => {
-                    desired.insert(chunk_hash_hex, mapping);
+                    desired.insert(chunk_hash, mapping);
                 }
             }
         }
@@ -274,13 +269,13 @@ where
     let mut existing = HashMap::new();
     index_store
         .visit_dedupe_shard_mappings(|mapping| {
-            existing.insert(xet_hash_hex_string(mapping.chunk_hash()), mapping);
+            existing.insert(mapping.chunk_hash(), mapping);
             Ok::<(), RebuildError>(())
         })
         .await?;
 
-    for (chunk_hash_hex, mapping) in &desired {
-        match existing.get(chunk_hash_hex) {
+    for (chunk_hash, mapping) in &desired {
+        match existing.get(chunk_hash) {
             Some(existing_mapping)
                 if existing_mapping.shard_object_key() == mapping.shard_object_key() =>
             {
@@ -302,8 +297,8 @@ where
     // and deletion. Server entry points hold that barrier; generic store callers
     // provide their own ownership so a concurrent shard publication cannot be
     // removed using an older inventory.
-    for (chunk_hash_hex, mapping) in existing {
-        if desired.contains_key(&chunk_hash_hex) {
+    for (chunk_hash, mapping) in existing {
+        if desired.contains_key(&chunk_hash) {
             continue;
         }
 
