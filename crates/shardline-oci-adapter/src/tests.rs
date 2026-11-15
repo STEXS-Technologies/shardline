@@ -2363,62 +2363,52 @@ async fn purge_expired_read_error_is_preserved_with_permission_denied() {
     );
 }
 
-// ── Unix anchored-file closure coverage (path-escape closures) ────────────
-// These test the error-factory closures passed to open_anchored_target.
-// They are only invoked when the path escapes the root.
-
-#[cfg(unix)]
-#[test]
-fn open_anchored_file_rejects_escaped_path() {
-    let root = temp_root();
-    let escaped = root.path().join("../../../etc/passwd");
-    let result = super::open_anchored_file(root.path(), &escaped);
-    assert!(result.is_err(), "path escaping root should be rejected");
-}
-
-#[cfg(unix)]
-#[test]
-fn read_file_anchored_rejects_escaped_path() {
-    let root = temp_root();
-    let escaped = root.path().join("../../../etc/hostname");
-    let result = super::read_file_anchored(root.path(), &escaped);
-    assert!(result.is_err(), "path escaping root should be rejected");
-}
-
-#[cfg(unix)]
-#[test]
-fn delete_file_anchored_rejects_escaped_path() {
-    let root = temp_root();
-    let escaped = root.path().join("../../../tmp/escape");
-    let result = super::delete_file_anchored(root.path(), &escaped);
-    assert!(result.is_err(), "path escaping root should be rejected");
-}
-
-#[cfg(unix)]
-#[test]
-fn append_file_anchored_rejects_escaped_path() {
-    let root = temp_root();
-    let escaped = root.path().join("../../../tmp/escape");
-    let result = super::append_file_anchored(root.path(), &escaped, b"data");
-    assert!(result.is_err(), "path escaping root should be rejected");
-}
-
 #[cfg(unix)]
 #[tokio::test]
-async fn upload_file_len_async_rejects_escaped_path() {
+async fn anchored_file_operations_reject_escape_without_touching_outside_content() {
     let root = temp_root();
-    let escaped = root.path().join("../../../etc/passwd");
-    let result = super::upload_file_len_async(root.path(), &escaped).await;
-    assert!(result.is_err(), "path escaping root should be rejected");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn upload_file_exists_async_rejects_escaped_path() {
-    let root = temp_root();
-    let escaped = root.path().join("../../../etc/passwd");
-    let result = super::upload_file_exists_async(root.path(), &escaped).await;
-    assert!(result.is_err(), "path escaping root should be rejected");
+    let outside = temp_root();
+    let sentinel = outside.path().join("sentinel");
+    std::fs::write(&sentinel, b"unchanged").unwrap();
+    for escaped in [
+        sentinel.clone(),
+        root.path()
+            .join("..")
+            .join(outside.path().file_name().unwrap())
+            .join("sentinel"),
+    ] {
+        for (operation, result) in [
+            (
+                "open",
+                super::open_anchored_file(root.path(), &escaped).map(|_| ()),
+            ),
+            (
+                "read",
+                super::read_file_anchored(root.path(), &escaped).map(|_| ()),
+            ),
+            ("delete", super::delete_file_anchored(root.path(), &escaped)),
+            (
+                "append",
+                super::append_file_anchored(root.path(), &escaped, b"data").map(|_| ()),
+            ),
+            (
+                "length",
+                super::upload_file_len_async(root.path(), &escaped)
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "exists",
+                super::upload_file_exists_async(root.path(), &escaped).await,
+            ),
+        ] {
+            assert!(
+                matches!(result, Err(ref error) if error.kind() == std::io::ErrorKind::InvalidInput),
+                "{operation}: {result:?}"
+            );
+        }
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+    }
 }
 
 #[tokio::test]
