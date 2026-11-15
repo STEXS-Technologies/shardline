@@ -96,23 +96,20 @@ pub async fn run_local_gc_diagnostics(
     let object_store = ServerObjectStore::local(root.join("chunks"))?;
     let index_store = LocalIndexStore::open(root.clone());
     let record_store = LocalRecordStore::open(root);
-    let result = run_gc_with_stores(
+    let diagnostics = run_gc_with_stores(
         &record_store,
         &index_store,
         &object_store,
         &[ServerFrontend::Xet],
         options,
     )
-    .await;
-    if let Ok(ref diagnostics) = result {
-        let elapsed = start.elapsed();
-        shardline_metrics::record_gc_run(
-            elapsed,
-            diagnostics.report.deleted_chunks,
-            diagnostics.report.deleted_bytes,
-        );
-    }
-    result
+    .await?;
+    shardline_metrics::record_gc_run(
+        start.elapsed(),
+        diagnostics.report.deleted_chunks,
+        diagnostics.report.deleted_bytes,
+    );
+    Ok(diagnostics)
 }
 
 /// Runs garbage collection against provided record, index, and object stores.
@@ -864,26 +861,18 @@ pub(crate) fn orphan_inventory_entry(
     orphan: &OrphanObject,
     candidate: Option<&QuarantineCandidate>,
 ) -> GcOrphanInventoryEntry {
-    let object_key = orphan.object_key.as_str().to_owned();
-    match candidate {
-        Some(candidate) => GcOrphanInventoryEntry {
-            hash: orphan.hash.clone(),
-            object_key,
-            bytes: orphan.bytes,
-            quarantine_state: GcOrphanQuarantineState::Quarantined,
-            first_seen_unreachable_at_unix_seconds: Some(
-                candidate.first_seen_unreachable_at_unix_seconds(),
-            ),
-            delete_after_unix_seconds: Some(candidate.delete_after_unix_seconds()),
+    GcOrphanInventoryEntry {
+        hash: orphan.hash.clone(),
+        object_key: orphan.object_key.as_str().to_owned(),
+        bytes: orphan.bytes,
+        quarantine_state: if candidate.is_some() {
+            GcOrphanQuarantineState::Quarantined
+        } else {
+            GcOrphanQuarantineState::Untracked
         },
-        None => GcOrphanInventoryEntry {
-            hash: orphan.hash.clone(),
-            object_key,
-            bytes: orphan.bytes,
-            quarantine_state: GcOrphanQuarantineState::Untracked,
-            first_seen_unreachable_at_unix_seconds: None,
-            delete_after_unix_seconds: None,
-        },
+        first_seen_unreachable_at_unix_seconds: candidate
+            .map(QuarantineCandidate::first_seen_unreachable_at_unix_seconds),
+        delete_after_unix_seconds: candidate.map(QuarantineCandidate::delete_after_unix_seconds),
     }
 }
 
