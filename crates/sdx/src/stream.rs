@@ -364,7 +364,20 @@ impl BufferSemaphore {
         if target <= current {
             return None;
         }
-        self.increment_total_permits_impl(target.saturating_sub(current))
+        let physical_n = target.saturating_sub(current).div_ceil(self.basis);
+        let added = attempt_add(&self.total_permits, physical_n, self.max_physical_permits);
+        if added == 0 {
+            return None;
+        }
+        let cancelled = attempt_sub(&self.enqueued_permit_decreases, added, 0);
+        let to_hold = added.saturating_sub(cancelled);
+        Some(BufferPermit {
+            permit: None,
+            num_physical_permits: u32::try_from(to_hold).unwrap_or(u32::MAX),
+            parent: self.clone(),
+            _term_slot: None,
+            _backing_block: None,
+        })
     }
 
     /// Shrinks the total capacity toward `target` bytes if it is currently
@@ -382,9 +395,6 @@ impl BufferSemaphore {
         }
         let n = current.saturating_sub(target);
         let physical_n = n.div_ceil(self.basis);
-        if physical_n == 0 {
-            return None;
-        }
         let removed = attempt_sub(&self.total_permits, physical_n, self.min_physical_permits);
         if removed == 0 {
             return None;
@@ -397,26 +407,6 @@ impl BufferSemaphore {
                 .fetch_add(removed, Ordering::Relaxed);
         }
         Some(removed.saturating_mul(self.basis))
-    }
-
-    fn increment_total_permits_impl(self: &Arc<Self>, n: u64) -> Option<BufferPermit> {
-        let physical_n = n.div_ceil(self.basis);
-        if physical_n == 0 {
-            return None;
-        }
-        let added = attempt_add(&self.total_permits, physical_n, self.max_physical_permits);
-        if added == 0 {
-            return None;
-        }
-        let cancelled = attempt_sub(&self.enqueued_permit_decreases, added, 0);
-        let to_hold = added.saturating_sub(cancelled);
-        Some(BufferPermit {
-            permit: None,
-            num_physical_permits: u32::try_from(to_hold).unwrap_or(u32::MAX),
-            parent: self.clone(),
-            _term_slot: None,
-            _backing_block: None,
-        })
     }
 
     fn to_physical_acquire(&self, n: u64) -> u32 {
