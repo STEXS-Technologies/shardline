@@ -1504,30 +1504,31 @@ mod tests {
     // ---- retained_shard_chunk_hashes tests ----
 
     #[test]
-    fn retained_shard_chunk_hashes_returns_expected_hashes() {
-        let bytes = b"x";
-        let chunk_hash = compute_data_hash(bytes);
-        let xorb_hash = xorb_hash(&[(chunk_hash, 1_u64)]);
-        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
-        let shard = serialize_test_shard(
-            vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
-                verification: Vec::new(),
-                metadata_ext: None,
-            }],
-            vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
-            }],
-        );
-
-        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
-        assert!(
-            hashes.is_ok(),
-            "retained_shard_chunk_hashes failed: {hashes:?}"
-        );
-        assert_eq!(hashes.unwrap(), vec![chunk_hash.hex()]);
+    fn retained_shard_chunk_hashes_returns_file_start_chunks() {
+        let chunk_hash = compute_data_hash(b"x");
+        for (xorb_hash, file_hash) in [
+            (
+                xorb_hash(&[(chunk_hash, 1_u64)]),
+                file_hash(&[(chunk_hash, 1_u64)]),
+            ),
+            (compute_data_hash(b"xorb"), compute_data_hash(b"file")),
+        ] {
+            let shard = serialize_test_shard(
+                vec![MDBFileInfo {
+                    metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                    segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
+                    verification: Vec::new(),
+                    metadata_ext: None,
+                }],
+                vec![MDBXorbInfo {
+                    metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                    chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
+                }],
+            );
+            let hashes =
+                retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS).unwrap();
+            assert_eq!(hashes, vec![chunk_hash.hex()]);
+        }
     }
 
     #[test]
@@ -1539,13 +1540,17 @@ mod tests {
     // ---- dedupe_shard_mapping tests ----
 
     #[test]
-    fn dedupe_shard_mapping_with_valid_hash() {
-        let hash = "ab".repeat(32);
-        let shard_key = shard_object_key(&hash).unwrap();
-        let mapping = dedupe_shard_mapping(&hash, &shard_key).unwrap();
-        let hex_chunk_hash = shardline_index::xet_hash_hex_string(mapping.chunk_hash());
-        assert_eq!(hex_chunk_hash, hash);
-        assert_eq!(mapping.shard_object_key(), &shard_key);
+    fn dedupe_shard_mapping_preserves_chunk_hash_and_shard_key() {
+        for (chunk, shard) in [("ab", "ab"), ("ef", "ef"), ("ab", "ef")] {
+            let hash = chunk.repeat(32);
+            let shard_key = shard_object_key(&shard.repeat(32)).unwrap();
+            let mapping = dedupe_shard_mapping(&hash, &shard_key).unwrap();
+            assert_eq!(
+                shardline_index::xet_hash_hex_string(mapping.chunk_hash()),
+                hash
+            );
+            assert_eq!(mapping.shard_object_key(), &shard_key);
+        }
     }
 
     #[test]
@@ -1836,40 +1841,6 @@ mod tests {
         ));
     }
 
-    // ── retained_shard_chunk_hashes edge cases ──────────────────────────
-
-    #[test]
-    fn retained_shard_chunk_hashes_returns_file_start_chunks() {
-        // A chunk that IS a file start (chunk_index_start = 0) should be
-        // included in the retained set.
-        let chunk_hash = compute_data_hash(b"x");
-        let xorb_hash_bytes = compute_data_hash(b"xorb");
-        let file_hash_bytes = compute_data_hash(b"file");
-        let shard = serialize_test_shard(
-            vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash_bytes, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash_bytes,
-                    1_u64,
-                    0_u64,
-                    1_u64,
-                )],
-                verification: Vec::new(),
-                metadata_ext: None,
-            }],
-            vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash_bytes, 1_u64, 1_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
-            }],
-        );
-
-        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
-
-        let result = hashes.unwrap();
-        assert_eq!(result.len(), 1, "file start chunk should be retained");
-        assert_eq!(result[0], chunk_hash.hex());
-    }
-
     // ── parse_uploaded_shard_with_metrics ─────────────────────────────────
 
     fn stored_single_chunk_shard(
@@ -2064,18 +2035,6 @@ mod tests {
     fn validate_referenced_xorb_count_empty() {
         let result = super::validate_referenced_xorb_count(&[], 10);
         assert!(result.is_ok());
-    }
-
-    // ── dedupe_shard_mapping ─────────────────────────────────────────────
-
-    #[test]
-    fn dedupe_shard_mapping_creates_mapping_with_correct_fields() {
-        let hash = "ef".repeat(32);
-        let shard_key = shard_object_key(&hash).unwrap();
-        let mapping = dedupe_shard_mapping(&hash, &shard_key).unwrap();
-        let hex_chunk_hash = shardline_index::xet_hash_hex_string(mapping.chunk_hash());
-        assert_eq!(hex_chunk_hash, hash);
-        assert_eq!(mapping.shard_object_key(), &shard_key);
     }
 
     // ── resolve_dedupe_shard_object async test ────────────────────────────
