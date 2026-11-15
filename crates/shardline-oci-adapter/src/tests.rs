@@ -2696,41 +2696,20 @@ mod write_file_atomically_tests {
     }
 
     #[test]
-    fn creates_file_with_expected_content() {
-        let (_dir, root) = temp_root();
-        let path = root.join("metadata.json");
-        let payload = b"{\"key\":\"value\"}";
-        crate::write_file_atomically(&root, &path, payload).unwrap();
-        let contents = std::fs::read(&path).unwrap();
-        assert_eq!(contents, payload);
-    }
-
-    #[test]
-    fn overwrites_existing_file() {
-        let (_dir, root) = temp_root();
-        let path = root.join("data.json");
-        crate::write_file_atomically(&root, &path, b"first").unwrap();
-        crate::write_file_atomically(&root, &path, b"second").unwrap();
-        let contents = std::fs::read(&path).unwrap();
-        assert_eq!(contents, b"second");
-    }
-
-    #[test]
-    fn handles_empty_bytes() {
-        let (_dir, root) = temp_root();
-        let path = root.join("empty.json");
-        crate::write_file_atomically(&root, &path, b"").unwrap();
-        let contents = std::fs::read(&path).unwrap();
-        assert_eq!(contents, b"");
-    }
-
-    #[test]
-    fn writes_into_nested_subdirectory() {
-        let (_dir, root) = temp_root();
-        let path = root.join("sub/dir/file.json");
-        crate::write_file_atomically(&root, &path, b"nested").unwrap();
-        let contents = std::fs::read(&path).unwrap();
-        assert_eq!(contents, b"nested");
+    fn creates_and_overwrites_files_with_expected_content() {
+        for (relative_path, payload) in [
+            ("metadata.json", b"{\"key\":\"value\"}".as_slice()),
+            ("data.json", b"first"),
+            ("empty.json", b""),
+            ("sub/dir/file.json", b"nested"),
+        ] {
+            let (_dir, root) = temp_root();
+            let path = root.join(relative_path);
+            crate::write_file_atomically(&root, &path, payload).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), payload, "{relative_path}");
+            crate::write_file_atomically(&root, &path, b"second").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"second", "{relative_path}");
+        }
     }
 
     #[test]
@@ -2777,26 +2756,12 @@ mod write_file_atomically_tests {
             result.is_err(),
             "rename should fail when target is a non-empty directory"
         );
-        // The temporary file must have been cleaned up:
-        // the directory should still contain only "child".
-        let entries: Vec<_> = std::fs::read_dir(&target)
+        assert_eq!(std::fs::read(target.join("child")).unwrap(), b"x");
+        let remaining: Vec<_> = std::fs::read_dir(&root)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .map(|entry| entry.unwrap().path())
             .collect();
-        assert_eq!(entries.len(), 1, "temp file should have been cleaned up");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn post_rename_parent_anchor_check_passes() {
-        // Verifies that ensure_parent_path_matches_anchor passes after a
-        // successful atomic write — the post-rename integrity check should
-        // not reject a valid path.
-        let (_dir, root) = temp_root();
-        let path = root.join("metadata.json");
-        crate::write_file_atomically(&root, &path, b"payload").unwrap();
-        let contents = std::fs::read(&path).unwrap();
-        assert_eq!(contents, b"payload");
+        assert_eq!(remaining, [target], "temporary sibling must be removed");
     }
 }
 
