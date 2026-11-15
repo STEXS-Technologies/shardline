@@ -595,38 +595,21 @@ async fn single_container_file_stream(
         return Ok(Box::pin(stream::empty()));
     }
 
-    // Explicit routing based on storage representation.
-    // WholeFileV1 records should use reconstruct_file_record_bytes, not this path.
-    match record.storage_repr {
-        shardline_index::StorageRepresentation::WholeFileV1 => {
-            return Err(ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch,
-            ));
-        }
-        shardline_index::StorageRepresentation::FixedChunkV1 => {
-            // Old format: uncompressed chunks.  The is_xorb_backed check below
-            // handles single-chunk records correctly (packed_start == 0).
-        }
-        shardline_index::StorageRepresentation::XorbCdcV1 => {
-            // New format: compressed + optionally xorb-packed.  Proceed.
-        }
+    // WholeFileV1 records use reconstruct_file_record_bytes instead.
+    if record.storage_repr == shardline_index::StorageRepresentation::WholeFileV1 {
+        return Err(ServerError::ObjectStore(
+            crate::error::ObjectStoreError::StoredLengthMismatch,
+        ));
     }
 
     // Fast path: when all chunks reference one packed xorb, read and validate
     // that object once. The direct GET also establishes object existence, so
     // S3 avoids a separate HEAD. If the xorb is absent, preserve compatibility
     // by falling back to individually stored chunks.
-    let first_hash = record.chunks.first().map(|c| &c.hash);
-    let all_same_hash = first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
-    let is_xorb_candidate = all_same_hash
-        && record
-            .chunks
-            .first()
-            .is_some_and(|chunk| chunk.packed_end > 0);
-
-    if is_xorb_candidate {
-        #[allow(clippy::indexing_slicing)]
-        let xorb_hash = &record.chunks[0].hash;
+    if let Some(first) = record.chunks.first().filter(|first| {
+        first.packed_end > 0 && record.chunks.iter().all(|chunk| chunk.hash == first.hash)
+    }) {
+        let xorb_hash = &first.hash;
         debug!(
             file_id = %record.file_id,
             total_bytes = record.total_bytes,
