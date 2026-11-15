@@ -3750,30 +3750,30 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`4c0aa805255b11b41269dfdabf903ddb70eb8190`. It counts all tracked `.rs`
+`28c0f227e6d62b176b53f71c5aaf6dcf65091855`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 586,265 | 17,384 (2.88%) |
-| Server | 220,570 | 213,052 | 7,518 (3.41%) |
-| Server core | 6,454 | 5,627 | 827 (12.81%) |
+| Entire repository | 603,649 | 585,951 | 17,698 (2.93%) |
+| Server | 220,570 | 213,869 | 6,701 (3.04%) |
+| Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
-| S3 adapter | 10,954 | 10,323 | 631 (5.76%) |
-| OCI adapter | 7,700 | 7,422 | 278 (3.61%) |
+| S3 adapter | 10,954 | 10,300 | 654 (5.97%) |
+| OCI adapter | 7,700 | 7,056 | 644 (8.36%) |
 | Cache | 6,573 | 5,866 | 707 (10.76%) |
-| Index | 71,472 | 69,403 | 2,069 (2.89%) |
+| Index | 71,472 | 69,567 | 1,905 (2.67%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
-| GC | 10,954 | 10,615 | 339 (3.09%) |
-| Fsck | 8,989 | 8,456 | 533 (5.93%) |
-| Rebuild | 4,326 | 4,068 | 258 (5.96%) |
-| CLI | 37,677 | 37,299 | 378 (1.00%) |
+| GC | 10,954 | 10,634 | 320 (2.92%) |
+| Fsck | 8,989 | 8,501 | 488 (5.43%) |
+| Rebuild | 4,326 | 4,081 | 245 (5.66%) |
+| CLI | 37,677 | 37,300 | 377 (1.00%) |
 | Protocol | 4,076 | 3,715 | 361 (8.86%) |
 | Protocol adapters | 1,670 | 1,372 | 298 (17.84%) |
-| Provider events | 5,283 | 5,090 | 193 (3.65%) |
+| Provider events | 5,283 | 5,117 | 166 (3.14%) |
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
@@ -3783,8 +3783,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 4c0aa805255b11b41269dfdabf903ddb70eb8190 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 4c0aa805255b11b41269dfdabf903ddb70eb8190 -- '*.rs' | wc -l
+git grep -I -n '^' 28c0f227e6d62b176b53f71c5aaf6dcf65091855 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 28c0f227e6d62b176b53f71c5aaf6dcf65091855 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
@@ -3970,6 +3970,60 @@ Existing containers without native chunk-index entries need the existing index
 rebuild/backfill machinery before lookup can discover them. Storage tests also
 exercise the S3-compatible object-store fixture; these measurements use local
 physical storage. Benchmark output includes inventories and per-lane logs.
+
+### Complete local distributed-integrity gate (2026-11-15)
+
+The existing `scripts/shardline/run_distributed_integrity_gate.sh` completed
+successfully from clean commit `28c0f227e6d62b176b53f71c5aaf6dcf65091855`.
+Every deployment and multi-node test, including ignored qualification cases,
+executed. The script also verified the expected test counts and rejected runtime
+prerequisite skips and panic markers.
+
+| Stage | Result | Test elapsed time |
+| --- | --- | ---: |
+| Deployment faults and compatibility | 50 passed, 0 skipped | 482.716 s |
+| Split-role traffic and probe contracts | 8 passed, 0 skipped | 22.583 s |
+
+The complete command, including build and prerequisite preparation, took
+531.290 seconds. These are local qualification elapsed times, not throughput
+or service latency measurements.
+
+The gate froze an all-features dev executable built with Rust
+`1.99.0 (b940084d7 2026-09-28)`, four build jobs, no compiler wrapper, and dev
+and test debug information disabled. Its SHA-256 was
+`2ba732267f5766de8d196975d885de875281ccaaa5a8a847cf2759aa81062372`, unchanged
+after the run. This is separate from the optimized release executable qualified
+below. The adjacent release was checksum-pinned v1.12.1. Recorded clients were
+Git 2.52.0, `huggingface_hub==2.2.0`, and `hf_xet==1.7.0`.
+
+Deployment coverage includes PostgreSQL/MinIO/Redis outages, actual network
+partitions and packet duplication/reordering, clock skew, mixed-version
+rollout/rollback, durable resumable uploads, lost remote-delete acknowledgements,
+GC takeover fencing, restricted grants, native source reclamation, Git atomic
+publication, and recovery of maintenance evidence. Some compatibility cases
+exercise local storage; the gate is not uniformly a remote-storage workload.
+
+The eight split-role cases comprise five API/transfer traffic drills and three
+probe contracts. Their servers run as in-process tasks sharing local SQLite and
+filesystem storage, with proxy-level partition injection. A multi-host
+PostgreSQL/S3 split-role topology still needs separate qualification. This run
+also does not establish independent CI, production capacity, or customer unit
+costs. The measured PostgreSQL/MinIO throughput and physical-reuse workloads
+remain separate results below.
+
+With Docker, Nextest, the pinned Python clients on `PATH`, and the clock library
+available as described in [the distributed gate prerequisites](../CONTRIBUTING.md#distributed-integrity-qualification),
+reproduce from that commit with:
+
+```bash
+env RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  CARGO_BUILD_JOBS=4 SHARDLINE_FAKETIME_LIBRARY=/path/to/libfaketime.so.1 \
+  bash scripts/shardline/run_distributed_integrity_gate.sh /private/evidence/distributed
+```
+
+The output retains frozen binaries, checksums, build records, client versions,
+and complete stage logs. Both this gate and the source inventory above use the
+same source revision.
 
 ### PostgreSQL/MinIO GC recovery qualification (2026-11-15)
 
