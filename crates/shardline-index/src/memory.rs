@@ -283,9 +283,7 @@ impl ReconstructionStore for MemoryIndexStore {
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        file_ids.sort_by(|left, right| {
-            xet_hash_hex_string(left.hash()).cmp(&xet_hash_hex_string(right.hash()))
-        });
+        file_ids.sort_by_cached_key(|file_id| xet_hash_hex_string(file_id.hash()));
         Ok(file_ids)
     }
 
@@ -327,9 +325,7 @@ impl DedupeStore for MemoryIndexStore {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        mappings.sort_by(|left, right| {
-            xet_hash_hex_string(left.chunk_hash()).cmp(&xet_hash_hex_string(right.chunk_hash()))
-        });
+        mappings.sort_by_cached_key(|mapping| xet_hash_hex_string(mapping.chunk_hash()));
         Ok(mappings)
     }
 
@@ -2182,8 +2178,10 @@ mod tests {
         let ids = store.list_reconstruction_file_ids().unwrap();
         assert!(ids.is_empty());
 
-        let hash1 = ShardlineHash::from_bytes([10; 32]);
-        let hash2 = ShardlineHash::from_bytes([11; 32]);
+        // Xet reverses each eight-byte hash group before hexadecimal encoding.
+        // These hashes have opposite raw-byte and Xet ordering.
+        let hash1 = ShardlineHash::from_bytes(*b"10000000000000000000000000000000");
+        let hash2 = ShardlineHash::from_bytes(*b"01000000000000000000000000000000");
         let file_id1 = FileId::new(hash1);
         let file_id2 = FileId::new(hash2);
         let range = ChunkRange::new(0, 1).unwrap();
@@ -2203,9 +2201,18 @@ mod tests {
             .unwrap();
 
         let ids = store.list_reconstruction_file_ids().unwrap();
-        assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&file_id1));
-        assert!(ids.contains(&file_id2));
+        assert_eq!(ids, vec![file_id1, file_id2]);
+
+        let mappings: Vec<_> = [hash1, hash2]
+            .into_iter()
+            .map(|hash| {
+                DedupeShardMapping::new(hash, ObjectKey::parse("shards/order.shard").unwrap())
+            })
+            .collect();
+        for mapping in mappings.iter().rev() {
+            store.upsert_dedupe_shard_mapping(mapping).unwrap();
+        }
+        assert_eq!(store.list_dedupe_shard_mappings().unwrap(), mappings);
     }
 
     #[test]
