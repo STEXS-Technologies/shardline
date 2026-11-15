@@ -5,7 +5,7 @@ use shardline_protocol::ShardlineHash;
 use shardline_xet_core::{
     merklehash::MerkleHash,
     xorb_object::{
-        CompressionScheme, RawXorbData, SerializedXorbObject,
+        SerializedXorbObject,
         xorb_chunk_format::{XORB_CHUNK_HEADER_LENGTH, XorbChunkHeader, deserialize_chunk_header},
     },
 };
@@ -55,10 +55,6 @@ pub struct PackedXorb {
 pub fn pack_chunks_into_xorb(
     chunks: &[(Vec<u8>, u64)], // (raw_data, file_offset)
 ) -> Result<PackedXorb, ServerError> {
-    if chunks.is_empty() {
-        return Err(ServerError::Overflow);
-    }
-
     let owned_chunks = chunks
         .iter()
         .map(|(data, offset)| (data.clone(), *offset))
@@ -70,36 +66,7 @@ pub fn pack_chunks_into_xorb(
 pub(crate) fn pack_owned_chunks_into_xorb(
     chunks: Vec<(Vec<u8>, u64)>,
 ) -> Result<PackedXorb, ServerError> {
-    if chunks.is_empty() {
-        return Err(ServerError::Overflow);
-    }
-
-    let file_boundaries: Vec<usize> = chunks.iter().map(|(_, offset)| *offset as usize).collect();
-    let chunk_metadata: Vec<(usize, u64)> = chunks
-        .iter()
-        .map(|(data, offset)| (data.len(), *offset))
-        .collect();
-    let xorb_data = chunks
-        .into_iter()
-        .map(|(data, _)| std::borrow::Cow::Owned(data))
-        .collect();
-
-    let raw = RawXorbData::from_owned_data(xorb_data, file_boundaries);
-
-    // Serialize with BG4+LZ4 compression and footer.
-    let serialized = SerializedXorbObject::from_xorb_with_compression(
-        raw,
-        CompressionScheme::ByteGrouping4LZ4,
-        true, // include footer
-    )
-    .map_err(|e| {
-        ServerError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("xorb serialization failed: {e}"),
-        ))
-    })?;
-
-    packed_xorb_from_serialized(serialized, &chunk_metadata)
+    RecoverableXorbBatch::new(chunks).pack()
 }
 
 fn packed_xorb_from_serialized(

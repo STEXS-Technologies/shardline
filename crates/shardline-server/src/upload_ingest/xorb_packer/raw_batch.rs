@@ -26,6 +26,9 @@ impl RecoverableXorbBatch {
     }
 
     pub(in crate::upload_ingest) fn pack(&self) -> Result<PackedXorb, ServerError> {
+        if self.raw.data.is_empty() {
+            return Err(ServerError::Overflow);
+        }
         let serialized = SerializedXorbObject::from_xorb_ref_with_compression(
             &self.raw,
             CompressionScheme::ByteGrouping4LZ4,
@@ -70,9 +73,18 @@ mod tests {
         let recovered = batch.into_chunks();
         assert_eq!(recovered[0].0.as_ptr(), address);
         assert_eq!(recovered[0].0, b"recoverable bounded payload");
-        let expected = super::super::pack_chunks_into_xorb(&recovered).unwrap();
-        assert_eq!(packed.serialized, expected.serialized);
-        assert_eq!(packed.xorb_hash_hex, expected.xorb_hash_hex);
-        assert_eq!(packed.chunk_entries, expected.chunk_entries);
+        let expected = SerializedXorbObject::from_xorb_with_compression(
+            RawXorbData::from_owned_data(vec![Cow::Owned(recovered[0].0.clone())], vec![0]),
+            CompressionScheme::ByteGrouping4LZ4,
+            true,
+        )
+        .unwrap();
+        assert_eq!(packed.serialized, expected.serialized_data);
+        assert_eq!(packed.xorb_hash_hex, expected.hash.hex());
+        assert_eq!(packed.chunk_entries[0].raw_offset, recovered[0].1);
+        assert_eq!(
+            packed.chunk_entries[0].raw_length,
+            recovered[0].0.len() as u64
+        );
     }
 }
