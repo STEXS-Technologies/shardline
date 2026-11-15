@@ -2022,44 +2022,33 @@ async fn s3_read_upload_tail_io_error() {
 
 #[allow(clippy::shadow_unrelated)]
 #[tokio::test]
-async fn s3_write_upload_tail_empty_removes_file() {
-    // write_upload_tail with empty bytes removes existing tail file → line 1158 (Ok branch)
-    let root = temp_root();
-    let backend = MockS3Backend::new();
-    let session_id = create_s3_session(root.path(), &backend).await;
-
-    // Append 1 byte (creates tail file with 1 byte)
-    let session = read_session(root.path(), &session_id).await;
-    let (_session, _) =
-        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"x")
-            .await
-            .unwrap();
-
-    // Now append exactly 8MiB - 1 byte so total = 8MiB, tail gets drained, write_upload_tail
-    // called with empty bytes, removes the existing tail file → line 1158 (Ok)
-    let remaining = vec![b'y'; 8 * 1024 * 1024 - 1];
-    let session = read_session(root.path(), &session_id).await;
-    let result =
-        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, &remaining)
-            .await;
-    assert!(result.is_ok(), "append with exact chunk should succeed");
-}
-
-#[tokio::test]
-async fn s3_write_upload_tail_remove_non_existent() {
-    // write_upload_tail with empty bytes, no tail file → line 1159 (NotFound → Ok)
-    // This happens when the first append is exactly 8MiB (no previous tail file)
-    let root = temp_root();
-    let backend = MockS3Backend::new();
-    let session_id = create_s3_session(root.path(), &backend).await;
-
-    // Append exactly 8MiB — the full chunk gets uploaded, tail is empty,
-    // write_upload_tail(empty) tries to remove the non-existent tail file → NotFound → Ok
-    let chunk = vec![b'z'; 8 * 1024 * 1024];
-    let session = read_session(root.path(), &session_id).await;
-    let result =
-        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, &chunk).await;
-    assert!(result.is_ok(), "exact chunk append should succeed");
+async fn exact_multipart_chunk_leaves_no_tail_with_or_without_existing_tail() {
+    for prefix in [b"".as_slice(), b"x"] {
+        let root = temp_root();
+        let backend = MockS3Backend::new();
+        let session_id = create_s3_session(root.path(), &backend).await;
+        let session = read_session(root.path(), &session_id).await;
+        let (session, _) =
+            append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, prefix)
+                .await
+                .unwrap();
+        let tail_path = crate::upload_tail_path(root.path(), &session_id);
+        assert_eq!(tail_path.is_file(), !prefix.is_empty());
+        let remaining = vec![b'y'; crate::types::OCI_S3_MULTIPART_CHUNK_BYTES - prefix.len()];
+        let (_, length) = append_s3_multipart_upload_bytes(
+            root.path(),
+            &backend,
+            &session_id,
+            session,
+            &remaining,
+        )
+        .await
+        .unwrap();
+        assert_eq!(length, crate::types::OCI_S3_MULTIPART_CHUNK_BYTES as u64);
+        assert!(!tail_path.exists());
+        let persisted = read_session(root.path(), &session_id).await;
+        assert_eq!(persisted.s3_multipart.unwrap().uploaded_part_ids.len(), 1);
+    }
 }
 
 #[tokio::test]
