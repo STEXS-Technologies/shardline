@@ -9,6 +9,7 @@ mod helpers;
 mod lfs;
 mod lfs_patch_evidence;
 pub(super) mod oci;
+mod repository;
 mod s3;
 
 pub(crate) use bazel::{

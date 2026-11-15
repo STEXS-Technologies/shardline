@@ -16,11 +16,10 @@ use std::time::Instant;
 use axum::{
     Json,
     body::{Body, Bytes, HttpBody},
-    extract::{FromRequestParts, Path, State},
+    extract::{Path, State},
     http::{
         HeaderMap, StatusCode,
         header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
-        request::Parts,
     },
     response::{IntoResponse, Response},
 };
@@ -90,75 +89,9 @@ fn durable_lfs_session_id(scope_namespace: &str, oid: &str) -> String {
     format!("lfs-{}", hex::encode(hasher.finalize().as_bytes()))
 }
 
-/// Read-scoped LFS authorization capability, extracted from the request.
-///
-/// Because LFS URLs carry no repository path segment, the capability's
-/// namespace comes entirely from the verified token claims. The extractor
-/// reproduces today's authorize chain exactly: `authorize` (permissive
-/// `Ok(None)` when `state.auth` is `None`) → verified context → capability,
-/// or `anonymous_full_access()` for permissive mode.
-#[derive(Debug)]
-pub struct LfsRepository {
-    auth: AuthorizedRepository,
-}
-
-/// Write-scoped LFS authorization capability, extracted from the request.
-#[derive(Debug)]
-pub struct LfsWriteRepository {
-    auth: AuthorizedRepository,
-}
-
-impl LfsRepository {
-    /// Read-scoped construction from request headers.
-    fn read(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
-        Ok(Self {
-            auth: authorize_repository(state, headers, TokenScope::Read)?,
-        })
-    }
-
-    /// The typed, verified authorization capability.
-    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
-        &self.auth
-    }
-}
-
-impl LfsWriteRepository {
-    /// Write-scoped construction from request headers.
-    fn write(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
-        Ok(Self {
-            auth: authorize_repository(state, headers, TokenScope::Write)?,
-        })
-    }
-
-    /// The typed, verified authorization capability.
-    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
-        &self.auth
-    }
-}
-
-impl FromRequestParts<Arc<AppState>> for LfsRepository {
-    type Rejection = ServerError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        // Borrow (do not consume) the headers: handlers extract `HeaderMap`
-        // separately for CONTENT_LENGTH / CONTENT_RANGE / range parsing.
-        Self::read(state, &parts.headers)
-    }
-}
-
-impl FromRequestParts<Arc<AppState>> for LfsWriteRepository {
-    type Rejection = ServerError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        Self::write(state, &parts.headers)
-    }
-}
+pub use super::repository::{
+    ReadRepository as LfsRepository, WriteRepository as LfsWriteRepository,
+};
 
 fn request_object_key(oid: &str, repository: &AuthorizedRepository) -> Option<ObjectKey> {
     lfs_object_key(oid, repository)

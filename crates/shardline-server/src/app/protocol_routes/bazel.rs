@@ -2,12 +2,10 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{FromRequestParts, Path, State},
-    http::{HeaderMap, StatusCode, request::Parts},
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use shardline_protocol::TokenScope;
-use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     BazelCacheKind, ServerError,
@@ -17,79 +15,11 @@ use crate::{
     upload_ingest::{RequestBodyReader, stage_bounded_body},
 };
 
-use super::{
-    AppState, authorize_repository, direct_object_response, direct_object_response_from_snapshot,
+use super::{AppState, direct_object_response, direct_object_response_from_snapshot};
+
+pub use super::repository::{
+    ReadRepository as BazelRepository, WriteRepository as BazelWriteRepository,
 };
-
-/// Read-scoped Bazel authorization capability, extracted from the request.
-///
-/// Because Bazel URLs carry no repository path segment, the capability's
-/// namespace comes entirely from the verified token claims. The extractor
-/// reproduces today's authorize chain exactly: `authorize` (permissive
-/// `Ok(None)` when `state.auth` is `None`) → verified context → capability,
-/// or `anonymous_full_access()` for permissive mode.
-#[derive(Debug)]
-pub struct BazelRepository {
-    auth: AuthorizedRepository,
-}
-
-/// Write-scoped Bazel authorization capability, extracted from the request.
-#[derive(Debug)]
-pub struct BazelWriteRepository {
-    auth: AuthorizedRepository,
-}
-
-impl BazelRepository {
-    /// Read-scoped construction from request headers.
-    fn read(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
-        Ok(Self {
-            auth: authorize_repository(state, headers, TokenScope::Read)?,
-        })
-    }
-
-    /// The typed, verified authorization capability.
-    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
-        &self.auth
-    }
-}
-
-impl BazelWriteRepository {
-    /// Write-scoped construction from request headers.
-    fn write(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
-        Ok(Self {
-            auth: authorize_repository(state, headers, TokenScope::Write)?,
-        })
-    }
-
-    /// The typed, verified authorization capability.
-    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
-        &self.auth
-    }
-}
-
-impl FromRequestParts<Arc<AppState>> for BazelRepository {
-    type Rejection = ServerError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        // Borrow (do not consume) the headers: handlers extract `HeaderMap`
-        // separately for downstream processing.
-        Self::read(state, &parts.headers)
-    }
-}
-
-impl FromRequestParts<Arc<AppState>> for BazelWriteRepository {
-    type Rejection = ServerError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        Self::write(state, &parts.headers)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // AC (Action Cache) handlers — /v1/bazel/cache/ac/{hash}
@@ -296,6 +226,7 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
     use shardline_protocol_adapters::ProtocolError;
+    use shardline_server_core::AuthorizedRepository;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -303,7 +234,6 @@ mod tests {
         BazelCacheKind, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter,
         app::AppState, bazel_cache_object_key,
     };
-    use shardline_server_core::AuthorizedRepository;
     use shardline_server_core::protocol_support::protocol_object_file_id;
 
     use super::{
