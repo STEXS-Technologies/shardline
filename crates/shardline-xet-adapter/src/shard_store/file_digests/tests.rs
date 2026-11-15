@@ -18,24 +18,6 @@ fn feed(digest: &mut FileDigest, entry: &FileDataSequenceEntry, data: &[u8]) {
 }
 
 #[test]
-fn verified_prefix_reuses_real_sha_state_and_hashes_changed_suffix() {
-    let scope = scope("changed-suffix");
-    let prefix = term(b"verified prefix");
-    let mut original = FileDigest::with_scope(None, Some(&scope));
-    feed(&mut original, &prefix, b"verified prefix");
-    feed(&mut original, &term(b"old"), b"old");
-    original.finish().unwrap();
-
-    let expected = format!("{:x}", Sha256::digest(b"verified prefixnew"));
-    let mut changed = FileDigest::with_scope(Some(expected.clone()), Some(&scope));
-    feed(&mut changed, &prefix, b"verified prefix");
-    assert!(changed.reusing_prefix, "test must exercise a cache hit");
-    feed(&mut changed, &term(b"new"), b"new");
-    assert!(!changed.reusing_prefix);
-    assert_eq!(changed.finish().unwrap(), Some(expected));
-}
-
-#[test]
 fn wrong_final_identity_is_rejected_even_on_cache_hit() {
     let scope = scope("wrong-final");
     let entry = term(b"content");
@@ -96,36 +78,43 @@ fn equivalent_adjacent_splits_reuse_verified_sha_in_both_directions() {
 }
 
 #[test]
-fn parallel_digest_checks_final_identity_and_resets_to_verified_prefix() {
-    let scope = scope("parallel-prefix");
-    let data = vec![42; 512 * 1024];
-    let entry = term(&data);
-    let mut original = FileDigest::with_scope(None, Some(&scope));
-    original.enable_parallel(true);
-    assert!(original.worker.is_some());
-    feed(&mut original, &entry, &data);
-    assert_eq!(
-        original.finish().unwrap(),
-        Some(format!("{:x}", Sha256::digest(&data)))
-    );
+fn serial_and_parallel_digests_reuse_prefixes_and_check_final_identity() {
+    for parallel in [false, true] {
+        let scope = scope(&format!("changed-suffix-{parallel}"));
+        let data = vec![42; if parallel { 512 * 1024 } else { 16 }];
+        let entry = term(&data);
+        let mut original = FileDigest::with_scope(None, Some(&scope));
+        original.enable_parallel(parallel);
+        assert_eq!(original.worker.is_some(), parallel);
+        feed(&mut original, &entry, &data);
+        feed(&mut original, &term(b"old"), b"old");
+        assert_eq!(
+            original.finish().unwrap(),
+            Some(format!(
+                "{:x}",
+                Sha256::digest([data.as_slice(), b"old"].concat())
+            ))
+        );
 
-    let expected = format!(
-        "{:x}",
-        Sha256::digest([data.as_slice(), b"changed"].concat())
-    );
-    let mut changed = FileDigest::with_scope(Some(expected.clone()), Some(&scope));
-    changed.enable_parallel(true);
-    assert!(changed.worker.is_some());
-    feed(&mut changed, &entry, &data);
-    assert!(changed.reusing_prefix);
-    feed(&mut changed, &term(b"changed"), b"changed");
-    assert_eq!(changed.finish().unwrap(), Some(expected));
+        let expected = format!(
+            "{:x}",
+            Sha256::digest([data.as_slice(), b"changed"].concat())
+        );
+        let mut changed = FileDigest::with_scope(Some(expected.clone()), Some(&scope));
+        changed.enable_parallel(parallel);
+        assert_eq!(changed.worker.is_some(), parallel);
+        feed(&mut changed, &entry, &data);
+        assert!(changed.reusing_prefix);
+        feed(&mut changed, &term(b"changed"), b"changed");
+        assert!(!changed.reusing_prefix);
+        assert_eq!(changed.finish().unwrap(), Some(expected));
 
-    let mut wrong = FileDigest::with_scope(Some("00".repeat(32)), Some(&scope));
-    wrong.enable_parallel(true);
-    feed(&mut wrong, &entry, &data);
-    assert!(wrong.reusing_prefix);
-    assert!(wrong.finish().is_err());
+        let mut wrong = FileDigest::with_scope(Some("00".repeat(32)), Some(&scope));
+        wrong.enable_parallel(parallel);
+        feed(&mut wrong, &entry, &data);
+        assert!(wrong.reusing_prefix);
+        assert!(wrong.finish().is_err());
+    }
 }
 
 #[test]
