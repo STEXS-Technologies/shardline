@@ -1602,90 +1602,46 @@ mod tests {
         assert_eq!(result, payload);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_range_stream_local_store_mid_range() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/mid-range").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"0123456789").await;
-
-        let store = ServerObjectStore::Local(object_store);
-        let range = ByteRange::new(3, 7).unwrap();
-        let result = super::object_byte_range_stream(store, object_key, 10, range).await;
-        let mut stream = result.unwrap();
-        let mut observed = Vec::new();
-        use futures_util::StreamExt;
-        while let Some(item) = stream.next().await {
-            observed.extend_from_slice(&item.unwrap());
+    #[tokio::test]
+    async fn local_range_entry_points_read_middle_and_boundary_bytes() {
+        for (payload, start, end, expected) in [
+            (b"0123456789".as_slice(), 3, 7, b"34567".as_slice()),
+            (b"abcdef".as_slice(), 0, 0, b"a".as_slice()),
+            (b"abcdef".as_slice(), 5, 5, b"f".as_slice()),
+            (b"x".as_slice(), 0, 0, b"x".as_slice()),
+        ] {
+            let storage = shardline_test_support::TempStorage::new();
+            let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+            let key = ObjectKey::parse("ab/range").unwrap();
+            write_fixture_file(&store.path_for_key(&key), payload).await;
+            let length = u64::try_from(payload.len()).unwrap();
+            let range = ByteRange::new(start, end).unwrap();
+            for dispatch in [false, true] {
+                let stream = if dispatch {
+                    super::object_byte_range_stream(
+                        ServerObjectStore::Local(store.clone()),
+                        key.clone(),
+                        length,
+                        range,
+                    )
+                    .await
+                } else {
+                    local_object_byte_range_stream(store.clone(), key.clone(), length, range).await
+                }
+                .unwrap();
+                let observed: Vec<u8> = stream
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                assert_eq!(
+                    observed, expected,
+                    "range {start}..={end}, dispatch={dispatch}"
+                );
+            }
         }
-        assert_eq!(observed, b"34567");
-    }
-
-    // ── local_store_byte_range_stream — single-byte at start ──────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn local_store_byte_range_stream_first_byte() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/first-byte").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"abcdef").await;
-
-        let range = ByteRange::new(0, 0).unwrap(); // just first byte
-        let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
-        assert!(result.is_ok());
-        let mut observed = Vec::new();
-        let mut stream = result.unwrap();
-        while let Some(item) = stream.next().await {
-            observed.extend_from_slice(&item.unwrap());
-        }
-        assert_eq!(observed, b"a");
-    }
-
-    // ── local_store_byte_range_stream — range at very end ─────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn local_store_byte_range_stream_last_byte_range() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/last-byte").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"abcdef").await;
-
-        // Range at end: byte 5 of 6 → last byte
-        let range = ByteRange::new(5, 5).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
-        let mut stream = result.unwrap();
-        let mut observed = Vec::new();
-        while let Some(item) = stream.next().await {
-            observed.extend_from_slice(&item.unwrap());
-        }
-        assert_eq!(observed, b"f");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn local_store_byte_range_stream_empty_range_with_nonempty_body_not_possible() {
-        // A zero-length range is not representable by ByteRange (start <= end always).
-        // Test edge: range at position 0,0 on 1-byte file.
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/minimal-range").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"x").await;
-
-        let range = ByteRange::new(0, 0).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 1, range).await;
-        let mut stream = result.unwrap();
-        let observed: Vec<u8> = futures_util::StreamExt::collect::<Vec<_>>(&mut stream)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-            .into_iter()
-            .flatten()
-            .collect();
-        assert_eq!(observed, b"x");
     }
 
     // ── xorb-backed file record tests ────────────────────────────────────
