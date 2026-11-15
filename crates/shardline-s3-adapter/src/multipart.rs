@@ -953,8 +953,7 @@ async fn store_part_metadata_locked(
             "session binding changed".into(),
         ));
     }
-    let (total_active_bytes, total_active_part_files) =
-        total_active_usage_locked(root, ttl_seconds, now_unix_seconds, None).await?;
+    let usage = total_active_usage_locked(root, ttl_seconds, now_unix_seconds, None).await?;
     enforce_part_quotas(
         &session,
         part_number,
@@ -964,8 +963,7 @@ async fn store_part_metadata_locked(
             total_max_bytes,
             max_active_part_files,
         },
-        total_active_bytes,
-        total_active_part_files,
+        usage,
     )?;
 
     let checksum_marker = format!("PART_CHECKSUM:{part_number}:");
@@ -1121,16 +1119,9 @@ pub async fn validate_part_quota_for_session_locked(
     if is_expired(session, ttl_seconds, now_unix_seconds) {
         return Err(S3SessionError::NotFound);
     }
-    let (total_active_bytes, total_active_part_files) =
+    let usage =
         total_active_usage_locked(root, ttl_seconds, now_unix_seconds, Some(session)).await?;
-    enforce_part_quotas(
-        session,
-        part_number,
-        size_bytes,
-        limits,
-        total_active_bytes,
-        total_active_part_files,
-    )
+    enforce_part_quotas(session, part_number, size_bytes, limits, usage)
 }
 
 /// The shared per-session + aggregate byte-quota and global part-file-count
@@ -1149,8 +1140,7 @@ fn enforce_part_quotas(
     part_number: u32,
     size_bytes: u64,
     limits: PartQuotaLimits,
-    total_active_bytes: u64,
-    total_active_part_files: u64,
+    usage: ActiveSessionUsage,
 ) -> Result<(), S3SessionError> {
     let previous = session.parts.get(&part_number);
     let previous_size = previous.map_or(0_u64, |part| part.size_bytes);
@@ -1163,12 +1153,12 @@ fn enforce_part_quotas(
     if new_session_total > limits.session_max_bytes.get() {
         return Err(S3SessionError::SessionQuotaExceeded);
     }
-    if total_active_bytes.saturating_add(delta) > limits.total_max_bytes.get() {
+    if usage.total_bytes.saturating_add(delta) > limits.total_max_bytes.get() {
         return Err(S3SessionError::AggregateQuotaExceeded);
     }
     let new_part_file = u64::from(previous.is_none());
     let cap = u64::try_from(limits.max_active_part_files.get()).unwrap_or(u64::MAX);
-    if total_active_part_files.saturating_add(new_part_file) > cap {
+    if usage.total_part_files.saturating_add(new_part_file) > cap {
         return Err(S3SessionError::TooManyPartFiles);
     }
     Ok(())
@@ -1234,7 +1224,11 @@ pub async fn count_active_sessions(
 ) -> Result<usize, S3SessionError> {
     let _lock = lock_upload_sessions(root).await?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    count_active_sessions_locked(root, ttl_seconds, now_unix_seconds).await
+    Ok(
+        total_active_usage_locked(root, ttl_seconds, now_unix_seconds, None)
+            .await?
+            .active_sessions,
+    )
 }
 
 /// Returns whether a session has expired against the TTL.
@@ -2047,6 +2041,7 @@ async fn delete_session_dir(path: &Path) -> Result<(), S3SessionError> {
 struct ActiveSessionUsage {
     active_sessions: usize,
     total_bytes: u64,
+    total_part_files: u64,
 }
 
 async fn sweep_expired_sessions_with_usage_locked(
@@ -2077,13 +2072,7 @@ async fn sweep_expired_sessions_with_usage_locked(
         }
         let expired = match load_session_at(&path, ttl_seconds, now_unix_seconds).await {
             Ok((session, _evidence)) => {
-                usage.active_sessions = usage.active_sessions.saturating_add(1);
-                usage.total_bytes = usage.total_bytes.saturating_add(
-                    session
-                        .parts
-                        .values()
-                        .fold(0_u64, |sum, part| sum.saturating_add(part.size_bytes)),
-                );
+                add_session_usage(&session, &mut usage);
                 false
             }
             Err(S3SessionError::NotFound) => true,
@@ -2104,41 +2093,8 @@ async fn sweep_expired_sessions_with_usage_locked(
     Ok((removed, usage))
 }
 
-async fn count_active_sessions_locked(
-    root: &Path,
-    ttl_seconds: NonZeroU64,
-    now_unix_seconds: u64,
-) -> Result<usize, S3SessionError> {
-    let dir = upload_dir(root);
-    let mut entries = match fs::read_dir(&dir).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(S3SessionError::Io(error)),
-    };
-    let mut active = 0_usize;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if validate_upload_id(file_name).is_err() {
-            continue;
-        }
-        if load_session_at(&path, ttl_seconds, now_unix_seconds)
-            .await
-            .is_ok()
-        {
-            active = active.saturating_add(1);
-        }
-    }
-    Ok(active)
-}
-
-/// Computes the aggregate stored-part bytes AND the total part-file count
-/// across all active sessions (caller must hold the session lock). Used to
+/// Computes active session count, stored-part bytes, and part-file count
+/// across live sessions (caller must hold the session lock). Used to
 /// enforce the aggregate byte quota and the global active-part-file cap in a
 /// single scan, so both limits are checked atomically under the same lock
 /// section with no counter drift. Each active session contributes
@@ -2150,15 +2106,16 @@ async fn total_active_usage_locked(
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
     known_session: Option<&MultipartUploadSession>,
-) -> Result<(u64, u64), S3SessionError> {
+) -> Result<ActiveSessionUsage, S3SessionError> {
     let dir = upload_dir(root);
     let mut entries = match fs::read_dir(&dir).await {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ActiveSessionUsage::default());
+        }
         Err(error) => return Err(S3SessionError::Io(error)),
     };
-    let mut total_bytes = 0_u64;
-    let mut total_part_files = 0_u64;
+    let mut usage = ActiveSessionUsage::default();
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if !path.is_dir() {
@@ -2173,30 +2130,28 @@ async fn total_active_usage_locked(
         if let Some(known_session) = known_session
             && file_name == known_session.upload_id
         {
-            add_session_usage(known_session, &mut total_bytes, &mut total_part_files);
+            add_session_usage(known_session, &mut usage);
             continue;
         }
         if let Ok((session, _evidence)) =
             load_session_at(&path, ttl_seconds, now_unix_seconds).await
         {
-            add_session_usage(&session, &mut total_bytes, &mut total_part_files);
+            add_session_usage(&session, &mut usage);
         }
     }
-    Ok((total_bytes, total_part_files))
+    Ok(usage)
 }
 
-fn add_session_usage(
-    session: &MultipartUploadSession,
-    total_bytes: &mut u64,
-    total_part_files: &mut u64,
-) {
+fn add_session_usage(session: &MultipartUploadSession, usage: &mut ActiveSessionUsage) {
     let session_total = session
         .parts
         .values()
         .fold(0_u64, |sum, part| sum.saturating_add(part.size_bytes));
-    *total_bytes = total_bytes.saturating_add(session_total);
-    *total_part_files =
-        total_part_files.saturating_add(u64::try_from(session.parts.len()).unwrap_or(u64::MAX));
+    usage.active_sessions = usage.active_sessions.saturating_add(1);
+    usage.total_bytes = usage.total_bytes.saturating_add(session_total);
+    usage.total_part_files = usage
+        .total_part_files
+        .saturating_add(u64::try_from(session.parts.len()).unwrap_or(u64::MAX));
 }
 
 #[cfg(test)]
