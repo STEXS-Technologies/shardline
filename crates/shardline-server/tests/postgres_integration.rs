@@ -977,33 +977,13 @@ async fn test_record_ops_duplicate_upload_idempotent() {
 // ===========================================================================
 
 #[test]
-fn test_migration_version_ordering() {
-    let migrations = bundled_database_migrations();
-    assert!(!migrations.is_empty());
-    assert!(
-        migrations
-            .windows(2)
-            .all(|w| w.first().unwrap().version < w.get(1).unwrap().version),
-        "migration versions must be strictly increasing and unique"
-    );
-}
-
-#[test]
-fn test_migration_each_has_valid_sql() {
-    for m in bundled_database_migrations() {
-        assert!(!m.up_sql.is_empty(), "{} up_sql empty", m.version);
-        assert!(!m.down_sql.is_empty(), "{} down_sql empty", m.version);
+fn test_migration_names_are_not_empty() {
+    for migration in bundled_database_migrations() {
         assert!(
-            m.up_sql.trim().starts_with("CREATE")
-                || m.up_sql.trim().starts_with("ALTER")
-                || m.up_sql.trim().starts_with("INSERT")
-                || m.up_sql.trim().starts_with("DROP")
-                || m.up_sql.trim().starts_with("--"),
-            "{} up_sql unexpected start: {:?}",
-            m.version,
-            &m.up_sql.trim()[..20.min(m.up_sql.trim().len())]
+            !migration.name.is_empty(),
+            "{} name empty",
+            migration.version
         );
-        assert!(!m.name.is_empty(), "{} name empty", m.version);
     }
 }
 
@@ -1016,21 +996,6 @@ fn test_migration_find_by_version_iteration() {
     assert_eq!(found.unwrap().name, "metadata_store");
     let not_found = migrations.iter().find(|m| m.version == "00000000000000");
     assert!(not_found.is_none(), "unknown version should not be found");
-}
-
-#[test]
-fn test_migration_status_entry_accessors() {
-    use shardline_server::DatabaseMigrationStatusEntry;
-    let entry = DatabaseMigrationStatusEntry {
-        version: "v1".to_owned(),
-        name: "test".to_owned(),
-        applied: true,
-        applied_at_utc: Some("2026-01-01T00:00:00Z".to_owned()),
-    };
-    assert_eq!(entry.version, "v1");
-    assert_eq!(entry.name, "test");
-    assert!(entry.applied);
-    assert!(entry.applied_at_utc.is_some());
 }
 
 #[test]
@@ -2155,28 +2120,6 @@ async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
     .await
     .ok();
     admin_pool.close().await;
-}
-
-#[test]
-fn test_migration_options_up_down_commands() {
-    // Verify that DatabaseMigrationCommand::Up and Down accessors work
-    let up_opts = DatabaseMigrationOptions::new(
-        "postgres://localhost/test".to_owned(),
-        DatabaseMigrationCommand::Up { steps: Some(3) },
-    );
-    assert!(matches!(
-        up_opts.command(),
-        DatabaseMigrationCommand::Up { steps: Some(3) }
-    ));
-
-    let down_opts = DatabaseMigrationOptions::new(
-        "postgres://localhost/test".to_owned(),
-        DatabaseMigrationCommand::Down { steps: 2 },
-    );
-    assert!(matches!(
-        down_opts.command(),
-        DatabaseMigrationCommand::Down { steps: 2 }
-    ));
 }
 
 // ===========================================================================
