@@ -41,7 +41,7 @@ use shardline_gc::{LocalGcOptions, LocalGcReport};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{ServerConfig, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
-use shardline_test_support::deterministic_bytes;
+use shardline_test_support::{count_chunk_files, deterministic_bytes};
 
 use std::{
     collections::HashMap,
@@ -160,25 +160,6 @@ fn extract_xml_all_tags(xml: &str, tag: &str) -> Vec<String> {
         rest = &rest[text_end.wrapping_add(close.len())..];
     }
     out
-}
-
-fn count_files_recursive(dir: &Path) -> usize {
-    let mut count: usize = 0;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                count = count.saturating_add(count_files_recursive(&path));
-            } else {
-                count = count.saturating_add(1);
-            }
-        }
-    }
-    count
-}
-
-fn count_chunk_files(root: &Path) -> usize {
-    count_files_recursive(&root.join("chunks"))
 }
 
 // The one-part fault fixture keeps its body channel open, so the file with

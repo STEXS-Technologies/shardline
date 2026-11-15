@@ -105,3 +105,26 @@ pub fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
     }
     out
 }
+
+/// Counts files recursively, ignoring unreadable or missing fixture directories.
+#[must_use]
+pub fn count_files_recursive(dir: &Path) -> usize {
+    let mut count: usize = 0;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                count = count.saturating_add(count_files_recursive(&path));
+            } else {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+    count
+}
+
+/// Counts files beneath a local fixture storage root’s `chunks` directory.
+#[must_use]
+pub fn count_chunk_files(root: &Path) -> usize {
+    count_files_recursive(&root.join("chunks"))
+}

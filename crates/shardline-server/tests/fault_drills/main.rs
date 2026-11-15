@@ -31,7 +31,7 @@ use shardline_server::{
     ServerConfig, ServerFrontend, ServerRole, app, run_fsck, write_backup_manifest,
 };
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
-use shardline_test_support::deterministic_bytes;
+use shardline_test_support::{count_chunk_files, count_files_recursive, deterministic_bytes};
 
 use std::{
     net::SocketAddr,
@@ -316,25 +316,6 @@ fn slow_body() -> (
 // ---------------------------------------------------------------------------
 // On-disk evidence helpers (blocking fs reads are fine in tests).
 // ---------------------------------------------------------------------------
-
-fn count_files_recursive(dir: &Path) -> usize {
-    let mut count: usize = 0;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                count = count.saturating_add(count_files_recursive(&path));
-            } else {
-                count = count.saturating_add(1);
-            }
-        }
-    }
-    count
-}
-
-fn count_chunk_files(root: &Path) -> usize {
-    count_files_recursive(&root.join("chunks"))
-}
 
 // These drills stream one part per owned session. Before publication the
 // server writes to an anonymous .tmp file; part-N is now an immutable versioned

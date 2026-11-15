@@ -3,19 +3,9 @@
 //! recover after a proxy-level partition between them, and survive a
 //! single-role rolling upgrade on the original port.
 //!
-//! This file is a SEPARATE integration-test crate. Harness helpers are
-//! duplicated verbatim from the e2e reference files (each integration test
-//! builds its own crate; the repo convention is per-crate verbatim helper
-//! duplication):
-//!   - `RoleRuntime`, `bind_with_retry`, `wait_for_health`, `wait_for_ready`,
-//!     `wait_for_server_down`, `ready_response`, `role_surface_statuses`,
-//!     `expected_surface` from `e2e/rolling_upgrade_e2e.rs`;
-//!   - the split proxy (`SplitProxyState`, `handle_split_proxy`,
-//!     `select_upstream_base_url`, `is_transfer_path`) and the XET upload
-//!     machinery (`authenticated_translator`, `upload_bytes`) from
-//!     `e2e/role_split_e2e.rs`;
-//!   - `deterministic_bytes`, `sha256_hex`, `count_chunk_files`,
-//!     `wait_until` from the drill crates, plus the `PanicStatus` inspector.
+//! Role lifecycle and proxy fixtures adapt `e2e/rolling_upgrade_e2e.rs` and
+//! `e2e/role_split_e2e.rs`. Payload generation and local file counting come
+//! from `shardline-test-support`; readiness probes are shared test modules.
 //!
 //! Two documented adaptations vs the original design (both verified against
 //! the current source):
@@ -53,7 +43,7 @@
     clippy::unnecessary_map_or
 )]
 
-use shardline_test_support::deterministic_bytes;
+use shardline_test_support::{count_chunk_files, deterministic_bytes};
 
 use std::{
     collections::HashMap,
@@ -141,25 +131,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
-}
-
-fn count_files_recursive(dir: &Path) -> usize {
-    let mut count: usize = 0;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                count = count.saturating_add(count_files_recursive(&path));
-            } else {
-                count = count.saturating_add(1);
-            }
-        }
-    }
-    count
-}
-
-fn count_chunk_files(root: &Path) -> usize {
-    count_files_recursive(&root.join("chunks"))
 }
 
 async fn wait_until(timeout: Duration, what: &str, cond: impl Fn() -> bool) {
