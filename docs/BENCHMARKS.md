@@ -3750,14 +3750,14 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`f1b385b8142d3de65c3ff8a64abe9394990a6bb9`. It counts all tracked `.rs`
+`ee7f7d0fdfbdb5174b22e67b921d9c7465ccb749`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 581,535 | 22,114 (3.66%) |
+| Entire repository | 603,649 | 581,525 | 22,124 (3.66%) |
 | Server | 220,570 | 211,158 | 9,412 (4.27%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
@@ -3778,7 +3778,7 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
-This refresh includes 809 fewer Rust lines since `c78b7e1e`. The client and
+This refresh includes 819 fewer Rust lines since `c78b7e1e`. The client and
 server share one CDC boundary engine; SDK metadata decoding no longer copies
 identical response structs; Xorb packing reuses the core footer writer and
 already-computed chunk hashes. Shared shard field readers also fix legacy v2
@@ -3831,8 +3831,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' f1b385b8142d3de65c3ff8a64abe9394990a6bb9 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' f1b385b8142d3de65c3ff8a64abe9394990a6bb9 -- '*.rs' | wc -l
+git grep -I -n '^' ee7f7d0fdfbdb5174b22e67b921d9c7465ccb749 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' ee7f7d0fdfbdb5174b22e67b921d9c7465ccb749 -- '*.rs' | wc -l
 ```
 
 The cleanup reuses Cargo build artifacts, narrows ordinary binary and
@@ -4504,6 +4504,74 @@ members retained alongside live members in the same immutable container. These
 are descriptor-derived unpacked counts, exclude standalone fallback chunks, and
 must not be substituted for the object-store inventory's physical byte count.
 Ordinary object-level GC cannot remove a container while any member is live.
+
+### Footprint after real retention expiry (2026-11-15)
+
+The twelve-lane matrix was repeated with a frozen dev binary from
+`ab4099636753259631e32f5c33cd1c9316376465`, built with Rust 1.99.0 and debug
+information disabled. Its SHA-256 was
+`08f30a6626a9997cd46a511b2952e5d23ed780d9f5ded0facb86b5ec6c9e5739`.
+This is a fixed qualification candidate, not a binary of the latest cleanup
+commit. The harness at that revision used PostgreSQL 16, MinIO, eight clients,
+one or two API replicas capped at one CPU and 1 GiB each, 32 one-MiB objects,
+and three repetitions per dataset/replica combination.
+
+After the mixed upload/read phases and ordinary GC, API writers stopped for
+3,600 real seconds. All twelve databases and buckets then resumed with fresh
+credentials, ran two further normal GC passes, and passed all 1,728 full-body
+download comparisons through every replica. No quarantine rows remained.
+Physical payload bytes were unchanged in every lane:
+
+| Data | Replicas | Retained payload bytes, range across three runs | Change after expiry GC |
+| --- | ---: | ---: | ---: |
+| Unique | 1 | 33,588,965 | 0 |
+| Unique | 2 | 33,588,965 | 0 |
+| Repeated | 1 | 10,642,606–15,983,814 | 0 |
+| Repeated | 2 | 12,311,197–15,845,177 | 0 |
+
+Initial logical data is 32 MiB; all three upload namespaces remain live at the
+end, totaling 96 MiB per lane. Later phases deliberately upload the same content
+under additional names. Thus a smaller final stored/logical ratio does not mean
+GC reclaimed data. These inventory bytes include Xorbs and reliability evidence,
+excluding database size, MinIO filesystem overhead, replication and versions.
+
+The repeated-data lanes already had zero quarantined objects before the wait.
+Their descriptor accounting found 135 distinct used chunk hashes (8 MiB of
+unique unpacked data), but 177–251 live physical members across containers. Every
+member was referenced; unused unpacked bytes were zero. This explains why normal
+object GC cannot reclaim the surplus: it cannot delete containers required by
+live file references. Retention expiry did not eliminate this footprint.
+
+A separate three-run control changed ingestion to one client and one API replica
+with the same binary, repeated dataset, object count and three upload phases.
+Each run had exactly 135 used members for 135 distinct hashes, eight referenced
+containers, and 8,397,245 final payload bytes. All 288 final downloads passed.
+This control used normal short-run GC, not another hour-long observation. Its
+harness source at `ee7f7d0f` is unchanged from `ab409963`.
+
+The control supports concurrent ingestion affecting reuse/packing choices rather
+than a chunk-boundary mismatch. The one- and two-replica ranges overlap, so this
+does not isolate a replica-count effect or establish a historical regression.
+Reducing the surplus requires ingestion coordination or verified reference
+rewriting/compaction; deleting referenced containers is not a safe GC shortcut.
+These measurements do not compare concurrent native Xet/basic LFS workloads or
+establish production throughput, cloud unit costs or a margin.
+
+To repeat, first freeze a binary built from the recorded source revision, then
+use a new output directory outside the checkout:
+
+```bash
+python3 -B scripts/shardline/validate_performance.py \
+  "$FROZEN_SHARDLINE_BINARY" /path/to/new-expiry-run \
+  --binary-source-revision ab4099636753259631e32f5c33cd1c9316376465 \
+  --replicas 1 2 --datasets unique repeated --objects 32 \
+  --object-bytes 1048576 --clients 8 --repeats 3 --retention-expiry
+```
+
+For the serial control, use another new directory with `--replicas 1`,
+`--datasets repeated`, `--clients 1`, and omit `--retention-expiry`. Retain the
+provenance, per-lane JSON, inventories and traces as described above; fixture
+service files contain disposable credentials.
 
 ### Reusing validated upload descriptors (2026-11-15)
 
