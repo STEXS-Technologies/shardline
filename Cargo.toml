@@ -85,7 +85,7 @@ shardline-oci-adapter = { version = "1.13.0", path = "crates/shardline-oci-adapt
 shardline-s3-adapter = { version = "1.13.0", path = "crates/shardline-s3-adapter" }
 shardline-server = { version = "1.13.0", path = "crates/shardline-server" }
 shardline-server-core = { version = "1.13.0", path = "crates/shardline-server-core" }
-shardline-storage = { version = "1.13.0", path = "crates/shardline-storage" }
+shardline-storage = { version = "1.13.0", path = "crates/shardline-storage", default-features = false }
 shardline-test-support = { version = "1.13.0", path = "crates/shardline-test-support" }
 shardline-validation = { version = "1.13.0", path = "crates/shardline-validation" }
 shardline-auth = { version = "1.13.0", path = "crates/shardline-auth" }

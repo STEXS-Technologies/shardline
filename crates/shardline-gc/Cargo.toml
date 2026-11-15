@@ -18,7 +18,7 @@ shardline-metrics.workspace = true
 shardline-oci-adapter.workspace = true
 shardline-protocol.workspace = true
 shardline-server-core.workspace = true
-shardline-storage.workspace = true
+shardline-storage = { workspace = true, features = ["s3"] }
 shardline-xet-adapter.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
