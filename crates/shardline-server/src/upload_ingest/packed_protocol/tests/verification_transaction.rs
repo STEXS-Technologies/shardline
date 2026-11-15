@@ -36,6 +36,18 @@ async fn postgres_slow_reuse_verification_releases_discovery_and_rechecks_public
         .unwrap();
     let source = backend.protocol_file_record("source").await.unwrap();
     let key = crate::xet_adapter::xorb_object_key(&source.chunks.first().unwrap().hash).unwrap();
+    assert_eq!(
+        provider
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(method, path)| *method == Method::GET && path.contains("/xorbs/"))
+            .count(),
+        1,
+        "fresh container registration must share the verified read-back metadata"
+    );
     provider.reads.armed.store(true, Ordering::SeqCst);
     let target = backend.clone();
     let upload = tokio::spawn(async move {

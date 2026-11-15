@@ -110,11 +110,26 @@ impl PackedProtocolUpload {
             // Execution is acquired separately for each blocking operation.
             // A cancelled running worker retains it until its buffers are dropped.
             let permit = self.batch_permit.take().ok_or(ServerError::Overflow)?;
-            let ((raw, packed), permit) =
+            let register_descriptor = self.reuse.is_some();
+            let ((raw, packed, mut descriptor), permit) =
                 crate::admission::blocking_work_with_buffer(&self.work_pool, permit, move || {
                     let raw = RecoverableXorbBatch::new(chunks);
                     let packed = raw.pack();
-                    Ok((raw, packed))
+                    let descriptor = if register_descriptor {
+                        match &packed {
+                            Ok(packed) => Some(
+                                shardline_xet_adapter::validate_serialized_xorb(
+                                    &mut std::io::Cursor::new(&packed.serialized),
+                                    shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex)?,
+                                )?
+                                .descriptor(),
+                            ),
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
+                    Ok((raw, packed, descriptor))
                 })
                 .await?;
             // The encoded payload may outlive a cancelled request in transport.
@@ -164,6 +179,9 @@ impl PackedProtocolUpload {
                     };
                     let mut retained_length = integrity.length();
                     if stored.as_ref().is_err_and(encoding::is_encoding_conflict) {
+                        // Retained encodings have different offsets; recover their
+                        // descriptor from verified stored content as before.
+                        descriptor = None;
                         let store = self.store.clone();
                         let ((retained_packed, reused), retained_permit) =
                             crate::admission::blocking_work_with_buffer(
@@ -185,7 +203,10 @@ impl PackedProtocolUpload {
                     match stored {
                         Ok(outcome) => {
                             if let Some(reuse) = &self.reuse {
-                                reuse.register(&packed.xorb_hash_hex).await?;
+                                // Read-back established that stored bytes match the fully
+                                // validated input. Register its descriptor without a
+                                // second complete object-store read.
+                                reuse.register(&packed.xorb_hash_hex, descriptor).await?;
                             }
                             let inserted = outcome == PutOutcome::Inserted;
                             let recovered_chunks = raw.into_chunks();

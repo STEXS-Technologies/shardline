@@ -141,7 +141,17 @@ impl ProtocolChunkReuse {
         })
     }
 
-    pub(super) async fn register(&self, hash: &str) -> Result<(), ServerError> {
+    pub(super) async fn register(
+        &self,
+        hash: &str,
+        verified: Option<shardline_index::XetXorbDescriptor>,
+    ) -> Result<(), ServerError> {
+        if let Some(descriptor) = verified {
+            return self
+                .backend
+                .cache_verified_xorb_descriptor(&descriptor)
+                .await;
+        }
         let objects = self.backend.object_store();
         let hash = hash.to_owned();
         let descriptor = blocking_work(self.backend.stream_work_pool(), move || {
@@ -203,7 +213,7 @@ mod tests {
                 .await
                 .unwrap();
             let hash = record.chunks.first().unwrap().hash.clone();
-            reuse.register(&hash).await.unwrap();
+            reuse.register(&hash, None).await.unwrap();
             assert_eq!(reuse.find(&bytes, 0).await.unwrap().unwrap().hash, hash);
             sources.push((bytes, hash));
             if index == 7 {
@@ -257,7 +267,7 @@ mod tests {
             .unwrap();
         let hash = record.chunks.first().unwrap().hash.clone();
         let mut authorized = ProtocolChunkReuse::new(backend.clone(), Some(allowed.clone()));
-        authorized.register(&hash).await.unwrap();
+        authorized.register(&hash, None).await.unwrap();
         let reused = authorized.find(&bytes, 123).await.unwrap().unwrap();
         assert_eq!(reused.hash, hash);
         assert_eq!(reused.offset, 123);
