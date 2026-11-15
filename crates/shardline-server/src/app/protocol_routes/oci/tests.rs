@@ -133,9 +133,7 @@ async fn postgres_ordinary_gc_reclaims_row_scoped_abandoned_manifest_after_hold_
     let bootstrap = sqlx::PgPool::connect(url).await.unwrap();
     crate::apply_database_migrations(&bootstrap).await.unwrap();
     bootstrap.close().await;
-    let cluster = super::test_helpers::build_oci_postgres_test_cluster_for_url(url)
-        .await
-        .unwrap();
+    let cluster = super::test_helpers::build_oci_postgres_test_cluster_for_url(url).await;
     let backend = match &cluster.node_a.backend {
         crate::ServerBackend::Postgres(backend) => Some(backend),
         crate::ServerBackend::Local(_) => None,

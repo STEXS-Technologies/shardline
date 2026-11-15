@@ -27,38 +27,35 @@ pub(crate) struct OciPostgresTestCluster {
 
 pub(crate) async fn build_oci_postgres_test_cluster() -> Option<OciPostgresTestCluster> {
     let scoped_url = crate::test_support::postgres_fixture::isolated_postgres_url("oci").await?;
-    Some(
-        build_oci_postgres_test_cluster_for_url(&scoped_url)
-            .await
-            .expect("configured PostgreSQL OCI nodes must initialize"),
-    )
+    Some(build_oci_postgres_test_cluster_for_url(&scoped_url).await)
 }
 
 pub(crate) async fn build_oci_postgres_test_cluster_for_url(
     database_url: &str,
-) -> Option<OciPostgresTestCluster> {
-    let temp = tempfile::tempdir().ok()?;
-    let shared_store = crate::ServerObjectStore::local(temp.path().join("objects")).ok()?;
+) -> OciPostgresTestCluster {
+    let temp = tempfile::tempdir().expect("create PostgreSQL OCI scratch directory");
+    let shared_store = crate::ServerObjectStore::local(temp.path().join("objects"))
+        .expect("create PostgreSQL OCI object store");
     let node_a = build_oci_postgres_state(
         database_url,
         temp.path().join("node-a"),
         shared_store.clone(),
     )
-    .await?;
+    .await;
     let node_b =
-        build_oci_postgres_state(database_url, temp.path().join("node-b"), shared_store).await?;
-    Some(OciPostgresTestCluster {
+        build_oci_postgres_state(database_url, temp.path().join("node-b"), shared_store).await;
+    OciPostgresTestCluster {
         _temp: temp,
         node_a,
         node_b,
-    })
+    }
 }
 
 async fn build_oci_postgres_state(
     database_url: &str,
     root: std::path::PathBuf,
     object_store: crate::ServerObjectStore,
-) -> Option<Arc<AppState>> {
+) -> Arc<AppState> {
     let config = oci_test_config(root.clone());
     let backend = crate::PostgresBackend::new_with_object_store(
         root,
@@ -68,8 +65,8 @@ async fn build_oci_postgres_state(
         object_store,
     )
     .await
-    .ok()?;
-    Some(oci_test_state(config, ServerBackend::Postgres(backend)))
+    .expect("initialize configured PostgreSQL OCI backend");
+    oci_test_state(config, ServerBackend::Postgres(backend))
 }
 
 /// Builds a minimal [`AppState`] backed by a local filesystem backend rooted
