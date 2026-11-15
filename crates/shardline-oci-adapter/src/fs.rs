@@ -1040,8 +1040,6 @@ pub(crate) fn append_file_anchored(root: &Path, path: &Path, bytes: &[u8]) -> st
     Ok(metadata.len())
 }
 
-/// Opens a file under `root` for append using anchored (symlink-resistant) path resolution.
-///
 /// Reads a file under the OCI upload root using anchored (symlink-resistant) I/O.
 #[cfg(unix)]
 pub(crate) async fn read_upload_file_async(root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
@@ -1058,13 +1056,9 @@ pub(crate) async fn upload_file_len_async(root: &Path, path: &Path) -> std::io::
     let root = root.to_path_buf();
     let path = path.to_path_buf();
     spawn_blocking(move || {
-        let anchored =
-            open_anchored_target(&root, &path, AnchoredPathOptions::new(None, None), || {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
-            })?;
-        let file = File::open(anchored.final_path())?;
-        let metadata = file.metadata()?;
-        Ok(metadata.len())
+        open_anchored_file(&root, &path)?
+            .metadata()
+            .map(|metadata| metadata.len())
     })
     .await
     .map_err(std::io::Error::other)?
@@ -1075,18 +1069,9 @@ pub(crate) async fn upload_file_len_async(root: &Path, path: &Path) -> std::io::
 pub(crate) async fn upload_file_exists_async(root: &Path, path: &Path) -> std::io::Result<()> {
     let root = root.to_path_buf();
     let path = path.to_path_buf();
-    spawn_blocking(move || {
-        let anchored =
-            open_anchored_target(&root, &path, AnchoredPathOptions::new(None, None), || {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
-            })?;
-        match File::open(anchored.final_path()) {
-            Ok(_file) => Ok(()),
-            Err(error) => Err(error),
-        }
-    })
-    .await
-    .map_err(std::io::Error::other)?
+    spawn_blocking(move || open_anchored_file(&root, &path).map(|_file| ()))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 // ── Non-Unix async wrappers ──────────────────────────────────────────────────
