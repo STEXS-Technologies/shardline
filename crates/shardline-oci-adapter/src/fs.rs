@@ -384,17 +384,18 @@ pub(crate) async fn persist_upload_session_with_evidence(
         || !merkle_commits.is_empty()
         || !snapshot_merkle_commits.is_empty()
     {
+        let mut record = PersistedMerkleJournalRecord {
+            evidence: evidence_to_append,
+            merkle_commits,
+            snapshot_evidence: snapshot_to_append,
+            snapshot_merkle_commits,
+        };
         let appended_bytes = append_evidence_journal(
             root,
             session_id,
             journal_head.unwrap_or(0),
             journal_bytes,
-            &PersistedMerkleJournalRecord {
-                evidence: evidence_to_append,
-                merkle_commits: merkle_commits.clone(),
-                snapshot_evidence: snapshot_to_append,
-                snapshot_merkle_commits: snapshot_merkle_commits.clone(),
-            },
+            &record,
         )
         .await?;
         journal_bytes = Some(appended_bytes);
@@ -409,35 +410,31 @@ pub(crate) async fn persist_upload_session_with_evidence(
             .events()
             .last()
             .map(|event| event.sequence);
-        last_merkle_evidence_sequence = merkle_commits
+        last_merkle_evidence_sequence = record
+            .merkle_commits
             .last()
             .and_then(|commit| commit.get("body"))
             .and_then(|body| body.get("sequence"))
             .and_then(serde_json::Value::as_u64)
             .or(last_merkle_evidence_sequence);
-        last_merkle_snapshot_sequence = snapshot_merkle_commits
+        last_merkle_snapshot_sequence = record
+            .snapshot_merkle_commits
             .last()
             .and_then(|commit| commit.get("body"))
             .and_then(|body| body.get("sequence"))
             .and_then(serde_json::Value::as_u64)
             .or(last_merkle_snapshot_sequence);
-        if !merkle_commits.is_empty() {
-            previous_merkle_evidence_previous = merkle_commits
-                .iter()
-                .rev()
-                .nth(1)
-                .cloned()
-                .or_else(|| previous_merkle_evidence.clone());
-            previous_merkle_evidence = merkle_commits.last().cloned();
+        if let Some(last) = record.merkle_commits.pop() {
+            previous_merkle_evidence_previous =
+                record.merkle_commits.pop().or(previous_merkle_evidence);
+            previous_merkle_evidence = Some(last);
         }
-        if !snapshot_merkle_commits.is_empty() {
-            previous_merkle_snapshot_previous = snapshot_merkle_commits
-                .iter()
-                .rev()
-                .nth(1)
-                .cloned()
-                .or_else(|| previous_merkle_snapshot.clone());
-            previous_merkle_snapshot = snapshot_merkle_commits.last().cloned();
+        if let Some(last) = record.snapshot_merkle_commits.pop() {
+            previous_merkle_snapshot_previous = record
+                .snapshot_merkle_commits
+                .pop()
+                .or(previous_merkle_snapshot);
+            previous_merkle_snapshot = Some(last);
         }
     }
     let journal_evidence_head = evidence.events().last().cloned().or_else(|| {
