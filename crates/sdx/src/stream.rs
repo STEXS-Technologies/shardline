@@ -1342,9 +1342,8 @@ pub(crate) struct FileTerm {
 
 /// Decoded xorb block data with per-chunk byte offsets for zero-copy slicing.
 pub(crate) struct XorbBlockData {
-    /// `(chunk_index, byte_offset)` pairs mapping each chunk to its start
-    /// position within `data`.
-    pub chunk_offsets: Vec<(usize, usize)>,
+    /// Byte offsets within `data`, including the final chunk's end.
+    pub chunk_offsets: Vec<usize>,
     /// The concatenated decompressed chunk data for this block.
     pub data: Bytes,
     _buffer_permit: BufferPermit,
@@ -1473,17 +1472,10 @@ impl XorbBlock {
                             "cached xorb exceeds buffer reservation".to_owned(),
                         ));
                     }
-                    let base = usize::try_from(self.chunk_range.0).unwrap_or(usize::MAX);
                     let chunk_offsets = cached
                         .chunk_offsets
                         .iter()
-                        .enumerate()
-                        .map(|(index, offset)| {
-                            (
-                                base.saturating_add(index),
-                                usize::try_from(*offset).unwrap_or(usize::MAX),
-                            )
-                        })
+                        .map(|offset| usize::try_from(*offset).unwrap_or(usize::MAX))
                         .collect();
                     let block_data = Arc::new(XorbBlockData {
                         chunk_offsets,
@@ -1548,10 +1540,6 @@ impl XorbBlock {
                 // Await the best-effort cache write inside this admitted fetch;
                 // failures must not fail the download.
                 if let Some(cache) = &ctx.chunk_cache {
-                    let cache = cache.clone();
-                    let hash = self.hash.clone();
-                    let chunk_range = self.chunk_range;
-                    let data = chunk_data.data.clone();
                     let chunk_offsets = chunk_data
                         .chunk_offsets
                         .iter()
@@ -1560,18 +1548,19 @@ impl XorbBlock {
                     // Keep cache work within this admitted fetch. A detached
                     // put otherwise retains decoded bytes after its reservation
                     // has returned and creates unbounded background tasks.
-                    drop(cache.put(&hash, chunk_range, &chunk_offsets, &data).await);
+                    drop(
+                        cache
+                            .put(
+                                &self.hash,
+                                self.chunk_range,
+                                &chunk_offsets,
+                                &chunk_data.data,
+                            )
+                            .await,
+                    );
                 }
-                let start_chunk = self.chunk_range.0;
-                let base = usize::try_from(start_chunk).unwrap_or(usize::MAX);
-                let chunk_offsets = chunk_data
-                    .chunk_offsets
-                    .iter()
-                    .enumerate()
-                    .map(|(index, offset)| (base.saturating_add(index), *offset))
-                    .collect();
                 let block_data = Arc::new(XorbBlockData {
-                    chunk_offsets,
+                    chunk_offsets: chunk_data.chunk_offsets,
                     data: chunk_data.data,
                     _buffer_permit: buffer_permit,
                 });
@@ -1594,7 +1583,7 @@ impl FileTerm {
     /// Returns [`SdxError::StreamInternal`] when the block data does not cover
     /// the term's byte range.
     fn extract_bytes(&self, block_data: &XorbBlockData) -> Result<Bytes, SdxError> {
-        let (_, start_byte_offset) = block_data
+        let start_byte_offset = block_data
             .chunk_offsets
             .get(self.xorb_block_start_index)
             .copied()
@@ -1604,7 +1593,7 @@ impl FileTerm {
                     self.xorb_block_start_index
                 ))
             })?;
-        let (_, end_byte_offset) = block_data
+        let end_byte_offset = block_data
             .chunk_offsets
             .get(self.xorb_block_end_index)
             .copied()
