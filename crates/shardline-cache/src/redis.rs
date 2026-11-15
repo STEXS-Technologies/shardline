@@ -856,140 +856,85 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── Repository scope key serialization ────────────────────────────────
-
     #[test]
-    fn redis_key_format_with_scope() {
-        let scope = RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "my-org",
-            "my-repo",
-            Some("main"),
-        );
-        let scope = scope.unwrap();
-        let key = ReconstructionCacheKey::latest("file.bin", Some(&scope));
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        // The provider ("github") is NOT hex-encoded (comes from provider_token directly).
-        // owner, repo, and revision ARE hex-encoded (via encode_component).
-        // file_id and content_hash ARE also hex-encoded.
-        let owner_hex = hex::encode("my-org");
-        let repo_hex = hex::encode("my-repo");
-        let revision_hex = hex::encode("main");
-        let file_hex = hex::encode("file.bin");
-        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
-        assert!(redis_key.contains(&format!(":github:{owner_hex}:{repo_hex}:{revision_hex}:")));
-        assert!(redis_key.ends_with(&format!(":latest:{file_hex}")));
-    }
-
-    #[test]
-    fn redis_key_format_without_scope() {
-        let key = ReconstructionCacheKey::latest("file.bin", None);
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
-        assert!(redis_key.contains(":global:"));
-    }
-
-    #[test]
-    fn redis_key_format_with_content_hash() {
-        let key = ReconstructionCacheKey::version("file.bin", "abc123", None);
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        let hash_hex = hex::encode("abc123");
-        let file_hex = hex::encode("file.bin");
-        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
-        assert!(redis_key.ends_with(&format!(":{hash_hex}:{file_hex}")));
-    }
-
-    #[test]
-    fn redis_key_format_with_scope_no_revision() {
-        let scope = RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
-        let scope = scope.unwrap();
-        let key = ReconstructionCacheKey::latest("doc.pdf", Some(&scope));
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        let owner_hex = hex::encode("group");
-        let repo_hex = hex::encode("project");
-        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
-        assert!(redis_key.contains(&format!(":gitlab:{owner_hex}:{repo_hex}:")));
-        assert!(redis_key.contains(":head:"));
-    }
-
-    // ── Additional provider key formats ─────────────────────────────────
-
-    #[test]
-    fn redis_key_format_gitea_provider() {
-        let scope =
-            RepositoryScope::new(RepositoryProvider::Gitea, "gitea-org", "gitea-repo", None);
-        let scope = scope.unwrap();
-        let key = ReconstructionCacheKey::version("f1.bin", "hash1", Some(&scope));
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        let owner_hex = hex::encode("gitea-org");
-        let repo_hex = hex::encode("gitea-repo");
-        let hash_hex = hex::encode("hash1");
-        let file_hex = hex::encode("f1.bin");
-        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
-        assert!(redis_key.contains(&format!(":gitea:{owner_hex}:{repo_hex}:head:")));
-        assert!(redis_key.ends_with(&format!(":{hash_hex}:{file_hex}")));
-    }
-
-    #[test]
-    fn redis_key_format_codeberg_provider() {
-        let scope = RepositoryScope::new(RepositoryProvider::Codeberg, "user", "repo", Some("v2"));
-        let scope = scope.unwrap();
-        let key = ReconstructionCacheKey::latest("data.bin", Some(&scope));
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        let owner_hex = hex::encode("user");
-        let repo_hex = hex::encode("repo");
-        let rev_hex = hex::encode("v2");
-        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
-        assert!(redis_key.contains(&format!(":codeberg:{owner_hex}:{repo_hex}:{rev_hex}:")));
-    }
-
-    #[test]
-    fn redis_key_format_generic_provider() {
-        let scope = RepositoryScope::new(RepositoryProvider::Generic, "ns", "repo-name", None);
-        let scope = scope.unwrap();
-        let key = ReconstructionCacheKey::latest("generic.bin", Some(&scope));
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        let owner_hex = hex::encode("ns");
-        let repo_hex = hex::encode("repo-name");
-        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
-        assert!(redis_key.contains(&format!(":generic:{owner_hex}:{repo_hex}:head:")));
-    }
-
-    // ── Edge cases ──────────────────────────────────────────────────────
-
-    #[test]
-    fn redis_key_format_special_characters_in_names() {
-        let scope = RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "my-org/team",
-            "asset.repo_v2",
-            Some("feature/branch"),
-        );
-        let scope = scope.unwrap();
-        let key = ReconstructionCacheKey::latest("my file (1).bin", Some(&scope));
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        let owner_hex = hex::encode("my-org/team");
-        let repo_hex = hex::encode("asset.repo_v2");
-        let rev_hex = hex::encode("feature/branch");
-        let file_hex = hex::encode("my file (1).bin");
-        assert!(redis_key.contains(&format!(":github:{owner_hex}:{repo_hex}:{rev_hex}:")));
-        assert!(redis_key.ends_with(&format!(":latest:{file_hex}")));
-    }
-
-    #[test]
-    fn redis_key_format_empty_file_id() {
-        let key = ReconstructionCacheKey::latest("", None);
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        assert!(redis_key.ends_with(":latest:"));
-    }
-
-    #[test]
-    fn redis_key_format_empty_content_hash() {
-        let key = ReconstructionCacheKey::version("f", "", None);
-        let redis_key = RedisReconstructionCache::redis_key(&key);
-        // Empty content hash is still hex-encoded as an empty string.
-        let hash_hex = hex::encode("");
-        assert!(redis_key.contains(&format!(":{hash_hex}:")));
+    fn redis_key_serialization_preserves_scope_and_content_identity() {
+        let cases = [
+            (
+                Some((
+                    RepositoryProvider::GitHub,
+                    "my-org",
+                    "my-repo",
+                    Some("main"),
+                )),
+                "file.bin",
+                None,
+                "shardline:reconstruction:v1:github:6d792d6f7267:6d792d7265706f:6d61696e:latest:66696c652e62696e",
+            ),
+            (
+                None,
+                "file.bin",
+                None,
+                "shardline:reconstruction:v1:global:latest:66696c652e62696e",
+            ),
+            (
+                None,
+                "file.bin",
+                Some("abc123"),
+                "shardline:reconstruction:v1:global:616263313233:66696c652e62696e",
+            ),
+            (
+                Some((RepositoryProvider::GitLab, "group", "project", None)),
+                "doc.pdf",
+                None,
+                "shardline:reconstruction:v1:gitlab:67726f7570:70726f6a656374:head:latest:646f632e706466",
+            ),
+            (
+                Some((RepositoryProvider::Gitea, "gitea-org", "gitea-repo", None)),
+                "f1.bin",
+                Some("hash1"),
+                "shardline:reconstruction:v1:gitea:67697465612d6f7267:67697465612d7265706f:head:6861736831:66312e62696e",
+            ),
+            (
+                Some((RepositoryProvider::Codeberg, "user", "repo", Some("v2"))),
+                "data.bin",
+                None,
+                "shardline:reconstruction:v1:codeberg:75736572:7265706f:7632:latest:646174612e62696e",
+            ),
+            (
+                Some((RepositoryProvider::Generic, "ns", "repo-name", None)),
+                "generic.bin",
+                None,
+                "shardline:reconstruction:v1:generic:6e73:7265706f2d6e616d65:head:latest:67656e657269632e62696e",
+            ),
+            (
+                Some((
+                    RepositoryProvider::GitHub,
+                    "my-org/team",
+                    "asset.repo_v2",
+                    Some("feature/branch"),
+                )),
+                "my file (1).bin",
+                None,
+                "shardline:reconstruction:v1:github:6d792d6f72672f7465616d:61737365742e7265706f5f7632:666561747572652f6272616e6368:latest:6d792066696c65202831292e62696e",
+            ),
+            (None, "", None, "shardline:reconstruction:v1:global:latest:"),
+            (
+                None,
+                "f",
+                Some(""),
+                "shardline:reconstruction:v1:global::66",
+            ),
+        ];
+        for (scope, file_id, content_hash, expected) in cases {
+            let scope = scope.map(|(provider, owner, repo, revision)| {
+                RepositoryScope::new(provider, owner, repo, revision).unwrap()
+            });
+            let key = content_hash.map_or_else(
+                || ReconstructionCacheKey::latest(file_id, scope.as_ref()),
+                |hash| ReconstructionCacheKey::version(file_id, hash, scope.as_ref()),
+            );
+            assert_eq!(RedisReconstructionCache::redis_key(&key), expected);
+        }
     }
 
     // ── Redis URL validation ─────────────────────────────────────────────
