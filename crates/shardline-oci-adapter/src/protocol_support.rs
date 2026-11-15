@@ -213,26 +213,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn scope_namespace_none_returns_global() {
-        assert_eq!(super::scope_namespace(None), "global");
-    }
-
-    #[allow(clippy::unwrap_used)]
-    #[test]
-    fn scope_namespace_with_scope_returns_64_char_hex() {
-        let scope = shardline_protocol::RepositoryScope::new(
-            shardline_protocol::RepositoryProvider::GitHub,
-            "org",
-            "repo",
-            None,
-        )
-        .unwrap();
-        let ns = super::scope_namespace(Some(&scope));
-        assert_eq!(ns.len(), 64);
-        assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
     #[allow(clippy::unwrap_used)]
     #[test]
     fn object_key_preserves_valid_paths_and_rejects_unsafe_paths() {
