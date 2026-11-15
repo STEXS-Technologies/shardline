@@ -959,9 +959,11 @@ async fn store_part_metadata_locked(
         &session,
         part_number,
         part.size_bytes,
-        session_max_bytes,
-        total_max_bytes,
-        max_active_part_files,
+        PartQuotaLimits {
+            session_max_bytes,
+            total_max_bytes,
+            max_active_part_files,
+        },
         total_active_bytes,
         total_active_part_files,
     )?;
@@ -1125,9 +1127,7 @@ pub async fn validate_part_quota_for_session_locked(
         session,
         part_number,
         size_bytes,
-        limits.session_max_bytes,
-        limits.total_max_bytes,
-        limits.max_active_part_files,
+        limits,
         total_active_bytes,
         total_active_part_files,
     )
@@ -1144,39 +1144,30 @@ pub async fn validate_part_quota_for_session_locked(
 /// atomically with the quota accounting and an over-cap part never reaches the
 /// disk; deleting a session (abort/sweep/complete) removes its part files from
 /// the count as a side effect of the next scan.
-#[allow(clippy::too_many_arguments)]
 fn enforce_part_quotas(
     session: &MultipartUploadSession,
     part_number: u32,
     size_bytes: u64,
-    session_max_bytes: NonZeroU64,
-    total_max_bytes: NonZeroU64,
-    max_active_part_files: NonZeroUsize,
+    limits: PartQuotaLimits,
     total_active_bytes: u64,
     total_active_part_files: u64,
 ) -> Result<(), S3SessionError> {
-    let previous_size = session
-        .parts
-        .get(&part_number)
-        .map_or(0_u64, |part| part.size_bytes);
+    let previous = session.parts.get(&part_number);
+    let previous_size = previous.map_or(0_u64, |part| part.size_bytes);
     let session_total = session
         .parts
         .values()
         .fold(0_u64, |total, part| total.saturating_add(part.size_bytes));
     let delta = size_bytes.saturating_sub(previous_size);
     let new_session_total = session_total.saturating_add(delta);
-    if new_session_total > session_max_bytes.get() {
+    if new_session_total > limits.session_max_bytes.get() {
         return Err(S3SessionError::SessionQuotaExceeded);
     }
-    if total_active_bytes.saturating_add(delta) > total_max_bytes.get() {
+    if total_active_bytes.saturating_add(delta) > limits.total_max_bytes.get() {
         return Err(S3SessionError::AggregateQuotaExceeded);
     }
-    let new_part_file = if session.parts.contains_key(&part_number) {
-        0_u64
-    } else {
-        1_u64
-    };
-    let cap = u64::try_from(max_active_part_files.get()).unwrap_or(u64::MAX);
+    let new_part_file = u64::from(previous.is_none());
+    let cap = u64::try_from(limits.max_active_part_files.get()).unwrap_or(u64::MAX);
     if total_active_part_files.saturating_add(new_part_file) > cap {
         return Err(S3SessionError::TooManyPartFiles);
     }
