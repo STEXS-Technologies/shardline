@@ -286,15 +286,4 @@ mod tests {
             assert_eq!(actual, expected.as_deref());
         }
     }
-
-    // ── validate_oci_tag in tags list (line 37) ──────────────────────────
-
-    #[test]
-    fn validate_oci_tag_accepts_valid_rejects_invalid() {
-        assert!(validate_oci_tag("valid-tag").is_ok());
-        assert!(validate_oci_tag("v1.0.0").is_ok());
-        assert!(validate_oci_tag("").is_err());
-        assert!(validate_oci_tag("tag with spaces").is_err());
-        assert!(validate_oci_tag("tag\nnewline").is_err());
-    }
 }

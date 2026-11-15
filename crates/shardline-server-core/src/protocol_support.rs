@@ -89,10 +89,6 @@ pub fn shared_sha256_object_key<E: ProtocolValidation>(digest_hex: &str) -> Resu
 /// Returns `E::invalid_repository_name()` when the name is empty, contains
 /// path separators or traversal sequences, or has non-compliant segments.
 pub fn validate_oci_repository_name<E: ProtocolValidation>(value: &str) -> Result<(), E> {
-    if value.is_empty() || value.starts_with('/') || value.ends_with('/') || value.contains('\\') {
-        return Err(E::invalid_repository_name());
-    }
-
     for segment in value.split('/') {
         if segment.is_empty()
             || segment == "."
@@ -237,32 +233,78 @@ mod tests {
     }
 
     #[test]
-    fn oci_repository_validator_rejects_traversal_and_uppercase() {
-        assert!(validate_oci_repository_name::<ValidateContentHashError>("team/assets").is_ok());
-        assert!(validate_oci_repository_name::<ValidateContentHashError>("../assets").is_err());
-        assert!(validate_oci_repository_name::<ValidateContentHashError>("Team/assets").is_err());
-        assert!(validate_oci_repository_name::<ValidateContentHashError>("team//assets").is_err());
+    fn oci_repository_validator_checks_segments() {
+        for (value, valid) in [
+            ("team/assets", true),
+            ("repo", true),
+            ("team-1/assets_v2.0", true),
+            ("../assets", false),
+            ("Team/assets", false),
+            ("team//assets", false),
+            ("", false),
+            ("/repo", false),
+            ("repo/", false),
+            ("team\\repo", false),
+            ("team//repo", false),
+            ("team/./repo", false),
+            ("team/../repo", false),
+            ("Team/Repo", false),
+            ("team/repo!", false),
+        ] {
+            assert_eq!(
+                validate_oci_repository_name::<ValidateContentHashError>(value).is_ok(),
+                valid,
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
-    fn oci_tag_validator_enforces_allowed_characters() {
-        assert!(validate_oci_tag::<ValidateContentHashError>("v1").is_ok());
-        assert!(validate_oci_tag::<ValidateContentHashError>("_debug.2026-04-23").is_ok());
-        assert!(validate_oci_tag::<ValidateContentHashError>("bad/tag").is_err());
-        assert!(validate_oci_tag::<ValidateContentHashError>("-bad").is_err());
+    fn oci_tag_validator_checks_characters_and_length() {
+        let maximum = "a".repeat(128);
+        let oversized = "a".repeat(129);
+        for (value, valid) in [
+            ("v1", true),
+            ("_debug.2026-04-23", true),
+            ("valid-tag", true),
+            ("v1.0.0", true),
+            (maximum.as_str(), true),
+            ("bad/tag", false),
+            ("-bad", false),
+            ("", false),
+            (".tag", false),
+            (oversized.as_str(), false),
+            ("tag with spaces", false),
+            ("tag\nnewline", false),
+        ] {
+            assert_eq!(
+                validate_oci_tag::<ValidateContentHashError>(value).is_ok(),
+                valid,
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
-    fn upload_session_validator_accepts_hex_and_hyphen_only() {
-        assert!(validate_upload_session_id::<ValidateContentHashError>("0000000000000001").is_ok());
-        assert!(validate_upload_session_id::<ValidateContentHashError>("dead-beef").is_ok());
-        assert!(validate_upload_session_id::<ValidateContentHashError>("session_1").is_err());
-        assert!(
-            validate_upload_session_id::<ValidateContentHashError>(
-                &"a".repeat(MAX_UPLOAD_SESSION_ID_BYTES + 1)
-            )
-            .is_err()
-        );
+    fn upload_session_validator_checks_characters_and_length() {
+        let maximum = "a".repeat(MAX_UPLOAD_SESSION_ID_BYTES);
+        let oversized = "a".repeat(MAX_UPLOAD_SESSION_ID_BYTES + 1);
+        for (value, valid) in [
+            ("0000000000000001", true),
+            ("dead-beef", true),
+            ("a1b2c3d4e5f6", true),
+            (maximum.as_str(), true),
+            ("session_1", false),
+            (oversized.as_str(), false),
+            ("", false),
+            ("session@123", false),
+        ] {
+            assert_eq!(
+                validate_upload_session_id::<ValidateContentHashError>(value).is_ok(),
+                valid,
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
@@ -367,96 +409,6 @@ mod tests {
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
         let result =
             validate_oci_repository_scope::<ValidateContentHashError>("other/repo", Some(&scope));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_tag_rejects_empty() {
-        let result = validate_oci_tag::<ValidateContentHashError>("");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_tag_rejects_invalid_start_char() {
-        let result = validate_oci_tag::<ValidateContentHashError>(".tag");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_tag_rejects_oversized() {
-        let result = validate_oci_tag::<ValidateContentHashError>(&"a".repeat(129));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_upload_session_id_rejects_empty() {
-        let result = validate_upload_session_id::<ValidateContentHashError>("");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_upload_session_id_accepts_hex() {
-        let result = validate_upload_session_id::<ValidateContentHashError>("a1b2c3d4e5f6");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn validate_upload_session_id_rejects_special_chars() {
-        let result = validate_upload_session_id::<ValidateContentHashError>("session@123");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_empty() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_leading_slash() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("/repo");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_trailing_slash() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("repo/");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_backslash() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("team\\repo");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_double_slash() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("team//repo");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_dot_segment() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("team/./repo");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_dot_dot() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("team/../repo");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_uppercase() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("Team/Repo");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_oci_repository_name_rejects_invalid_chars() {
-        let result = validate_oci_repository_name::<ValidateContentHashError>("team/repo!");
         assert!(result.is_err());
     }
 
