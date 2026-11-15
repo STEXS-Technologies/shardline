@@ -742,20 +742,14 @@ pub fn shard_object_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
 pub fn shard_hash_from_object_key_if_present(
     key: &ObjectKey,
 ) -> Result<Option<&str>, XetAdapterError> {
-    let mut segments = key.as_str().split('/');
-    let Some(namespace) = segments.next() else {
+    let Some((prefix, file_name)) = key
+        .as_str()
+        .strip_prefix("shards/")
+        .and_then(|path| path.split_once('/'))
+    else {
         return Ok(None);
     };
-    let Some(prefix) = segments.next() else {
-        return Ok(None);
-    };
-    let Some(file_name) = segments.next() else {
-        return Ok(None);
-    };
-    if segments.next().is_some() {
-        return Ok(None);
-    }
-    if namespace != "shards" {
+    if file_name.contains('/') {
         return Ok(None);
     }
     if prefix.len() != 2 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -1385,6 +1379,22 @@ mod tests {
                 None,
                 "unrelated key {path}",
             );
+        }
+    }
+
+    #[test]
+    fn shard_hash_discovery_reports_malformed_matching_hashes() {
+        for hash in [
+            "ab".to_owned(),
+            "ab".repeat(31),
+            format!("ab{}", "G".repeat(62)),
+        ] {
+            let key =
+                shardline_storage::ObjectKey::parse(&format!("shards/ab/{hash}.shard")).unwrap();
+            assert!(matches!(
+                shard_hash_from_object_key_if_present(&key),
+                Err(XetAdapterError::InvalidContentHash)
+            ));
         }
     }
 
