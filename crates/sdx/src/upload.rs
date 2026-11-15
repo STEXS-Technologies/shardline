@@ -378,10 +378,7 @@ impl UploadSessionInner {
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Write,
             // 403 on an upload re-issues the write token once (loop-guarded).
-            markers: RetryMarkers {
-                retry_on_403: true,
-                ..RetryMarkers::default()
-            },
+            markers: RetryMarkers::refresh_on_forbidden(),
         }
     }
 

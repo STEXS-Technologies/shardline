@@ -169,7 +169,7 @@ impl StreamContext {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Read,
-            markers: RetryMarkers::ranged_xorb(),
+            markers: RetryMarkers::refresh_on_forbidden(),
         }
     }
 }
@@ -1753,8 +1753,7 @@ async fn fetch_term_block(
     {
         Ok(response) => response,
         // Past-EOF reconstruction requests surface as 416; the prefetch loop
-        // treats that as end-of-stream (`docs/SDX_PLAN.md` §4.4.4
-        // `.with_expected_416()`).
+        // treats that as end-of-stream.
         Err(SdxError::Transfer(TransferError::RangeNotSatisfiable(_))) => return Ok(None),
         Err(error) => return Err(error),
     };

@@ -148,22 +148,15 @@ pub(crate) enum RetryScope {
 /// Per-call markers that tune retry behavior for a specific request kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RetryMarkers {
-    /// A 404 is an expected outcome (dedup cache miss), not an error.
-    pub expected_404: bool,
-    /// A 416 is an expected outcome (past-EOF), not a retryable error.
-    pub expected_416: bool,
     /// Whether 429 responses are retried (override of the policy default).
     pub retry_on_429: bool,
-    /// Whether a 403 on a ranged xorb fetch triggers a token refresh (signed
-    /// URL refresh) and a single retry.
+    /// Whether a 403 triggers token refresh and one retry for this request kind.
     pub retry_on_403: bool,
 }
 
 impl Default for RetryMarkers {
     fn default() -> Self {
         Self {
-            expected_404: false,
-            expected_416: false,
             retry_on_429: true,
             retry_on_403: false,
         }
@@ -173,26 +166,13 @@ impl Default for RetryMarkers {
 impl RetryMarkers {
     pub(crate) const fn dedup() -> Self {
         Self {
-            expected_404: true,
-            expected_416: false,
             retry_on_429: false,
             retry_on_403: false,
         }
     }
 
-    pub(crate) const fn reconstruction() -> Self {
+    pub(crate) const fn refresh_on_forbidden() -> Self {
         Self {
-            expected_404: false,
-            expected_416: true,
-            retry_on_429: true,
-            retry_on_403: false,
-        }
-    }
-
-    pub(crate) const fn ranged_xorb() -> Self {
-        Self {
-            expected_404: false,
-            expected_416: true,
             retry_on_429: true,
             retry_on_403: true,
         }
@@ -271,8 +251,7 @@ impl RetryContext {
     /// Whether a 401/403 should trigger a token refresh for this call kind.
     const fn refresh_allowed(&self, error: &TransferError) -> bool {
         match error {
-            // 403 only triggers a refresh for ranged xorb fetches (signed-URL
-            // refresh); a 403 on reconstruction/upload is otherwise surfaced.
+            // Only request kinds that opt in may refresh after a 403.
             TransferError::Forbidden(_) => self.markers.retry_on_403,
             TransferError::Unauthorized(_) => true,
             TransferError::BadRequest(_)
@@ -538,8 +517,11 @@ mod tests {
         assert!(!rt(404));
         assert!(!rt(416));
 
-        let _ = is_retryable(&TransferError::BadRequest(String::new()), true);
-        let _ = is_retryable(&TransferError::NotFound(String::new()), true);
+        assert!(!is_retryable(
+            &TransferError::BadRequest(String::new()),
+            true
+        ));
+        assert!(!is_retryable(&TransferError::NotFound(String::new()), true));
         assert!(!is_retryable(
             &TransferError::RangeNotSatisfiable(String::new()),
             true
@@ -568,10 +550,7 @@ mod tests {
         assert!(!markers.retry_on_403);
         let dedup = RetryMarkers::dedup();
         assert!(!dedup.retry_on_429);
-        assert!(dedup.expected_404);
-        let recon = RetryMarkers::reconstruction();
-        assert!(recon.expected_416);
-        let xorb = RetryMarkers::ranged_xorb();
+        let xorb = RetryMarkers::refresh_on_forbidden();
         assert!(xorb.retry_on_403);
     }
 

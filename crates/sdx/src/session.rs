@@ -67,7 +67,7 @@ impl DownloadSessionInner {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Read,
-            markers: RetryMarkers::reconstruction(),
+            markers: RetryMarkers::default(),
         }
     }
 

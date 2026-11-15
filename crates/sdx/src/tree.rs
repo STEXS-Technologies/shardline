@@ -187,10 +187,7 @@ impl MetadataClient {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Read,
-            markers: RetryMarkers {
-                retry_on_403: true,
-                ..RetryMarkers::default()
-            },
+            markers: RetryMarkers::refresh_on_forbidden(),
         }
     }
 
@@ -199,10 +196,7 @@ impl MetadataClient {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
             scope: RetryScope::Write,
-            markers: RetryMarkers {
-                retry_on_403: true,
-                ..RetryMarkers::default()
-            },
+            markers: RetryMarkers::refresh_on_forbidden(),
         }
     }
 

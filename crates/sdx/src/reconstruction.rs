@@ -908,7 +908,7 @@ mod tests {
                 .with_jitter(false),
             tokens: None,
             scope: RetryScope::Read,
-            markers: RetryMarkers::reconstruction(),
+            markers: RetryMarkers::default(),
         };
         let transfer = transfer_client();
         let file = super::reconstruct(
