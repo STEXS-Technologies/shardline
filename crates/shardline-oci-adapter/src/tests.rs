@@ -2208,51 +2208,35 @@ async fn count_active_sessions_read_dir_error() {
 }
 
 #[tokio::test]
-async fn count_active_sessions_skips_unreadable_json() {
-    // count_active_upload_sessions: fs::read fails → continue (line 951)
+async fn count_active_sessions_skips_unreadable_invalid_and_expired_metadata() {
     let root = temp_root();
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
-    // Create a directory with .json name (read will fail with EISDIR)
-    let dir_path = upload_dir.join("unreadable.json");
-    tokio::fs::create_dir(&dir_path).await.unwrap();
-    let count = super::count_active_upload_sessions(root.path(), ttl())
+    create_test_session(root.path(), false).await.unwrap();
+    let unreadable = crate::upload_metadata_path(root.path(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    tokio::fs::create_dir(&unreadable).await.unwrap();
+    let invalid = crate::upload_metadata_path(root.path(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    tokio::fs::write(&invalid, b"not-valid-json").await.unwrap();
+    let expired_id = "cccccccccccccccccccccccccccccccc";
+    let expired_session = OciUploadSession {
+        created_at_unix_seconds: 1,
+        last_touched_unix_seconds: 1,
+        ..upload_session_fixture()
+    };
+    super::persist_upload_session(root.path(), expired_id, &expired_session)
         .await
         .unwrap();
-    assert_eq!(count, 0, "unreadable json should be skipped");
-}
-
-#[tokio::test]
-async fn count_active_sessions_skips_invalid_json() {
-    // count_active_upload_sessions: serde_json::from_slice fails → continue (line 954)
-    let root = temp_root();
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
-    let json_path = upload_dir.join("invalid.json");
-    tokio::fs::write(&json_path, b"not-valid-json")
+    // The expiry case must pass evidence validation before the counter skips it.
+    crate::fs::read_persisted_upload_session(root.path(), expired_id)
         .await
         .unwrap();
-    let count = super::count_active_upload_sessions(root.path(), ttl())
-        .await
-        .unwrap();
-    assert_eq!(count, 0, "invalid json should be skipped");
-}
-
-#[tokio::test]
-async fn count_active_sessions_skips_expired_session() {
-    // count_active_upload_sessions: expired session → continue (line 957)
-    let root = temp_root();
-    let upload_dir = crate::upload_dir(root.path());
-    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
-    // Write an expired session (last_touched very old)
-    let session = upload_session_fixture();
-    let bytes = serde_json::to_vec(&session).unwrap();
-    let json_path = upload_dir.join("expired.json");
-    tokio::fs::write(&json_path, &bytes).await.unwrap();
-    let count = super::count_active_upload_sessions(root.path(), ttl())
-        .await
-        .unwrap();
-    assert_eq!(count, 0, "expired session should be skipped");
+    assert_eq!(
+        super::count_active_upload_sessions(root.path(), ttl())
+            .await
+            .unwrap(),
+        1,
+    );
+    assert!(unreadable.is_dir());
+    assert_eq!(tokio::fs::read(&invalid).await.unwrap(), b"not-valid-json");
+    assert!(crate::upload_metadata_path(root.path(), expired_id).is_file());
 }
 
 #[tokio::test]
