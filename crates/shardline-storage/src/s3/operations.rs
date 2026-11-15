@@ -1116,33 +1116,7 @@ impl AsyncObjectStore for S3ObjectStore {
             )
             .await
             .map_err(S3ObjectStoreError::External)?;
-        if result.range != external_range {
-            return Err(S3ObjectStoreError::RangeOutOfBounds);
-        }
-        let expected_length = external_range
-            .end
-            .checked_sub(external_range.start)
-            .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
-        let mut acc = Vec::new();
-        let mut stream = result.into_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(S3ObjectStoreError::External)?;
-            let next_length = acc
-                .len()
-                .checked_add(chunk.len())
-                .and_then(|length| u64::try_from(length).ok())
-                .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
-            if next_length > expected_length {
-                return Err(S3ObjectStoreError::RangeOutOfBounds);
-            }
-            acc.extend_from_slice(&chunk);
-        }
-        if u64::try_from(acc.len()).map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?
-            != expected_length
-        {
-            return Err(S3ObjectStoreError::RangeOutOfBounds);
-        }
-        Ok(acc)
+        read_range_payload(result, external_range).await
     }
 
     async fn read_suffix(
@@ -1227,6 +1201,36 @@ pub(crate) fn validated_external_range(range: ByteRange) -> Result<Range<u64>, S
         .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
 
     Ok(range.start()..end_exclusive)
+}
+
+async fn read_range_payload(
+    result: GetResult,
+    expected_range: Range<u64>,
+) -> Result<Vec<u8>, S3ObjectStoreError> {
+    let expected_length = expected_range
+        .end
+        .checked_sub(expected_range.start)
+        .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
+    let mut acc = Vec::new();
+    let mut stream = stream_payload_for_range(result, expected_range)?;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let next_length = acc
+            .len()
+            .checked_add(chunk.len())
+            .and_then(|length| u64::try_from(length).ok())
+            .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
+        if next_length > expected_length {
+            return Err(S3ObjectStoreError::RangeOutOfBounds);
+        }
+        acc.extend_from_slice(&chunk);
+    }
+    if u64::try_from(acc.len()).map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?
+        != expected_length
+    {
+        return Err(S3ObjectStoreError::RangeOutOfBounds);
+    }
+    Ok(acc)
 }
 
 async fn copy_snapshot_to_writer(

@@ -28,31 +28,7 @@ impl S3ObjectStore {
         };
         let total = result.meta.size;
         let start = total.saturating_sub(length);
-        if result.range != (start..total) {
-            return Err(S3ObjectStoreError::RangeOutOfBounds);
-        }
-        let expected = total
-            .checked_sub(start)
-            .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
-        let mut bytes = Vec::new();
-        let mut stream = result.into_stream();
-        while let Some(frame) = stream.next().await {
-            let frame = frame.map_err(S3ObjectStoreError::External)?;
-            let next = bytes
-                .len()
-                .checked_add(frame.len())
-                .and_then(|size| u64::try_from(size).ok())
-                .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
-            if next > expected {
-                return Err(S3ObjectStoreError::RangeOutOfBounds);
-            }
-            bytes.extend_from_slice(&frame);
-        }
-        if u64::try_from(bytes.len()).map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?
-            != expected
-        {
-            return Err(S3ObjectStoreError::RangeOutOfBounds);
-        }
+        let bytes = read_range_payload(result, start..total).await?;
         Ok(Some((bytes, total)))
     }
 }
