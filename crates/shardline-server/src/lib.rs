@@ -227,7 +227,7 @@ pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
 pub(crate) use shardline_protocol_adapters::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    LfsOperation, TransferAdapter, cas_headers,
+    LfsOperation, cas_headers,
 };
 pub(crate) use shardline_xet_adapter::ShardUploadResponse;
 pub use storage_migration::{

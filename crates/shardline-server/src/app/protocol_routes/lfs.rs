@@ -43,7 +43,7 @@ use super::{MAX_LFS_BATCH_OBJECTS, authorize_repository, direct_object_response}
 use crate::app::{AppState, MAX_LFS_PATCH_CHUNK_BYTES};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    LfsOperation, ServerError, TransferAdapter,
+    LfsOperation, ServerError,
     admission::weights,
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
@@ -916,17 +916,8 @@ pub(crate) async fn lfs_batch(
 
     // Determine the transfer adapter. Prefer "xet" when the client supports it
     // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
-    let adapters: Vec<Option<TransferAdapter>> = request
-        .transfers
-        .iter()
-        .map(|transfer| match transfer.as_str() {
-            "xet" => Some(TransferAdapter::Xet),
-            "basic" => Some(TransferAdapter::Basic),
-            _ => None,
-        })
-        .collect();
-    let supports_xet = adapters.contains(&Some(TransferAdapter::Xet));
-    let supports_basic = adapters.contains(&Some(TransferAdapter::Basic));
+    let supports_xet = request.transfers.iter().any(|transfer| transfer == "xet");
+    let supports_basic = request.transfers.iter().any(|transfer| transfer == "basic");
     // Authorization above is mandatory for every adapter. Only an internal
     // signing failure may fall back; token and permission failures stay errors.
     let cas_token = if supports_xet && state.auth.is_some() && auth.claims().is_some() {
