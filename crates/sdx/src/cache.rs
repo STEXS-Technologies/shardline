@@ -262,26 +262,17 @@ impl ChunkCache {
             }
 
             let mut state = state.blocking_lock();
-            let (cached, was_corrupt) = match read_entry_bounded(&path, decoded_limit) {
-                Ok(Some(cached)) if cached.chunk_range == chunk_range => (Some(cached), false),
-                Ok(Some(_)) => (None, true),
-                Ok(None) => (None, false),
-                Err(_) => (None, true),
-            };
-            if was_corrupt {
-                drop(remove_entry_file(&path));
-            }
-
-            if was_corrupt {
-                // Drop the stale index entry so `total_bytes` accounting stays
-                // accurate after the corrupt file is deleted.
-                if let Some(existing) = state.entries.remove(&key) {
-                    state.total_bytes = state.total_bytes.saturating_sub(existing.size);
+            let cached = match read_entry_bounded(&path, decoded_limit) {
+                Ok(Some(cached)) if cached.chunk_range == chunk_range => cached,
+                Ok(None) => return Ok(None),
+                Ok(Some(_)) | Err(_) => {
+                    drop(remove_entry_file(&path));
+                    // Remove stale accounting when discarding a corrupt file.
+                    if let Some(existing) = state.entries.remove(&key) {
+                        state.total_bytes = state.total_bytes.saturating_sub(existing.size);
+                    }
+                    return Ok(None);
                 }
-                return Ok(None);
-            }
-            let Some(cached) = cached else {
-                return Ok(None);
             };
             // File reads and index updates share the lock with writes and eviction.
             if let Some(entry) = state.entries.get_mut(&key) {
