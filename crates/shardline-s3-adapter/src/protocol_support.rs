@@ -94,78 +94,6 @@ pub enum S3SubResource {
     Other,
 }
 
-/// A typed S3 query-parameter name (the `?subresource` dispatch set plus the
-/// recognized-but-unsupported operations).
-///
-/// This is the single typed choke point between raw query strings and the
-/// [`S3SubResource`] model: [`QueryParameter::parse`] owns the literal name
-/// table and every other site matches the typed enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QueryParameter {
-    /// `?uploads` — `CreateMultipartUpload`.
-    Uploads,
-    /// `?uploadId=<id>`.
-    UploadId,
-    /// `?partNumber=<n>`.
-    PartNumber,
-    /// `?list-type=<v>`.
-    ListType,
-    /// `?delete=` — `DeleteObjects` (batch delete).
-    Delete,
-    /// `?location`.
-    Location,
-    /// `?acl`.
-    Acl,
-    /// `?policy`.
-    Policy,
-    /// `?lifecycle`.
-    Lifecycle,
-    /// `?versioning`.
-    Versioning,
-    /// `?cors`.
-    Cors,
-    /// `?notification`.
-    Notification,
-    /// `?tagging`.
-    Tagging,
-    /// `?encryption`.
-    Encryption,
-    /// A recognized-but-unsupported sub-resource (for example `restore`,
-    /// `select`, `torrent`, `legal-hold`, `retention`, `attributes`,
-    /// `replication`, `website`, `versionId`, `versions`, `logging`,
-    /// `requestPayment`, `accelerate`, `object-lock`, or `ownershipControls`) — maps to
-    /// [`S3SubResource::Other`].
-    Other,
-}
-
-impl QueryParameter {
-    /// Parses a raw query-parameter name into the typed set.
-    fn parse(name: &str) -> Option<Self> {
-        match name {
-            "uploads" => Some(Self::Uploads),
-            "uploadId" => Some(Self::UploadId),
-            "partNumber" => Some(Self::PartNumber),
-            "list-type" => Some(Self::ListType),
-            "delete" => Some(Self::Delete),
-            "location" => Some(Self::Location),
-            "acl" => Some(Self::Acl),
-            "policy" => Some(Self::Policy),
-            "lifecycle" => Some(Self::Lifecycle),
-            "versioning" => Some(Self::Versioning),
-            "cors" => Some(Self::Cors),
-            "notification" => Some(Self::Notification),
-            "tagging" => Some(Self::Tagging),
-            "encryption" => Some(Self::Encryption),
-            "restore" | "select" | "torrent" | "legal-hold" | "retention" | "attributes"
-            | "replication" | "website" | "versionId" | "versions" | "logging"
-            | "requestPayment" | "accelerate" | "object-lock" | "ownershipControls" => {
-                Some(Self::Other)
-            }
-            _ => None,
-        }
-    }
-}
-
 /// Parses one query pair into its typed sub-resource, if the name is a
 /// recognized sub-resource.
 ///
@@ -173,30 +101,34 @@ impl QueryParameter {
 /// `continuation-token`, `fetch-owner`, …) return `None`.
 #[must_use]
 pub fn parse_subresource(name: &str, value: &str) -> Option<S3SubResource> {
-    match QueryParameter::parse(name)? {
-        QueryParameter::Uploads => Some(S3SubResource::Uploads),
-        QueryParameter::UploadId => Some(S3SubResource::UploadId(value.to_owned())),
-        QueryParameter::PartNumber => match value.parse::<u32>() {
-            Ok(number) => Some(S3SubResource::PartNumber(number)),
-            Err(_error) => Some(S3SubResource::Other),
-        },
-        QueryParameter::ListType => Some(if value.parse::<u32>().ok() == Some(2) {
-            S3SubResource::ListObjects
-        } else {
-            S3SubResource::Other
-        }),
-        QueryParameter::Delete => Some(S3SubResource::DeleteObjects),
-        QueryParameter::Location => Some(S3SubResource::Location),
-        QueryParameter::Acl => Some(S3SubResource::Acl),
-        QueryParameter::Policy => Some(S3SubResource::Policy),
-        QueryParameter::Lifecycle => Some(S3SubResource::Lifecycle),
-        QueryParameter::Versioning => Some(S3SubResource::Versioning),
-        QueryParameter::Cors => Some(S3SubResource::Cors),
-        QueryParameter::Notification => Some(S3SubResource::Notification),
-        QueryParameter::Tagging => Some(S3SubResource::Tagging),
-        QueryParameter::Encryption => Some(S3SubResource::Encryption),
-        QueryParameter::Other => Some(S3SubResource::Other),
-    }
+    Some(match name {
+        "uploads" => S3SubResource::Uploads,
+        "uploadId" => S3SubResource::UploadId(value.to_owned()),
+        "partNumber" => value
+            .parse::<u32>()
+            .map_or(S3SubResource::Other, S3SubResource::PartNumber),
+        "list-type" => {
+            if value.parse::<u32>().ok() == Some(2) {
+                S3SubResource::ListObjects
+            } else {
+                S3SubResource::Other
+            }
+        }
+        "delete" => S3SubResource::DeleteObjects,
+        "location" => S3SubResource::Location,
+        "acl" => S3SubResource::Acl,
+        "policy" => S3SubResource::Policy,
+        "lifecycle" => S3SubResource::Lifecycle,
+        "versioning" => S3SubResource::Versioning,
+        "cors" => S3SubResource::Cors,
+        "notification" => S3SubResource::Notification,
+        "tagging" => S3SubResource::Tagging,
+        "encryption" => S3SubResource::Encryption,
+        "restore" | "select" | "torrent" | "legal-hold" | "retention" | "attributes"
+        | "replication" | "website" | "versionId" | "versions" | "logging" | "requestPayment"
+        | "accelerate" | "object-lock" | "ownershipControls" => S3SubResource::Other,
+        _ => return None,
+    })
 }
 
 /// Classifies the query parameters of an S3 request into the recognized
