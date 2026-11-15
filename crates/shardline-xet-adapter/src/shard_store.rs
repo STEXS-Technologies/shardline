@@ -1688,37 +1688,45 @@ mod tests {
         }
     }
 
-    // ── validate_referenced_xorb_count ────────────────────────────────────
-
     #[test]
-    fn validate_referenced_xorb_count_accepts_within_limit() {
+    fn referenced_xorb_limit_counts_distinct_containers() {
         use shardline_xet_core::merklehash::compute_data_hash;
-        let hash = compute_data_hash(b"xorb");
-        let file_infos = vec![MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, false, false),
-            segments: vec![FileDataSequenceEntry::new(hash, 1, 0, 1)],
-            verification: Vec::new(),
-            metadata_ext: None,
-        }];
-        assert!(super::validate_referenced_xorb_count(&file_infos, 1).is_ok());
-    }
 
-    #[test]
-    fn validate_referenced_xorb_count_exceeds_limit() {
-        use shardline_xet_core::merklehash::compute_data_hash;
-        let first = compute_data_hash(b"xorb1");
-        let second = compute_data_hash(b"xorb2");
-        let file_infos = vec![MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2, false, false),
-            segments: vec![
-                FileDataSequenceEntry::new(first, 1, 0, 1),
-                FileDataSequenceEntry::new(second, 1, 0, 1),
-            ],
-            verification: Vec::new(),
-            metadata_ext: None,
-        }];
-        let result = super::validate_referenced_xorb_count(&file_infos, 1);
-        assert!(matches!(result, Err(XetAdapterError::TooManyShardTerms)));
+        for (names, limit, allowed) in [
+            (vec!["xorb"], 1, true),
+            (vec!["xorb1", "xorb2"], 1, false),
+            (vec!["xorb"], 0, false),
+            (vec!["xorb", "xorb"], 1, true),
+        ] {
+            let file_infos = [MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(
+                    compute_data_hash(b"f"),
+                    names.len() as u64,
+                    false,
+                    false,
+                ),
+                segments: names
+                    .iter()
+                    .map(|name| {
+                        FileDataSequenceEntry::new(compute_data_hash(name.as_bytes()), 1, 0, 1)
+                    })
+                    .collect(),
+                verification: Vec::new(),
+                metadata_ext: None,
+            }];
+            let result = super::validate_referenced_xorb_count(&file_infos, limit);
+            if allowed {
+                assert!(
+                    result.is_ok(),
+                    "containers={names:?}, limit={limit}: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(XetAdapterError::TooManyShardTerms)),
+                    "containers={names:?}, limit={limit}: {result:?}"
+                );
+            }
+        }
     }
 
     // ── XorbRangeInfo ────────────────────────────────────────────────────
@@ -2146,20 +2154,6 @@ mod tests {
     fn validate_referenced_xorb_count_empty() {
         let result = super::validate_referenced_xorb_count(&[], 10);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn validate_referenced_xorb_count_zero_limit() {
-        use shardline_xet_core::merklehash::compute_data_hash;
-        let hash = compute_data_hash(b"xorb");
-        let file_infos = vec![MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, false, false),
-            segments: vec![FileDataSequenceEntry::new(hash, 1, 0, 1)],
-            verification: Vec::new(),
-            metadata_ext: None,
-        }];
-        let result = super::validate_referenced_xorb_count(&file_infos, 0);
-        assert!(matches!(result, Err(XetAdapterError::TooManyShardTerms)));
     }
 
     // ── dedupe_shard_mapping ─────────────────────────────────────────────
