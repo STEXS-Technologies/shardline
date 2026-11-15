@@ -201,51 +201,55 @@ pub struct MultipartUploadSession {
 }
 
 #[derive(Debug, Serialize)]
-struct MultipartPartSnapshotV1 {
+struct MultipartPartSnapshotV1<'session> {
     size_bytes: u64,
-    file_name: String,
+    file_name: &'session str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    etag: Option<String>,
+    etag: Option<&'session str>,
 }
 
 #[derive(Debug, Serialize)]
-struct MultipartUploadSessionSnapshotV1 {
-    bucket: String,
-    key: String,
-    scope_namespace: String,
-    upload_id: String,
-    parts: BTreeMap<u32, MultipartPartSnapshotV1>,
-    user_metadata: Vec<(String, String)>,
+struct MultipartUploadSessionSnapshotV1<'session> {
+    bucket: &'session str,
+    key: &'session str,
+    scope_namespace: &'session str,
+    upload_id: &'session str,
+    #[serde(serialize_with = "serialize_snapshot_parts")]
+    parts: &'session BTreeMap<u32, MultipartPart>,
+    user_metadata: &'session [(String, String)],
     created_at_unix_seconds: u64,
     last_touched_unix_seconds: u64,
 }
 
-impl MultipartUploadSessionSnapshotV1 {
-    fn from_session(session: &MultipartUploadSession) -> Self {
+impl<'session> MultipartUploadSessionSnapshotV1<'session> {
+    fn from_session(session: &'session MultipartUploadSession) -> Self {
         Self {
-            bucket: session.bucket.clone(),
-            key: session.key.clone(),
-            scope_namespace: session.scope_namespace.clone(),
-            upload_id: session.upload_id.clone(),
-            parts: session
-                .parts
-                .iter()
-                .map(|(number, part)| {
-                    (
-                        *number,
-                        MultipartPartSnapshotV1 {
-                            size_bytes: part.size_bytes,
-                            file_name: part.file_name.clone(),
-                            etag: part.etag.clone(),
-                        },
-                    )
-                })
-                .collect(),
-            user_metadata: session.user_metadata.clone(),
+            bucket: &session.bucket,
+            key: &session.key,
+            scope_namespace: &session.scope_namespace,
+            upload_id: &session.upload_id,
+            parts: &session.parts,
+            user_metadata: &session.user_metadata,
             created_at_unix_seconds: session.created_at_unix_seconds,
             last_touched_unix_seconds: session.last_touched_unix_seconds,
         }
     }
+}
+
+fn serialize_snapshot_parts<Serializer: serde::Serializer>(
+    parts: &BTreeMap<u32, MultipartPart>,
+    serializer: Serializer,
+) -> Result<Serializer::Ok, Serializer::Error> {
+    serializer.collect_map(parts.iter().map(|(number, part)| {
+        (
+            number,
+            MultipartPartSnapshotV1 {
+                size_bytes: part.size_bytes,
+                file_name: &part.file_name,
+                etag: part.etag.as_deref(),
+            },
+        )
+    }))
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2631,6 +2635,42 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_snapshot_preserves_session_bytes_and_part_order() {
+        let session = MultipartUploadSession {
+            bucket: "acme.models".into(),
+            key: "data/model.pt".into(),
+            scope_namespace: "global".into(),
+            upload_id: "upload-id".into(),
+            parts: [
+                (
+                    10,
+                    MultipartPart {
+                        size_bytes: 7,
+                        file_name: "part-10".into(),
+                        etag: Some("quoted-etag".into()),
+                    },
+                ),
+                (
+                    2,
+                    MultipartPart {
+                        size_bytes: 3,
+                        file_name: "part-2".into(),
+                        etag: None,
+                    },
+                ),
+            ]
+            .into(),
+            user_metadata: vec![("source".into(), "fixture".into())],
+            created_at_unix_seconds: 100,
+            last_touched_unix_seconds: 200,
+        };
+        assert_eq!(
+            serde_json::to_vec(&MultipartUploadSessionSnapshotV1::from_session(&session)).unwrap(),
+            serde_json::to_vec(&session).unwrap(),
+        );
+    }
+
+    #[test]
     fn legacy_part_metadata_preserves_snapshot_bytes_and_validates_paths() {
         let part: MultipartPart =
             serde_json::from_str(r#"{"size_bytes":3,"file_name":"part-1"}"#).unwrap();
@@ -2641,7 +2681,7 @@ mod tests {
         );
         let snapshot = MultipartPartSnapshotV1 {
             size_bytes: part.size_bytes,
-            file_name: part.file_name.clone(),
+            file_name: &part.file_name,
             etag: None,
         };
         assert_eq!(
