@@ -902,444 +902,8 @@ type XetIdentityLookup = dyn Fn(
 /// Type-erased Hub metadata with an optional native-storage identity bridge.
 #[derive(Clone)]
 pub struct BoxedHubStore {
-    inner: Arc<dyn ErasedHubStore>,
+    inner: Arc<dyn HubStore<Error = HubStoreError>>,
     xet_identity_lookup: Option<Arc<XetIdentityLookup>>,
-}
-
-trait ErasedHubStore: Send + Sync {
-    fn create_repo_authorized(
-        &self,
-        repo_type: HubRepoType,
-        name: &str,
-        private: bool,
-        actor: Option<&HubCreationActor>,
-    ) -> Result<HubCreationOutcome, HubStoreError>;
-    fn object_location(
-        &self,
-        scope: &shardline_protocol::RepositoryScope,
-        kind: HubObjectKind,
-        object_id: &str,
-    ) -> Result<Option<HubObjectLocation>, HubStoreError>;
-    fn remember_object_location(
-        &self,
-        scope: &shardline_protocol::RepositoryScope,
-        kind: HubObjectKind,
-        object_id: &str,
-    ) -> Result<(), HubStoreError>;
-    fn lookup_xet_file_identity(
-        &self,
-        scope: &shardline_protocol::RepositoryScope,
-        sha256: &str,
-    ) -> Result<Option<crate::XetFileIdentity>, HubStoreError>;
-    fn supports_atomic_ref_updates(&self) -> bool;
-    fn change_refs_atomically(
-        &self,
-        repo_id: &str,
-        changes: &[HubRefChange],
-    ) -> Result<HubRefBatchOutcome, HubStoreError>;
-    fn create_repo(
-        &self,
-        repo_type: HubRepoType,
-        name: &str,
-        private: bool,
-    ) -> Result<HubRepo, HubStoreError>;
-
-    fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, HubStoreError>;
-
-    fn list_repos(&self) -> Result<Vec<HubRepo>, HubStoreError>;
-
-    fn search_repos(
-        &self,
-        repo_type: Option<HubRepoType>,
-        name_prefix: &str,
-        limit: usize,
-    ) -> Result<Vec<HubRepo>, HubStoreError>;
-
-    fn search_repos_with_options(
-        &self,
-        repo_type: Option<HubRepoType>,
-        name_prefix: &str,
-        limit: usize,
-        options: &HubRepoSearchOptions,
-    ) -> Result<Vec<HubRepo>, HubStoreError>;
-
-    fn create_revision(
-        &self,
-        repo_id: &str,
-        parent_sha: Option<&str>,
-        new_sha: &str,
-        ref_name: &str,
-        message: &str,
-    ) -> Result<HubRevision, HubStoreError>;
-    fn publish_prepared_revision(
-        &self,
-        revision: &HubRevision,
-    ) -> Result<HubRefUpdateOutcome, HubStoreError>;
-    fn update_revision_if_current(
-        &self,
-        repo_id: &str,
-        expected_sha: &str,
-        new_sha: &str,
-        ref_name: &str,
-        message: &str,
-    ) -> Result<HubRefUpdateOutcome, HubStoreError>;
-    fn create_revision_if_absent(
-        &self,
-        repo_id: &str,
-        parent_sha: Option<&str>,
-        new_sha: &str,
-        ref_name: &str,
-        message: &str,
-    ) -> Result<HubRefCreateOutcome, HubStoreError>;
-
-    fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, HubStoreError>;
-    fn list_refs_bounded(&self, repo_id: &str, limit: usize) -> Result<Vec<HubRef>, HubStoreError>;
-
-    fn delete_ref(
-        &self,
-        repo_id: &str,
-        ref_name: &str,
-        expected_sha: &str,
-    ) -> Result<(), HubStoreError>;
-
-    fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, HubStoreError>;
-    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, HubStoreError>;
-    fn list_revisions_bounded(
-        &self,
-        repo_id: &str,
-        limit: usize,
-    ) -> Result<Vec<HubRevision>, HubStoreError>;
-
-    fn resolve_revision(
-        &self,
-        repo_id: &str,
-        revision: &str,
-    ) -> Result<Option<String>, HubStoreError>;
-
-    fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), HubStoreError>;
-
-    fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, HubStoreError>;
-    fn get_files_bounded(
-        &self,
-        commit_sha: &str,
-        limit: usize,
-    ) -> Result<Vec<HubFileEntry>, HubStoreError>;
-
-    fn get_tree_page(
-        &self,
-        commit_sha: &str,
-        options: &HubTreePageOptions,
-    ) -> Result<HubTreePage, HubStoreError>;
-
-    fn create_webhook_bounded(
-        &self,
-        repo_id: &str,
-        url: &str,
-        events: &[String],
-        secret: Option<&str>,
-        limit: usize,
-    ) -> Result<HubWebhookCreateOutcome, HubStoreError>;
-    fn create_webhook(
-        &self,
-        repo_id: &str,
-        url: &str,
-        events: &[String],
-        secret: Option<&str>,
-    ) -> Result<HubWebhook, HubStoreError>;
-
-    fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, HubStoreError>;
-
-    fn delete_repo(&self, repo_id: &str) -> Result<(), HubStoreError>;
-
-    fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), HubStoreError>;
-
-    fn update_webhook_secret(
-        &self,
-        repo_id: &str,
-        webhook_id: &str,
-        secret: Option<&str>,
-    ) -> Result<(), HubStoreError>;
-
-    fn compare_and_swap_webhook_secret(
-        &self,
-        repo_id: &str,
-        webhook_id: &str,
-        expected_secret: &str,
-        secret: Option<&str>,
-    ) -> Result<Option<bool>, HubStoreError>;
-
-    fn webhooks_for_event(
-        &self,
-        repo_id: &str,
-        event: &str,
-    ) -> Result<Vec<HubWebhook>, HubStoreError>;
-}
-
-impl<T: HubStore> ErasedHubStore for T {
-    fn create_repo_authorized(
-        &self,
-        repo_type: HubRepoType,
-        name: &str,
-        private: bool,
-        actor: Option<&HubCreationActor>,
-    ) -> Result<HubCreationOutcome, HubStoreError> {
-        T::create_repo_authorized(self, repo_type, name, private, actor)
-            .map_err(erase_hub_store_error)
-    }
-    fn object_location(
-        &self,
-        scope: &shardline_protocol::RepositoryScope,
-        kind: HubObjectKind,
-        object_id: &str,
-    ) -> Result<Option<HubObjectLocation>, HubStoreError> {
-        T::object_location(self, scope, kind, object_id).map_err(erase_hub_store_error)
-    }
-    fn remember_object_location(
-        &self,
-        scope: &shardline_protocol::RepositoryScope,
-        kind: HubObjectKind,
-        object_id: &str,
-    ) -> Result<(), HubStoreError> {
-        T::remember_object_location(self, scope, kind, object_id).map_err(erase_hub_store_error)
-    }
-    fn lookup_xet_file_identity(
-        &self,
-        scope: &shardline_protocol::RepositoryScope,
-        sha256: &str,
-    ) -> Result<Option<crate::XetFileIdentity>, HubStoreError> {
-        T::lookup_xet_file_identity(self, scope, sha256).map_err(erase_hub_store_error)
-    }
-    fn supports_atomic_ref_updates(&self) -> bool {
-        T::supports_atomic_ref_updates(self)
-    }
-    fn change_refs_atomically(
-        &self,
-        repo_id: &str,
-        changes: &[HubRefChange],
-    ) -> Result<HubRefBatchOutcome, HubStoreError> {
-        T::change_refs_atomically(self, repo_id, changes).map_err(erase_hub_store_error)
-    }
-    fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, HubStoreError> {
-        T::get_revision(self, repo_id, sha).map_err(erase_hub_store_error)
-    }
-    fn create_repo(
-        &self,
-        repo_type: HubRepoType,
-        name: &str,
-        private: bool,
-    ) -> Result<HubRepo, HubStoreError> {
-        T::create_repo(self, repo_type, name, private).map_err(erase_hub_store_error)
-    }
-
-    fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, HubStoreError> {
-        T::get_repo(self, repo_id).map_err(erase_hub_store_error)
-    }
-
-    fn list_repos(&self) -> Result<Vec<HubRepo>, HubStoreError> {
-        T::list_repos(self).map_err(erase_hub_store_error)
-    }
-
-    fn search_repos(
-        &self,
-        repo_type: Option<HubRepoType>,
-        name_prefix: &str,
-        limit: usize,
-    ) -> Result<Vec<HubRepo>, HubStoreError> {
-        T::search_repos(self, repo_type, name_prefix, limit).map_err(erase_hub_store_error)
-    }
-
-    fn search_repos_with_options(
-        &self,
-        repo_type: Option<HubRepoType>,
-        name_prefix: &str,
-        limit: usize,
-        options: &HubRepoSearchOptions,
-    ) -> Result<Vec<HubRepo>, HubStoreError> {
-        T::search_repos_with_options(self, repo_type, name_prefix, limit, options)
-            .map_err(erase_hub_store_error)
-    }
-
-    fn create_revision(
-        &self,
-        repo_id: &str,
-        parent_sha: Option<&str>,
-        new_sha: &str,
-        ref_name: &str,
-        message: &str,
-    ) -> Result<HubRevision, HubStoreError> {
-        T::create_revision(self, repo_id, parent_sha, new_sha, ref_name, message)
-            .map_err(erase_hub_store_error)
-    }
-    fn publish_prepared_revision(
-        &self,
-        revision: &HubRevision,
-    ) -> Result<HubRefUpdateOutcome, HubStoreError> {
-        T::publish_prepared_revision(self, revision).map_err(erase_hub_store_error)
-    }
-    fn update_revision_if_current(
-        &self,
-        repo_id: &str,
-        expected_sha: &str,
-        new_sha: &str,
-        ref_name: &str,
-        message: &str,
-    ) -> Result<HubRefUpdateOutcome, HubStoreError> {
-        T::update_revision_if_current(self, repo_id, expected_sha, new_sha, ref_name, message)
-            .map_err(erase_hub_store_error)
-    }
-    fn create_revision_if_absent(
-        &self,
-        repo_id: &str,
-        parent_sha: Option<&str>,
-        new_sha: &str,
-        ref_name: &str,
-        message: &str,
-    ) -> Result<HubRefCreateOutcome, HubStoreError> {
-        T::create_revision_if_absent(self, repo_id, parent_sha, new_sha, ref_name, message)
-            .map_err(erase_hub_store_error)
-    }
-
-    fn list_refs_bounded(&self, repo_id: &str, limit: usize) -> Result<Vec<HubRef>, HubStoreError> {
-        T::list_refs_bounded(self, repo_id, limit)
-            .map_err(erase_hub_store_error)?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub refs exceed the requested listing limit",
-                )) as _
-            })
-    }
-
-    fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, HubStoreError> {
-        T::list_refs(self, repo_id).map_err(erase_hub_store_error)
-    }
-
-    fn delete_ref(
-        &self,
-        repo_id: &str,
-        ref_name: &str,
-        expected_sha: &str,
-    ) -> Result<(), HubStoreError> {
-        T::delete_ref(self, repo_id, ref_name, expected_sha).map_err(erase_hub_store_error)
-    }
-
-    fn list_revisions_bounded(
-        &self,
-        repo_id: &str,
-        limit: usize,
-    ) -> Result<Vec<HubRevision>, HubStoreError> {
-        T::list_revisions_bounded(self, repo_id, limit)
-            .map_err(erase_hub_store_error)?
-            .ok_or_else(|| Box::new(HubRevisionListingOverflow) as _)
-    }
-
-    fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, HubStoreError> {
-        T::list_revisions(self, repo_id).map_err(erase_hub_store_error)
-    }
-
-    fn resolve_revision(
-        &self,
-        repo_id: &str,
-        revision: &str,
-    ) -> Result<Option<String>, HubStoreError> {
-        T::resolve_revision(self, repo_id, revision).map_err(erase_hub_store_error)
-    }
-
-    fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), HubStoreError> {
-        T::store_files(self, commit_sha, files).map_err(erase_hub_store_error)
-    }
-
-    fn get_files_bounded(
-        &self,
-        commit_sha: &str,
-        limit: usize,
-    ) -> Result<Vec<HubFileEntry>, HubStoreError> {
-        T::get_files_bounded(self, commit_sha, limit)
-            .map_err(erase_hub_store_error)?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub tree exceeds the requested listing limit",
-                )) as _
-            })
-    }
-
-    fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, HubStoreError> {
-        T::get_files(self, commit_sha).map_err(erase_hub_store_error)
-    }
-
-    fn get_tree_page(
-        &self,
-        commit_sha: &str,
-        options: &HubTreePageOptions,
-    ) -> Result<HubTreePage, HubStoreError> {
-        T::get_tree_page(self, commit_sha, options)
-            .map_err(erase_hub_store_error)?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub tree exceeds the 100000-entry metadata read ceiling",
-                )) as _
-            })
-    }
-
-    fn create_webhook_bounded(
-        &self,
-        repo_id: &str,
-        url: &str,
-        events: &[String],
-        secret: Option<&str>,
-        limit: usize,
-    ) -> Result<HubWebhookCreateOutcome, HubStoreError> {
-        T::create_webhook_bounded(self, repo_id, url, events, secret, limit)
-            .map_err(erase_hub_store_error)
-    }
-    fn create_webhook(
-        &self,
-        repo_id: &str,
-        url: &str,
-        events: &[String],
-        secret: Option<&str>,
-    ) -> Result<HubWebhook, HubStoreError> {
-        T::create_webhook(self, repo_id, url, events, secret).map_err(erase_hub_store_error)
-    }
-
-    fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, HubStoreError> {
-        T::list_webhooks(self, repo_id).map_err(erase_hub_store_error)
-    }
-
-    fn delete_repo(&self, repo_id: &str) -> Result<(), HubStoreError> {
-        T::delete_repo(self, repo_id).map_err(erase_hub_store_error)
-    }
-
-    fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), HubStoreError> {
-        T::delete_webhook(self, repo_id, webhook_id).map_err(erase_hub_store_error)
-    }
-
-    fn update_webhook_secret(
-        &self,
-        repo_id: &str,
-        webhook_id: &str,
-        secret: Option<&str>,
-    ) -> Result<(), HubStoreError> {
-        T::update_webhook_secret(self, repo_id, webhook_id, secret).map_err(erase_hub_store_error)
-    }
-
-    fn compare_and_swap_webhook_secret(
-        &self,
-        repo_id: &str,
-        webhook_id: &str,
-        expected_secret: &str,
-        secret: Option<&str>,
-    ) -> Result<Option<bool>, HubStoreError> {
-        T::compare_and_swap_webhook_secret(self, repo_id, webhook_id, expected_secret, secret)
-            .map_err(erase_hub_store_error)
-    }
-
-    fn webhooks_for_event(
-        &self,
-        repo_id: &str,
-        event: &str,
-    ) -> Result<Vec<HubWebhook>, HubStoreError> {
-        T::webhooks_for_event(self, repo_id, event).map_err(erase_hub_store_error)
-    }
 }
 
 impl BoxedHubStore {
@@ -1438,7 +1002,10 @@ impl BoxedHubStore {
     /// Creates a new `BoxedHubStore` from any `HubStore` implementation.
     pub fn new(store: impl HubStore<Error = HubStoreError> + 'static) -> Self {
         Self {
-            inner: Arc::new(store),
+            inner: Arc::new(ErasedAdapter {
+                store,
+                erase_error: erase_hub_store_error,
+            }),
             xet_identity_lookup: None,
         }
     }
@@ -1448,9 +1015,11 @@ impl BoxedHubStore {
     where
         T::Error: Into<HubStoreError>,
     {
-        let erased: Arc<dyn ErasedHubStore> = Arc::new(ErasedAdapter(store));
         Self {
-            inner: erased,
+            inner: Arc::new(ErasedAdapter {
+                store,
+                erase_error: Into::into,
+            }),
             xet_identity_lookup: None,
         }
     }
@@ -1586,7 +1155,9 @@ impl BoxedHubStore {
         repo_id: &str,
         limit: usize,
     ) -> Result<Vec<HubRef>, HubStoreError> {
-        self.inner.list_refs_bounded(repo_id, limit)
+        self.inner
+            .list_refs_bounded(repo_id, limit)?
+            .ok_or_else(|| erase_hub_store_error("Hub refs exceed the requested listing limit"))
     }
 
     /// Lists active branches and tags.
@@ -1623,7 +1194,9 @@ impl BoxedHubStore {
         repo_id: &str,
         limit: usize,
     ) -> Result<Vec<HubRevision>, HubStoreError> {
-        self.inner.list_revisions_bounded(repo_id, limit)
+        self.inner
+            .list_revisions_bounded(repo_id, limit)?
+            .ok_or_else(|| Box::new(HubRevisionListingOverflow) as _)
     }
 
     /// Lists all revisions.
@@ -1676,7 +1249,9 @@ impl BoxedHubStore {
         commit_sha: &str,
         limit: usize,
     ) -> Result<Vec<HubFileEntry>, HubStoreError> {
-        self.inner.get_files_bounded(commit_sha, limit)
+        self.inner
+            .get_files_bounded(commit_sha, limit)?
+            .ok_or_else(|| erase_hub_store_error("Hub tree exceeds the requested listing limit"))
     }
 
     /// Returns all entries for a tree within the adapter's supported ceiling.
@@ -1697,7 +1272,11 @@ impl BoxedHubStore {
         commit_sha: &str,
         options: &HubTreePageOptions,
     ) -> Result<HubTreePage, HubStoreError> {
-        self.inner.get_tree_page(commit_sha, options)
+        self.inner
+            .get_tree_page(commit_sha, options)?
+            .ok_or_else(|| {
+                erase_hub_store_error("Hub tree exceeds the 100000-entry metadata read ceiling")
+            })
     }
 
     /// Atomically registers a nonduplicate webhook within `limit`.
@@ -1802,13 +1381,15 @@ impl BoxedHubStore {
     }
 }
 
-/// Adapter to bridge any `HubStore` to `ErasedHubStore` via `Into<Box<dyn Error>>`.
-struct ErasedAdapter<T>(T);
+/// Retains the public store contract while adapting its error type.
+struct ErasedAdapter<T: HubStore> {
+    store: T,
+    erase_error: fn(T::Error) -> HubStoreError,
+}
 
-impl<T: HubStore> ErasedHubStore for ErasedAdapter<T>
-where
-    T::Error: Into<HubStoreError>,
-{
+impl<T: HubStore> HubStore for ErasedAdapter<T> {
+    type Error = HubStoreError;
+
     fn create_repo_authorized(
         &self,
         repo_type: HubRepoType,
@@ -1816,7 +1397,8 @@ where
         private: bool,
         actor: Option<&HubCreationActor>,
     ) -> Result<HubCreationOutcome, HubStoreError> {
-        T::create_repo_authorized(&self.0, repo_type, name, private, actor).map_err(Into::into)
+        T::create_repo_authorized(&self.store, repo_type, name, private, actor)
+            .map_err(self.erase_error)
     }
     fn object_location(
         &self,
@@ -1824,7 +1406,7 @@ where
         kind: HubObjectKind,
         object_id: &str,
     ) -> Result<Option<HubObjectLocation>, HubStoreError> {
-        T::object_location(&self.0, scope, kind, object_id).map_err(Into::into)
+        T::object_location(&self.store, scope, kind, object_id).map_err(self.erase_error)
     }
     fn remember_object_location(
         &self,
@@ -1832,27 +1414,27 @@ where
         kind: HubObjectKind,
         object_id: &str,
     ) -> Result<(), HubStoreError> {
-        T::remember_object_location(&self.0, scope, kind, object_id).map_err(Into::into)
+        T::remember_object_location(&self.store, scope, kind, object_id).map_err(self.erase_error)
     }
     fn lookup_xet_file_identity(
         &self,
         scope: &shardline_protocol::RepositoryScope,
         sha256: &str,
     ) -> Result<Option<crate::XetFileIdentity>, HubStoreError> {
-        T::lookup_xet_file_identity(&self.0, scope, sha256).map_err(Into::into)
+        T::lookup_xet_file_identity(&self.store, scope, sha256).map_err(self.erase_error)
     }
     fn supports_atomic_ref_updates(&self) -> bool {
-        T::supports_atomic_ref_updates(&self.0)
+        T::supports_atomic_ref_updates(&self.store)
     }
     fn change_refs_atomically(
         &self,
         repo_id: &str,
         changes: &[HubRefChange],
     ) -> Result<HubRefBatchOutcome, HubStoreError> {
-        T::change_refs_atomically(&self.0, repo_id, changes).map_err(Into::into)
+        T::change_refs_atomically(&self.store, repo_id, changes).map_err(self.erase_error)
     }
     fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, HubStoreError> {
-        T::get_revision(&self.0, repo_id, sha).map_err(Into::into)
+        T::get_revision(&self.store, repo_id, sha).map_err(self.erase_error)
     }
     fn create_repo(
         &self,
@@ -1860,15 +1442,15 @@ where
         name: &str,
         private: bool,
     ) -> Result<HubRepo, HubStoreError> {
-        T::create_repo(&self.0, repo_type, name, private).map_err(Into::into)
+        T::create_repo(&self.store, repo_type, name, private).map_err(self.erase_error)
     }
 
     fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, HubStoreError> {
-        T::get_repo(&self.0, repo_id).map_err(Into::into)
+        T::get_repo(&self.store, repo_id).map_err(self.erase_error)
     }
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, HubStoreError> {
-        T::list_repos(&self.0).map_err(Into::into)
+        T::list_repos(&self.store).map_err(self.erase_error)
     }
 
     fn search_repos(
@@ -1877,7 +1459,7 @@ where
         name_prefix: &str,
         limit: usize,
     ) -> Result<Vec<HubRepo>, HubStoreError> {
-        T::search_repos(&self.0, repo_type, name_prefix, limit).map_err(Into::into)
+        T::search_repos(&self.store, repo_type, name_prefix, limit).map_err(self.erase_error)
     }
 
     fn search_repos_with_options(
@@ -1887,8 +1469,8 @@ where
         limit: usize,
         options: &HubRepoSearchOptions,
     ) -> Result<Vec<HubRepo>, HubStoreError> {
-        T::search_repos_with_options(&self.0, repo_type, name_prefix, limit, options)
-            .map_err(Into::into)
+        T::search_repos_with_options(&self.store, repo_type, name_prefix, limit, options)
+            .map_err(self.erase_error)
     }
 
     fn create_revision(
@@ -1899,14 +1481,14 @@ where
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, HubStoreError> {
-        T::create_revision(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
-            .map_err(Into::into)
+        T::create_revision(&self.store, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(self.erase_error)
     }
     fn publish_prepared_revision(
         &self,
         revision: &HubRevision,
     ) -> Result<HubRefUpdateOutcome, HubStoreError> {
-        T::publish_prepared_revision(&self.0, revision).map_err(Into::into)
+        T::publish_prepared_revision(&self.store, revision).map_err(self.erase_error)
     }
     fn update_revision_if_current(
         &self,
@@ -1916,8 +1498,15 @@ where
         ref_name: &str,
         message: &str,
     ) -> Result<HubRefUpdateOutcome, HubStoreError> {
-        T::update_revision_if_current(&self.0, repo_id, expected_sha, new_sha, ref_name, message)
-            .map_err(Into::into)
+        T::update_revision_if_current(
+            &self.store,
+            repo_id,
+            expected_sha,
+            new_sha,
+            ref_name,
+            message,
+        )
+        .map_err(self.erase_error)
     }
     fn create_revision_if_absent(
         &self,
@@ -1927,22 +1516,20 @@ where
         ref_name: &str,
         message: &str,
     ) -> Result<HubRefCreateOutcome, HubStoreError> {
-        T::create_revision_if_absent(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
-            .map_err(Into::into)
+        T::create_revision_if_absent(&self.store, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(self.erase_error)
     }
 
-    fn list_refs_bounded(&self, repo_id: &str, limit: usize) -> Result<Vec<HubRef>, HubStoreError> {
-        T::list_refs_bounded(&self.0, repo_id, limit)
-            .map_err(erase_hub_store_error)?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub refs exceed the requested listing limit",
-                )) as _
-            })
+    fn list_refs_bounded(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<HubRef>>, HubStoreError> {
+        T::list_refs_bounded(&self.store, repo_id, limit).map_err(erase_hub_store_error)
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, HubStoreError> {
-        T::list_refs(&self.0, repo_id).map_err(Into::into)
+        T::list_refs(&self.store, repo_id).map_err(self.erase_error)
     }
 
     fn delete_ref(
@@ -1951,21 +1538,19 @@ where
         ref_name: &str,
         expected_sha: &str,
     ) -> Result<(), HubStoreError> {
-        T::delete_ref(&self.0, repo_id, ref_name, expected_sha).map_err(Into::into)
+        T::delete_ref(&self.store, repo_id, ref_name, expected_sha).map_err(self.erase_error)
     }
 
     fn list_revisions_bounded(
         &self,
         repo_id: &str,
         limit: usize,
-    ) -> Result<Vec<HubRevision>, HubStoreError> {
-        T::list_revisions_bounded(&self.0, repo_id, limit)
-            .map_err(erase_hub_store_error)?
-            .ok_or_else(|| Box::new(HubRevisionListingOverflow) as _)
+    ) -> Result<Option<Vec<HubRevision>>, HubStoreError> {
+        T::list_revisions_bounded(&self.store, repo_id, limit).map_err(erase_hub_store_error)
     }
 
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, HubStoreError> {
-        T::list_revisions(&self.0, repo_id).map_err(Into::into)
+        T::list_revisions(&self.store, repo_id).map_err(self.erase_error)
     }
 
     fn resolve_revision(
@@ -1973,43 +1558,31 @@ where
         repo_id: &str,
         revision: &str,
     ) -> Result<Option<String>, HubStoreError> {
-        T::resolve_revision(&self.0, repo_id, revision).map_err(Into::into)
+        T::resolve_revision(&self.store, repo_id, revision).map_err(self.erase_error)
     }
 
     fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), HubStoreError> {
-        T::store_files(&self.0, commit_sha, files).map_err(Into::into)
+        T::store_files(&self.store, commit_sha, files).map_err(self.erase_error)
     }
 
     fn get_files_bounded(
         &self,
         commit_sha: &str,
         limit: usize,
-    ) -> Result<Vec<HubFileEntry>, HubStoreError> {
-        T::get_files_bounded(&self.0, commit_sha, limit)
-            .map_err(erase_hub_store_error)?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub tree exceeds the requested listing limit",
-                )) as _
-            })
+    ) -> Result<Option<Vec<HubFileEntry>>, HubStoreError> {
+        T::get_files_bounded(&self.store, commit_sha, limit).map_err(erase_hub_store_error)
     }
 
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, HubStoreError> {
-        T::get_files(&self.0, commit_sha).map_err(Into::into)
+        T::get_files(&self.store, commit_sha).map_err(self.erase_error)
     }
 
     fn get_tree_page(
         &self,
         commit_sha: &str,
         options: &HubTreePageOptions,
-    ) -> Result<HubTreePage, HubStoreError> {
-        T::get_tree_page(&self.0, commit_sha, options)
-            .map_err(erase_hub_store_error)?
-            .ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "Hub tree exceeds the 100000-entry metadata read ceiling",
-                )) as _
-            })
+    ) -> Result<Option<HubTreePage>, HubStoreError> {
+        T::get_tree_page(&self.store, commit_sha, options).map_err(erase_hub_store_error)
     }
 
     fn create_webhook_bounded(
@@ -2020,7 +1593,8 @@ where
         secret: Option<&str>,
         limit: usize,
     ) -> Result<HubWebhookCreateOutcome, HubStoreError> {
-        T::create_webhook_bounded(&self.0, repo_id, url, events, secret, limit).map_err(Into::into)
+        T::create_webhook_bounded(&self.store, repo_id, url, events, secret, limit)
+            .map_err(self.erase_error)
     }
     fn create_webhook(
         &self,
@@ -2029,19 +1603,19 @@ where
         events: &[String],
         secret: Option<&str>,
     ) -> Result<HubWebhook, HubStoreError> {
-        T::create_webhook(&self.0, repo_id, url, events, secret).map_err(Into::into)
+        T::create_webhook(&self.store, repo_id, url, events, secret).map_err(self.erase_error)
     }
 
     fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, HubStoreError> {
-        T::list_webhooks(&self.0, repo_id).map_err(Into::into)
+        T::list_webhooks(&self.store, repo_id).map_err(self.erase_error)
     }
 
     fn delete_repo(&self, repo_id: &str) -> Result<(), HubStoreError> {
-        T::delete_repo(&self.0, repo_id).map_err(Into::into)
+        T::delete_repo(&self.store, repo_id).map_err(self.erase_error)
     }
 
     fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), HubStoreError> {
-        T::delete_webhook(&self.0, repo_id, webhook_id).map_err(Into::into)
+        T::delete_webhook(&self.store, repo_id, webhook_id).map_err(self.erase_error)
     }
 
     fn update_webhook_secret(
@@ -2050,7 +1624,7 @@ where
         webhook_id: &str,
         secret: Option<&str>,
     ) -> Result<(), HubStoreError> {
-        T::update_webhook_secret(&self.0, repo_id, webhook_id, secret).map_err(Into::into)
+        T::update_webhook_secret(&self.store, repo_id, webhook_id, secret).map_err(self.erase_error)
     }
 
     fn compare_and_swap_webhook_secret(
@@ -2060,8 +1634,14 @@ where
         expected_secret: &str,
         secret: Option<&str>,
     ) -> Result<Option<bool>, HubStoreError> {
-        T::compare_and_swap_webhook_secret(&self.0, repo_id, webhook_id, expected_secret, secret)
-            .map_err(Into::into)
+        T::compare_and_swap_webhook_secret(
+            &self.store,
+            repo_id,
+            webhook_id,
+            expected_secret,
+            secret,
+        )
+        .map_err(self.erase_error)
     }
 
     fn webhooks_for_event(
@@ -2069,7 +1649,7 @@ where
         repo_id: &str,
         event: &str,
     ) -> Result<Vec<HubWebhook>, HubStoreError> {
-        T::webhooks_for_event(&self.0, repo_id, event).map_err(Into::into)
+        T::webhooks_for_event(&self.store, repo_id, event).map_err(self.erase_error)
     }
 }
 
@@ -2185,12 +1765,15 @@ where
         .clone()
         .unwrap();
     assert_eq!(
-        ErasedHubStore::compare_and_swap_webhook_secret(
-            store,
+        ErasedAdapter {
+            store: store.clone(),
+            erase_error: erase_hub_store_error
+        }
+        .compare_and_swap_webhook_secret(
             repo,
             &hook.id,
             current.expose_secret(),
-            Some("boxed-blanket")
+            Some("boxed-display")
         )
         .unwrap(),
         Some(true)
@@ -2198,7 +1781,7 @@ where
     let adapter = BoxedHubStore::from_store(store.clone());
     assert_eq!(
         adapter
-            .compare_and_swap_webhook_secret(repo, &hook.id, "boxed-blanket", Some("boxed-adapter"))
+            .compare_and_swap_webhook_secret(repo, &hook.id, "boxed-display", Some("boxed-adapter"))
             .unwrap(),
         Some(true)
     );
@@ -3291,11 +2874,9 @@ mod tests {
         }
     }
 
-    /// Exercises the blanket `impl<T: HubStore> ErasedHubStore for T` path
-    /// (used by `BoxedHubStore::new`) for every method at least once.
+    /// Exercises the display-error constructor's forwarding for every operation.
     #[test]
-    fn boxed_hub_store_blanket_impl_exercise() {
-        // Using `new` forces the blanket impl (not ErasedAdapter).
+    fn boxed_hub_store_new_forwards_all_operations() {
         let store = BoxedHubStore::new(MemoryHubStore::new());
 
         // create / get / list / search
@@ -3486,7 +3067,11 @@ mod tests {
             Err(std::io::Error::other("unexpected non-page dispatch").into())
         }
         fn get_repo(&self, _repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
-            Err(std::io::Error::other("unexpected non-page dispatch").into())
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unexpected non-page dispatch",
+            )
+            .into())
         }
         fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error> {
             Err(std::io::Error::other("unexpected non-page dispatch").into())
@@ -3594,15 +3179,86 @@ mod tests {
         }
         fn get_tree_page(
             &self,
-            _commit_sha: &str,
+            commit_sha: &str,
             _options: &HubTreePageOptions,
         ) -> Result<Option<HubTreePage>, Self::Error> {
+            if commit_sha == "overflow" {
+                return Ok(None);
+            }
             Ok(Some(HubTreePage {
                 entries: vec![HubTreePageEntry::Directory {
                     path: "override".to_owned(),
                 }],
                 has_more: false,
             }))
+        }
+    }
+
+    #[test]
+    fn boxed_constructors_preserve_error_conversion_contracts() {
+        for (store, kind) in [
+            (
+                BoxedHubStore::new(OptimizedTreePageStore),
+                std::io::ErrorKind::Other,
+            ),
+            (
+                BoxedHubStore::from_store(OptimizedTreePageStore),
+                std::io::ErrorKind::PermissionDenied,
+            ),
+        ] {
+            let error = store.get_repo("repo").unwrap_err();
+            assert_eq!(error.to_string(), "unexpected non-page dispatch");
+            assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), kind);
+            // Bounded read failures remain errors, not overflow or empty listings.
+            assert_eq!(
+                store.list_refs_bounded("repo", 0).unwrap_err().to_string(),
+                "unexpected non-page dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn boxed_bounded_reads_preserve_overflow_and_complete_results() {
+        for store in [
+            BoxedHubStore::new(MemoryHubStore::new()),
+            BoxedHubStore::from_store(MemoryHubStore::new()),
+        ] {
+            store
+                .create_repo(HubRepoType::Model, "owner/repo", false)
+                .unwrap();
+            store
+                .create_revision("owner/repo", None, "sha", "main", "test")
+                .unwrap();
+            store
+                .store_files(
+                    "sha",
+                    &[HubFileEntry {
+                        path: "file".to_owned(),
+                        size: 1,
+                        sha: "digest".to_owned(),
+                        is_lfs: false,
+                    }],
+                )
+                .unwrap();
+            assert_eq!(store.list_refs_bounded("owner/repo", 1).unwrap().len(), 1);
+            assert_eq!(
+                store.list_revisions_bounded("owner/repo", 1).unwrap().len(),
+                1
+            );
+            assert_eq!(store.get_files_bounded("sha", 1).unwrap().len(), 1);
+            assert_eq!(
+                store
+                    .list_refs_bounded("owner/repo", 0)
+                    .unwrap_err()
+                    .to_string(),
+                "Hub refs exceed the requested listing limit"
+            );
+            assert_eq!(
+                store.get_files_bounded("sha", 0).unwrap_err().to_string(),
+                "Hub tree exceeds the requested listing limit"
+            );
+            let error = store.list_revisions_bounded("owner/repo", 0).unwrap_err();
+            assert!(error.downcast_ref::<HubRevisionListingOverflow>().is_some());
         }
     }
 
@@ -3623,6 +3279,13 @@ mod tests {
                 vec![HubTreePageEntry::Directory {
                     path: "override".to_owned()
                 }]
+            );
+            assert_eq!(
+                store
+                    .get_tree_page("overflow", &options)
+                    .unwrap_err()
+                    .to_string(),
+                "Hub tree exceeds the 100000-entry metadata read ceiling"
             );
         }
     }
