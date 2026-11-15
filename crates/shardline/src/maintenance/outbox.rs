@@ -1,7 +1,7 @@
 //! Bounded, fair scanning of retained evidence. The cursor never authorizes work.
 use super::{Result, archive_lease::ArchiveLease, artifact};
 use std::{
-    collections::BTreeMap,
+    collections::BTreeSet,
     io::ErrorKind,
     path::{Path, PathBuf},
 };
@@ -35,29 +35,32 @@ impl Batch {
                 None
             }
         };
-        let mut first = BTreeMap::new();
-        let mut next = BTreeMap::new();
+        let mut first = BTreeSet::new();
+        let mut next = BTreeSet::new();
         let mut total = 0_usize;
         for entry in std::fs::read_dir(state)? {
             let entry = entry?;
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
                 continue;
             };
-            if !task_name(&name) || !entry.file_type()?.is_dir() {
+            if !task_name(name) || !entry.file_type()?.is_dir() {
                 continue;
             }
             total = total.saturating_add(1);
-            retain_first(&mut first, name.clone(), entry.path());
-            if after.as_ref().is_none_or(|after| &name > after) {
-                retain_first(&mut next, name, entry.path());
-            }
+            let entries = if after.as_deref().is_none_or(|after| name > after) {
+                &mut next
+            } else {
+                &mut first
+            };
+            retain_first(entries, entry.path());
         }
         // Wrap only after reaching the end. At most 64 journals are opened;
         // directory enumeration uses bounded memory regardless of backlog size.
         let selected = if next.is_empty() { first } else { next };
         Ok(Some(Self {
             lease,
-            jobs: selected.into_values().collect(),
+            jobs: selected.into_iter().collect(),
             cursor,
             total,
         }))
@@ -103,8 +106,8 @@ fn task_name(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn retain_first(entries: &mut BTreeMap<String, PathBuf>, name: String, path: PathBuf) {
-    entries.insert(name, path);
+fn retain_first(entries: &mut BTreeSet<PathBuf>, path: PathBuf) {
+    entries.insert(path);
     if entries.len() > BATCH_SIZE {
         entries.pop_last();
     }

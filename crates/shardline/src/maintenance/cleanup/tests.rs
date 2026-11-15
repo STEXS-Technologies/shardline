@@ -15,6 +15,20 @@ fn retired_cleanup_is_bounded_and_never_removes_unfinished_state() {
         artifact::private_directory(&directory).unwrap();
         fs::write(directory.join("remaining-scratch"), b"already confirmed").unwrap();
     }
+    for (after, expected) in [(None, 0..64), (Some(63), 64..66), (Some(65), 0..64)] {
+        let cursor = retired.join(".export-cursor");
+        if let Some(after) = after {
+            crate::write_output_bytes(&cursor, format!("{after:064x}").as_bytes(), false).unwrap();
+        }
+        let batch = outbox::Batch::open(&retired).unwrap().unwrap();
+        assert_eq!(
+            batch.jobs,
+            expected
+                .map(|task| retired.join(format!("{task:064x}")))
+                .collect::<Vec<_>>()
+        );
+    }
+    fs::remove_file(retired.join(".export-cursor")).unwrap();
     retry(&state).unwrap();
     let remaining = fs::read_dir(&retired)
         .unwrap()
