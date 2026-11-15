@@ -2003,6 +2003,29 @@ mod tests {
         }
     }
 
+    fn lfs_test_state(
+        config: ServerConfig,
+        backend: ServerBackend,
+        auth: Option<crate::auth::ServerAuth>,
+    ) -> Arc<AppState> {
+        let chunk_size = config.chunk_size();
+        Arc::new(AppState {
+            config,
+            role: ServerRole::All,
+            backend,
+            auth,
+            provider_tokens: None,
+            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
+            transfer_limiter: crate::TransferLimiter::new(chunk_size, chunk_size),
+            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                NonZeroUsize::new(256).expect("nonzero"),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
+            protocol_metrics: crate::ProtocolMetrics::default(),
+        })
+    }
+
     /// Builds a minimal [`AppState`] backed by a fresh temp directory.
     ///
     /// `auth` is left as `None` so that route handlers skip authorization checks,
@@ -2023,23 +2046,7 @@ mod tests {
             .await
             .expect("backend from config");
 
-        let transfer_limiter = crate::TransferLimiter::new(chunk_size, chunk_size);
-
-        let state = Arc::new(AppState {
-            config,
-            role: ServerRole::All,
-            backend,
-            auth: None,
-            provider_tokens: None,
-            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
-            transfer_limiter,
-            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            admission: crate::admission::WeightedAdmission::new(
-                std::num::NonZeroUsize::new(256).unwrap(),
-            ),
-            pools: crate::admission::ExecutionPools::default_sizes(),
-            protocol_metrics: crate::ProtocolMetrics::default(),
-        });
+        let state = lfs_test_state(config, backend, None);
 
         (state, tmp)
     }
@@ -2070,21 +2077,7 @@ mod tests {
         crate::apply_database_migrations(&backend.gc_barrier_pool)
             .await
             .expect("configured PostgreSQL LFS fixture migrations must apply");
-        Arc::new(AppState {
-            config,
-            role: ServerRole::All,
-            backend: ServerBackend::Postgres(backend),
-            auth: None,
-            provider_tokens: None,
-            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
-            transfer_limiter: crate::TransferLimiter::new(chunk_size, chunk_size),
-            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            admission: crate::admission::WeightedAdmission::new(
-                NonZeroUsize::new(256).expect("nonzero"),
-            ),
-            pools: crate::admission::ExecutionPools::default_sizes(),
-            protocol_metrics: crate::ProtocolMetrics::default(),
-        })
+        lfs_test_state(config, ServerBackend::Postgres(backend), None)
     }
 
     /// Builds a minimal [`AppState`] with explicit LFS chunked-patch store
@@ -2115,23 +2108,7 @@ mod tests {
             .await
             .expect("backend from config");
 
-        let transfer_limiter = crate::TransferLimiter::new(chunk_size, chunk_size);
-
-        let state = Arc::new(AppState {
-            config,
-            role: ServerRole::All,
-            backend,
-            auth: None,
-            provider_tokens: None,
-            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
-            transfer_limiter,
-            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            admission: crate::admission::WeightedAdmission::new(
-                std::num::NonZeroUsize::new(256).unwrap(),
-            ),
-            pools: crate::admission::ExecutionPools::default_sizes(),
-            protocol_metrics: crate::ProtocolMetrics::default(),
-        });
+        let state = lfs_test_state(config, backend, None);
 
         (state, tmp)
     }
@@ -2153,24 +2130,9 @@ mod tests {
             .await
             .expect("backend from config");
 
-        let transfer_limiter = crate::TransferLimiter::new(chunk_size, chunk_size);
         let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
 
-        let state = Arc::new(AppState {
-            config,
-            role: ServerRole::All,
-            backend,
-            auth: Some(auth),
-            provider_tokens: None,
-            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
-            transfer_limiter,
-            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            admission: crate::admission::WeightedAdmission::new(
-                std::num::NonZeroUsize::new(256).unwrap(),
-            ),
-            pools: crate::admission::ExecutionPools::default_sizes(),
-            protocol_metrics: crate::ProtocolMetrics::default(),
-        });
+        let state = lfs_test_state(config, backend, Some(auth));
 
         (state, tmp)
     }
