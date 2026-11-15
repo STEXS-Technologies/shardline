@@ -473,11 +473,7 @@ impl TransferClient {
         serialized: Bytes,
     ) -> Result<XorbUploadResponse, TransferError> {
         let url = format!("{}/v1/xorbs/default/{hash}", base_url.trim_end_matches('/'));
-        let length = u64::try_from(serialized.len()).unwrap_or(u64::MAX);
-        let body = reqwest::Body::wrap(SizedStreamBody::new(
-            xorb_progress_stream(serialized),
-            length,
-        ));
+        let body = reqwest::Body::wrap(XorbUploadBody(serialized));
         let response = self
             .with_session(self.client.post(&url).bearer_auth(token))
             .body(body)
@@ -631,72 +627,34 @@ fn generate_session_id() -> String {
 /// Size of each progress block in a streamed xorb upload body.
 pub const XORB_UPLOAD_PROGRESS_BLOCK_SIZE: usize = 512 * 1024;
 
-/// Splits `serialized` into [`XORB_UPLOAD_PROGRESS_BLOCK_SIZE`] blocks for a
-/// streamed request body (progress granularity; the total length is carried by
-/// the explicit `Content-Length` header).
-fn xorb_progress_stream(
-    serialized: Bytes,
-) -> impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> {
-    futures_util::stream::unfold(serialized, |mut remaining| async move {
-        if remaining.is_empty() {
-            return None;
-        }
-        let take = XORB_UPLOAD_PROGRESS_BLOCK_SIZE.min(remaining.len());
-        let head = remaining.split_to(take);
-        Some((Ok(head), remaining))
-    })
-}
+/// Streams owned Xorb bytes in progress blocks while advertising their exact
+/// remaining length, so HTTP uses Content-Length rather than chunked framing.
+struct XorbUploadBody(Bytes);
 
-/// A streamed [`http_body::Body`] that advertises an exact total length, so the
-/// HTTP/1.1 layer frames it with an explicit `Content-Length` header while data
-/// is still delivered in streaming progress blocks.
-struct SizedStreamBody<S> {
-    inner: std::pin::Pin<Box<S>>,
-    remaining: u64,
-}
-
-impl<S> SizedStreamBody<S> {
-    fn new(stream: S, total: u64) -> Self {
-        Self {
-            inner: Box::pin(stream),
-            remaining: total,
-        }
-    }
-}
-
-impl<S> http_body::Body for SizedStreamBody<S>
-where
-    S: futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static,
-{
+impl http_body::Body for XorbUploadBody {
     type Data = Bytes;
     type Error = std::convert::Infallible;
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        let this = self.get_mut();
-        match this.inner.as_mut().poll_next(cx) {
-            std::task::Poll::Ready(Some(Ok(data))) => {
-                this.remaining = this
-                    .remaining
-                    .saturating_sub(u64::try_from(data.len()).unwrap_or(u64::MAX));
-                std::task::Poll::Ready(Some(Ok(http_body::Frame::data(data))))
-            }
-            std::task::Poll::Ready(Some(Err(error))) => match error {},
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
+        let remaining = &mut self.get_mut().0;
+        let frame = if remaining.is_empty() {
+            None
+        } else {
+            let length = XORB_UPLOAD_PROGRESS_BLOCK_SIZE.min(remaining.len());
+            Some(Ok(http_body::Frame::data(remaining.split_to(length))))
+        };
+        std::task::Poll::Ready(frame)
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
-        let mut hint = http_body::SizeHint::default();
-        hint.set_exact(self.remaining);
-        hint
+        http_body::SizeHint::with_exact(u64::try_from(self.0.len()).unwrap_or(u64::MAX))
     }
 
     fn is_end_stream(&self) -> bool {
-        self.remaining == 0
+        self.0.is_empty()
     }
 }
 
@@ -2062,6 +2020,53 @@ mod tests {
         let content_type = format!("multipart/byteranges; boundary=\"{boundary}\"");
         let parts = parse_multipart_byteranges(&content_type, body.as_bytes()).unwrap();
         assert_eq!(parts[0].data, b"ab");
+    }
+
+    #[test]
+    fn xorb_upload_body_preserves_frames_and_exact_remaining_length() {
+        use super::{XORB_UPLOAD_PROGRESS_BLOCK_SIZE, XorbUploadBody};
+        use http_body::Body;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        for length in [
+            0,
+            1,
+            XORB_UPLOAD_PROGRESS_BLOCK_SIZE,
+            2 * XORB_UPLOAD_PROGRESS_BLOCK_SIZE + 3,
+        ] {
+            let data = Bytes::from(
+                (0..length)
+                    .map(|index| (index % 251) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let mut body = XorbUploadBody(data.clone());
+            let mut consumed = 0;
+            let mut context = Context::from_waker(Waker::noop());
+            while consumed < length {
+                assert!(!body.is_end_stream());
+                assert_eq!(body.size_hint().exact(), Some((length - consumed) as u64));
+                let frame = match Pin::new(&mut body).poll_frame(&mut context) {
+                    Poll::Ready(frame) => frame,
+                    Poll::Pending => None,
+                }
+                .expect("owned upload data must be immediately available")
+                .unwrap()
+                .into_data()
+                .unwrap();
+                let end = (consumed + XORB_UPLOAD_PROGRESS_BLOCK_SIZE).min(length);
+                assert_eq!(frame, data.slice(consumed..end));
+                consumed = end;
+            }
+            assert!(body.is_end_stream());
+            assert_eq!(body.size_hint().exact(), Some(0));
+            for _ in 0..2 {
+                assert!(matches!(
+                    Pin::new(&mut body).poll_frame(&mut context),
+                    Poll::Ready(None)
+                ));
+            }
+        }
     }
 
     /// Verifies at the wire level that `upload_xorb` sends an explicit
