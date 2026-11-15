@@ -3750,15 +3750,15 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`7b101b0b3a101837d4297aecd23a8f03a922c23a`. It counts all tracked `.rs`
+`c78b7e1e5001220241cbbe085135298ed1b35d97`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 583,221 | 20,428 (3.38%) |
-| Server | 220,570 | 212,335 | 8,235 (3.73%) |
+| Entire repository | 603,649 | 582,344 | 21,305 (3.53%) |
+| Server | 220,570 | 211,584 | 8,986 (4.07%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
@@ -3766,7 +3766,7 @@ or the amount of additional code that can safely be removed.
 | Xet adapter | 17,801 | 15,986 | 1,815 (10.20%) |
 | OCI adapter | 7,700 | 7,049 | 651 (8.45%) |
 | Cache | 6,573 | 5,856 | 717 (10.91%) |
-| Index | 71,472 | 68,728 | 2,744 (3.84%) |
+| Index | 71,472 | 68,615 | 2,857 (4.00%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
 | GC | 10,954 | 10,634 | 320 (2.92%) |
 | Fsck | 8,989 | 8,501 | 488 (5.43%) |
@@ -3778,11 +3778,20 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
-This refresh includes 903 fewer Rust lines since the previously measured
-`1853f18a` snapshot. It consolidates Hub store forwarding and database row decoding,
-shares S3 property-header handling, and derives fieldwise clones for shared auth
-and cache clients. Test tables retain distinct parsing inputs; redundant tests
-that only read fields immediately after assigning them have been removed.
+This refresh includes 877 fewer Rust lines since the previously measured
+`7b101b0b` snapshot. It removes an unreachable retention-repair action and an
+optional request-connection mode, shares chunk submission, uses the pinned
+Gear table, and simplifies completion ordering and verified reuse control flow.
+Buffer-pool tests now check allocation reuse, and the task-admission test uses
+real asynchronous storage tasks rather than a synchronous blackhole store.
+
+At `c78b7e1e`, all 23 selected server CDC and client chunker tests passed,
+including upstream golden boundaries and client/server equivalence across frame
+sizes and target sizes. Strict Rust 1.100 server library/test Clippy passed.
+At `5c840ed0`, both required PostgreSQL reuse tests passed: slow source
+verification releases discovery locks and the metadata connection, while
+publication rejects a source admitted for deletion. These focused checks do not
+replace a full release qualification.
 
 At `7b101b0b`, all 908 selected Hub API and index Hub library tests passed in
 98.296 seconds using a disposable PostgreSQL 16 database with
@@ -3822,8 +3831,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 7b101b0b3a101837d4297aecd23a8f03a922c23a -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 7b101b0b3a101837d4297aecd23a8f03a922c23a -- '*.rs' | wc -l
+git grep -I -n '^' c78b7e1e5001220241cbbe085135298ed1b35d97 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' c78b7e1e5001220241cbbe085135298ed1b35d97 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
