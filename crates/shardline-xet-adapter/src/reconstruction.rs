@@ -51,7 +51,7 @@ pub fn build_reconstruction_response(
     let mut first_term = true;
     let mut terms = Vec::with_capacity(record.chunks.len());
     let mut fetch_info = BTreeMap::new();
-    let mut dedup: HashSet<ReconstructionFetchInfo> = HashSet::new();
+    let mut dedup = HashSet::new();
     for chunk in &record.chunks {
         let Some(chunk_end_inclusive) = chunk
             .offset
@@ -84,6 +84,15 @@ pub fn build_reconstruction_response(
             .packed_end
             .checked_sub(1)
             .ok_or(XetAdapterError::Overflow)?;
+        if !dedup.insert((
+            chunk.hash.as_str(),
+            chunk.range_start,
+            chunk.range_end,
+            chunk.packed_start,
+            byte_end,
+        )) {
+            continue;
+        }
         let fetch_entry = ReconstructionFetchInfo {
             range: ReconstructionChunkRange {
                 start: chunk.range_start,
@@ -95,13 +104,10 @@ pub fn build_reconstruction_response(
                 end: byte_end,
             },
         };
-        let fetch_entries = fetch_info
+        fetch_info
             .entry(chunk.hash.clone())
-            .or_insert_with(Vec::new);
-        // Use a global dedup set to avoid O(n²) scans per hash group
-        if dedup.insert(fetch_entry.clone()) {
-            fetch_entries.push(fetch_entry);
-        }
+            .or_insert_with(Vec::new)
+            .push(fetch_entry);
     }
 
     // Clients share downloaded blocks by hash and starting chunk. Advertise
@@ -601,6 +607,7 @@ mod tests {
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
 
         let response = response.expect("expected valid response");
+        assert_eq!(response.terms.len(), 2, "both logical terms must remain");
         // Both chunks reference the same hash and same range -> one fetch entry
         assert_eq!(
             response.fetch_info.get(&"a".repeat(64)).map(Vec::len),
