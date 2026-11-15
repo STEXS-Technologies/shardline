@@ -436,6 +436,7 @@ impl SerializationGate {
 }
 
 /// Session-wide state shared by all file pipelines in this session.
+#[derive(Default)]
 struct SessionState {
     /// chunk hash → xorb + index for chunks placed/imported this session
     /// (the session dedup store).
@@ -472,23 +473,6 @@ impl SessionState {
     fn record_background_failure(&mut self, error: &SdxError) {
         self.background_failure
             .get_or_insert_with(|| error.to_string());
-    }
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {
-            chunk_locations: HashMap::new(),
-            xorb_infos: HashMap::new(),
-            file_reports: Vec::new(),
-            file_infos: Vec::new(),
-            xorb_upload_tasks: JoinSet::new(),
-            pending_registrations: Vec::new(),
-            global_chunk_index: 0,
-            last_global_query_index: None,
-            finalized: false,
-            background_failure: None,
-        }
     }
 }
 
@@ -1102,15 +1086,13 @@ impl UploadSession {
         }
 
         let (file_infos, xorb_infos, files) = {
-            let state = self.inner.state.lock().await;
+            let mut state = self.inner.state.lock().await;
             (
-                state.file_infos.clone(),
-                state
-                    .xorb_infos
-                    .values()
-                    .cloned()
-                    .collect::<Vec<ShardXorb>>(),
-                state.file_reports.clone(),
+                std::mem::take(&mut state.file_infos),
+                std::mem::take(&mut state.xorb_infos)
+                    .into_values()
+                    .collect::<Vec<_>>(),
+                std::mem::take(&mut state.file_reports),
             )
         };
 
