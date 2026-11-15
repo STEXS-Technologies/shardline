@@ -98,12 +98,7 @@ async fn postgres_manifest_publication_fails_after_request_barrier_owner_loss() 
     )
     .await;
     assert_eq!(referrers.status(), StatusCode::OK);
-    let listing: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(referrers.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let listing = crate::test_support::json_body(referrers).await;
     assert_eq!(
         listing["manifests"].as_array().unwrap().len(),
         1,
@@ -980,10 +975,7 @@ async fn manifest_delete_cleans_up_tag() {
     let tags_uri = format!("/v2/{REPO}/tags/list");
     let response = send(&app, Method::GET, &tags_uri, Body::empty()).await;
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let body = crate::test_support::json_body(response).await;
     assert_eq!(body["tags"], serde_json::json!([]));
 }
 
@@ -1103,12 +1095,7 @@ async fn tags_list_empty_repository() {
             .unwrap(),
         "application/json"
     );
-    let body: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body = crate::test_support::json_body(response).await;
     assert_eq!(body["name"], REPO);
     assert_eq!(body["tags"], serde_json::json!([]));
 }
@@ -1123,12 +1110,7 @@ async fn tags_list_with_manifest() {
     let response = send(&app, Method::GET, &uri, Body::empty()).await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body = crate::test_support::json_body(response).await;
     assert_eq!(body["name"], REPO);
     let tags = body["tags"].as_array().unwrap();
     assert!(tags.contains(&serde_json::json!(TAG)));
@@ -1145,12 +1127,7 @@ async fn tags_list_with_n_zero_returns_empty() {
     assert_eq!(response.status(), StatusCode::OK);
     // Must NOT have Link header when n=0
     let has_link = response.headers().get(header::LINK).is_some();
-    let body: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body = crate::test_support::json_body(response).await;
     assert!(!has_link);
     let tags = body["tags"].as_array().unwrap();
     assert!(tags.is_empty());
@@ -1173,12 +1150,7 @@ async fn tags_list_with_pagination() {
 
     // Should have a Link header for the next page
     let link = response.headers().get(header::LINK).cloned();
-    let body: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body = crate::test_support::json_body(response).await;
     let tags = body["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 2);
     assert!(link.is_some(), "expected Link header for pagination");
