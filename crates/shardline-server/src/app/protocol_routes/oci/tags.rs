@@ -40,20 +40,14 @@ pub(crate) async fn oci_tags_list(
 
     // Per the OCI Distribution spec, when n is zero the endpoint MUST return
     // an empty list and MUST NOT include a Link header.
-    if page_size == 0 {
-        let body = serde_json::to_vec(&serde_json::json!({
-            "name": repository,
-            "tags": [],
-        }))?;
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "application/json")
-            .header(CONTENT_LENGTH, body.len().to_string())
-            .body(Body::from(body))
-            .map_err(|_error| ServerError::Overflow);
-    }
-
-    let tag_page = list_oci_tags(state, repository, repo.capability(), page_size, last).await?;
+    let tag_page = if page_size == 0 {
+        OciTagListPage {
+            tags: Vec::new(),
+            has_more: false,
+        }
+    } else {
+        list_oci_tags(state, repository, repo.capability(), page_size, last).await?
+    };
     let tags = tag_page.tags;
     let has_more = tag_page.has_more;
     let body = serde_json::to_vec(&serde_json::json!({
