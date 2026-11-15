@@ -382,6 +382,68 @@ async fn verify_postgres_webhook_evidence_batch(
     Ok(())
 }
 
+type UploadIntentRow = (
+    String,
+    String,
+    String,
+    i64,
+    String,
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+);
+
+/// Decode and verify a complete listing inside the caller's read snapshot.
+async fn verified_upload_intent_listing(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rows: Vec<UploadIntentRow>,
+) -> Result<Vec<UploadIntent>, PostgresMetadataStoreError> {
+    let intents = rows
+        .into_iter()
+        .map(|(id, key, hash, length, state_str, created, updated)| {
+            let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
+                PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
+            })?;
+            Ok(UploadIntent::from_parts(
+                id,
+                key,
+                hash,
+                i64_to_u64(length)?,
+                s,
+                std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
+                std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
+            ))
+        })
+        .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+    let operation_ids = intents
+        .iter()
+        .map(|intent| intent.intent_id().to_owned())
+        .collect::<Vec<_>>();
+    let heads = load_postgres_latest_evidence_heads(
+        &mut **transaction,
+        OperationKind::Upload,
+        &operation_ids,
+    )
+    .await?;
+    for intent in &intents {
+        let event_json = heads.get(intent.intent_id()).ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            )
+        })?;
+        let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
+        verify_upload_lifecycle_head(
+            &event,
+            event.operation.tenant.as_str(),
+            event.operation.repository.as_str(),
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            intent.state(),
+        )?;
+    }
+    Ok(intents)
+}
+
 async fn verify_postgres_intent_evidence(
     store: &super::PostgresIndexStore,
     intent: &crate::UploadIntent,
@@ -2019,7 +2081,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
-        let row = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+        let row = sqlx::query_as::<_, UploadIntentRow>(
             "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE intent_id = $1"
         )
         .bind(intent_id)
@@ -2066,56 +2128,13 @@ impl UploadIntentStore for super::PostgresIndexStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *transaction)
             .await?;
-        let rows = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+        let rows = sqlx::query_as::<_, UploadIntentRow>(
             "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE state = $1 ORDER BY created_at"
         )
         .bind(state.as_str())
         .fetch_all(&mut *transaction)
         .await?;
-        let intents = rows
-            .into_iter()
-            .map(|(id, key, hash, length, state_str, created, updated)| {
-                let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
-                    PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
-                })?;
-                Ok(UploadIntent::from_parts(
-                    id,
-                    key,
-                    hash,
-                    i64_to_u64(length)?,
-                    s,
-                    std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
-                    std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
-                ))
-            })
-            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
-        let operation_ids = intents
-            .iter()
-            .map(|intent| intent.intent_id().to_owned())
-            .collect::<Vec<_>>();
-        let heads = load_postgres_latest_evidence_heads(
-            &mut *transaction,
-            OperationKind::Upload,
-            &operation_ids,
-        )
-        .await?;
-        for intent in &intents {
-            let event_json = heads.get(intent.intent_id()).ok_or_else(|| {
-                PostgresMetadataStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::OperationMismatch,
-                )
-            })?;
-            let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
-            verify_upload_lifecycle_head(
-                &event,
-                event.operation.tenant.as_str(),
-                event.operation.repository.as_str(),
-                intent.intent_id(),
-                intent.object_key(),
-                intent.object_hash(),
-                intent.state(),
-            )?;
-        }
+        let intents = verified_upload_intent_listing(&mut transaction, rows).await?;
         transaction.commit().await?;
         Ok(intents)
     }
@@ -2137,57 +2156,14 @@ impl UploadIntentStore for super::PostgresIndexStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *transaction)
             .await?;
-        let rows = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+        let rows = sqlx::query_as::<_, UploadIntentRow>(
             "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE state = $1 AND created_at < $2 ORDER BY created_at"
         )
         .bind(state.as_str())
         .bind(cutoff)
         .fetch_all(&mut *transaction)
         .await?;
-        let intents = rows
-            .into_iter()
-            .map(|(id, key, hash, length, state_str, created, updated)| {
-                let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
-                    PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
-                })?;
-                Ok(UploadIntent::from_parts(
-                    id,
-                    key,
-                    hash,
-                    i64_to_u64(length)?,
-                    s,
-                    std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
-                    std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
-                ))
-            })
-            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
-        let operation_ids = intents
-            .iter()
-            .map(|intent| intent.intent_id().to_owned())
-            .collect::<Vec<_>>();
-        let heads = load_postgres_latest_evidence_heads(
-            &mut *transaction,
-            OperationKind::Upload,
-            &operation_ids,
-        )
-        .await?;
-        for intent in &intents {
-            let event_json = heads.get(intent.intent_id()).ok_or_else(|| {
-                PostgresMetadataStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::OperationMismatch,
-                )
-            })?;
-            let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
-            verify_upload_lifecycle_head(
-                &event,
-                event.operation.tenant.as_str(),
-                event.operation.repository.as_str(),
-                intent.intent_id(),
-                intent.object_key(),
-                intent.object_hash(),
-                intent.state(),
-            )?;
-        }
+        let intents = verified_upload_intent_listing(&mut transaction, rows).await?;
         transaction.commit().await?;
         Ok(intents)
     }
@@ -3370,6 +3346,18 @@ mod tests {
         .unwrap();
 
         assert!(store.intent_by_id(intent.intent_id()).await.is_err());
+        assert!(
+            store
+                .intents_by_state(UploadIntentState::Stored)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .stale_intents(UploadIntentState::Stored, Duration::ZERO)
+                .await
+                .is_err()
+        );
         assert!(store.reliability_events(intent.intent_id()).await.is_err());
     }
 
