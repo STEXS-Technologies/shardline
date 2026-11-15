@@ -3970,3 +3970,38 @@ Existing containers without native chunk-index entries need the existing index
 rebuild/backfill machinery before lookup can discover them. Storage tests also
 exercise the S3-compatible object-store fixture; these measurements use local
 physical storage. Benchmark output includes inventories and per-lane logs.
+
+### Standalone index checks without inherited S3 dependencies (2026-11-15)
+
+Compared `b38e851f` with `e83bdc5a`. Workspace storage dependencies no longer
+inherit S3 by default; consumers of S3 types request `s3` explicitly. Direct
+users of `shardline-storage` still receive its unchanged default `s3` feature.
+The standalone index and CAS normal dependency graphs each lose 35 package
+versions, including `object_store`, its HTTP client stack, and AWS-LC bindings.
+Server and other S3 consumers retain their explicit S3 dependency.
+
+Fresh standalone index checks used Linux x86_64, rustc/Cargo 1.99.0, two jobs,
+and repository dev defaults (`debug = 2`, incremental compilation disabled).
+Every sample used a new target directory on `/tmp` tmpfs, an empty
+`RUSTC_WRAPPER`, and no profile or Rust-flag overrides. Registry and OS caches
+were shared. Runs were sequential in baseline, candidate, candidate, baseline,
+baseline, candidate order, with three samples per revision:
+
+```sh
+RUSTC_WRAPPER= CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/path/to/fresh-target \
+  cargo check --offline --locked -j2 -p shardline-index --lib \
+  --message-format=json-render-diagnostics
+```
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| Wall time, median (range) | 50.3 s (49.9–58.8 s) | 23.0 s (22.3–23.0 s) |
+| Compiled package IDs, including build dependencies | 248 | 209 |
+| Compiler artifacts | 275 | 232 |
+
+Wall-time samples were 58.840/50.315/49.924 seconds before and
+23.010/22.951/22.299 seconds after. Every compiler artifact was fresh in all
+six checks. Median check time decreased approximately 54%; this is a focused
+standalone index result, not a server, SDK, release-build, or container timing.
+Local-only index/CAS/storage tests, default S3 storage tests, a real MinIO
+round trip, and server/storage Clippy checks also passed.
