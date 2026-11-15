@@ -3044,92 +3044,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_part_enforces_session_byte_quota() {
-        let root = make_root().await;
-        let upload_id = create_default_session(root.path(), "k").await;
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            100,
-            ttl(3600),
-            quota(150),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
-        // A second part pushes the session over its 150-byte quota.
-        let result = store_part(
-            root.path(),
-            &upload_id,
-            2,
-            100,
-            ttl(3600),
-            quota(150),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await;
-        assert!(matches!(result, Err(S3SessionError::SessionQuotaExceeded)));
-        // Replacing a part (same total) stays within the quota.
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            50,
-            ttl(3600),
-            quota(150),
-            quota(1 << 40),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn store_part_enforces_aggregate_byte_quota() {
-        let root = make_root().await;
-        let upload_id = create_session(
-            root.path(),
-            "acme.models",
-            "k",
-            "global",
-            ttl(3600),
-            cap(16),
-            quota(200),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-        store_part(
-            root.path(),
-            &upload_id,
-            1,
-            100,
-            ttl(3600),
-            quota(1 << 40),
-            quota(200),
-            cap(200_000),
-        )
-        .await
-        .unwrap();
-        // The aggregate (100) + 150 exceeds the 200-byte aggregate quota.
-        let result = store_part(
-            root.path(),
-            &upload_id,
-            2,
-            150,
-            ttl(3600),
-            quota(1 << 40),
-            quota(200),
-            cap(200_000),
-        )
-        .await;
-        assert!(matches!(
-            result,
-            Err(S3SessionError::AggregateQuotaExceeded)
-        ));
+    async fn store_part_enforces_byte_quotas_without_mutating_rejected_parts() {
+        for aggregate in [false, true] {
+            let root = make_root().await;
+            let (session_limit, total_limit, rejected_size) = if aggregate {
+                (1 << 40, 200, 150)
+            } else {
+                (150, 1 << 40, 100)
+            };
+            let upload_id = create_session(
+                root.path(),
+                "acme.models",
+                "k",
+                "global",
+                ttl(3600),
+                cap(16),
+                quota(total_limit),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+            let store = |number, size| {
+                store_part(
+                    root.path(),
+                    &upload_id,
+                    number,
+                    size,
+                    ttl(3600),
+                    quota(session_limit),
+                    quota(total_limit),
+                    cap(200_000),
+                )
+            };
+            store(1, 100).await.unwrap();
+            match store(2, rejected_size).await {
+                Err(S3SessionError::AggregateQuotaExceeded) => assert!(aggregate),
+                Err(S3SessionError::SessionQuotaExceeded) => assert!(!aggregate),
+                result => panic!("unexpected quota result (aggregate={aggregate}): {result:?}"),
+            }
+            let session = read_session(root.path(), &upload_id, ttl(3600))
+                .await
+                .unwrap();
+            assert_eq!(session.parts.len(), 1);
+            assert_eq!(session.parts[&1].size_bytes, 100);
+            store(1, 50).await.unwrap();
+            let session = read_session(root.path(), &upload_id, ttl(3600))
+                .await
+                .unwrap();
+            assert_eq!(session.parts.len(), 1);
+            assert_eq!(session.parts[&1].size_bytes, 50);
+        }
     }
 
     #[tokio::test]
