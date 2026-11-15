@@ -273,12 +273,12 @@ impl XetStreamGroup {
         let registration =
             StreamRegistration::new(id, stream.run_state(), stream.pending_start_signal());
         self.register(&registration);
-        Ok(GroupedDownloadStream::new(
-            stream,
+        Ok(GroupedDownloadStream {
+            inner: stream,
             id,
             registration,
-            Arc::downgrade(&self.inner),
-        ))
+            group: Arc::downgrade(&self.inner),
+        })
     }
 
     /// Creates an unordered streaming download of `file_id` (optionally
@@ -307,12 +307,12 @@ impl XetStreamGroup {
         let registration =
             StreamRegistration::new(id, stream.run_state(), stream.pending_start_signal());
         self.register(&registration);
-        Ok(GroupedUnorderedDownloadStream::new(
-            stream,
+        Ok(GroupedUnorderedDownloadStream {
+            inner: stream,
             id,
             registration,
-            Arc::downgrade(&self.inner),
-        ))
+            group: Arc::downgrade(&self.inner),
+        })
     }
 
     /// Aborts every active stream in this group and cancels the group's
@@ -381,20 +381,6 @@ pub struct GroupedDownloadStream {
 }
 
 impl GroupedDownloadStream {
-    const fn new(
-        inner: DownloadStream,
-        id: u64,
-        registration: Arc<StreamRegistration>,
-        group: Weak<XetStreamGroupInner>,
-    ) -> Self {
-        Self {
-            inner,
-            id,
-            registration,
-            group,
-        }
-    }
-
     /// Returns the unique stream id within its group.
     #[must_use]
     pub const fn task_id(&self) -> u64 {
@@ -480,20 +466,6 @@ pub struct GroupedUnorderedDownloadStream {
 }
 
 impl GroupedUnorderedDownloadStream {
-    const fn new(
-        inner: UnorderedDownloadStream,
-        id: u64,
-        registration: Arc<StreamRegistration>,
-        group: Weak<XetStreamGroupInner>,
-    ) -> Self {
-        Self {
-            inner,
-            id,
-            registration,
-            group,
-        }
-    }
-
     /// Returns the unique stream id within its group.
     #[must_use]
     pub const fn task_id(&self) -> u64 {
@@ -682,16 +654,13 @@ impl XetUploadCommit {
             ));
         }
         let handle = self.inner.session.upload_stream_handle_with_id(id);
-        let registration = Arc::new(UploadRegistration {
-            handle: handle.clone(),
-        });
+        let registration = Arc::new(UploadRegistration { handle });
         active.insert(id, Arc::downgrade(&registration));
-        Ok(GroupedUploadStream::new(
-            handle,
+        Ok(GroupedUploadStream {
             id,
             registration,
-            Arc::downgrade(&self.inner),
-        ))
+            group: Arc::downgrade(&self.inner),
+        })
     }
 
     /// Finalizes the shared upload session: joins all xorb uploads, then
@@ -777,27 +746,12 @@ impl XetUploadCommitInner {
 /// this upload, and [`task_id`](Self::task_id) identifies it in the group
 /// status probe.
 pub struct GroupedUploadStream {
-    handle: UploadStreamHandle,
     id: u64,
     registration: Arc<UploadRegistration>,
     group: Weak<XetUploadCommitInner>,
 }
 
 impl GroupedUploadStream {
-    const fn new(
-        handle: UploadStreamHandle,
-        id: u64,
-        registration: Arc<UploadRegistration>,
-        group: Weak<XetUploadCommitInner>,
-    ) -> Self {
-        Self {
-            handle,
-            id,
-            registration,
-            group,
-        }
-    }
-
     /// Returns the unique upload id within its group.
     #[must_use]
     pub const fn task_id(&self) -> u64 {
@@ -811,7 +765,7 @@ impl GroupedUploadStream {
     /// Returns [`SdxError`] when the upload is finished/aborted or a dedup /
     /// staging step fails.
     pub async fn write(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
-        self.handle.write(data).await
+        self.registration.handle.write(data).await
     }
 
     /// Blocking version of [`write`](Self::write), bridged onto the
@@ -825,7 +779,7 @@ impl GroupedUploadStream {
     /// write fails.
     #[cfg(not(target_family = "wasm"))]
     pub fn write_blocking(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
-        self.handle.write_blocking(data)
+        self.registration.handle.write_blocking(data)
     }
 
     /// Finalizes this upload and returns its file result.
@@ -837,13 +791,13 @@ impl GroupedUploadStream {
     /// Returns [`SdxError`] when the upload is already finished/aborted or a
     /// xorb cut fails.
     pub async fn finish(&self) -> Result<UploadFileInfo, SdxError> {
-        self.handle.finish().await
+        self.registration.handle.finish().await
     }
 
     /// Returns the finished result without finalizing, if available.
     #[must_use]
     pub fn try_finish(&self) -> Option<UploadFileInfo> {
-        self.handle.try_finish()
+        self.registration.handle.try_finish()
     }
 
     /// Returns this upload's status snapshot.
@@ -860,13 +814,13 @@ impl GroupedUploadStream {
 
     /// Cancels this upload only (the group and sibling uploads continue).
     pub fn cancel(&self) {
-        self.handle.abort();
+        self.registration.handle.abort();
     }
 }
 
 impl Drop for GroupedUploadStream {
     fn drop(&mut self) {
-        self.handle.abort();
+        self.registration.handle.abort();
         if let Some(group) = self.group.upgrade() {
             group.unregister(self.id);
         }
