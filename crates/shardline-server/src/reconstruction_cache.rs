@@ -11,9 +11,8 @@ use std::{
 
 use serde_json::{from_slice, to_vec};
 use shardline_cache::{
-    AsyncReconstructionCache, DisabledReconstructionCache, MemoryReconstructionCache,
-    ReconstructionCacheKey, ReconstructionCacheLookup, ReconstructionCacheReservation,
-    RedisReconstructionCache,
+    AsyncReconstructionCache, MemoryReconstructionCache, ReconstructionCacheKey,
+    ReconstructionCacheLookup, ReconstructionCacheReservation, RedisReconstructionCache,
 };
 use shardline_protocol::RepositoryScope;
 
@@ -47,8 +46,7 @@ pub struct ReconstructionCacheBenchReport {
 #[derive(Clone)]
 pub struct ReconstructionCacheService {
     adapter_name: &'static str,
-    adapter: SharedReconstructionCache,
-    writes_enabled: bool,
+    adapter: Option<SharedReconstructionCache>,
 }
 
 impl Debug for ReconstructionCacheService {
@@ -65,8 +63,7 @@ impl ReconstructionCacheService {
     pub fn disabled() -> Self {
         Self {
             adapter_name: ReconstructionCacheAdapter::Disabled.as_str(),
-            adapter: Arc::new(DisabledReconstructionCache::new()),
-            writes_enabled: false,
+            adapter: None,
         }
     }
 
@@ -80,11 +77,10 @@ impl ReconstructionCacheService {
             ReconstructionCacheAdapter::Disabled => Ok(Self::disabled()),
             ReconstructionCacheAdapter::Memory => Ok(Self {
                 adapter_name: ReconstructionCacheAdapter::Memory.as_str(),
-                adapter: Arc::new(MemoryReconstructionCache::new(
+                adapter: Some(Arc::new(MemoryReconstructionCache::new(
                     config.reconstruction_cache_ttl_seconds(),
                     config.reconstruction_cache_memory_max_entries(),
-                )),
-                writes_enabled: true,
+                ))),
             }),
             ReconstructionCacheAdapter::Redis => {
                 let redis_url = config
@@ -100,8 +96,7 @@ impl ReconstructionCacheService {
                 )?;
                 Ok(Self {
                     adapter_name: ReconstructionCacheAdapter::Redis.as_str(),
-                    adapter: Arc::new(adapter),
-                    writes_enabled: true,
+                    adapter: Some(Arc::new(adapter)),
                 })
             }
         }
@@ -110,8 +105,7 @@ impl ReconstructionCacheService {
     fn for_tests(adapter_name: &'static str, adapter: SharedReconstructionCache) -> Self {
         Self {
             adapter_name,
-            adapter,
-            writes_enabled: true,
+            adapter: Some(adapter),
         }
     }
 
@@ -120,7 +114,10 @@ impl ReconstructionCacheService {
     }
 
     pub(crate) async fn ready(&self) -> Result<(), ServerError> {
-        self.adapter.ready().await.map_err(ServerError::from)
+        match &self.adapter {
+            Some(adapter) => adapter.ready().await.map_err(ServerError::from),
+            None => Ok(()),
+        }
     }
 
     pub(crate) async fn get_or_load<Load, LoadFuture>(
@@ -132,71 +129,69 @@ impl ReconstructionCacheService {
         Load: FnOnce() -> LoadFuture,
         LoadFuture: Future<Output = Result<FileReconstructionResponse, ServerError>>,
     {
-        let reservation = if self.writes_enabled {
-            match self.adapter.get_or_reserve(key).await {
-                Ok(ReconstructionCacheLookup::Hit(payload)) => {
-                    if let Some(response) = decode_cache_hit(&payload) {
-                        return Ok(response);
-                    }
-                    // A cache value is never authoritative. Remove malformed or
-                    // oversized data, and compete for a fenced reconstruction
-                    // reservation instead of allowing every replica to rebuild it.
-                    self.adapter.delete(key).await.ok();
-                    match self.adapter.get_or_reserve(key).await {
-                        Ok(ReconstructionCacheLookup::Hit(refetched)) => {
-                            if let Some(response) = decode_cache_hit(&refetched) {
-                                return Ok(response);
-                            }
-                            None
-                        }
-                        Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
-                        Err(_) => None,
-                    }
+        let Some(adapter) = &self.adapter else {
+            shardline_metrics::record_reconstruction_cache_miss();
+            return load().await;
+        };
+        let reservation = match adapter.get_or_reserve(key).await {
+            Ok(ReconstructionCacheLookup::Hit(payload)) => {
+                if let Some(response) = decode_cache_hit(&payload) {
+                    return Ok(response);
                 }
-                Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
-                Err(_) => None,
+                // A cache value is never authoritative. Remove malformed or
+                // oversized data, and compete for a fenced reconstruction
+                // reservation instead of allowing every replica to rebuild it.
+                adapter.delete(key).await.ok();
+                match adapter.get_or_reserve(key).await {
+                    Ok(ReconstructionCacheLookup::Hit(refetched)) => {
+                        if let Some(response) = decode_cache_hit(&refetched) {
+                            return Ok(response);
+                        }
+                        None
+                    }
+                    Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
+                    Err(_) => None,
+                }
             }
-        } else {
-            None
+            Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
+            Err(_) => None,
         };
 
         shardline_metrics::record_reconstruction_cache_miss();
         // Release this reservation synchronously on cancellation so waiters
         // can retry without waiting for the orphan timeout (F-112).
-        let _latch_release = LoadingLatchReleaseGuard {
-            adapter: Arc::clone(&self.adapter),
-            key: key.clone(),
-            reservation: reservation.clone(),
-        };
+        let _latch_release = reservation
+            .as_ref()
+            .map(|reservation| LoadingLatchReleaseGuard {
+                adapter,
+                key,
+                reservation,
+            });
         // Refresh the fenced reservation while loading so a slow, live loader
         // is not mistaken for an orphan and duplicated by a waiter (F-90).
-        let response = match self
-            .run_load_with_heartbeat(key, reservation.as_ref(), load)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                // Wake waiters after failure, without deleting a newer owner's reservation.
-                if let Some(reservation) = reservation.as_ref() {
-                    self.adapter.delete_reserved(key, reservation).await.ok();
+        let response =
+            match Self::run_load_with_heartbeat(adapter, key, reservation.as_ref(), load).await {
+                Ok(response) => response,
+                Err(error) => {
+                    // Wake waiters after failure, without deleting a newer owner's reservation.
+                    if let Some(reservation) = reservation.as_ref() {
+                        adapter.delete_reserved(key, reservation).await.ok();
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
-        if self.writes_enabled {
-            let payload = to_vec(&response)?;
-            if payload_within_bound(&payload) {
-                if let Some(reservation) = reservation.as_ref() {
-                    let _ignored = self.adapter.put_reserved(key, &payload, reservation).await;
-                } else {
-                    let _ignored = self.adapter.put(key, &payload).await;
-                }
+            };
+        let payload = to_vec(&response)?;
+        if payload_within_bound(&payload) {
+            if let Some(reservation) = reservation.as_ref() {
+                let _ignored = adapter.put_reserved(key, &payload, reservation).await;
             } else {
-                // Skipping an oversized write must still release our loading
-                // reservation so waiters can retry promptly (F-91).
-                if let Some(reservation) = reservation.as_ref() {
-                    self.adapter.delete_reserved(key, reservation).await.ok();
-                }
+                let _ignored = adapter.put(key, &payload).await;
+            }
+        } else {
+            // Skipping an oversized write must still release our loading
+            // reservation so waiters can retry promptly (F-91).
+            if let Some(reservation) = reservation.as_ref() {
+                adapter.delete_reserved(key, reservation).await.ok();
             }
         }
         Ok(response)
@@ -206,7 +201,7 @@ impl ReconstructionCacheService {
     /// intervals, mirroring the memory adapter's own loader heartbeat so the
     /// production service-layer path gets the same protection (F-90).
     async fn run_load_with_heartbeat<Load, LoadFuture>(
-        &self,
+        adapter: &SharedReconstructionCache,
         key: &ReconstructionCacheKey,
         reservation: Option<&ReconstructionCacheReservation>,
         load: Load,
@@ -227,7 +222,7 @@ impl ReconstructionCacheService {
                     // Refresh the latch the adapter registered during get(), so
                     // a concurrent waiter at the orphan bound sees a fresh
                     // stamp instead of stealing the latch of a live loader.
-                    let _ignored = self.adapter.touch_reservation(key, reservation).await;
+                    let _ignored = adapter.touch_reservation(key, reservation).await;
                 }
             }
         }
@@ -242,27 +237,18 @@ impl ReconstructionCacheService {
     }
 }
 
-/// Releases the loading latch the adapter registered during `get()` when the
-/// service-layer caller's future is dropped mid-load (F-112).
-///
-/// The memory adapter registers a loading latch on a cold `get()` miss and
-/// removes it on `put()`/`delete()`. If the caller is dropped in between
-/// (client disconnect, request timeout, shutdown), neither runs — without this
-/// guard the latch would linger for the full orphan bound, stalling the next
-/// caller and leaking loading-map entries. `Drop` runs synchronously, so the
-/// release is a synchronous adapter method (a no-op for adapters without
-/// loading latches, e.g. Redis and Disabled).
-struct LoadingLatchReleaseGuard {
-    adapter: SharedReconstructionCache,
-    key: ReconstructionCacheKey,
-    reservation: Option<ReconstructionCacheReservation>,
+/// Releases a loader reservation on cancellation. Memory-cache waiters
+/// can retry immediately; adapters without synchronous release use lease expiry.
+/// The ownership fence prevents an old loader from releasing a newer reservation.
+struct LoadingLatchReleaseGuard<'request> {
+    adapter: &'request SharedReconstructionCache,
+    key: &'request ReconstructionCacheKey,
+    reservation: &'request ReconstructionCacheReservation,
 }
 
-impl Drop for LoadingLatchReleaseGuard {
+impl Drop for LoadingLatchReleaseGuard<'_> {
     fn drop(&mut self) {
-        if let Some(reservation) = self.reservation.as_ref() {
-            self.adapter.release_reservation(&self.key, reservation);
-        }
+        self.adapter.release_reservation(self.key, self.reservation);
     }
 }
 
@@ -734,10 +720,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reconstruction_cache_service_disabled_returns_disabled_name() {
+    #[tokio::test]
+    async fn disabled_cache_loads_each_request_and_propagates_errors() {
         let service = ReconstructionCacheService::disabled();
         assert_eq!(service.backend_name(), "disabled");
+        service.ready().await.unwrap();
+        let key = ReconstructionCacheKey::latest("asset.bin", None);
+        for hash in ["first", "second"] {
+            let response = service
+                .get_or_load(&key, || async { Ok(sample_response(hash)) })
+                .await
+                .unwrap();
+            assert_eq!(response.terms.first().unwrap().hash, hash);
+        }
+        assert!(matches!(
+            service
+                .get_or_load(&key, || async { Err(ServerError::NotFound) })
+                .await,
+            Err(ServerError::NotFound)
+        ));
     }
 
     #[test]
