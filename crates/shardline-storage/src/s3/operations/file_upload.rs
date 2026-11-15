@@ -58,12 +58,11 @@ impl S3ObjectStore {
                         .checked_add(1)
                         .filter(|count| *count <= 10_000)
                         .ok_or(S3ObjectStoreError::InvalidUploadParts)?;
-                    let store = self.inner.clone();
-                    let location = location.clone();
-                    let upload_id = upload_id.clone();
+                    let store = &self.inner;
+                    let upload_id = &upload_id;
                     pending.push_back(async move {
                         store
-                            .put_part(&location, &upload_id, index, PutPayload::from(bytes))
+                            .put_part(location, upload_id, index, PutPayload::from(bytes))
                             .await
                     });
                     if final_part {

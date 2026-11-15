@@ -55,16 +55,9 @@ impl S3ObjectStore {
         canonical_key: &ObjectKey,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
         upload.finish().await?;
-        match self.copy_object_if_absent(temp_key, canonical_key) {
-            Ok(outcome) => {
-                self.delete_if_present(temp_key).ok();
-                Ok(outcome)
-            }
-            Err(error) => {
-                self.delete_if_present(temp_key).ok();
-                Err(error)
-            }
-        }
+        let result = self.copy_object_if_absent(temp_key, canonical_key);
+        self.delete_if_present(temp_key).ok();
+        result
     }
 
     /// Begins a direct multipart upload to a content-addressed destination key.
@@ -125,27 +118,16 @@ impl S3ObjectStore {
     ///
     /// # Errors
     ///
-    /// Returns [`S3ObjectStoreError`] when the multipart finalization, conditional
-    /// copy, or cleanup fails.
+    /// Returns [`S3ObjectStoreError`] when multipart finalization or conditional
+    /// copy fails. Temporary-object cleanup is best-effort.
     pub async fn finish_content_addressed_upload(
         &self,
         upload: S3MultipartUploadWriter,
         temp_key: &ObjectKey,
         canonical_key: &ObjectKey,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
-        upload.finish().await?;
-
-        // Conditional copy — fails if canonical already exists.
-        match self.copy_object_if_absent(temp_key, canonical_key) {
-            Ok(outcome) => {
-                self.delete_if_present(temp_key).ok();
-                Ok(outcome)
-            }
-            Err(error) => {
-                self.delete_if_present(temp_key).ok();
-                Err(error)
-            }
-        }
+        self.finish_stream_upload(upload, temp_key, canonical_key)
+            .await
     }
 
     /// Starts a resumable multipart upload at a temporary S3 location.
