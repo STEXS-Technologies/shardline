@@ -854,36 +854,38 @@ fn put_overwrite_inserts_and_overwrites() {
     assert_eq!(data, b"second version");
 }
 
-// ── local_root ────────────────────────────────────────────────────
-
 #[test]
-fn local_root_returns_path_for_local_store() {
+fn backend_identity_and_local_paths() {
     let storage = shardline_test_support::TempStorage::new();
     let root = storage.path().join("objects");
-    let store = ServerObjectStore::local(root.clone()).unwrap();
-
-    assert_eq!(store.local_root(), Some(root.as_path()));
-}
-
-#[test]
-fn local_root_returns_none_for_blackhole() {
-    let store = ServerObjectStore::blackhole();
-    assert_eq!(store.local_root(), None);
-}
-
-// ── backend_name ──────────────────────────────────────────────────
-
-#[test]
-fn backend_name_local() {
-    let storage = shardline_test_support::TempStorage::new();
-    let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-    assert_eq!(store.backend_name(), "local");
-}
-
-#[test]
-fn backend_name_blackhole() {
-    let store = ServerObjectStore::blackhole();
-    assert_eq!(store.backend_name(), "blackhole");
+    for (store, name, expected_root) in [
+        (
+            ServerObjectStore::local(root.clone()).unwrap(),
+            "local",
+            Some(root.as_path()),
+        ),
+        (
+            ServerObjectStore::s3(S3ObjectStoreConfig::new(
+                "test-bucket".to_owned(),
+                "us-east-1".to_owned(),
+            ))
+            .unwrap(),
+            "s3",
+            None,
+        ),
+        (ServerObjectStore::blackhole(), "blackhole", None),
+    ] {
+        assert_eq!(store.backend_name(), name);
+        assert_eq!(store.local_root(), expected_root, "{name}");
+        for raw_key in ["aa/abcd", "ab/abcdef123456"] {
+            let key = ObjectKey::parse(raw_key).unwrap();
+            assert_eq!(
+                store.local_path_for_key(&key),
+                expected_root.map(|root| root.join(raw_key)),
+                "{name}: {raw_key}"
+            );
+        }
+    }
 }
 
 // ── OpsRecordStore impl for LocalRecordStore ──────────────────────
@@ -993,23 +995,6 @@ fn chunk_hash_returns_32_byte_hash() {
 fn unix_now_seconds_checked_returns_modern_timestamp() {
     let ts = unix_now_seconds_checked().unwrap();
     assert!(ts >= 1_700_000_000, "timestamp {ts} too small");
-}
-
-// ── ServerObjectStore::local_path_for_key ────────────────────────────
-
-#[test]
-fn local_path_for_key_with_local_store_returns_some() {
-    let storage = shardline_test_support::TempStorage::new();
-    let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-    let key = ObjectKey::parse("aa/abcd").unwrap();
-    assert!(store.local_path_for_key(&key).is_some());
-}
-
-#[test]
-fn local_path_for_key_with_blackhole_returns_none() {
-    let store = ServerObjectStore::blackhole();
-    let key = ObjectKey::parse("aa/abcd").unwrap();
-    assert!(store.local_path_for_key(&key).is_none());
 }
 
 // ── ServerObjectStore::visit_prefix and list_flat_namespace_page ────
@@ -1173,15 +1158,6 @@ fn content_hash_different_total_bytes_produces_different_hash() {
     assert_ne!(hash1, content_hash(100, 20, &chunks));
 }
 
-// ── ServerObjectStore constructors ─────────────────────────────────
-
-#[test]
-fn server_object_store_local_with_root_path() {
-    let storage = shardline_test_support::TempStorage::new();
-    let store = ServerObjectStore::local(storage.path().join("objects"));
-    assert!(store.is_ok());
-}
-
 #[test]
 fn server_object_store_put_overwrite_blackhole() {
     let store = ServerObjectStore::blackhole();
@@ -1190,17 +1166,6 @@ fn server_object_store_put_overwrite_blackhole() {
     let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
     let result = store.put_overwrite(&key, ObjectBody::from_slice(body), &integrity);
     assert!(result.is_ok());
-}
-
-#[test]
-fn server_object_store_local_path_for_key_format() {
-    let storage = shardline_test_support::TempStorage::new();
-    let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-    let key = ObjectKey::parse("ab/abcdef123456").unwrap();
-    let path = store.local_path_for_key(&key);
-    assert!(path.is_some());
-    let path = path.unwrap();
-    assert!(path.to_string_lossy().contains("ab"));
 }
 
 // ── read_full_object blackhole edge case ────────────────────────────
@@ -1244,29 +1209,6 @@ fn read_full_object_blackhole_nonzero_length_returns_not_found() {
 }
 
 // ── ServerObjectStore::s3 constructor and S3 branches ─────────────────
-
-#[test]
-fn server_object_store_s3_with_minimal_config() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config);
-    assert!(store.is_ok());
-}
-
-#[test]
-fn backend_name_s3() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
-    assert_eq!(store.backend_name(), "s3");
-}
-
-#[test]
-fn s3_local_root_and_local_path_for_key_return_none() {
-    let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
-    let store = ServerObjectStore::s3(config).unwrap();
-    assert_eq!(store.local_root(), None);
-    let key = ObjectKey::parse("aa/hash").unwrap();
-    assert_eq!(store.local_path_for_key(&key), None);
-}
 
 #[test]
 fn s3_operations_return_s3_error() {
