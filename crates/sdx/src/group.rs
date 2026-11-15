@@ -558,36 +558,29 @@ pub struct XetUploadCommit {
 struct XetUploadCommitInner {
     session: UploadSession,
     id: u64,
-    token: CancellationToken,
     aborted: AtomicBool,
-    active: Mutex<HashMap<u64, Weak<UploadRegistration>>>,
+    active: Mutex<HashMap<u64, Weak<UploadStreamHandle>>>,
     next_id: AtomicU64,
     #[cfg(test)]
     registration_gate: Option<Arc<std::sync::Barrier>>,
 }
 
-/// Per-upload bookkeeping shared between the group and the handle wrapper.
-struct UploadRegistration {
-    handle: UploadStreamHandle,
-}
-
-impl UploadRegistration {
-    fn state(&self, group_aborted: bool) -> XetTaskState {
-        let flags = self.handle.status_flags();
-        if group_aborted || flags.aborted {
-            return XetTaskState::Cancelled;
-        }
-        if let Some(message) = flags.error {
-            return XetTaskState::Failed(message);
-        }
-        if flags.finished {
-            return XetTaskState::Completed;
-        }
-        if flags.started {
-            return XetTaskState::InProgress;
-        }
-        XetTaskState::Queued
+/// Maps the shared upload handle's status into the group status vocabulary.
+fn upload_state(handle: &UploadStreamHandle, group_aborted: bool) -> XetTaskState {
+    let flags = handle.status_flags();
+    if group_aborted || flags.aborted {
+        return XetTaskState::Cancelled;
     }
+    if let Some(message) = flags.error {
+        return XetTaskState::Failed(message);
+    }
+    if flags.finished {
+        return XetTaskState::Completed;
+    }
+    if flags.started {
+        return XetTaskState::InProgress;
+    }
+    XetTaskState::Queued
 }
 
 impl XetUploadCommit {
@@ -602,7 +595,6 @@ impl XetUploadCommit {
             inner: Arc::new(XetUploadCommitInner {
                 session: upload_session,
                 id: NEXT_GROUP_ID.fetch_add(1, Ordering::Relaxed),
-                token: CancellationToken::new(),
                 aborted: AtomicBool::new(false),
                 active: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(0),
@@ -653,12 +645,11 @@ impl XetUploadCommit {
                 "upload group aborted; cannot start new streams".to_owned(),
             ));
         }
-        let handle = self.inner.session.upload_stream_handle_with_id(id);
-        let registration = Arc::new(UploadRegistration { handle });
-        active.insert(id, Arc::downgrade(&registration));
+        let handle = Arc::new(self.inner.session.upload_stream_handle_with_id(id));
+        active.insert(id, Arc::downgrade(&handle));
         Ok(GroupedUploadStream {
             id,
-            registration,
+            handle,
             group: Arc::downgrade(&self.inner),
         })
     }
@@ -681,22 +672,20 @@ impl XetUploadCommit {
         self.inner.session.finalize().await
     }
 
-    /// Aborts every active upload in this group and cancels the group's
-    /// cancellation subtree.
+    /// Aborts every active upload and prevents new uploads in this group.
     ///
     /// Active [`GroupedUploadStream`] handles report [`XetTaskState::Cancelled`];
     /// handles created after the abort fail immediately.
     pub fn abort(&self) {
         self.inner.aborted.store(true, Ordering::Relaxed);
-        self.inner.token.cancel();
         let active = self
             .inner
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for weak in active.values() {
-            if let Some(registration) = weak.upgrade() {
-                registration.handle.abort();
+            if let Some(handle) = weak.upgrade() {
+                handle.abort();
             }
         }
     }
@@ -705,11 +694,7 @@ impl XetUploadCommit {
     /// pairs, ordered by upload id.
     #[must_use]
     pub fn status(&self) -> Vec<(u64, XetTaskState)> {
-        group_status(
-            &self.inner.aborted,
-            &self.inner.active,
-            UploadRegistration::state,
-        )
+        group_status(&self.inner.aborted, &self.inner.active, upload_state)
     }
 
     /// Number of live (not-yet-dropped) upload handles registered with this
@@ -747,7 +732,7 @@ impl XetUploadCommitInner {
 /// status probe.
 pub struct GroupedUploadStream {
     id: u64,
-    registration: Arc<UploadRegistration>,
+    handle: Arc<UploadStreamHandle>,
     group: Weak<XetUploadCommitInner>,
 }
 
@@ -765,7 +750,7 @@ impl GroupedUploadStream {
     /// Returns [`SdxError`] when the upload is finished/aborted or a dedup /
     /// staging step fails.
     pub async fn write(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
-        self.registration.handle.write(data).await
+        self.handle.write(data).await
     }
 
     /// Blocking version of [`write`](Self::write), bridged onto the
@@ -779,7 +764,7 @@ impl GroupedUploadStream {
     /// write fails.
     #[cfg(not(target_family = "wasm"))]
     pub fn write_blocking(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
-        self.registration.handle.write_blocking(data)
+        self.handle.write_blocking(data)
     }
 
     /// Finalizes this upload and returns its file result.
@@ -791,13 +776,13 @@ impl GroupedUploadStream {
     /// Returns [`SdxError`] when the upload is already finished/aborted or a
     /// xorb cut fails.
     pub async fn finish(&self) -> Result<UploadFileInfo, SdxError> {
-        self.registration.handle.finish().await
+        self.handle.finish().await
     }
 
     /// Returns the finished result without finalizing, if available.
     #[must_use]
     pub fn try_finish(&self) -> Option<UploadFileInfo> {
-        self.registration.handle.try_finish()
+        self.handle.try_finish()
     }
 
     /// Returns this upload's status snapshot.
@@ -809,18 +794,18 @@ impl GroupedUploadStream {
             .group
             .upgrade()
             .is_some_and(|group| group.aborted.load(Ordering::Relaxed));
-        self.registration.state(aborted)
+        upload_state(&self.handle, aborted)
     }
 
     /// Cancels this upload only (the group and sibling uploads continue).
     pub fn cancel(&self) {
-        self.registration.handle.abort();
+        self.handle.abort();
     }
 }
 
 impl Drop for GroupedUploadStream {
     fn drop(&mut self) {
-        self.registration.handle.abort();
+        self.handle.abort();
         if let Some(group) = self.group.upgrade() {
             group.unregister(self.id);
         }
