@@ -20,11 +20,6 @@ use crate::{
 use super::super::{AppState, parse_query_map};
 use super::helpers::{OciRepository, oci_manifest_index_key, oci_tag_key, oci_tag_prefix};
 
-struct OciTagListPage {
-    tags: Vec<String>,
-    has_more: bool,
-}
-
 pub(crate) async fn oci_tags_list(
     state: &Arc<AppState>,
     uri: &axum::http::Uri,
@@ -40,16 +35,25 @@ pub(crate) async fn oci_tags_list(
 
     // Per the OCI Distribution spec, when n is zero the endpoint MUST return
     // an empty list and MUST NOT include a Link header.
-    let tag_page = if page_size == 0 {
-        OciTagListPage {
-            tags: Vec::new(),
-            has_more: false,
-        }
+    let mut tags = if page_size == 0 {
+        Vec::new()
     } else {
-        list_oci_tags(state, repository, repo.capability(), page_size, last).await?
+        backfill_legacy_oci_tags(state, repository, repo.capability()).await?;
+        state
+            .backend
+            .list_oci_tags(
+                &scope_namespace(repo.capability().namespace()),
+                repository,
+                last,
+                page_size.saturating_add(1),
+            )
+            .await?
+            .into_iter()
+            .map(|entry| entry.tag)
+            .collect::<Vec<_>>()
     };
-    let tags = tag_page.tags;
-    let has_more = tag_page.has_more;
+    let has_more = tags.len() > page_size;
+    tags.truncate(page_size);
     let body = serde_json::to_vec(&serde_json::json!({
         "name": repository,
         "tags": tags,
@@ -67,31 +71,6 @@ pub(crate) async fn oci_tags_list(
     builder
         .body(Body::from(body))
         .map_err(|_error| ServerError::Overflow)
-}
-
-async fn list_oci_tags(
-    state: &Arc<AppState>,
-    repository: &str,
-    auth: &AuthorizedRepository,
-    page_size: usize,
-    last: Option<&str>,
-) -> Result<OciTagListPage, ServerError> {
-    backfill_legacy_oci_tags(state, repository, auth).await?;
-    let entries = state
-        .backend
-        .list_oci_tags(
-            &scope_namespace(auth.namespace()),
-            repository,
-            last,
-            page_size.saturating_add(1),
-        )
-        .await?;
-    let mut tags: Vec<String> = entries.into_iter().map(|entry| entry.tag).collect();
-    let has_more = tags.len() > page_size;
-    if has_more {
-        let _removed = tags.pop();
-    }
-    Ok(OciTagListPage { tags, has_more })
 }
 
 pub(crate) async fn update_oci_tags(

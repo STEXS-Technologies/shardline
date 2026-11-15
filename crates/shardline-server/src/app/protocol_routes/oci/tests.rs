@@ -1117,45 +1117,51 @@ async fn tags_list_with_manifest() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tags_list_with_n_zero_returns_empty() {
+async fn tags_list_pagination_covers_zero_partial_and_complete_pages() {
     let ctx = build_oci_test_state().await;
     let app = oci_test_router(&ctx.state);
-    setup_manifest(&app, REPO, TAG).await;
-
-    let uri = format!("/v2/{REPO}/tags/list?n=0");
-    let response = send(&app, Method::GET, &uri, Body::empty()).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    // Must NOT have Link header when n=0
-    let has_link = response.headers().get(header::LINK).is_some();
-    let body = crate::test_support::json_body(response).await;
-    assert!(!has_link);
-    let tags = body["tags"].as_array().unwrap();
-    assert!(tags.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tags_list_with_pagination() {
-    let ctx = build_oci_test_state().await;
-    let app = oci_test_router(&ctx.state);
-
-    // Upload manifests with different tags
-    for tag in ["alpha", "beta", "gamma"] {
+    for tag in ["gamma", "alpha", "beta"] {
         setup_manifest(&app, REPO, tag).await;
     }
 
-    // Request page of size 2
-    let uri = format!("/v2/{REPO}/tags/list?n=2");
-    let response = send(&app, Method::GET, &uri, Body::empty()).await;
-    assert_eq!(response.status(), StatusCode::OK);
+    for (size, expected_tags, expected_link) in [
+        (0, serde_json::json!([]), None),
+        (
+            2,
+            serde_json::json!(["alpha", "beta"]),
+            Some(format!(
+                "</v2/{REPO}/tags/list?n=2&last=beta>; rel=\"next\""
+            )),
+        ),
+        (3, serde_json::json!(["alpha", "beta", "gamma"]), None),
+    ] {
+        let uri = format!("/v2/{REPO}/tags/list?n={size}");
+        let response = send(&app, Method::GET, &uri, Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LINK)
+                .map(|link| link.to_str().unwrap()),
+            expected_link.as_deref(),
+            "n={size}"
+        );
+        let body = crate::test_support::json_body(response).await;
+        assert_eq!(body["name"], REPO);
+        assert_eq!(body["tags"], expected_tags, "n={size}");
+    }
 
-    // Should have a Link header for the next page
-    let link = response.headers().get(header::LINK).cloned();
+    let response = send(
+        &app,
+        Method::GET,
+        &format!("/v2/{REPO}/tags/list?n=2&last=beta"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::LINK));
     let body = crate::test_support::json_body(response).await;
-    let tags = body["tags"].as_array().unwrap();
-    assert_eq!(tags.len(), 2);
-    assert!(link.is_some(), "expected Link header for pagination");
-    let link_str = link.unwrap().to_str().unwrap().to_owned();
-    assert!(link_str.contains("rel=\"next\""));
+    assert_eq!(body["tags"], serde_json::json!(["gamma"]));
 }
 
 // ═══════════════════════════════════════════════════════════════════
