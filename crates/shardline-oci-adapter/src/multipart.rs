@@ -88,10 +88,7 @@ pub async fn append_s3_multipart_upload_bytes_owned<B: OciBackend>(
         drop(tail.drain(..consumed));
         write_upload_tail(root, session_id, retain_source(tail, bytes)).await?;
     }
-    let total_length = session
-        .s3_multipart
-        .as_ref()
-        .map_or(0, |multipart| multipart.total_length);
+    let total_length = crate::session::upload_session_length(&session).unwrap_or_default();
     session.last_touched_unix_seconds = unix_now_seconds_checked()?;
     persist_upload_session(root, session_id, &session).await?;
     Ok((session, total_length))
