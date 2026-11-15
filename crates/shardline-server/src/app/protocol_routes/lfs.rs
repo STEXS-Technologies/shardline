@@ -2307,6 +2307,15 @@ mod tests {
         assert_eq!(response.headers()["content-type"], crate::LFS_CONTENT_TYPE);
     }
 
+    fn batch_request(body: &Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/lfs/objects/batch")
+            .header("content-type", crate::LFS_CONTENT_TYPE)
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
     // =========================================================================
     // lfs_batch tests
     // =========================================================================
@@ -2322,17 +2331,7 @@ mod tests {
             "objects": [{ "oid": oid, "size": 1024 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2359,17 +2358,7 @@ mod tests {
             "objects": [{ "oid": oid, "size": 512 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2399,17 +2388,7 @@ mod tests {
             "objects": []
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2429,17 +2408,7 @@ mod tests {
             "objects": [{ "oid": "not-a-valid-hash", "size": 100 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2460,17 +2429,7 @@ mod tests {
             "objects": [{ "oid": test_oid_constant(), "size": 100 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2491,17 +2450,7 @@ mod tests {
             "objects": [{ "oid": test_oid_constant(), "size": 100 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2522,17 +2471,7 @@ mod tests {
             "objects": [{ "oid": test_oid_constant(), "size": 100 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2552,17 +2491,7 @@ mod tests {
             "objects": []
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2589,17 +2518,7 @@ mod tests {
             "objects": [{ "oid": test_oid_constant(), "size": 100 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2622,17 +2541,7 @@ mod tests {
             "objects": [{ "oid": test_oid_constant(), "size": 100 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -3753,17 +3662,7 @@ mod tests {
             "objects": [{ "oid": oid, "size": 18446744073709551615u64 }]
         });
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/batch")
-                    .header("content-type", "application/vnd.git-lfs+json")
-                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(batch_request(&request)).await.unwrap();
 
         // u64::MAX is a valid u64 value → should deserialize and return 200.
         assert_eq!(response.status(), StatusCode::OK);
