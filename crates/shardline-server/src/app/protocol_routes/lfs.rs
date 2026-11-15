@@ -165,46 +165,42 @@ fn live_lfs_patch_lock_count() -> usize {
     map.values().filter(|weak| weak.upgrade().is_some()).count()
 }
 
-/// Held filesystem advisory lock for patch-store accounting.
+/// Held filesystem advisory lock for PATCH accounting or object writes.
 ///
-/// API replicas mount the same staging root in the scaled topology, so the
-/// file guard extends quotas, sweeping, and session creation across pods.
-struct LfsPatchStoreGuard {
+/// API replicas mount the same staging root in the scaled topology, so these
+/// guards serialize their respective critical sections across pods.
+pub(super) struct LfsPatchFileGuard {
     file: fs::File,
 }
 
-impl Drop for LfsPatchStoreGuard {
+impl LfsPatchFileGuard {
+    fn lock(path: &FsPath) -> Result<Self, ServerError> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.lock()?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for LfsPatchFileGuard {
     fn drop(&mut self) {
         let _ignored = self.file.unlock();
     }
 }
 
-pub(super) struct LfsPatchOidFileGuard {
-    file: fs::File,
-}
-
-impl Drop for LfsPatchOidFileGuard {
-    fn drop(&mut self) {
-        let _ignored = self.file.unlock();
-    }
-}
-
-fn lock_lfs_patch_store(dir: &FsPath) -> Result<LfsPatchStoreGuard, ServerError> {
+fn lock_lfs_patch_store(dir: &FsPath) -> Result<LfsPatchFileGuard, ServerError> {
     fs::create_dir_all(dir)?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(dir.join(".sessions.lock"))?;
-    file.lock()?;
-    Ok(LfsPatchStoreGuard { file })
+    LfsPatchFileGuard::lock(&dir.join(".sessions.lock"))
 }
 
 pub(super) fn lock_lfs_patch_oid(
     dir: &FsPath,
     oid: &str,
-) -> Result<LfsPatchOidFileGuard, ServerError> {
+) -> Result<LfsPatchFileGuard, ServerError> {
     // A fixed 256-way stripe set avoids one permanent lock inode per attacker-
     // supplied OID. Hashing also keeps the lock-file component independent of
     // the client value. Collisions only serialize unrelated PATCHes briefly.
@@ -212,14 +208,7 @@ pub(super) fn lock_lfs_patch_oid(
     let stripe = digest.first().copied().ok_or(ServerError::Overflow)?;
     let lock_dir = dir.join(".locks");
     fs::create_dir_all(&lock_dir)?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_dir.join(format!("{stripe:02x}.lock")))?;
-    file.lock()?;
-    Ok(LfsPatchOidFileGuard { file })
+    LfsPatchFileGuard::lock(&lock_dir.join(format!("{stripe:02x}.lock")))
 }
 
 /// In-memory merged-range bookkeeping for active LFS patch sessions.
