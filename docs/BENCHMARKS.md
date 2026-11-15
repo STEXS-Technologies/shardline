@@ -3750,15 +3750,15 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`d55f5dcdab41af94b8ec388246068b8afc3c38f8`. It counts all tracked `.rs`
+`54ab7c5db7cb589ffa61fa5448212790c89cb630`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 584,860 | 18,789 (3.11%) |
-| Server | 220,570 | 213,090 | 7,480 (3.39%) |
+| Entire repository | 603,649 | 584,459 | 19,190 (3.18%) |
+| Server | 220,570 | 212,689 | 7,881 (3.57%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
@@ -3778,16 +3778,31 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
-This refresh includes 251 fewer Rust lines since the previously measured
-`1b4f59c4` snapshot. It shares OCI request fixtures, simplifies empty protocol
-responses and consolidates parser and routing cases while retaining their inputs
-and expected results. The S3 authentication prefix check also uses the standard
-string operation directly.
+This refresh includes 401 fewer Rust lines since the previously measured
+`d55f5dcd` snapshot. It shares LFS fixture configuration, state assembly and batch
+requests, reuses bounded JSON response decoding across admin, LFS and OCI tests,
+and consolidates validation cases while preserving distinct inputs and expected
+results. LFS request handlers share OID validation and borrow range headers;
+the range parser also rejects previously ignored trailing fields.
 
 The inventory revision is not a release qualification stamp. The complete local
-distributed gate below passed at `6823c999`; subsequent OCI and S3 changes received
-targeted tests and strict Clippy checks. Independent hosted CI and a multi-host
-PostgreSQL/S3 split-role topology remain separate qualification requirements.
+distributed gate below passed at `6823c999`; subsequent changes received targeted
+tests and strict Clippy checks. A combined run at `54ab7c5d` passed all 564 selected
+S3, OCI, LFS, Bazel and admin library tests in 68.259 seconds, with PostgreSQL 16
+configured and `SHARDLINE_REQUIRE_POSTGRES_TESTS=1`. The run included ignored tests
+in those modules, including the PostgreSQL/MinIO disconnected-copy recovery test;
+2,849 unrelated tests were filtered out. Tests ran serially using all server
+features. Independent hosted CI and a multi-host PostgreSQL/S3 split-role topology
+remain separate qualification requirements.
+
+With a disposable PostgreSQL database available through `DATABASE_URL` and Docker
+available for the selected MinIO fixtures, reproduce the combined selection with:
+
+```bash
+SHARDLINE_REQUIRE_POSTGRES_TESTS=1 cargo nextest run -p shardline-server \
+  --lib --all-features --run-ignored all --test-threads 1 \
+  -E 'test(app::protocol_routes::lfs) | test(app::protocol_routes::s3::) | test(app::protocol_routes::oci::) | test(app::protocol_routes::bazel::) | test(app::admin_api::)'
+```
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
@@ -3795,8 +3810,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' d55f5dcdab41af94b8ec388246068b8afc3c38f8 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' d55f5dcdab41af94b8ec388246068b8afc3c38f8 -- '*.rs' | wc -l
+git grep -I -n '^' 54ab7c5db7cb589ffa61fa5448212790c89cb630 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 54ab7c5db7cb589ffa61fa5448212790c89cb630 -- '*.rs' | wc -l
 ```
 
 The cleanup preserves incremental build artifacts, narrows ordinary binary and
