@@ -255,21 +255,15 @@ pub fn group_page(
             break;
         }
         rows = rows.saturating_add(1);
-        let key = entry.object_key.clone();
-        // The index guarantees every key starts with the prefix; keys that do
-        // not (defensive) are surfaced as ordinary Contents rows.
-        let Some(remainder) = key.strip_prefix(prefix) else {
-            contents.push(contents_row(&entry, &key));
-            next_cursor = Some(key);
-            continue;
-        };
-        if let Some(delimiter) = delimiter
-            && let Some((head, _tail)) = remainder.split_once(delimiter)
-        {
-            // CommonPrefixes rollup: `prefix` + the leading segment up to and
-            // including the delimiter. Consume every key under it.
-            let group_prefix = format!("{prefix}{head}{delimiter}");
-            let mut group_last = key;
+        // Keys outside the index prefix remain ordinary Contents rows.
+        let group_prefix = delimiter.and_then(|delimiter| {
+            let remainder = entry.object_key.strip_prefix(prefix)?;
+            let (head, _) = remainder.split_once(delimiter)?;
+            Some(format!("{prefix}{head}{delimiter}"))
+        });
+        if let Some(group_prefix) = group_prefix {
+            // Consume every key under this CommonPrefixes rollup.
+            let mut group_last = entry.object_key;
             while let Some(child) =
                 remaining.next_if(|candidate| candidate.object_key.starts_with(&group_prefix))
             {
@@ -278,8 +272,8 @@ pub fn group_page(
             common_prefixes.push(group_prefix);
             next_cursor = Some(group_last);
         } else {
-            contents.push(contents_row(&entry, &key));
-            next_cursor = Some(key);
+            next_cursor = Some(entry.object_key.clone());
+            contents.push(contents_row(entry));
         }
     }
     ListPage {
@@ -290,11 +284,11 @@ pub fn group_page(
     }
 }
 
-fn contents_row(entry: &shardline_index::S3ObjectEntry, key: &str) -> Contents {
+fn contents_row(entry: shardline_index::S3ObjectEntry) -> Contents {
     Contents {
-        key: key.to_owned(),
+        key: entry.object_key,
         size_bytes: entry.size_bytes,
-        etag: entry.etag.clone(),
+        etag: entry.etag,
         last_modified_iso8601: format_iso8601(entry.updated_at_unix_seconds),
     }
 }
@@ -475,16 +469,18 @@ mod tests {
 
     #[test]
     fn group_page_single_key() {
-        let page = group_page(vec![entry("a.txt")], "", None, MAX_LIST_KEYS);
-        let (contents, prefixes) = keys(&page);
-        assert_eq!(contents, vec!["a.txt"]);
-        assert!(prefixes.is_empty());
-        assert_eq!(page.next_cursor.as_deref(), Some("a.txt"));
-        assert!(!page.is_truncated);
-        let row = &page.contents[0];
-        assert_eq!(row.size_bytes, "a.txt".len() as u64);
-        assert_eq!(row.etag, "etag:a.txt");
-        assert_eq!(row.last_modified_iso8601, "2026-07-27T00:00:00Z");
+        for (prefix, delimiter) in [("", None), ("", Some('/')), ("elsewhere", Some('.'))] {
+            let page = group_page(vec![entry("a.txt")], prefix, delimiter, MAX_LIST_KEYS);
+            let (contents, prefixes) = keys(&page);
+            assert_eq!(contents, vec!["a.txt"]);
+            assert!(prefixes.is_empty());
+            assert_eq!(page.next_cursor.as_deref(), Some("a.txt"));
+            assert!(!page.is_truncated);
+            let row = &page.contents[0];
+            assert_eq!(row.size_bytes, "a.txt".len() as u64);
+            assert_eq!(row.etag, "etag:a.txt");
+            assert_eq!(row.last_modified_iso8601, "2026-07-27T00:00:00Z");
+        }
     }
 
     #[test]
