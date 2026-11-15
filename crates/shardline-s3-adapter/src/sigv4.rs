@@ -208,9 +208,9 @@ impl VerifiedSigV4PostPolicy {
         if !bucket_constrained {
             return Err(denied());
         }
-        for name in values.keys() {
+        for (name, value) in &values {
             if name == "bucket" {
-                if values.get(name).copied() != Some(bucket) {
+                if *value != bucket {
                     return Err(denied());
                 }
                 continue;
@@ -371,20 +371,14 @@ pub fn verify_sigv4(
                 Ok((name, value))
             })
             .collect::<Result<Vec<_>, S3Error>>()?;
-        if fields.len() != 3
-            || ["Credential", "SignedHeaders", "Signature"]
-                .iter()
-                .any(|expected| fields.iter().filter(|(name, _)| name == expected).count() != 1)
-        {
+        if fields.len() != 3 {
             return Err(denied());
         }
         let field = |name| {
-            let mut values = fields.iter().filter(|(key, _)| *key == name);
-            let value = values.next().map(|(_, value)| *value).ok_or_else(denied)?;
-            if values.next().is_some() {
-                return Err(denied());
-            }
-            Ok(value)
+            fields
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(*value))
+                .ok_or_else(denied)
         };
         (
             field("Credential")?,

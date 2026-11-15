@@ -456,6 +456,9 @@ fn rejects_unknown_missing_and_duplicate_authorization_fields() {
         .to_owned();
     for changed in [
         original.replace(",Signature=", ",Unknown=ignored,Signature="),
+        original.replace("Credential=", "SignedHeaders="),
+        original.replace("SignedHeaders=", "Signature="),
+        original.replace("Signature=", "Unknown="),
         original.replace("Credential=", "Unknown=ignored,Credential="),
         original.replace(",SignedHeaders=", ",Credential=duplicate,SignedHeaders="),
         original.replace(",SignedHeaders=", ",Signature=duplicate,SignedHeaders="),
