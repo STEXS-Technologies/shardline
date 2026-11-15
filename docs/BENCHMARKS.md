@@ -3748,29 +3748,32 @@ metadata.
 
 ## Maintenance cleanup source inventory
 
-The November 15, 2026 inventory compares baseline
+The November 16, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`bed9b1ea616238ef79becbc15d5ad21a20542331`. It counts all tracked `.rs`
+`588ebed9b7f233fdf40e547c454a1c1f70d349f3`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
+Per-file counts from `git grep -I -c '^' <commit> -- '*.rs'` were independently
+checked against the line count of every Rust blob in each Git snapshot.
+
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 579,163 | 24,486 (4.06%) |
+| Entire repository | 603,649 | 578,369 | 25,280 (4.19%) |
 | Server | 220,570 | 210,914 | 9,656 (4.38%) |
 | Server core | 6,454 | 5,501 | 953 (14.77%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,391 | 982 (4.82%) |
-| S3 adapter | 10,954 | 10,106 | 848 (7.74%) |
-| Xet adapter | 17,801 | 15,936 | 1,865 (10.48%) |
-| OCI adapter | 7,700 | 6,977 | 723 (9.39%) |
+| S3 adapter | 10,954 | 10,002 | 952 (8.69%) |
+| Xet adapter | 17,801 | 15,866 | 1,935 (10.87%) |
+| OCI adapter | 7,700 | 6,927 | 773 (10.04%) |
 | Cache | 6,573 | 5,786 | 787 (11.97%) |
 | Index | 71,472 | 68,525 | 2,947 (4.12%) |
 | CAS | 3,447 | 2,858 | 589 (17.09%) |
-| GC | 10,954 | 10,634 | 320 (2.92%) |
+| GC | 10,954 | 10,110 | 844 (7.70%) |
 | Fsck | 8,989 | 8,493 | 496 (5.52%) |
-| Rebuild | 4,326 | 3,834 | 492 (11.37%) |
+| Rebuild | 4,326 | 3,788 | 538 (12.44%) |
 | CLI | 37,677 | 37,264 | 413 (1.10%) |
 | SDK | 26,965 | 24,479 | 2,486 (9.22%) |
 | Protocol | 4,076 | 3,715 | 361 (8.86%) |
