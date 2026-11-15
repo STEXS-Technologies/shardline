@@ -455,8 +455,7 @@ where
     }
 
     for object_key in object_keys {
-        let orphan = orphan_objects.get(&object_key);
-        if orphan.is_none() {
+        let Some(orphan) = orphan_objects.get(&object_key) else {
             let Some(candidate) = quarantine_entries.remove(&object_key) else {
                 continue;
             };
@@ -477,7 +476,7 @@ where
             report.released_quarantine_candidates =
                 checked_increment(report.released_quarantine_candidates)?;
             continue;
-        }
+        };
 
         let Some(candidate) = quarantine_entries.get(&object_key) else {
             continue;
@@ -486,9 +485,6 @@ where
             continue;
         }
 
-        let Some(orphan) = orphan else {
-            continue;
-        };
         // Remove the quarantine entry from the durable index first, then
         // delete the object.
         //

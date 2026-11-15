@@ -48,12 +48,7 @@ pub struct LocalGcOptions {
 
 impl Default for LocalGcOptions {
     fn default() -> Self {
-        Self {
-            mark: false,
-            sweep: false,
-            retention_seconds: DEFAULT_LOCAL_GC_RETENTION_SECONDS,
-            max_revisions_per_repo: None,
-        }
+        Self::dry_run()
     }
 }
 
@@ -74,9 +69,8 @@ impl LocalGcOptions {
     pub const fn mark_only(retention_seconds: u64) -> Self {
         Self {
             mark: true,
-            sweep: false,
             retention_seconds,
-            max_revisions_per_repo: None,
+            ..Self::dry_run()
         }
     }
 
@@ -84,10 +78,8 @@ impl LocalGcOptions {
     #[must_use]
     pub const fn sweep_only() -> Self {
         Self {
-            mark: false,
             sweep: true,
-            retention_seconds: DEFAULT_LOCAL_GC_RETENTION_SECONDS,
-            max_revisions_per_repo: None,
+            ..Self::dry_run()
         }
     }
 
@@ -95,10 +87,8 @@ impl LocalGcOptions {
     #[must_use]
     pub const fn mark_and_sweep(retention_seconds: u64) -> Self {
         Self {
-            mark: true,
             sweep: true,
-            retention_seconds,
-            max_revisions_per_repo: None,
+            ..Self::mark_only(retention_seconds)
         }
     }
 
