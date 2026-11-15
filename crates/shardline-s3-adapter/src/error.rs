@@ -418,48 +418,25 @@ mod tests {
         assert!(body.contains("</Error>"));
     }
 
-    /// A stand-in for `shardline_server::error::ServerError` that mirrors the
-    /// classification the server crate applies; exercising the full
-    /// `ServerError` → `S3Error` mapping matrix through the generic `From`.
-    #[derive(Debug, Clone, Copy)]
-    enum TestServerError {
-        RangeNotSatisfiable,
-        NotFound,
-        AccessDenied,
-        Internal,
-    }
+    /// Exercises the generic server-error conversion independently of constructors.
+    struct TestServerError(S3ErrorClass);
 
     impl S3ErrorClassify for TestServerError {
         fn s3_class(&self) -> S3ErrorClass {
-            match self {
-                Self::RangeNotSatisfiable => S3ErrorClass::RangeNotSatisfiable,
-                Self::NotFound => S3ErrorClass::NotFound,
-                Self::AccessDenied => S3ErrorClass::AccessDenied,
-                Self::Internal => S3ErrorClass::Internal,
-            }
+            self.0
         }
     }
 
     #[test]
     fn classified_server_error_code_and_status_contract() {
-        for (error, code, status) in [
-            (
-                S3Error::from(TestServerError::RangeNotSatisfiable),
-                "InvalidRange",
-                416,
-            ),
-            (S3Error::from(TestServerError::NotFound), "NoSuchKey", 404),
-            (
-                S3Error::from(TestServerError::AccessDenied),
-                "AccessDenied",
-                403,
-            ),
-            (
-                S3Error::from(TestServerError::Internal),
-                "InternalError",
-                500,
-            ),
+        for (class, code, status) in [
+            (S3ErrorClass::RangeNotSatisfiable, "InvalidRange", 416),
+            (S3ErrorClass::NotFound, "NoSuchKey", 404),
+            (S3ErrorClass::AccessDenied, "AccessDenied", 403),
+            (S3ErrorClass::BadDigest, "BadDigest", 400),
+            (S3ErrorClass::Internal, "InternalError", 500),
         ] {
+            let error = S3Error::from(TestServerError(class));
             assert_eq!(error.code, code);
             assert_eq!(error.status.as_u16(), status, "{code}");
         }
