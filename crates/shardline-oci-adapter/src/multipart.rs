@@ -57,20 +57,10 @@ pub async fn append_s3_multipart_upload_bytes_owned<B: OciBackend>(
     if !session.use_s3_multipart {
         return Err(OciAdapterError::NotFound);
     }
-    if bytes.is_empty() {
-        let total_length = session
-            .s3_multipart
-            .as_ref()
-            .map_or(0, |multipart| multipart.total_length);
-        session.last_touched_unix_seconds = unix_now_seconds_checked()?;
-        persist_upload_session(root, session_id, &session).await?;
-        return Ok((session, total_length));
-    }
-
-    ensure_s3_upload_started(root, backend, session_id, &mut session).await?;
-    let mut tail = read_upload_tail(root, session_id).await?;
-    tail.extend_from_slice(&bytes);
-    let total_length = {
+    if !bytes.is_empty() {
+        ensure_s3_upload_started(root, backend, session_id, &mut session).await?;
+        let mut tail = read_upload_tail(root, session_id).await?;
+        tail.extend_from_slice(&bytes);
         let multipart = session
             .s3_multipart
             .as_mut()
@@ -96,9 +86,12 @@ pub async fn append_s3_multipart_upload_bytes_owned<B: OciBackend>(
         }
         let consumed = tail.len().saturating_sub(remainder.len());
         drop(tail.drain(..consumed));
-        multipart.total_length
-    };
-    write_upload_tail(root, session_id, retain_source(tail, bytes)).await?;
+        write_upload_tail(root, session_id, retain_source(tail, bytes)).await?;
+    }
+    let total_length = session
+        .s3_multipart
+        .as_ref()
+        .map_or(0, |multipart| multipart.total_length);
     session.last_touched_unix_seconds = unix_now_seconds_checked()?;
     persist_upload_session(root, session_id, &session).await?;
     Ok((session, total_length))
