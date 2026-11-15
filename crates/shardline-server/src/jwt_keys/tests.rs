@@ -252,58 +252,41 @@ fn jwks_response_deserialize_extra_fields() {
 }
 
 #[test]
-fn build_decoding_key_rsa_missing_n_or_e_returns_error() {
-    let jwk = Jwk {
-        key_use: None,
-        key_operations: None,
-        algorithm: None,
-        curve: None,
-        kid: "missing-params".to_owned(),
-        key_type: "RSA".to_owned(),
-        n: None,
-        e: None,
-        x_coord: None,
-        y_coord: None,
-    };
-    let result = super::build_decoding_key(&jwk, Algorithm::RS256);
-    assert!(result.is_err());
+fn build_decoding_key_rejects_missing_parameter_pairs() {
+    for (jwk, algorithm) in [
+        (
+            Jwk {
+                kid: "missing-params".to_owned(),
+                n: None,
+                e: None,
+                ..sample_rsa_jwk()
+            },
+            Algorithm::RS256,
+        ),
+        (
+            Jwk {
+                kid: "missing-ec-params".to_owned(),
+                x_coord: None,
+                y_coord: None,
+                ..sample_ec_jwk()
+            },
+            Algorithm::ES256,
+        ),
+    ] {
+        assert!(
+            build_decoding_key(&jwk, algorithm).is_err(),
+            "{algorithm:?}"
+        );
+    }
 }
 
 #[test]
-fn build_decoding_key_ec_missing_x_or_y_returns_error() {
+fn build_decoding_key_rejects_ec_algorithm_with_rsa_parameters() {
     let jwk = Jwk {
-        key_use: None,
-        key_operations: None,
-        algorithm: None,
-        curve: Some("P-256".to_owned()),
-        kid: "missing-ec-params".to_owned(),
-        key_type: "EC".to_owned(),
-        n: None,
-        e: None,
-        x_coord: None,
-        y_coord: None,
-    };
-    let result = super::build_decoding_key(&jwk, Algorithm::ES256);
-    assert!(result.is_err());
-}
-
-#[test]
-fn build_decoding_key_unsupported_algorithm_returns_error() {
-    let jwk = Jwk {
-        key_use: None,
-        key_operations: None,
-        algorithm: None,
-        curve: None,
         kid: "unsupported".to_owned(),
-        key_type: "RSA".to_owned(),
-        n: Some(TEST_RSA_N.to_owned()),
-        e: Some(TEST_RSA_E.to_owned()),
-        x_coord: None,
-        y_coord: None,
+        ..sample_rsa_jwk()
     };
-    // Use ES256 with RSA params → should fail
-    let result = super::build_decoding_key(&jwk, Algorithm::ES256);
-    assert!(result.is_err());
+    assert!(build_decoding_key(&jwk, Algorithm::ES256).is_err());
 }
 
 #[test]
