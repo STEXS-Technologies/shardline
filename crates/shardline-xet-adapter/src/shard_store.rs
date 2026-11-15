@@ -2040,6 +2040,7 @@ mod tests {
         // Use 2 chunks: first is a file start, second has the dedup flag
         let chunk_a = compute_data_hash(b"aaaaaaaa");
         let chunk_b = compute_data_hash(b"bbbbbbbb");
+        assert!(!super::hash_is_global_dedup_eligible(&chunk_b));
 
         let combined_hash = file_hash(&[(chunk_a, 8_u64), (chunk_b, 8_u64)]);
         let xorb_hash = xorb_hash(&[(chunk_a, 8_u64), (chunk_b, 8_u64)]);
@@ -2062,19 +2063,10 @@ mod tests {
             }],
         );
 
-        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
-        assert!(
-            hashes.is_ok(),
-            "retained_shard_chunk_hashes failed: {hashes:?}"
-        );
-        let result_hashes = hashes.unwrap();
-        // chunk[0] is a file start (chunk_index_start=0), should be retained
-        // chunk[1] has MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG, should be retained
-        assert!(
-            result_hashes.len() >= 2,
-            "expected at least 2 chunks retained (file start + flag), got {}",
-            result_hashes.len()
-        );
+        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS).unwrap();
+        let mut expected = vec![chunk_a.hex(), chunk_b.hex()];
+        expected.sort();
+        assert_eq!(hashes, expected);
     }
 
     // ── validate_referenced_xorb_count edge: empty file_infos ────────────
@@ -2197,14 +2189,19 @@ mod tests {
 
     #[test]
     fn retained_shard_chunk_hashes_excludes_non_start_non_eligible() {
-        // A chunk that is NOT a file start and NOT dedup eligible should NOT be retained
-        let chunk_hash = compute_data_hash(b"common"); // this hash is unlikely to be dedup-eligible
-        let xorb_hash = compute_data_hash(b"xorb-data");
-        let file_hash = compute_data_hash(b"file-data");
-        // Use a file that starts at chunk index 1, so chunk 0 is not a file start
+        let excluded = compute_data_hash(b"common");
+        let retained = compute_data_hash(b"file-start");
+        assert!(!super::hash_is_global_dedup_eligible(&excluded));
+        assert_ne!(excluded, retained);
+        let xorb_hash = xorb_hash(&[(excluded, 1_u64), (retained, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                metadata: FileDataSequenceHeader::new(
+                    file_hash(&[(retained, 1_u64)]),
+                    1u64,
+                    false,
+                    false,
+                ),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 1_u64, 2_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -2212,21 +2209,13 @@ mod tests {
             vec![MDBXorbInfo {
                 metadata: XorbChunkSequenceHeader::new(xorb_hash, 2_u64, 2_u64),
                 chunks: vec![
-                    XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64),
-                    XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 1_u64),
+                    XorbChunkSequenceEntry::new(excluded, 1_u64, 0_u64),
+                    XorbChunkSequenceEntry::new(retained, 1_u64, 1_u64),
                 ],
             }],
         );
 
-        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
-        let result = hashes.unwrap();
-        // Chunk 0 is not a file start (file starts at chunk 1), and its hash
-        // is unlikely to be dedup-eligible. If hash_is_global_dedup_eligible
-        // returns false, chunk 0 is excluded.
-        assert!(
-            result.len() <= 2,
-            "expected <=2 retained hashes, got {}",
-            result.len()
-        );
+        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS).unwrap();
+        assert_eq!(hashes, vec![retained.hex()]);
     }
 }
