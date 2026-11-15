@@ -258,15 +258,6 @@ async fn assemble(
                 actual: offset,
             });
         }
-        let term_byte_size = term.unpacked_length.saturating_sub(offset);
-
-        let mut term_data = Vec::with_capacity(decoded_len as usize);
-        for chunk in term_chunks {
-            term_data.extend_from_slice(&chunk.data);
-        }
-        term_data.drain(..usize::try_from(offset).unwrap_or(usize::MAX));
-        term_data.truncate(usize::try_from(term_byte_size).unwrap_or(usize::MAX));
-
         let chunk_hashes: Vec<MerkleHash> = term_chunks.iter().map(|chunk| chunk.hash).collect();
         let verification_hash = compute_term_verification_hash(&chunk_hashes);
 
@@ -277,7 +268,11 @@ async fn assemble(
             verification_hash,
             output_offset: u64::try_from(output.len()).unwrap_or(u64::MAX),
         });
-        output.extend_from_slice(&term_data);
+        let mut skip = usize::try_from(offset).unwrap_or(usize::MAX);
+        for chunk in term_chunks {
+            output.extend_from_slice(chunk.data.get(skip..).unwrap_or_default());
+            skip = skip.saturating_sub(chunk.data.len());
+        }
     }
 
     if let Some(range) = requested_range {
@@ -693,44 +688,49 @@ mod tests {
 
     #[tokio::test]
     async fn reconstruct_honors_offset_into_first_range() {
-        let server = MockServer::start().await;
-        let chunk = vec![7u8; 64];
-        let payload = serialize_payload(&[&chunk]);
+        for offset in [0, 16, 32, 48] {
+            let server = MockServer::start().await;
+            let chunks = [vec![7u8; 32], vec![9u8; 32]];
+            let payload = serialize_payload(&[&chunks[0], &chunks[1]]);
 
-        Mock::given(method("GET"))
-            .and(path(format!("/v2/reconstructions/{FILE_ID}")))
-            .and(header("range", "bytes=16-63"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(v2_response_body(
-                16,
-                json!([
-                    {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}}
-                ]),
-                json!({
-                    XORB_HASH: [{
-                        "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
-                        "ranges": [
-                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
-                        ]
-                    }]
-                }),
-            )))
-            .mount(&server)
-            .await;
-        xorb_range_mock(&server, XORB_HASH, 0, (payload.len() - 1) as u64, payload).await;
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+                .and(header("range", format!("bytes={offset}-63")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(v2_response_body(
+                    offset,
+                    json!([
+                        {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 2}}
+                    ]),
+                    json!({
+                        XORB_HASH: [{
+                            "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                            "ranges": [
+                                {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
+                            ]
+                        }]
+                    }),
+                )))
+                .mount(&server)
+                .await;
+            xorb_range_mock(&server, XORB_HASH, 0, (payload.len() - 1) as u64, payload).await;
 
-        let transfer = transfer_client();
-        let range = super::ByteRange::new(16, 63);
-        let file = super::reconstruct(
-            &transfer,
-            None,
-            &server.uri(),
-            "read-token",
-            FILE_ID,
-            Some(range),
-        )
-        .await
-        .unwrap();
-        assert_eq!(file.data, chunk[16..64]);
+            let transfer = transfer_client();
+            let range = super::ByteRange::new(offset, 63);
+            let file = super::reconstruct(
+                &transfer,
+                None,
+                &server.uri(),
+                "read-token",
+                FILE_ID,
+                Some(range),
+            )
+            .await
+            .unwrap();
+            assert_eq!(file.data, chunks.concat()[offset as usize..]);
+            assert_eq!(file.terms.len(), 1);
+            assert_eq!(file.terms[0].output_offset, 0);
+            assert_eq!(file.terms[0].unpacked_length, 64);
+        }
     }
 
     #[tokio::test]
