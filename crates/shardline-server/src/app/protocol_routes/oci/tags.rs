@@ -200,9 +200,6 @@ fn parse_oci_tag_list_page_size(value: Option<&str>) -> Result<usize, ServerErro
     let page_size = value
         .parse::<usize>()
         .map_err(|_error| ServerError::InvalidManifestReference)?;
-    if page_size == 0 {
-        return Ok(0);
-    }
     if page_size > super::super::MAX_OCI_TAG_LIST_PAGE_SIZE {
         return Err(ServerError::InvalidManifestReference);
     }
@@ -246,47 +243,35 @@ mod tests {
     // ── parse_oci_tag_list_page_size ────────────────────────────────────
 
     #[test]
-    fn default_page_size_when_none() {
-        assert_eq!(
-            parse_oci_tag_list_page_size(None).unwrap(),
-            super::super::super::MAX_OCI_TAG_LIST_PAGE_SIZE
-        );
-    }
-
-    #[test]
-    fn zero_page_size_returns_zero() {
-        assert_eq!(parse_oci_tag_list_page_size(Some("0")).unwrap(), 0);
-    }
-
-    #[test]
-    fn valid_page_size_returned() {
-        assert_eq!(parse_oci_tag_list_page_size(Some("10")).unwrap(), 10);
-    }
-
-    #[test]
-    fn max_page_size_accepted() {
+    fn page_size_accepts_default_and_protocol_bounds() {
         let max = super::super::super::MAX_OCI_TAG_LIST_PAGE_SIZE;
-        assert_eq!(
-            parse_oci_tag_list_page_size(Some(&max.to_string())).unwrap(),
-            max
-        );
+        let max_value = max.to_string();
+        for (value, expected) in [
+            (None, max),
+            (Some("0"), 0),
+            (Some("10"), 10),
+            (Some(max_value.as_str()), max),
+        ] {
+            assert_eq!(
+                parse_oci_tag_list_page_size(value).unwrap(),
+                expected,
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
-    fn oversized_page_size_rejected() {
-        let oversized = super::super::super::MAX_OCI_TAG_LIST_PAGE_SIZE + 1;
-        assert!(matches!(
-            parse_oci_tag_list_page_size(Some(&oversized.to_string())),
-            Err(ServerError::InvalidManifestReference)
-        ));
-    }
-
-    #[test]
-    fn non_numeric_page_size_rejected() {
-        assert!(matches!(
-            parse_oci_tag_list_page_size(Some("abc")),
-            Err(ServerError::InvalidManifestReference)
-        ));
+    fn page_size_rejects_invalid_values() {
+        let oversized = (super::super::super::MAX_OCI_TAG_LIST_PAGE_SIZE + 1).to_string();
+        for value in [oversized.as_str(), "abc", "", "-1", " 10", "10 "] {
+            assert!(
+                matches!(
+                    parse_oci_tag_list_page_size(Some(value)),
+                    Err(ServerError::InvalidManifestReference)
+                ),
+                "{value:?}"
+            );
+        }
     }
 
     // ── oci_tags_list_next_link ─────────────────────────────────────────
@@ -337,15 +322,6 @@ mod tests {
         assert!(validate_oci_tag("").is_err());
         assert!(validate_oci_tag("tag with spaces").is_err());
         assert!(validate_oci_tag("tag\nnewline").is_err());
-    }
-
-    // ── oci_tags_list_next_link ─────────────────────────────────────────
-
-    #[test]
-    fn next_link_encodes_last_parameter() {
-        let header = oci_tags_list_next_link("team/assets", 10, "v1.0").unwrap();
-        let value = header.to_str().unwrap();
-        assert!(value.contains("last=v1.0"));
     }
 
     // ── oci_created_response edge cases ──────────────────────────────────
