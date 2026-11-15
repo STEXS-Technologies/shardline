@@ -707,43 +707,31 @@ mod tests {
     }
 
     #[test]
-    fn ingestor_take_pending_buffer_returns_new_buffer_when_pool_empty() {
-        let mut ingestor = FileUploadIngestor::new(NonZeroUsize::new(128).unwrap(), false);
-        let buffer = ingestor.take_pending_buffer();
-        assert!(buffer.is_empty());
-        assert_eq!(buffer.capacity(), 128);
-    }
-
-    #[test]
-    fn ingestor_recycle_pending_buffer_ignores_undersized_buffer() {
-        let mut ingestor = FileUploadIngestor::new(NonZeroUsize::new(128).unwrap(), false);
-        let buffer = bytes::BytesMut::with_capacity(100);
-        ingestor.recycle_pending_buffer(buffer);
-        assert!(ingestor.reusable_pending_buffers.is_empty());
-    }
-
-    #[test]
-    fn ingestor_recycle_pending_buffer_accepts_chunk_sized_buffer() {
-        let mut ingestor = FileUploadIngestor::new(NonZeroUsize::new(128).unwrap(), false);
-        let mut buffer = bytes::BytesMut::with_capacity(2048);
-        buffer.extend_from_slice(b"some data");
-        ingestor.recycle_pending_buffer(buffer);
-        // Buffer should be cleared after recycling
-        assert!(ingestor.reusable_pending_buffers[0].is_empty());
-    }
-
-    #[test]
-    fn ingestor_recycle_pending_buffer_enforces_capacity_limit() {
+    fn pending_buffer_pool_reuses_cleared_buffers_with_a_bounded_capacity() {
         let mut ingestor = FileUploadIngestor::new_with_parallelism(
             NonZeroUsize::new(128).unwrap(),
             false,
             NonZeroUsize::new(2).unwrap(),
             &crate::admission::ExecutionPools::default_sizes().hashing,
         );
-        ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(2048));
-        ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(2048));
-        ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(2048));
-        // Only 2 should be kept (equal to max_in_flight_chunks)
+        let fresh = ingestor.take_pending_buffer();
+        assert!(fresh.is_empty());
+        assert_eq!(fresh.capacity(), 128);
+        ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(100));
+        assert!(ingestor.reusable_pending_buffers.is_empty());
+
+        let mut buffer = bytes::BytesMut::with_capacity(128);
+        buffer.extend_from_slice(b"some data");
+        let allocation = buffer.as_ptr();
+        ingestor.recycle_pending_buffer(buffer);
+        let reused = ingestor.take_pending_buffer();
+        assert!(reused.is_empty());
+        assert_eq!(reused.as_ptr(), allocation);
+        assert!(ingestor.reusable_pending_buffers.is_empty());
+
+        for _ in 0..3 {
+            ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(128));
+        }
         assert_eq!(ingestor.reusable_pending_buffers.len(), 2);
     }
 
@@ -832,34 +820,6 @@ mod tests {
             .unwrap();
 
         assert!(response.inserted_chunks > 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_recycles_pooled_pending_buffers_after_upload_completion() {
-        let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128).unwrap();
-        let mut ingestor = FileUploadIngestor::new(chunk_size, false);
-
-        let ingested = ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"ABC"))
-            .await;
-        assert!(ingested.is_ok());
-        let pooled_capacity = ingestor.pending.capacity();
-        assert!(pooled_capacity >= 4);
-
-        let second = ingestor
-            .ingest_body_chunk(
-                &object_store,
-                &Bytes::from_static(
-                    b"DEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-                ),
-            )
-            .await;
-        assert!(second.is_ok());
-        // With CDC, pending buffer is reused after chunks are flushed
-        assert_eq!(ingestor.reusable_pending_buffers.len(), 0);
-        let recycled_buffer = ingestor.reusable_pending_buffers.first();
-        assert!(recycled_buffer.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1022,42 +982,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_multiple_in_flight_chunks_exceeds_parallelism() {
-        // Submit enough chunks to exceed max_in_flight_chunks, triggering
-        // drain_completed_chunks_to_capacity. Use blackhole so chunks complete
-        // synchronously without spawn_blocking.
-        let object_store = ServerObjectStore::blackhole();
-
-        // Set max_in_flight_chunks to 2, submit via one body frame.
-        let chunk_size = NonZeroUsize::new(128).unwrap();
+    async fn chunk_submission_drains_tasks_at_the_in_flight_limit() {
+        let storage = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(storage.path().join("chunks")).unwrap();
         let mut ingestor = FileUploadIngestor::new_with_parallelism(
-            chunk_size,
+            NonZeroUsize::new(128).unwrap(),
             false,
             NonZeroUsize::new(2).unwrap(),
             &crate::admission::ExecutionPools::default_sizes().hashing,
         );
+        for byte in 0..3 {
+            ingestor
+                .submit_chunk(&object_store, bytes::BytesMut::from(&[byte; 128][..]))
+                .await
+                .unwrap();
+            assert!(ingestor.in_flight_chunks.len() <= 2);
+        }
+        assert_eq!(ingestor.completed_chunks.len(), 1);
+        assert_eq!(ingestor.in_flight_chunks.len(), 2);
 
-        // With CDC (target=128, min=16, max=256), send enough data to produce
-        // multiple chunks. The data below is 320 bytes — enough for 2+ chunks.
-        let data: Vec<u8> = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-            .iter()
-            .copied()
-            .cycle()
-            .take(320)
-            .collect();
-        ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from(data))
-            .await
-            .unwrap();
-        // CDC may or may not have flushed all chunks depending on boundaries
-        assert!(!ingestor.completed_chunks.is_empty());
-
-        let (record, _response) = ingestor
-            .finish(&object_store, "multi-chunk.bin", None, None)
-            .await
-            .unwrap();
-        assert_eq!(record.total_bytes, 320);
-        assert!(!record.chunks.is_empty());
+        ingestor.drain_all_completed_chunks().await.unwrap();
+        ingestor.record_completed_chunks().unwrap();
+        assert_eq!(ingestor.records.len(), 3);
+        assert_eq!(ingestor.stored_bytes, 384);
+        assert!(ingestor.in_flight_chunks.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1079,30 +1027,6 @@ mod tests {
             .finish(&object_store, "sha256-check.bin", None, Some(expected))
             .await;
         assert!(finished.is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_recycles_pending_buffer_across_multiple_flushes() {
-        // When the pending buffer fills and is flushed multiple times,
-        // the pooled buffer should be recycled.
-        let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128).unwrap();
-        let mut ingestor = FileUploadIngestor::new(chunk_size, false);
-
-        // Send 3 bytes then 5 bytes → first fills pending (3 < 4), second completes it (3+1=4)
-        // Then 1 remains pending.
-        ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"abc"))
-            .await
-            .unwrap();
-        assert_eq!(ingestor.pending.len(), 3);
-        assert_eq!(ingestor.reusable_pending_buffers.len(), 0);
-
-        ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"defg"))
-            .await
-            .unwrap();
-        // After flush, the buffer should be recycled
     }
 
     #[test]
