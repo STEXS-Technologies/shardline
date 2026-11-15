@@ -33,9 +33,7 @@ pub(super) fn capture_headers(
     metadata: &mut Vec<(String, String)>,
 ) -> Result<(), S3Error> {
     for (header_name, metadata_key) in PROPERTIES {
-        let header =
-            HeaderName::from_bytes(header_name.as_bytes()).map_err(|_error| S3Error::internal())?;
-        let mut values = headers.get_all(&header).iter();
+        let mut values = headers.get_all(header_name).iter();
         let Some(value) = values.next() else {
             continue;
         };
@@ -107,18 +105,13 @@ pub(super) fn attach_form_field(
     name: &str,
     value: &str,
 ) -> Result<(), S3Error> {
-    let canonical_name = name.to_ascii_lowercase();
-    if !PROPERTIES
+    let (header_name, _) = PROPERTIES
         .iter()
-        .any(|(property_name, _)| *property_name == canonical_name)
-    {
-        return Err(S3Error::internal());
-    }
-    let header = HeaderName::from_bytes(canonical_name.as_bytes())
-        .map_err(|_error| S3Error::invalid_argument("Invalid S3 form field name"))?;
+        .find(|(property, _)| property.eq_ignore_ascii_case(name))
+        .ok_or_else(S3Error::internal)?;
     let value = HeaderValue::from_str(value)
         .map_err(|_error| S3Error::invalid_argument("Invalid S3 form field value"))?;
-    headers.append(header, value);
+    headers.append(HeaderName::from_static(header_name), value);
     Ok(())
 }
 
@@ -154,9 +147,9 @@ pub(super) fn apply_response_headers(
     response.headers_mut().insert(CONTENT_TYPE, content_type);
     for (header_name, metadata_key) in PROPERTIES.into_iter().skip(1) {
         if let Some(value) = read(metadata, metadata_key)? {
-            let header = HeaderName::from_bytes(header_name.as_bytes())
-                .map_err(|_error| S3Error::internal())?;
-            response.headers_mut().insert(header, value);
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static(header_name), value);
         }
     }
     Ok(())
@@ -187,11 +180,8 @@ pub(super) const fn is_internal_metadata(name: &str) -> bool {
         || name.eq_ignore_ascii_case(TAGGING_KEY)
 }
 
-pub(super) const fn is_property_header(name: &str) -> bool {
-    name.eq_ignore_ascii_case("content-type")
-        || name.eq_ignore_ascii_case("cache-control")
-        || name.eq_ignore_ascii_case("content-disposition")
-        || name.eq_ignore_ascii_case("content-encoding")
-        || name.eq_ignore_ascii_case("expires")
-        || name.eq_ignore_ascii_case("x-amz-website-redirect-location")
+pub(super) fn is_property_header(name: &str) -> bool {
+    PROPERTIES
+        .iter()
+        .any(|(property, _)| property.eq_ignore_ascii_case(name))
 }
