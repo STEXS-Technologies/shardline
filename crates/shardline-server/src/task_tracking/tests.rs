@@ -1459,6 +1459,7 @@ fn postgres_password_rotation_preserves_deployment_identity() {
 
 #[tokio::test]
 async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_options() {
+    use shardline_index::{UploadIntent, UploadIntentStore};
     use std::str::FromStr;
     let Ok(database_url) = std::env::var("DATABASE_URL") else {
         return;
@@ -1740,15 +1741,21 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
                 .unwrap()
         );
     }
-    // Normal routers resolve their own configured connections and inspect the
-    // other login's signed history. These schema-only readers cannot publish
-    // metadata, so automatic startup must not add payload history instead.
+    // Normal routers inspect the other login's signed history. They can read
+    // metadata (including startup recovery evidence), but cannot publish it.
+    // Seed unfinished work so this also holds outside the full PostgreSQL suite.
+    let intent = UploadIntent::new(
+        format!("history-reader-{nonce}"),
+        format!("record/history-reader-{nonce}"),
+        "00".repeat(32),
+        1,
+    );
+    let index = shardline_index::PostgresIndexStore::new(pool.clone());
+    index.create_intent(&intent).await.unwrap();
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "ALTER ROLE {first_role} SET search_path TO public;
          ALTER ROLE {second_role} SET search_path TO public;
-         GRANT SELECT ON public.shardline_schema_migrations,
-             public.shardline_frontend_schema_v1,
-             public.shardline_upload_intents TO {first_role}, {second_role};"
+         GRANT SELECT ON ALL TABLES IN SCHEMA public TO {first_role}, {second_role};"
     )))
     .execute(&pool)
     .await
@@ -1937,14 +1944,35 @@ async fn postgres_logins_can_target_distinct_default_schemas_with_identical_url_
     second_pool.close().await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "DROP SCHEMA {first_role} CASCADE; DROP SCHEMA {second_role} CASCADE;
-         REVOKE SELECT ON public.shardline_schema_migrations,
-             public.shardline_frontend_schema_v1,
-             public.shardline_upload_intents FROM {first_role}, {second_role};
+         REVOKE SELECT ON ALL TABLES IN SCHEMA public FROM {first_role}, {second_role};
          DROP ROLE {first_role}; DROP ROLE {second_role};"
     )))
     .execute(&pool)
     .await
     .unwrap();
+    assert_eq!(
+        index
+            .intent_by_id(intent.intent_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        shardline_index::UploadIntentState::Created,
+    );
+    for statement in [
+        "DELETE FROM shardline_upload_intents WHERE intent_id=$1",
+        "DELETE FROM shardline_reliability_events WHERE operation_kind='Upload' AND operation_id=$1",
+    ] {
+        assert_eq!(
+            sqlx::query(statement)
+                .bind(intent.intent_id())
+                .execute(&pool)
+                .await
+                .unwrap()
+                .rows_affected(),
+            1,
+        );
+    }
     pool.close().await;
 }
 
