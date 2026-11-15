@@ -39,17 +39,11 @@ use tower::ServiceExt;
 mod deduplication_domains;
 mod range_checksums;
 
-use crate::{
-    ServerConfig, ServerFrontend, ServerRole,
-    app::{AppState, ProtocolMetrics},
-    reconstruction_cache::ReconstructionCacheService,
-    transfer_limiter::TransferLimiter,
-};
+use crate::app::AppState;
 
 use super::test_support::{
-    BUCKET, NAME, OWNER, TEST_SIGNING_KEY, body_bytes, build_state, build_state_with_backend,
-    build_test_state, build_test_state_with_options, mint_token, put_request, sigv4_auth,
-    test_config,
+    BUCKET, NAME, OWNER, body_bytes, build_state, build_state_with_backend, build_test_state,
+    build_test_state_with_options, mint_token, put_request, sigv4_auth, test_config,
 };
 use super::{
     bucket::{

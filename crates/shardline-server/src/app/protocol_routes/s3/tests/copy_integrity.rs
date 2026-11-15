@@ -484,45 +484,19 @@ async fn build_s3_payload_test_state_with_index(
     database_url: Option<String>,
 ) -> (Arc<AppState>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(65_536).unwrap();
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "http://127.0.0.1:8080".to_owned(),
-        tmp.path().to_path_buf(),
-        chunk_size,
-    )
-    .with_server_frontends([ServerFrontend::S3])
-    .expect("server frontends")
-    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key")
-    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
-    .expect("S3 max part size")
-    .with_s3_min_part_bytes(NonZeroU64::MIN)
-    .expect("S3 min part size")
-    .with_object_storage(crate::ObjectStorageAdapter::S3, Some(storage));
+    let config = test_config(tmp.path())
+        .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
+        .expect("S3 max part size")
+        .with_s3_min_part_bytes(NonZeroU64::MIN)
+        .expect("S3 min part size")
+        .with_object_storage(crate::ObjectStorageAdapter::S3, Some(storage));
     let config = match database_url {
         Some(database_url) => config
             .with_index_postgres_url(database_url)
             .expect("PostgreSQL metadata URL"),
         None => config,
     };
-    let backend = crate::ServerBackend::from_config(&config)
-        .await
-        .expect("S3 payload backend");
-    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("server auth");
-    let state = Arc::new(AppState {
-        config,
-        role: ServerRole::All,
-        backend,
-        auth: Some(auth),
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
-        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256).unwrap()),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    });
+    let state = build_state(config).await;
     (state, tmp)
 }
 
