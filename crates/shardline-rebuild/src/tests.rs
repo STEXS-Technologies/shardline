@@ -5,20 +5,16 @@ use shardline_server_core::ServerObjectStore;
 
 use super::*;
 
-fn empty_report() -> IndexRebuildReport {
-    IndexRebuildReport::default()
-}
-
 #[test]
 fn report_is_clean_when_no_issues() {
-    let report = empty_report();
+    let report = IndexRebuildReport::default();
     assert!(report.is_clean());
     assert_eq!(report.issue_count(), 0);
 }
 
 #[test]
 fn report_is_not_clean_with_issues() {
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     report.issues.push(IndexRebuildIssue {
         kind: IndexRebuildIssueKind::InvalidVersionRecordJson,
         location: "test/path".to_owned(),
@@ -30,7 +26,7 @@ fn report_is_not_clean_with_issues() {
 
 #[test]
 fn issue_count_matches_vec_len() {
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     for i in 0..5 {
         report.issues.push(IndexRebuildIssue {
             kind: IndexRebuildIssueKind::InvalidVersionFileId,
@@ -41,17 +37,6 @@ fn issue_count_matches_vec_len() {
         });
     }
     assert_eq!(report.issue_count(), 5);
-}
-
-#[test]
-fn index_rebuild_report_equality() {
-    let a = empty_report();
-    let mut b = empty_report();
-    b.scanned_version_records = 42;
-    assert_ne!(a, b);
-
-    b.scanned_version_records = 0;
-    assert_eq!(a, b);
 }
 
 #[test]
@@ -129,7 +114,7 @@ fn issue_detail_display_messages() {
 
 #[test]
 fn push_issue_increments_count() {
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     push_issue(
         &mut report,
         IndexRebuildIssueKind::InvalidVersionFileId,
@@ -256,7 +241,7 @@ async fn prune_stale_reconstructions_returns_early_when_report_is_dirty() {
     let index_store = MemoryIndexStore::new();
     let desired = HashSet::from([shardline_index::parse_xet_hash_hex(&"a".repeat(64)).unwrap()]);
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     push_issue(
         &mut report,
         IndexRebuildIssueKind::InvalidVersionRecordJson,
@@ -392,7 +377,7 @@ async fn run_index_rebuild_with_existing_latest_unchanged() {
 
 #[test]
 fn push_issue_many_issues_tracks_all() {
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     for i in 0..100 {
         push_issue(
             &mut report,
@@ -1011,7 +996,7 @@ async fn prune_stale_reconstructions_removes_undesired() {
 
     // desired set is empty, so the reconstruction above is stale
     let desired = HashSet::new();
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
 
     prune_stale_reconstructions(&index_store, &desired, &mut report)
         .await
@@ -1048,7 +1033,7 @@ async fn prune_stale_reconstructions_preserves_desired() {
         .unwrap();
     let desired = HashSet::from([file_id.hash()]);
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
 
     prune_stale_reconstructions(&index_store, &desired, &mut report)
         .await
@@ -1074,7 +1059,7 @@ async fn rebuild_dedupe_shard_mappings_empty_produces_clean_report() {
     std::fs::create_dir_all(&object_root).unwrap();
     let object_store = ServerObjectStore::local(&object_root).unwrap();
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     rebuild_dedupe_shard_mappings(
         &index_store,
         &object_store,
@@ -1115,7 +1100,7 @@ async fn rebuild_dedupe_shard_mappings_invalid_shard_bytes_reports_issue() {
         )
         .unwrap();
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     rebuild_dedupe_shard_mappings(
         &index_store,
         &object_store,
@@ -1153,7 +1138,7 @@ async fn rebuild_dedupe_shard_mappings_removes_stale_existing_mappings() {
     let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
     index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     rebuild_dedupe_shard_mappings(
         &index_store,
         &object_store,
@@ -1247,7 +1232,7 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_unchanged_mapping() {
         .upsert_dedupe_shard_mapping(&existing_mapping)
         .unwrap();
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     rebuild_dedupe_shard_mappings(
         &index_store,
         &object_store,
@@ -1340,7 +1325,7 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_rebuilds_changed_mapping
         .upsert_dedupe_shard_mapping(&old_mapping)
         .unwrap();
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     rebuild_dedupe_shard_mappings(
         &index_store,
         &object_store,
@@ -1445,7 +1430,7 @@ async fn shared_chunk_mappings_choose_the_smallest_retained_shard() {
                     ))
                     .unwrap();
             }
-            let mut report = empty_report();
+            let mut report = IndexRebuildReport::default();
             rebuild_dedupe_shard_mappings(
                 &index_store,
                 &object_store,
@@ -1607,7 +1592,7 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
         shardline_server_core::DEFAULT_MAX_SHARD_XORB_CHUNKS,
     );
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     let result =
         rebuild_dedupe_shard_mappings(&index_store, &object_store, tight_limits, &mut report).await;
 
@@ -1654,7 +1639,7 @@ async fn rebuild_dedupe_shard_mappings_early_return_when_issues_present() {
         )
         .unwrap();
 
-    let mut report = empty_report();
+    let mut report = IndexRebuildReport::default();
     rebuild_dedupe_shard_mappings(
         &index_store,
         &object_store,

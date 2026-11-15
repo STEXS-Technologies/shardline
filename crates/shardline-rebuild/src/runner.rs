@@ -57,7 +57,7 @@ where
     let mut desired_latest_paths = HashSet::new();
     for candidate in candidates.values() {
         let latest_path = RecordTraversal::latest_record_locator(record_store, &candidate.record);
-        desired_latest_paths.insert(latest_path.clone());
+        desired_latest_paths.insert(latest_path);
 
         let record_bytes = serde_json::to_vec(&candidate.record)?;
         let existing_bytes =
