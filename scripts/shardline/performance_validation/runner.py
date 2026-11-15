@@ -10,7 +10,7 @@ import subprocess
 import time
 
 from benchmark_gc_contention import command
-from .database import Sampler, query_mix, snapshot, top_queries
+from .database import Sampler, query_mix, referenced_xorb_members, snapshot, top_queries
 from .fixtures import Deployment
 from .measurements import RequestTrace, scale_efficiency, utc_now
 from .workload import ConcurrentGc, run_direct, run_http, verify_all
@@ -52,6 +52,7 @@ def lane_result(deployment, name, replicas, dataset, repeat, args):
         result["settling_gc_seconds"] = [deployment.gc(lane / f"settling-gc-{i}.log") for i in range(2)]
         result["settling_gc_s3"] = deployment.trace.snapshot(start, logical_bytes)
         result["after_initial_gc"] = deployment.inventory(name)
+        result["initial_referenced_xorb_members"] = referenced_xorb_members(deployment, name)
         result["initial_stored_to_logical_ratio"] = (
             result["after_initial_gc"]["stored_payload_bytes"] / logical_bytes)
         modes = ("baseline", "maintenance") if repeat % 2 == 0 else ("maintenance", "baseline")
@@ -78,6 +79,7 @@ def lane_result(deployment, name, replicas, dataset, repeat, args):
         result["final_inventory"] = deployment.inventory(name)
         result["trace_validation"] = deployment.trace.validate()
         result["final_logical_bytes"] = 3 * logical_bytes
+        result["final_referenced_xorb_members"] = referenced_xorb_members(deployment, name)
         result["top_queries"] = top_queries(deployment, name)
         (lane / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         return result

@@ -4451,6 +4451,16 @@ across replica counts before attributing the initial ratio difference to either
 transient quarantine or persistent packing/reference behavior. This phase does
 not establish sustained throughput, cloud cost or a production margin.
 
+Per-lane results also record referenced Xorb member accounting after initial GC
+and after the mixed phases, outside measured upload intervals. Repeated latest
+and version references count each physical member once. Distinct chunk hashes
+count once across containers; the difference between used and distinct unpacked
+bytes identifies live duplicate copies. Unused unpacked bytes instead identify
+members retained alongside live members in the same immutable container. These
+are descriptor-derived unpacked counts, exclude standalone fallback chunks, and
+must not be substituted for the object-store inventory's physical byte count.
+Ordinary object-level GC cannot remove a container while any member is live.
+
 ### Reusing validated upload descriptors (2026-11-15)
 
 Candidate `128f7c5eea9d2807b97ef3299d333c9ddae05f72` removes the second full

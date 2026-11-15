@@ -20,6 +20,36 @@ def snapshot(deployment, name):
     """))
 
 
+def referenced_xorb_members(deployment, name):
+    """Separate live duplicate members from unused space; bytes are unpacked."""
+    return json.loads(deployment.sql(name, """
+      /* performance-observer */ WITH refs AS (
+        SELECT DISTINCT c->>'hash' AS hash, (c->>'range_start')::bigint AS start,
+          (c->>'range_end')::bigint AS stop
+        FROM shardline_file_records r, LATERAL jsonb_array_elements(r.record->'chunks') c
+      ), members AS (
+        SELECT d.xorb_hash, c.ordinality-1 AS ordinal, c.value->>'hash' AS chunk_hash,
+          (c.value->>'unpacked_end')::bigint-(c.value->>'unpacked_start')::bigint AS bytes
+        FROM shardline_xet_xorbs d,
+          LATERAL jsonb_array_elements(d.descriptor->'chunks') WITH ORDINALITY c(value,ordinality)
+        WHERE EXISTS (SELECT 1 FROM refs r WHERE r.hash=d.xorb_hash)
+      ), used AS (
+        SELECT m.* FROM members m WHERE EXISTS (SELECT 1 FROM refs r
+          WHERE r.hash=m.xorb_hash AND m.ordinal>=r.start AND m.ordinal<r.stop)
+      ), unique_used AS (
+        SELECT chunk_hash, max(bytes) AS bytes FROM used GROUP BY chunk_hash
+      )
+      SELECT json_build_object(
+        'referenced_containers', (SELECT count(DISTINCT xorb_hash) FROM members),
+        'used_physical_members', (SELECT count(*) FROM used),
+        'distinct_used_chunk_hashes', (SELECT count(*) FROM unique_used),
+        'used_unpacked_bytes', (SELECT coalesce(sum(bytes),0) FROM used),
+        'distinct_used_unpacked_bytes', (SELECT coalesce(sum(bytes),0) FROM unique_used),
+        'unused_unpacked_bytes', (SELECT coalesce(sum(bytes),0) FROM members)
+          -(SELECT coalesce(sum(bytes),0) FROM used))
+    """))
+
+
 def query_mix(deployment, name):
     return json.loads(deployment.sql(name, """
       SELECT json_build_object('calls', coalesce(sum(calls),0),
