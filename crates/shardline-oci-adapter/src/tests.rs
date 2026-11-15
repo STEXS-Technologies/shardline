@@ -563,19 +563,32 @@ async fn create_s3_multipart_session_persists_metadata() {
 
 #[tokio::test]
 async fn create_upload_session_with_repository_scope_works() {
-    let root = temp_root();
-    let session_id = create_upload_session(
-        root.path(),
-        NO_BACKEND,
-        "my-repo",
-        None,
-        ttl(),
-        max_sessions(),
-        false,
-    )
-    .await
-    .unwrap();
-    assert!(!session_id.is_empty());
+    let bound_scope = test_scope();
+    for (repository, scope) in [
+        ("my-repo", None),
+        ("team/assets", Some(&bound_scope)),
+        ("team/assets/cache", Some(&bound_scope)),
+    ] {
+        let root = temp_root();
+        let session_id = create_upload_session(
+            root.path(),
+            NO_BACKEND,
+            repository,
+            scope,
+            ttl(),
+            max_sessions(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!session_id.is_empty());
+        let session = read_session(root.path(), &session_id).await;
+        assert_eq!(session.repository, repository);
+        assert_eq!(
+            session.scope_namespace,
+            crate::protocol_support::scope_namespace(scope)
+        );
+    }
 }
 
 #[tokio::test]
@@ -599,18 +612,24 @@ async fn create_upload_session_rejects_invalid_repository() {
 
 #[tokio::test]
 async fn create_upload_session_rejects_invalid_repository_scope() {
-    let root = temp_root();
-    let result = create_upload_session(
-        root.path(),
-        NO_BACKEND,
-        "my-repo",
-        None,
-        ttl(),
-        max_sessions(),
-        false,
-    )
-    .await;
-    assert!(result.is_ok());
+    let scope = test_scope();
+    for repository in ["team/other", "other/assets", "team/assets-suffix"] {
+        let root = temp_root();
+        let result = create_upload_session(
+            root.path(),
+            NO_BACKEND,
+            repository,
+            Some(&scope),
+            ttl(),
+            max_sessions(),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(OciAdapterError::NotFound)),
+            "{repository}: {result:?}"
+        );
+    }
 }
 
 #[tokio::test]
