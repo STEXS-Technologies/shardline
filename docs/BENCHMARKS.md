@@ -3750,21 +3750,21 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`38f35a530aae4124d56794614c638d4b2c9b4357`. It counts all tracked `.rs`
+`4c57ff2345b3fcae2eb4add575154cd2e3b071bd`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 580,337 | 23,312 (3.86%) |
-| Server | 220,570 | 211,072 | 9,498 (4.31%) |
-| Server core | 6,454 | 5,628 | 826 (12.80%) |
+| Entire repository | 603,649 | 580,204 | 23,445 (3.88%) |
+| Server | 220,570 | 211,036 | 9,534 (4.32%) |
+| Server core | 6,454 | 5,580 | 874 (13.54%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,391 | 982 (4.82%) |
-| S3 adapter | 10,954 | 10,272 | 682 (6.23%) |
+| S3 adapter | 10,954 | 10,253 | 701 (6.40%) |
 | Xet adapter | 17,801 | 15,986 | 1,815 (10.20%) |
-| OCI adapter | 7,700 | 7,049 | 651 (8.45%) |
+| OCI adapter | 7,700 | 6,977 | 723 (9.39%) |
 | Cache | 6,573 | 5,856 | 717 (10.91%) |
 | Index | 71,472 | 68,525 | 2,947 (4.12%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
@@ -3821,6 +3821,25 @@ storage failures propagate. The regression fixture checks both methods against
 healthy CAS content and a broken Action Cache object path. This run does not
 establish PostgreSQL or production qualification.
 
+At `ecbb5054`, all 86 selected LFS and batch tests passed after simplifying
+transfer actions and CAS credential negotiation; strict server library/test
+Clippy also passed. The run covers basic fallback on internal signing failure,
+Xet upload/download headers and existing-object responses. At `4a47b867`, all
+442 selected server-core, OCI and protocol-support tests passed, with strict
+core/server Clippy. Validator cases were consolidated without dropping prior
+literal inputs, and tag/session length-boundary cases were added.
+
+At `11e2a48a`, all 450 reliability/OCI/S3-adapter tests and 392 selected
+non-PostgreSQL server OCI/S3 tests passed. Strict library/test Clippy passed for
+the three affected crates. Both adapters share typed evidence suffix selection;
+OCI selects new events before serializing them instead of filtering and copying
+full JSON histories. Tests cover borrowed suffix boundaries, incremental
+snapshot appends, tampered Merkle records and uncommitted journal tails. At
+`4c57ff23`, all 206 OCI-adapter tests and strict adapter Clippy passed after
+consolidating journal write/sync/length accounting. These tests ran on Linux;
+the portable filesystem branch was not executed. Tests used Rust 1.99 and strict
+Clippy used Rust 1.100. These checks do not measure throughput or build-time gains.
+
 At `46fe2321`, raw-Xorb construction shares one implementation and server
 packing omits an unused boundary vector. Thirty-two duplicated compression/raw
 smoke tests were consolidated, moving their unique wire-value, scheme-name and
@@ -3876,8 +3895,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 38f35a530aae4124d56794614c638d4b2c9b4357 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 38f35a530aae4124d56794614c638d4b2c9b4357 -- '*.rs' | wc -l
+git grep -I -n '^' 4c57ff2345b3fcae2eb4add575154cd2e3b071bd -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 4c57ff2345b3fcae2eb4add575154cd2e3b071bd -- '*.rs' | wc -l
 ```
 
 The cleanup reuses Cargo build artifacts, narrows ordinary binary and
