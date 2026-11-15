@@ -757,19 +757,16 @@ fn remove_entry_file(path: &Path) -> Result<(), SdxError> {
     {
         return Err(SdxError::Io(error));
     }
-    // Remove the (now possibly empty) `{hash}` dir, then the `{prefix2}` dir.
+    // Remove empty prefix and xorbs directories. remove_dir itself checks
+    // emptiness, including files published since the entry was removed.
     let mut dir = path.parent();
     for _ in 0..2 {
         let Some(current) = dir else {
             break;
         };
-        let empty = std::fs::read_dir(current)
-            .map(|mut read_dir| read_dir.next().is_none())
-            .unwrap_or(false);
-        if !empty {
+        if std::fs::remove_dir(current).is_err() {
             break;
         }
-        drop(std::fs::remove_dir(current));
         dir = current.parent();
     }
     Ok(())
@@ -819,10 +816,9 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
                     continue;
                 }
             }
-            let size = entry_path.metadata().map_or(0, |metadata| metadata.len());
-            let last_accessed = entry_path
-                .metadata()
-                .ok()
+            let metadata = entry_path.metadata().ok();
+            let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+            let last_accessed = metadata
                 .and_then(|metadata| metadata.modified().ok())
                 .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |duration| {
