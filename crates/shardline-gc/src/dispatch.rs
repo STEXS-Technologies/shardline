@@ -79,9 +79,9 @@ where
                     Err(XetAdapterError::NotFound)
                 }
             }
-        })?;
+        });
     result?;
-    Ok(present)
+    present.map_err(Into::into)
 }
 
 #[cfg(test)]

@@ -203,3 +203,26 @@ async fn physical_sweep(frontends: &[ServerFrontend]) {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn member_visitor_preserves_the_original_gc_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let objects = ServerObjectStore::local(root.path().join("objects")).unwrap();
+    let hash = source(&objects, b"verified visitor failure fixture").await;
+    let key = shardline_xet_adapter::xorb_object_key(&hash).unwrap();
+    let error = crate::dispatch::visit_protocol_object_member_chunks(
+        &[ServerFrontend::Xet],
+        &objects,
+        &key,
+        |_| {
+            Err(crate::GcError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "visitor cancelled",
+            )))
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, crate::GcError::Io(ref cause)
+        if cause.kind() == std::io::ErrorKind::Interrupted
+            && cause.to_string() == "visitor cancelled"));
+}
