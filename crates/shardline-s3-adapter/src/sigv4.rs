@@ -473,12 +473,9 @@ pub fn verify_sigv4(
     let payload_sha256 = if payload == "UNSIGNED-PAYLOAD" || streaming {
         None
     } else {
-        Some(
-            hex::decode(payload)
-                .map_err(|_invalid_hash| denied())?
-                .try_into()
-                .map_err(|_invalid_length| denied())?,
-        )
+        let mut digest = [0; 32];
+        hex::decode_to_slice(payload, &mut digest).map_err(|_invalid_hash| denied())?;
+        Some(digest)
     };
     let mut canonical_headers = String::new();
     for name in names {
