@@ -173,33 +173,24 @@ fn local_endpoint(
     root: Option<&Path>,
     side: &'static str,
 ) -> Result<StorageMigrationEndpoint, StorageMigrationRuntimeError> {
-    if let Some(root) = root {
-        ensure_directory_path_components_are_not_symlinked(root).map_err(|source| {
-            StorageMigrationRuntimeError::InvalidLocalRoot {
+    let root = match root {
+        Some(root) => root.to_path_buf(),
+        None if side == "source" => effective_root(None)?,
+        None => {
+            return Err(StorageMigrationRuntimeError::MissingLocalRoot {
+                flag: "--to-root",
                 side,
-                path: root.to_path_buf(),
-                source,
-            }
-        })?;
-        return Ok(StorageMigrationEndpoint::LocalStateRoot(root.to_path_buf()));
-    }
-
-    if side == "source" {
-        let resolved_root = effective_root(None)?;
-        ensure_directory_path_components_are_not_symlinked(&resolved_root).map_err(|source| {
-            StorageMigrationRuntimeError::InvalidLocalRoot {
-                side,
-                path: resolved_root.clone(),
-                source,
-            }
-        })?;
-        return Ok(StorageMigrationEndpoint::LocalStateRoot(resolved_root));
-    }
-
-    Err(StorageMigrationRuntimeError::MissingLocalRoot {
-        flag: "--to-root",
-        side,
-    })
+            });
+        }
+    };
+    ensure_directory_path_components_are_not_symlinked(&root).map_err(|source| {
+        StorageMigrationRuntimeError::InvalidLocalRoot {
+            side,
+            path: root.clone(),
+            source,
+        }
+    })?;
+    Ok(StorageMigrationEndpoint::LocalStateRoot(root))
 }
 
 fn load_s3_config(prefix: &str) -> Result<S3ObjectStoreConfig, StorageMigrationRuntimeError> {
