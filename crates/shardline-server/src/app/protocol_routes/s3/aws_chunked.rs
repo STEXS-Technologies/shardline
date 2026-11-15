@@ -19,6 +19,7 @@ use axum::{
     body::Bytes,
     http::{HeaderMap, header::CONTENT_ENCODING},
 };
+use bytes::BytesMut;
 use futures_util::{Stream, stream};
 
 use crate::{ServerError, overflow::checked_add, upload_ingest::RequestBodyReader};
@@ -94,7 +95,7 @@ enum AwsChunkState {
 /// Incrementally decodes an AWS-chunked payload from a raw byte stream.
 struct AwsChunkedDecoder {
     reader: RequestBodyReader,
-    pending: Vec<u8>,
+    pending: BytesMut,
     state: AwsChunkState,
     max_decoded_bytes: u64,
     decoded_bytes: u64,
@@ -115,15 +116,15 @@ impl AwsChunkedDecoder {
     }
 
     /// Reads a bounded CRLF-terminated line, allowing EOF only between lines.
-    async fn line(&mut self) -> Result<Option<Vec<u8>>, ServerError> {
+    async fn line(&mut self) -> Result<Option<Bytes>, ServerError> {
         loop {
             if let Some(end) = self.pending.windows(2).position(|bytes| bytes == b"\r\n") {
                 if end.saturating_add(2) > MAX_AWS_CHUNK_LINE_BYTES {
                     return Err(Self::malformed());
                 }
-                let mut line: Vec<u8> = self.pending.drain(..end.saturating_add(2)).collect();
+                let mut line = self.pending.split_to(end.saturating_add(2));
                 line.truncate(end);
-                return Ok(Some(line));
+                return Ok(Some(line.freeze()));
             }
             if self.pending.len() >= MAX_AWS_CHUNK_LINE_BYTES {
                 return Err(Self::malformed());
@@ -241,7 +242,7 @@ impl AwsChunkedDecoder {
                         continue;
                     }
                     let take = remaining.min(self.pending.len());
-                    let chunk: Vec<u8> = self.pending.drain(..take).collect();
+                    let chunk = self.pending.split_to(take).freeze();
                     self.decoded_bytes = checked_add(
                         self.decoded_bytes,
                         u64::try_from(take).map_err(ServerError::from)?,
@@ -252,7 +253,7 @@ impl AwsChunkedDecoder {
                     self.state = AwsChunkState::Data {
                         remaining: remaining.saturating_sub(take),
                     };
-                    return Ok(Some(Bytes::from(chunk)));
+                    return Ok(Some(chunk));
                 }
                 AwsChunkState::Trailer => {
                     while self.pending.len() < 2 {
@@ -263,7 +264,7 @@ impl AwsChunkedDecoder {
                     if self.pending.get(..2) != Some(&b"\r\n"[..]) {
                         return Err(Self::malformed());
                     }
-                    self.pending.drain(..2);
+                    drop(self.pending.split_to(2));
                     self.state = AwsChunkState::ChunkSize;
                 }
                 AwsChunkState::Completion => {
@@ -291,7 +292,7 @@ pub fn decode_aws_chunked(
     stream::unfold(
         AwsChunkedDecoder {
             reader,
-            pending: Vec::new(),
+            pending: BytesMut::new(),
             state: AwsChunkState::ChunkSize,
             max_decoded_bytes,
             decoded_bytes: 0,
