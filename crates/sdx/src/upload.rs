@@ -497,7 +497,6 @@ impl Default for SessionState {
 struct ChunkLocation {
     xorb_hash: MerkleHash,
     chunk_index: u32,
-    unpacked_len: u64,
 }
 
 /// One file's chunk in file order.
@@ -525,11 +524,7 @@ struct FileUploadPipeline {
     /// Pending new chunks not yet cut into a xorb, with their file offsets.
     pending: Vec<(Chunk, u64)>,
     pending_bytes: usize,
-    /// Next file offset (cumulative over all chunks).
-    next_file_offset: u64,
     total_bytes: u64,
-    inserted_chunks: u64,
-    reused_chunks: u64,
 }
 
 impl FileUploadPipeline {
@@ -542,10 +537,7 @@ impl FileUploadPipeline {
             new_chunk_xorbs: Vec::new(),
             pending: Vec::new(),
             pending_bytes: 0,
-            next_file_offset: 0,
             total_bytes: 0,
-            inserted_chunks: 0,
-            reused_chunks: 0,
         }
     }
 
@@ -583,7 +575,6 @@ impl FileUploadPipeline {
                 xorb_hash: location.xorb_hash,
                 chunk_index: location.chunk_index,
             });
-            self.reused_chunks = self.reused_chunks.saturating_add(1);
             self.account_chunk(len);
             return Ok(());
         }
@@ -629,7 +620,6 @@ impl FileUploadPipeline {
                     let location = ChunkLocation {
                         xorb_hash: xorb.xorb_hash,
                         chunk_index: index,
-                        unpacked_len: len,
                     };
                     state.chunk_locations.insert(hash, location);
                     // Import the xorb info, marking the referenced chunk with
@@ -653,7 +643,6 @@ impl FileUploadPipeline {
                     xorb_hash: xorb.xorb_hash,
                     chunk_index: index,
                 });
-                self.reused_chunks = self.reused_chunks.saturating_add(1);
                 self.account_chunk(len);
                 return Ok(());
             }
@@ -664,11 +653,10 @@ impl FileUploadPipeline {
         if needs_xorb_cut(self.pending_bytes, self.pending.len(), chunk_len) {
             self.cut_xorb().await?;
         }
-        let file_offset = self.next_file_offset;
+        let file_offset = self.total_bytes;
         self.pending.push((chunk, file_offset));
         self.pending_bytes = self.pending_bytes.saturating_add(chunk_len);
         self.placements.push(Placement::New { hash, len });
-        self.inserted_chunks = self.inserted_chunks.saturating_add(1);
         self.account_chunk(len);
         {
             let mut state = self.session.inner.state.lock().await;
@@ -678,7 +666,6 @@ impl FileUploadPipeline {
     }
 
     const fn account_chunk(&mut self, len: u64) {
-        self.next_file_offset = self.next_file_offset.saturating_add(len);
         self.total_bytes = self.total_bytes.saturating_add(len);
     }
 
@@ -795,7 +782,6 @@ impl FileUploadPipeline {
             let location = ChunkLocation {
                 xorb_hash,
                 chunk_index: u32::try_from(index).unwrap_or(u32::MAX),
-                unpacked_len: u64::try_from(chunk.len()).unwrap_or(u64::MAX),
             };
             state.chunk_locations.insert(chunk.hash(), location);
             self.new_chunk_xorbs
@@ -874,13 +860,15 @@ impl FileUploadPipeline {
             .map(|(hash, _)| *hash)
             .collect::<std::collections::HashSet<_>>()
             .len() as u64;
+        let chunk_count = u64::try_from(chunk_list.len()).unwrap_or(u64::MAX);
+        let inserted_chunks = u64::try_from(self.new_chunk_xorbs.len()).unwrap_or(u64::MAX);
         let info = UploadFileInfo {
             file_id: xet_hash_hex_string(file_hash),
             total_bytes: self.total_bytes,
-            chunk_count: u64::try_from(chunk_list.len()).unwrap_or(u64::MAX),
+            chunk_count,
             xorb_count,
-            inserted_chunks: self.inserted_chunks,
-            reused_chunks: self.reused_chunks,
+            inserted_chunks,
+            reused_chunks: chunk_count.saturating_sub(inserted_chunks),
         };
 
         let mut state = self.session.inner.state.lock().await;
@@ -1806,11 +1794,13 @@ mod tests {
         // must never fire (idempotent re-upload).
         let (server, client) = mock_client_opts(true, None).await;
         let session = client.upload_session().unwrap();
-        session
+        let info = session
             .upload_bytes("remote/stored.bin", b"already stored".to_vec())
             .await
             .unwrap();
         let report = session.finalize().await.unwrap();
+        assert_eq!(info.inserted_chunks, 1);
+        assert_eq!(info.reused_chunks, 0);
         assert_eq!(report.xorb_posts, 0);
         assert_eq!(report.xorb_skipped, 1);
         let requests = server.received_requests().await.unwrap_or_default();
