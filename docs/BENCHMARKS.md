@@ -3750,32 +3750,32 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`248c9250dace1da32bb972b3f9c3df0daa7dfef3`. It counts all tracked `.rs`
+`bed9b1ea616238ef79becbc15d5ad21a20542331`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 579,893 | 23,756 (3.94%) |
+| Entire repository | 603,649 | 579,163 | 24,486 (4.06%) |
 | Server | 220,570 | 210,914 | 9,656 (4.38%) |
-| Server core | 6,454 | 5,580 | 874 (13.54%) |
+| Server core | 6,454 | 5,501 | 953 (14.77%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,391 | 982 (4.82%) |
-| S3 adapter | 10,954 | 10,253 | 701 (6.40%) |
-| Xet adapter | 17,801 | 15,986 | 1,815 (10.20%) |
+| S3 adapter | 10,954 | 10,106 | 848 (7.74%) |
+| Xet adapter | 17,801 | 15,936 | 1,865 (10.48%) |
 | OCI adapter | 7,700 | 6,977 | 723 (9.39%) |
 | Cache | 6,573 | 5,786 | 787 (11.97%) |
 | Index | 71,472 | 68,525 | 2,947 (4.12%) |
 | CAS | 3,447 | 2,858 | 589 (17.09%) |
 | GC | 10,954 | 10,634 | 320 (2.92%) |
-| Fsck | 8,989 | 8,501 | 488 (5.43%) |
-| Rebuild | 4,326 | 4,081 | 245 (5.66%) |
+| Fsck | 8,989 | 8,493 | 496 (5.52%) |
+| Rebuild | 4,326 | 3,834 | 492 (11.37%) |
 | CLI | 37,677 | 37,264 | 413 (1.10%) |
 | SDK | 26,965 | 24,479 | 2,486 (9.22%) |
 | Protocol | 4,076 | 3,715 | 361 (8.86%) |
 | Protocol adapters | 1,670 | 1,240 | 430 (25.75%) |
-| Provider events | 5,283 | 5,117 | 166 (3.14%) |
+| Provider events | 5,283 | 4,905 | 378 (7.16%) |
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
