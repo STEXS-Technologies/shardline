@@ -128,21 +128,7 @@ async fn postgres_ordinary_gc_reclaims_row_scoped_abandoned_manifest_after_hold_
         .execute(&admin)
         .await
         .unwrap();
-    let mut scoped_url = url::Url::parse(&url).unwrap();
-    let old_options = scoped_url
-        .query_pairs()
-        .find(|(key, _)| key == "options")
-        .map_or_else(String::new, |(_, value)| value.into_owned());
-    let other_parameters: Vec<_> = scoped_url
-        .query_pairs()
-        .filter(|(key, _)| key != "options")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    scoped_url.set_query(None);
-    scoped_url
-        .query_pairs_mut()
-        .extend_pairs(other_parameters)
-        .append_pair("options", &format!("{old_options} -csearch_path={schema}"));
+    let scoped_url = crate::test_support::postgres_fixture::schema_url(&url, &schema);
     let url = scoped_url.as_str();
     let bootstrap = sqlx::PgPool::connect(url).await.unwrap();
     crate::apply_database_migrations(&bootstrap).await.unwrap();

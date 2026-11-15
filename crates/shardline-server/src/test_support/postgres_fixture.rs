@@ -74,20 +74,7 @@ impl PostgresFixture {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO {schema}.shardline_schema_migrations SELECT * FROM public.shardline_schema_migrations"
         ))).execute(&admin).await.unwrap();
-        let mut url = url::Url::parse(&database_url).unwrap();
-        let options = url
-            .query_pairs()
-            .find(|(key, _)| key == "options")
-            .map_or_else(String::new, |(_, value)| value.into_owned());
-        let parameters: Vec<_> = url
-            .query_pairs()
-            .filter(|(key, _)| key != "options")
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect();
-        url.set_query(None);
-        url.query_pairs_mut()
-            .extend_pairs(parameters)
-            .append_pair("options", &format!("{options} -csearch_path={schema}"));
+        let url = schema_url(&database_url, &schema);
         let root = tempfile::tempdir().unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:8080".parse().unwrap(),
@@ -190,7 +177,16 @@ pub(crate) async fn isolated_postgres_url(prefix: &str) -> Option<String> {
         .await
         .unwrap();
     admin.close().await;
-    let mut scoped = url::Url::parse(&database_url).unwrap();
+    let scoped = schema_url(&database_url, &schema);
+    let pool = sqlx::PgPool::connect(scoped.as_str()).await.unwrap();
+    crate::apply_database_migrations(&pool).await.unwrap();
+    pool.close().await;
+    Some(scoped.into())
+}
+
+/// Preserve connection parameters while selecting the disposable schema.
+pub(crate) fn schema_url(database_url: &str, schema: &str) -> url::Url {
+    let mut scoped = url::Url::parse(database_url).unwrap();
     let options = scoped
         .query_pairs()
         .find(|(key, _)| key == "options")
@@ -205,8 +201,5 @@ pub(crate) async fn isolated_postgres_url(prefix: &str) -> Option<String> {
         .query_pairs_mut()
         .extend_pairs(parameters)
         .append_pair("options", &format!("{options} -csearch_path={schema}"));
-    let pool = sqlx::PgPool::connect(scoped.as_str()).await.unwrap();
-    crate::apply_database_migrations(&pool).await.unwrap();
-    pool.close().await;
-    Some(scoped.into())
+    scoped
 }
