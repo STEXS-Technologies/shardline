@@ -270,9 +270,10 @@ impl ListBucketResult {
     /// encoding. Opaque continuation tokens retain their original values.
     #[must_use]
     pub fn to_xml_with_context(&self, context: ListObjectsV2ResponseContext<'_>) -> String {
-        let mut result = self.clone();
+        let mut result = std::borrow::Cow::Borrowed(self);
         if context.url_encoding {
-            encode_listing_rows(&mut result.contents, &mut result.common_prefixes);
+            let encoded = result.to_mut();
+            encode_listing_rows(&mut encoded.contents, &mut encoded.common_prefixes);
         }
         let mut xml = result.to_xml_with_owner(context.owner_id);
         let mut fields = format!(
