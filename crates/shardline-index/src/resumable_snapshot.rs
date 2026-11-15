@@ -8,26 +8,26 @@ use crate::{ResumableSession, ResumableSessionPart};
 /// Canonical materialized state used to integrity-check a resumable session row
 /// together with its authoritative part map.
 #[derive(Debug, Serialize)]
-struct ResumableSessionStateSnapshotV1 {
-    session_id: String,
+struct ResumableSessionStateSnapshotV1<'snapshot> {
+    session_id: &'snapshot str,
     protocol: &'static str,
-    scope_namespace: String,
-    target_key: String,
-    attributes_json: String,
+    scope_namespace: &'snapshot str,
+    target_key: &'snapshot str,
+    attributes_json: &'snapshot str,
     state: ResumableLifecycleState,
     generation: u64,
     fence_epoch: u64,
     expires_at_unix_seconds: u64,
-    parts: Vec<ResumablePartStateSnapshotV1>,
+    parts: Vec<ResumablePartStateSnapshotV1<'snapshot>>,
 }
 
-#[derive(Debug, Serialize)]
-struct ResumablePartStateSnapshotV1 {
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+struct ResumablePartStateSnapshotV1<'snapshot> {
     part_number: u64,
     generation: u64,
-    staging_key: String,
+    staging_key: &'snapshot str,
     size_bytes: u64,
-    etag: Option<String>,
+    etag: Option<&'snapshot str>,
     range_start: Option<u64>,
     range_end_exclusive: Option<u64>,
 }
@@ -49,31 +49,22 @@ pub fn resumable_state_digest(
             ResumablePartStateSnapshotV1 {
                 part_number: part.part_number().get(),
                 generation: part.generation().get(),
-                staging_key: part.staging_key().to_owned(),
+                staging_key: part.staging_key(),
                 size_bytes: part.size_bytes(),
-                etag: part.etag().map(str::to_owned),
+                etag: part.etag(),
                 range_start: range.map(|value| value.start()),
                 range_end_exclusive: range.map(|value| value.end_exclusive()),
             }
         })
         .collect();
-    canonical_parts.sort_by(|left, right| {
-        left.part_number
-            .cmp(&right.part_number)
-            .then_with(|| left.generation.cmp(&right.generation))
-            .then_with(|| left.staging_key.cmp(&right.staging_key))
-            .then_with(|| left.size_bytes.cmp(&right.size_bytes))
-            .then_with(|| left.etag.cmp(&right.etag))
-            .then_with(|| left.range_start.cmp(&right.range_start))
-            .then_with(|| left.range_end_exclusive.cmp(&right.range_end_exclusive))
-    });
+    canonical_parts.sort_unstable();
 
     let snapshot = ResumableSessionStateSnapshotV1 {
-        session_id: session.session_id().to_owned(),
+        session_id: session.session_id(),
         protocol: session.protocol().as_str(),
-        scope_namespace: session.scope_namespace().to_owned(),
-        target_key: session.target_key().to_owned(),
-        attributes_json: session.attributes_json().to_owned(),
+        scope_namespace: session.scope_namespace(),
+        target_key: session.target_key(),
+        attributes_json: session.attributes_json(),
         state: session.state(),
         generation: session.generation().get(),
         fence_epoch: session.fence_epoch().get(),
@@ -121,12 +112,15 @@ mod tests {
     }
 
     #[test]
-    fn complete_materialized_state_digest_is_deterministic() {
+    fn complete_materialized_state_digest_preserves_persisted_encoding() {
         let session = session();
         let parts = vec![part("staging/one")];
+        // Persisted digests must survive changes to the snapshot representation.
         assert_eq!(
-            resumable_state_digest(&session, &parts).expect("valid snapshot serializes"),
-            resumable_state_digest(&session, &parts).expect("valid snapshot serializes")
+            resumable_state_digest(&session, &parts)
+                .expect("valid snapshot serializes")
+                .as_str(),
+            "sha256:5323d8af83d1542a807536b317a9b528172ae5b5c5f241c06ec6343351fdd19a"
         );
     }
 
