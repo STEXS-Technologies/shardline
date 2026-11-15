@@ -11,13 +11,13 @@ use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent};
 use super::{
     DEFAULT_LOCAL_GC_RETENTION_SECONDS, ProviderWebhookOutcome,
     records::{
-        DeletedRepositoryReferences, collect_deleted_repository_references, parse_record_entry,
+        DeletedRepositoryReferences, collect_deleted_repository_references,
         prepare_renamed_records, record_belongs_to_repository, repository_record_scope,
     },
     state::{migrate_provider_repository_state, planned_provider_repository_state_migration},
 };
 use crate::ProviderEventsError;
-use shardline_server_core::ServerObjectStore;
+use shardline_server_core::{ServerObjectStore, parse_stored_file_record_bytes};
 
 pub async fn apply_repository_renamed<RecordAdapter, IndexAdapter>(
     record_store: &RecordAdapter,
@@ -262,7 +262,7 @@ where
     };
 
     RecordTraversal::visit_repository_latest_records(record_store, &repository_scope, |entry| {
-        let record = parse_record_entry(&entry.bytes)?;
+        let record = parse_stored_file_record_bytes(&entry.bytes)?;
         if !record_belongs_to_repository(&record, repository) {
             return Ok::<(), ProviderEventsError>(());
         }
@@ -274,7 +274,7 @@ where
     .await?;
 
     RecordTraversal::visit_repository_version_records(record_store, &repository_scope, |entry| {
-        let record = parse_record_entry(&entry.bytes)?;
+        let record = parse_stored_file_record_bytes(&entry.bytes)?;
         if !record_belongs_to_repository(&record, repository) {
             return Ok::<(), ProviderEventsError>(());
         }

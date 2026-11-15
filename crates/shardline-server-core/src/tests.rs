@@ -58,7 +58,12 @@ fn parse_stored_file_record_bytes_valid() {
 
 #[test]
 fn parse_stored_file_record_bytes_invalid_json() {
-    assert!(parse_stored_file_record_bytes(b"not json").is_err());
+    for bytes in [b"not json".as_slice(), b"".as_slice()] {
+        assert!(matches!(
+            parse_stored_file_record_bytes(bytes),
+            Err(ParseStoredFileRecordError::Json(_))
+        ));
+    }
 }
 
 #[test]
@@ -946,9 +951,7 @@ fn parse_stored_file_record_returns_correct_fields() {
     let record = sample_file_record();
     let json = serde_json::to_vec(&record).unwrap();
     let parsed = parse_stored_file_record_bytes(&json).unwrap();
-    assert_eq!(parsed.file_id, "test-file-id");
-    assert_eq!(parsed.total_bytes, 100);
-    assert_eq!(parsed.chunk_size, 10);
+    assert_eq!(parsed, record);
 }
 
 #[test]

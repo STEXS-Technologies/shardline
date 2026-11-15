@@ -6,7 +6,7 @@ use shardline_protocol::RepositoryScope;
 use shardline_vcs::RepositoryRef;
 
 use crate::ProviderEventsError;
-use shardline_server_core::{ServerObjectStore, chunk_object_key, parse_stored_file_record_bytes};
+use shardline_server_core::{ServerObjectStore, chunk_object_key};
 use shardline_xet_adapter::{visit_stored_xorb_chunk_hashes_if_present, xorb_object_key};
 
 pub(super) async fn ensure_absent_or_matching_record<RecordAdapter>(
@@ -120,10 +120,6 @@ pub(super) fn collect_deleted_repository_references<'record>(
     })
 }
 
-pub(super) fn parse_record_entry(bytes: &[u8]) -> Result<FileRecord, ProviderEventsError> {
-    Ok(parse_stored_file_record_bytes(bytes)?)
-}
-
 pub(super) fn record_belongs_to_repository(
     record: &FileRecord,
     repository: &RepositoryRef,
@@ -194,8 +190,8 @@ mod tests {
     use shardline_vcs::{ProviderKind, RepositoryRef};
 
     use super::{
-        ensure_absent_or_matching_record, parse_record_entry, record_belongs_to_repository,
-        record_identity_key, renamed_file_record, repository_record_scope,
+        ensure_absent_or_matching_record, record_belongs_to_repository, record_identity_key,
+        renamed_file_record, repository_record_scope,
     };
 
     fn test_record() -> super::FileRecord {
@@ -327,20 +323,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_record_entry_round_trip() {
-        let record = test_record();
-        let bytes = serde_json::to_vec(&record).unwrap();
-        let parsed = parse_record_entry(&bytes).unwrap();
-        assert_eq!(parsed, record);
-    }
-
-    #[test]
-    fn parse_record_entry_invalid_bytes_returns_error() {
-        let result = parse_record_entry(b"not valid json");
-        assert!(result.is_err());
-    }
-
     #[tokio::test]
     async fn ensure_absent_or_matching_record_absent_is_ok() {
         let store = MemoryRecordStore::new();
@@ -454,13 +436,5 @@ mod tests {
             };
             assert!(!record_belongs_to_repository(&unscoped, &repository));
         }
-    }
-
-    // ── parse_record_entry with empty bytes ──────────────────────────────
-
-    #[test]
-    fn parse_record_entry_empty_bytes_returns_error() {
-        let result = parse_record_entry(b"");
-        assert!(result.is_err());
     }
 }
