@@ -3750,15 +3750,15 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`ee7f7d0fdfbdb5174b22e67b921d9c7465ccb749`. It counts all tracked `.rs`
+`46fe23217b7d80ec08f0769fd9709b2539af663e`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 581,525 | 22,124 (3.66%) |
-| Server | 220,570 | 211,158 | 9,412 (4.27%) |
+| Entire repository | 603,649 | 581,221 | 22,428 (3.72%) |
+| Server | 220,570 | 211,273 | 9,297 (4.21%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,433 | 940 (4.61%) |
@@ -3778,12 +3778,21 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
-This refresh includes 819 fewer Rust lines since `c78b7e1e`. The client and
+This refresh includes 1,123 fewer Rust lines since `c78b7e1e`. The client and
 server share one CDC boundary engine; SDK metadata decoding no longer copies
 identical response structs; Xorb packing reuses the core footer writer and
 already-computed chunk hashes. Shared shard field readers also fix legacy v2
 imports. Real-server SDK tests moved to the E2E workspace rather than being
 removed; standalone SDK tests no longer pull in the full server.
+
+At `46fe2321`, raw-Xorb construction shares one implementation and server
+packing omits an unused boundary vector. Thirty-two duplicated compression/raw
+smoke tests were consolidated, moving their unique wire-value, scheme-name and
+passthrough assertions into retained tests. All 282 other top-level test bodies
+were unchanged. Core/adapter tests (633/295), ingestion tests (153), and five
+SDK/server byte-identity tests passed, as did strict core/server Clippy. One
+pre-existing adapter I/O diagnostic remained ignored. This pass removed 420 net
+Rust lines; no build-time speedup is inferred from that count.
 
 At `c78b7e1e`, all 23 selected server CDC and client chunker tests passed,
 including upstream golden boundaries and client/server equivalence across frame
