@@ -1,8 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
-    http::{HeaderMap, HeaderValue, header::CONTENT_TYPE},
-    response::Response,
+    http::{
+        HeaderMap, HeaderValue,
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+    },
+    response::{IntoResponse, Response},
 };
 use shardline_protocol::{ByteRange, parse_http_byte_range};
 
@@ -10,6 +13,14 @@ use crate::{ServerError, metrics};
 
 use super::super::reconstruction_helpers::single_range_header;
 use super::{AppState, byte_range_stream_response, full_byte_stream_response};
+
+pub(super) fn object_head_response(total_length: u64) -> Response {
+    (
+        [(CONTENT_LENGTH, total_length.to_string())],
+        [(CONTENT_TYPE, "application/octet-stream")],
+    )
+        .into_response()
+}
 
 pub(crate) async fn direct_object_response(
     state: &Arc<AppState>,

@@ -1105,14 +1105,7 @@ pub(crate) async fn lfs_head_object(
         return Ok(lfs_validation_response("invalid oid"));
     };
     let total_length = state.backend.object_length(&object_key).await?;
-    Ok((
-        StatusCode::OK,
-        [
-            (CONTENT_LENGTH, total_length.to_string()),
-            (CONTENT_TYPE, "application/octet-stream".to_owned()),
-        ],
-    )
-        .into_response())
+    Ok(super::helpers::object_head_response(total_length))
 }
 
 #[tracing::instrument(skip(state, headers, body), fields(oid))]

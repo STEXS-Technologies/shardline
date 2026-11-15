@@ -154,17 +154,7 @@ pub(crate) async fn bazel_head_ac(
 ) -> Result<Response, ServerError> {
     let object_key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())?;
     let total_length = state.backend.object_length(&object_key).await?;
-    Ok((
-        StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/octet-stream".to_owned(),
-            ),
-        ],
-    )
-        .into_response())
+    Ok(super::helpers::object_head_response(total_length))
 }
 
 // ---------------------------------------------------------------------------
@@ -225,17 +215,7 @@ pub(crate) async fn bazel_head_cas(
 ) -> Result<Response, ServerError> {
     let object_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
     let total_length = state.backend.object_length(&object_key).await?;
-    Ok((
-        StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/octet-stream".to_owned(),
-            ),
-        ],
-    )
-        .into_response())
+    Ok(super::helpers::object_head_response(total_length))
 }
 
 // ---------------------------------------------------------------------------
@@ -296,32 +276,12 @@ pub(crate) async fn bazel_head(
     if let Ok(ac_key) = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())
         && let Ok(total_length) = state.backend.object_length(&ac_key).await
     {
-        return Ok((
-            StatusCode::OK,
-            [
-                (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
-                (
-                    axum::http::header::CONTENT_TYPE,
-                    "application/octet-stream".to_owned(),
-                ),
-            ],
-        )
-            .into_response());
+        return Ok(super::helpers::object_head_response(total_length));
     }
 
     let cas_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
     let total_length = state.backend.object_length(&cas_key).await?;
-    Ok((
-        StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/octet-stream".to_owned(),
-            ),
-        ],
-    )
-        .into_response())
+    Ok(super::helpers::object_head_response(total_length))
 }
 
 #[cfg(test)]
