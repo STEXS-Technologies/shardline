@@ -4,18 +4,18 @@
 //! Shardline's server fork of `xet-core` serializes metadata shards with
 //! **format version 3** and `u64` entry fields, while the pinned upstream
 //! `xet-core-structures` 1.5.2 writes version 2 with `u32` fields (same
-//! divergence class as the xorb footer in the write path). sdx does not
-//! depend on the fork, so this module assembles and parses the fork's v3
-//! layout directly (`docs/SDX_PLAN.md` §4.4.2 / §9-M3).
+//! divergence class as the xorb footer in the write path). This module
+//! assembles v3 upload shards and reads v2/v3 dedup shards with the shared
+//! core header and entry readers (`docs/SDX_PLAN.md` §4.4.2 / §9-M3).
 //!
-//! Byte layout (all little-endian scalars, `MDB_FILE_INFO_ENTRY_SIZE` /
-//! `MDB_XORB_INFO_ENTRY_SIZE` = 60 bytes for v3):
+//! Byte layout (little-endian scalars; v3 headers and entries occupy 64 bytes,
+//! including four trailing padding bytes):
 //!
 //! ```text
 //! MDBShardFileHeader:  tag(32) | version(u64 = 3) | footer_size(u64 = 200)
-//!   per file:          FileDataSequenceHeader(60) | FileDataSequenceEntry(60) × n
+//!   per file:          FileDataSequenceHeader(64) | FileDataSequenceEntry(64) × n
 //!   FileDataSequenceHeader bookend (all-ones file hash)
-//!   per xorb:          XorbChunkSequenceHeader(60) | XorbChunkSequenceEntry(60) × n
+//!   per xorb:          XorbChunkSequenceHeader(64) | XorbChunkSequenceEntry(64) × n
 //!   XorbChunkSequenceHeader bookend (all-ones xorb hash)
 //! MDBShardFileFooter:  version(u64 = 2) + placeholder offsets (200 bytes total)
 //! ```
@@ -25,6 +25,11 @@
 //! upload is that the header version and entry layout are parseable and that
 //! the file/xorb sections are semantically correct; the footer is informational.
 
+use shardline_xet_core::metadata_shard::{
+    file_structs::FileDataSequenceHeader,
+    shard_format::MDBShardFileHeader,
+    xorb_structs::{MAX_XORB_CHUNK_ENTRIES, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+};
 use xet_core_structures::merklehash::MerkleHash;
 
 use crate::error::SdxError;
@@ -50,14 +55,6 @@ const SHARD_ENTRY_SIZE: usize = 64;
 const SHARD_ENTRY_PADDING: [u8; 4] = [0u8; 4];
 /// V2 shard entry size (48 bytes), for parsing legacy shards.
 const SHARD_V2_ENTRY_SIZE: usize = 48;
-/// Maximum number of chunks a single xorb section may declare in its shard
-/// header. Each entry serializes to `SHARD_ENTRY_SIZE` (64) bytes, so this caps
-/// a single xorb's chunk table at 64 MiB. A valid xorb holds at most one
-/// `XORB_BLOCK_SIZE` (16 MiB) split into chunks of at least `TARGET_CHUNK_SIZE`,
-/// so 1 Mi entries is far beyond any valid shard xorb. This guards
-/// `Vec::with_capacity` against an attacker-inflated count read from the shard
-/// body before any bound is enforced.
-const MAX_XORB_CHUNK_ENTRIES: usize = 1 << 20;
 /// Returns the bookend marker hash (all-ones), used to terminate a shard section.
 fn bookend() -> MerkleHash {
     MerkleHash::from([0xFFu8; 32])
@@ -199,59 +196,61 @@ pub fn serialize_shard(files: &[ShardFileEntry], xorbs: &[ShardXorb]) -> Vec<u8>
 /// Returns [`SdxError::ShardParse`] when the body is not a valid shard or uses
 /// an unsupported layout.
 pub fn parse_shard_xorbs(body: &[u8]) -> Result<Vec<ShardXorb>, SdxError> {
-    let mut reader = BodyReader::new(body);
-
-    // Header.
-    let tag = reader.take(SHARD_HEADER_TAG.len())?;
-    if tag != SHARD_HEADER_TAG {
-        return Err(shard_parse("invalid shard magic tag"));
+    let mut reader = body;
+    let shard_header = MDBShardFileHeader::deserialize(&mut reader).map_err(shard_parse)?;
+    let version = shard_header.version;
+    if !matches!(version, 2 | 3) {
+        return Err(shard_parse("unsupported shard version"));
     }
-    let version = reader.take_u64()?;
-    let _footer_size = reader.take_u64()?;
 
-    // File sections until the bookend.
+    // Skip file tables without allocating their reconstruction metadata.
     loop {
-        let header = reader.take(SHARD_ENTRY_SIZE)?;
-        let file_hash = read_hash(header)?;
-        if file_hash == bookend() {
+        let file_header =
+            FileDataSequenceHeader::deserialize(&mut reader, version).map_err(shard_parse)?;
+        if file_header.is_bookend() {
             break;
         }
-        let num_entries = read_file_num_entries(header, version)?;
-        let flags = read_flags(header)?;
         let entry_size = entry_size(version);
-        reader.skip(num_entries.saturating_mul(entry_size))?;
-        if flags & MDB_FILE_FLAG_WITH_VERIFICATION != 0 {
-            reader.skip(num_entries.saturating_mul(entry_size))?;
+        skip_shard_bytes(
+            &mut reader,
+            file_header.num_entries.saturating_mul(entry_size),
+        )?;
+        if file_header.contains_verification() {
+            skip_shard_bytes(
+                &mut reader,
+                file_header.num_entries.saturating_mul(entry_size),
+            )?;
         }
-        if flags & MDB_FILE_FLAG_WITH_METADATA_EXT != 0 {
-            reader.skip(entry_size)?;
+        if file_header.contains_metadata_ext() {
+            skip_shard_bytes(&mut reader, entry_size)?;
         }
     }
 
-    // Xorb sections until the bookend.
     let mut xorbs = Vec::new();
     loop {
-        let header = reader.take(SHARD_ENTRY_SIZE)?;
-        let xorb_hash = read_hash(header)?;
-        if xorb_hash == bookend() {
+        let xorb_header =
+            XorbChunkSequenceHeader::deserialize(&mut reader, version).map_err(shard_parse)?;
+        if xorb_header.is_bookend() {
             break;
         }
-        let num_entries = read_xorb_num_entries(header, version)?;
-        let num_bytes = read_xorb_num_bytes(header, version)?;
-        let entry_len = entry_size(version);
-        let num_chunks = usize::try_from(num_entries)
-            .map_err(|e| shard_parse(&format!("xorb chunk count does not fit in usize: {e}")))?;
+        let num_chunks = usize::try_from(xorb_header.num_entries).map_err(shard_parse)?;
         if num_chunks > MAX_XORB_CHUNK_ENTRIES {
             return Err(shard_parse("xorb chunk count exceeds maximum"));
         }
         let mut chunks = Vec::with_capacity(num_chunks);
         for _ in 0..num_chunks {
-            let entry = reader.take(usize::try_from(entry_len).unwrap_or(usize::MAX))?;
-            chunks.push(read_xorb_chunk(entry, version)?);
+            let entry =
+                XorbChunkSequenceEntry::deserialize(&mut reader, version).map_err(shard_parse)?;
+            chunks.push(ShardXorbChunk {
+                chunk_hash: <[u8; 32]>::from(entry.chunk_hash).into(),
+                chunk_byte_range_start: entry.chunk_byte_range_start,
+                unpacked_segment_bytes: entry.unpacked_segment_bytes,
+                flags: entry.flags,
+            });
         }
         xorbs.push(ShardXorb {
-            xorb_hash,
-            num_bytes_in_xorb: num_bytes,
+            xorb_hash: <[u8; 32]>::from(xorb_header.xorb_hash).into(),
+            num_bytes_in_xorb: xorb_header.num_bytes_in_xorb,
             chunks,
         });
     }
@@ -274,9 +273,6 @@ pub fn find_chunk_in_xorbs<'shard>(
 }
 
 // ── serialization helpers ──────────────────────────────────────────────────
-
-const MDB_FILE_FLAG_WITH_VERIFICATION: u32 = 1 << 31;
-const MDB_FILE_FLAG_WITH_METADATA_EXT: u32 = 1 << 30;
 
 fn append_file_header(out: &mut Vec<u8>, file_hash: MerkleHash, num_entries: usize) {
     out.extend_from_slice(&hash_bytes(file_hash));
@@ -354,124 +350,20 @@ const fn entry_size(version: u64) -> u64 {
     }
 }
 
-fn read_hash(bytes: &[u8]) -> Result<MerkleHash, SdxError> {
-    let raw: [u8; 32] = bytes
-        .get(..32)
-        .and_then(|slice| <[u8; 32]>::try_from(slice).ok())
-        .ok_or_else(|| shard_parse("truncated hash in shard section"))?;
-    Ok(MerkleHash::from(raw))
-}
-
-fn read_flags(bytes: &[u8]) -> Result<u32, SdxError> {
-    let raw = bytes
-        .get(32..36)
-        .and_then(|slice| <[u8; 4]>::try_from(slice).ok())
-        .ok_or_else(|| shard_parse("truncated flags in shard section"))?;
-    Ok(u32::from_le_bytes(raw))
-}
-
-fn read_file_num_entries(bytes: &[u8], version: u64) -> Result<u64, SdxError> {
-    if version < SHARD_HEADER_VERSION {
-        Ok(u64::from(read_u32_at(bytes, 36)?))
-    } else {
-        read_u64_at(bytes, 36)
-    }
-}
-
-fn read_xorb_num_entries(bytes: &[u8], version: u64) -> Result<u64, SdxError> {
-    read_file_num_entries(bytes, version)
-}
-
-fn read_xorb_num_bytes(bytes: &[u8], version: u64) -> Result<u64, SdxError> {
-    if version < SHARD_HEADER_VERSION {
-        // v2: hash(32) + flags(4) + num_entries(4) + num_bytes(4).
-        Ok(u64::from(read_u32_at(bytes, 40)?))
-    } else {
-        // v3: hash(32) + flags(4) + num_entries(8) + num_bytes(8).
-        read_u64_at(bytes, 44)
-    }
-}
-
-fn read_xorb_chunk(bytes: &[u8], version: u64) -> Result<ShardXorbChunk, SdxError> {
-    let chunk_hash = read_hash(bytes)?;
-    if version < SHARD_HEADER_VERSION {
-        Ok(ShardXorbChunk {
-            chunk_hash,
-            chunk_byte_range_start: u64::from(read_u32_at(bytes, 32)?),
-            unpacked_segment_bytes: u64::from(read_u32_at(bytes, 36)?),
-            flags: read_u32_at(bytes, 40)?,
-        })
-    } else {
-        Ok(ShardXorbChunk {
-            chunk_hash,
-            chunk_byte_range_start: read_u64_at(bytes, 32)?,
-            unpacked_segment_bytes: read_u64_at(bytes, 40)?,
-            flags: read_u32_at(bytes, 48)?,
-        })
-    }
-}
-
-fn read_u32_at(bytes: &[u8], offset: usize) -> Result<u32, SdxError> {
-    let raw = bytes
-        .get(offset..offset.saturating_add(4))
-        .and_then(|slice| <[u8; 4]>::try_from(slice).ok())
-        .ok_or_else(|| shard_parse("truncated u32 in shard section"))?;
-    Ok(u32::from_le_bytes(raw))
-}
-
-fn read_u64_at(bytes: &[u8], offset: usize) -> Result<u64, SdxError> {
-    let raw = bytes
-        .get(offset..offset.saturating_add(8))
-        .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
-        .ok_or_else(|| shard_parse("truncated u64 in shard section"))?;
-    Ok(u64::from_le_bytes(raw))
-}
-
 fn hash_bytes(hash: MerkleHash) -> [u8; 32] {
     hash.into()
 }
 
-fn shard_parse(message: &str) -> SdxError {
-    SdxError::ShardParse(message.to_owned())
+fn shard_parse(error: impl std::fmt::Display) -> SdxError {
+    SdxError::ShardParse(error.to_string())
 }
 
-/// Bounded reader over a byte slice.
-struct BodyReader<'buf> {
-    bytes: &'buf [u8],
-    pos: usize,
-}
-
-impl<'buf> BodyReader<'buf> {
-    const fn new(bytes: &'buf [u8]) -> Self {
-        Self { bytes, pos: 0 }
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'buf [u8], SdxError> {
-        let end = self.pos.saturating_add(len);
-        let slice = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or_else(|| shard_parse("unexpected end of shard body"))?;
-        self.pos = end;
-        Ok(slice)
-    }
-
-    fn skip(&mut self, len: u64) -> Result<(), SdxError> {
-        let len = usize::try_from(len).unwrap_or(usize::MAX);
-        let end = self.pos.saturating_add(len);
-        if end > self.bytes.len() {
-            return Err(shard_parse("unexpected end of shard body"));
-        }
-        self.pos = end;
-        Ok(())
-    }
-
-    fn take_u64(&mut self) -> Result<u64, SdxError> {
-        let raw = self.take(8)?;
-        let raw: [u8; 8] = <[u8; 8]>::try_from(raw)
-            .map_err(|_error| shard_parse("truncated u64 in shard section"))?;
-        Ok(u64::from_le_bytes(raw))
-    }
+fn skip_shard_bytes(reader: &mut &[u8], len: u64) -> Result<(), SdxError> {
+    let len = usize::try_from(len).map_err(shard_parse)?;
+    *reader = reader
+        .get(len..)
+        .ok_or_else(|| shard_parse("unexpected end of shard body"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -534,8 +426,8 @@ mod tests {
         }];
 
         let bytes = serialize_shard(&files, &xorbs);
-        // 48-byte header + 1 file (60 + 2*60) + bookend(60) + 2 xorbs
-        // (60+2*60 + 60+1*60) + bookend(60) + 200-byte footer.
+        // 48-byte header + 1 file (64 + 2*64) + bookend(64) + 2 xorbs
+        // (64+2*64 + 64+1*64) + bookend(64) + 200-byte footer.
         assert_eq!(bytes.len(), 48 + 192 + 64 + 320 + 64 + 200);
         // Header tag + version 3.
         assert!(bytes.starts_with(b"HFRepoMetaData"));
@@ -596,9 +488,58 @@ mod tests {
     }
 
     #[test]
+    fn shard_parser_reads_legacy_shard_emitted_by_upstream() {
+        use xet_core_structures::metadata_shard::{
+            file_structs::{
+                FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt,
+                FileVerificationEntry, MDBFileInfo,
+            },
+            shard_in_memory::MDBInMemoryShard,
+            xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+        };
+
+        let xorb_hash = MerkleHash::from([7u8; 32]);
+        let chunk_hash = compute_data_hash(b"legacy chunk");
+        let mut shard = MDBInMemoryShard::default();
+        shard
+            .add_xorb_block(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1, 16),
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, 16, 0).with_global_dedup_flag(true),
+                ],
+            })
+            .unwrap();
+        shard
+            .add_file_reconstruction_info(MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(compute_data_hash(b"file"), 1, true, true),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 16, 0, 1)],
+                verification: vec![FileVerificationEntry::new(chunk_hash)],
+                metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"file"))),
+            })
+            .unwrap();
+        let bytes = shard.to_bytes().unwrap();
+        assert_eq!(bytes.get(32..40), Some(&2u64.to_le_bytes()[..]));
+        let mut expected = chunk(chunk_hash, 0, 16);
+        expected.flags = super::MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
+        assert_eq!(
+            parse_shard_xorbs(&bytes).unwrap(),
+            vec![ShardXorb {
+                xorb_hash,
+                num_bytes_in_xorb: 16,
+                chunks: vec![expected],
+            }]
+        );
+    }
+
+    #[test]
     fn shard_parser_rejects_garbage() {
         assert!(parse_shard_xorbs(b"not a shard").is_err());
         assert!(parse_shard_xorbs(&[]).is_err());
+        for version in [0u64, 1, 4, u64::MAX] {
+            let mut bytes = serialize_shard(&[], &[]);
+            bytes[32..40].copy_from_slice(&version.to_le_bytes());
+            assert!(parse_shard_xorbs(&bytes).is_err(), "version {version}");
+        }
     }
 
     #[test]

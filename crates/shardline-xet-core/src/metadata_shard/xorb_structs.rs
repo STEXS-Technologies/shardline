@@ -19,7 +19,7 @@ const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
 /// at least `TARGET_CHUNK_SIZE`, so 1 Mi entries is far beyond any legitimate
 /// xorb. This guards `Vec::with_capacity` against attacker-inflated counts
 /// read from a shard header before any bound is enforced.
-const MAX_XORB_CHUNK_ENTRIES: usize = 1 << 20;
+pub const MAX_XORB_CHUNK_ENTRIES: usize = 1 << 20;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct XorbChunkSequenceHeader {

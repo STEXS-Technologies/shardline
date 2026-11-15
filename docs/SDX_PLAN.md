@@ -216,7 +216,7 @@ Shipped crate: **`crates/sdx`** (package name `sdx`). Dependencies (as built):
   `shardline-server-core` (an allowed dependency; the forbidden dependency is
   `shardline-server`, which is **not** a library dependency of `sdx`)
 - `shardline-xet-core` — the shared client/server CDC boundary finder and
-  format-v2 Xorb footer writer
+  format-v2 Xorb footer writer and v2/v3 metadata-shard field readers
 - `xet-core-structures` (**pinned exact version `=1.5.2`**, per §11 Q3/Q6) — Merkle
   hash, `xorb_object` (`ByteGrouping4LZ4`), chunk-format constants; BG4 is not
   reimplemented
