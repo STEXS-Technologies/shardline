@@ -3785,8 +3785,9 @@ boundary contracts while retaining their distinct input cases. Some changes add
 stronger assertions or avoid allocations without reducing lines.
 
 The inventory revision is not a release qualification stamp. The complete local
-distributed gate below remains pinned to `28c0f227`; later changes have targeted
-test and Clippy results, not a repeated full gate or independent hosted CI result.
+distributed gate below was repeated at `7e3c77a5`, after this source snapshot.
+Independent hosted CI and a multi-host PostgreSQL/S3 split-role topology remain
+separate qualification requirements.
 
 Component rows are selected examples; other components gained coverage, so their
 reductions must not be summed to obtain the repository total. Reproduce a row
@@ -4033,8 +4034,36 @@ env RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
 ```
 
 The output retains frozen binaries, checksums, build records, client versions,
-and complete stage logs. Both this gate and the source inventory above use the
-same source revision.
+and complete stage logs. This gate remains pinned to its recorded source revision;
+the source inventory above is refreshed independently.
+
+### Distributed-integrity gate after shared parsing and cache refactors (2026-11-15)
+
+Repeated the same gate at clean source commit
+`7e3c77a5d85616e47b8017eecb51a9b804a0f415`, including the later shared Xorb
+metadata, reconstruction-cache decoding, allocation-free JWT partitioning, and
+consolidated test contracts. The script completed successfully and rejected no
+runtime skips or panic markers:
+
+| Stage | Result | Test elapsed time |
+| --- | --- | ---: |
+| Deployment faults and compatibility | 50 passed, 0 skipped | 470.710 s |
+| Split-role traffic and probe contracts | 8 passed, 0 skipped | 22.549 s |
+
+Total driver time, including build and released-baseline preparation, was
+533.167 seconds. The frozen all-features dev executable had SHA-256
+`e8540beea20f26bcf8a25021a4620f37a287f48e2feb4a573247d4281e433c5f`,
+verified unchanged after the tests. The script checksum, compiler/profile settings,
+Git version, Python clients, and v1.12.1 release baseline matched the earlier gate.
+The retained evidence includes source revision, script and executable checksums,
+client versions, compiler artifacts, and complete deployment and split-role logs.
+Reproduce with the preceding command at this pinned revision.
+
+This rerun qualifies the later refactors against the existing local fault gate.
+It retains the earlier scope limits: the split-role servers share local SQLite
+and filesystem storage, some compatibility cases use local storage, and the
+result does not establish a multi-host PostgreSQL/S3 topology, optimized-release
+performance, independent hosted CI, or production capacity.
 
 ### PostgreSQL/MinIO GC recovery qualification (2026-11-15)
 
