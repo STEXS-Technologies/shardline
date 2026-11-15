@@ -2992,88 +2992,35 @@ mod tests {
     #[tokio::test]
     async fn active_sessions_respect_max_cap() {
         let root = make_root().await;
-        // Cap of 2: the first two creates succeed, the third is rejected.
-        let first = create_session(
-            root.path(),
-            "a",
-            "1",
-            "g",
-            ttl(3600),
-            cap(2),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-        let second = create_session(
-            root.path(),
-            "a",
-            "2",
-            "g",
-            ttl(3600),
-            cap(2),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-        let third = create_session(
-            root.path(),
-            "a",
-            "3",
-            "g",
-            ttl(3600),
-            cap(2),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await;
-        assert!(matches!(third, Err(S3SessionError::TooManySessions)));
+        let create = |key| {
+            create_session(
+                root.path(),
+                "a",
+                key,
+                "g",
+                ttl(3600),
+                cap(2),
+                quota(1 << 40),
+                Vec::new(),
+            )
+        };
+        let first = create("1").await.unwrap();
+        create("2").await.unwrap();
+        assert!(matches!(
+            create("3").await,
+            Err(S3SessionError::TooManySessions)
+        ));
 
         // Deleting one frees the slot.
         delete_session(root.path(), &first).await.unwrap();
-        let third = create_session(
-            root.path(),
-            "a",
-            "3",
-            "g",
-            ttl(3600),
-            cap(2),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await;
-        assert!(third.is_ok());
-        let _ = second;
+        create("3").await.unwrap();
     }
 
     #[tokio::test]
     async fn count_active_sessions_ignores_expired() {
         let root = make_root().await;
-        let live = create_session(
-            root.path(),
-            "a",
-            "1",
-            "g",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-        let stale = create_session(
-            root.path(),
-            "a",
-            "2",
-            "g",
-            ttl(3600),
-            cap(16),
-            quota(1 << 40),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        let _live = create_default_session(root.path(), "1").await;
+        let stale = create_default_session(root.path(), "2").await;
         let mut session = session_at(root.path(), &stale);
         session.created_at_unix_seconds = 1;
         persist_session(root.path(), &stale, &session)
@@ -3084,7 +3031,6 @@ mod tests {
             count_active_sessions(root.path(), ttl(3600)).await.unwrap(),
             1
         );
-        let _ = live;
     }
 
     #[tokio::test]
