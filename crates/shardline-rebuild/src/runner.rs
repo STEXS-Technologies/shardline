@@ -44,14 +44,13 @@ where
     let mut native_xorbs = HashSet::new();
     RecordTraversal::visit_version_records(record_store, |entry| {
         report.scanned_version_records = checked_increment(report.scanned_version_records)?;
-        if record_store.supports_native_locations()
-            && let Ok(record) = shardline_server_core::parse_stored_file_record_bytes(&entry.bytes)
-            && record.storage_layout()
-                == shardline_index::FileRecordStorageLayout::ReferencedObjectTerms
-        {
-            native_xorbs.extend(record.chunks.into_iter().map(|term| term.hash));
-        }
-        collect_candidate(record_store, entry, &mut candidates, &mut report)
+        collect_candidate(
+            record_store,
+            entry,
+            &mut candidates,
+            &mut native_xorbs,
+            &mut report,
+        )
     })
     .await?;
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     time::Duration,
 };
 
@@ -65,6 +65,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
     record_store: &RecordAdapter,
     entry: StoredRecord<RecordAdapter::Locator>,
     candidates: &mut HashMap<RebuildKey, VersionCandidate<RecordAdapter::Locator>>,
+    native_xorbs: &mut HashSet<String>,
     report: &mut IndexRebuildReport,
 ) -> Result<(), RebuildError>
 where
@@ -104,6 +105,13 @@ where
             return reject_version(report, kind, location, detail);
         }
     };
+
+    if record_store.supports_native_locations()
+        && record.storage_layout()
+            == shardline_index::FileRecordStorageLayout::ReferencedObjectTerms
+    {
+        native_xorbs.extend(record.chunks.iter().map(|term| term.hash.clone()));
+    }
 
     if validate_identifier(&record.file_id).is_err() {
         return reject_version(
@@ -380,10 +388,11 @@ mod tests {
         store.write_version_record(&record).await.unwrap();
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
@@ -405,10 +414,11 @@ mod tests {
         store.write_version_record(&record).await.unwrap();
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
@@ -427,10 +437,11 @@ mod tests {
         store.write_version_record(&record).await.unwrap();
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
@@ -484,10 +495,11 @@ mod tests {
         .unwrap();
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
@@ -541,10 +553,11 @@ mod tests {
         .unwrap();
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
@@ -581,10 +594,11 @@ mod tests {
         store.write_version_record(&record).await.unwrap();
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
@@ -602,27 +616,35 @@ mod tests {
         let root = dir.path().to_path_buf();
         let store = LocalRecordStore::open(root.clone());
 
-        // Create first record (older timestamp)
-        let record1 = make_file_record("replace.txt", &valid_hex_hash());
-        store.write_version_record(&record1).await.unwrap();
-
-        // Create second record with SAME file_id but different content hash (newer)
-        // Use a different file_id approach: write a separate version record
-        // that rebuild_key maps to the same key, by having the same file_id
-        let record2 = make_file_record("replace.txt", &"b".repeat(64));
-        store.write_version_record(&record2).await.unwrap();
+        for (content, source) in [("a", "c"), ("b", "d")] {
+            let mut record = make_file_record("replace.txt", &content.repeat(64));
+            record.total_bytes = 1;
+            record.chunks = vec![shardline_index::FileChunkRecord {
+                hash: source.repeat(64),
+                offset: 0,
+                length: 1,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 1,
+            }];
+            store.write_version_record(&record).await.unwrap();
+            pin_modified_since_epoch(&root, &record, 100);
+        }
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
 
         assert!(report.is_clean());
         assert_eq!(candidates.len(), 1);
+        assert_eq!(xorbs, HashSet::from(["c".repeat(64), "d".repeat(64)]));
         // The candidate should have the newer content_hash ("b" > "a")
         let candidate = candidates.values().next().unwrap();
         // Both have the same file_id, same modified_since_epoch (same second),
@@ -651,10 +673,11 @@ mod tests {
         pin_modified_since_epoch(&root, &record_older, 1_700_000_000);
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
@@ -691,10 +714,11 @@ mod tests {
         pin_modified_since_epoch(&root, &record_b, 1);
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
@@ -744,10 +768,11 @@ mod tests {
         .unwrap();
 
         let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
         let mut report = empty_report();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
         })
         .await
         .unwrap();
