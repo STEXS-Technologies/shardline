@@ -103,25 +103,18 @@ const fn default_packed_end() -> u64 {
 ///
 /// Each variant maps to a unique decoder path.  The field is persisted in
 /// the `FileRecord` and defaulted for older records that predate the field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageRepresentation {
     /// Single-object whole-file storage (pre-chunking, term-referenced).
     #[serde(rename = "whole_file_v1")]
     WholeFileV1,
     /// Fixed-size chunking, no compression.
+    #[default] // Records created before this field existed used fixed chunks.
     #[serde(rename = "fixed_chunk_v1")]
     FixedChunkV1,
     /// CDC chunking + LZ4 compression + xorb container packing.
     #[serde(rename = "xorb_cdc_v1")]
     XorbCdcV1,
-}
-
-#[allow(clippy::derivable_impls)] // derive would pick WholeFileV1; legacy records default to FixedChunkV1
-impl Default for StorageRepresentation {
-    fn default() -> Self {
-        // Records created before this field existed were fixed-chunk, uncompressed.
-        Self::FixedChunkV1
-    }
 }
 
 impl StorageRepresentation {
@@ -328,10 +321,6 @@ impl FileRecord {
         }
 
         if expected_offset != self.total_bytes {
-            return Err(FileRecordInvariantError::TotalBytesMismatch);
-        }
-
-        if self.chunks.is_empty() && self.total_bytes != 0 {
             return Err(FileRecordInvariantError::TotalBytesMismatch);
         }
 
@@ -1452,7 +1441,16 @@ mod tests {
     }
 
     #[test]
-    fn storage_representation_as_str_matches_serde_rename() {
+    fn storage_representation_preserves_wire_labels_and_legacy_default() {
+        let mut legacy = serde_json::to_value(whole_file_record(0, Vec::new())).unwrap();
+        legacy.as_object_mut().unwrap().remove("storage_repr");
+        let record: FileRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            StorageRepresentation::default(),
+            StorageRepresentation::FixedChunkV1
+        );
+        assert_eq!(record.storage_repr, StorageRepresentation::FixedChunkV1);
+
         // as_str() must stay in sync with #[serde(rename = "...")] so that
         // metric labels match the serialized representation.
         for (repr, expected) in [
