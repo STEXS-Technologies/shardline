@@ -228,6 +228,28 @@ pub(crate) enum HubRefPublicationMode {
     UpdateOnly,
 }
 
+impl HubRefCreateOutcome {
+    pub(crate) fn into_update(self) -> HubRefUpdateOutcome {
+        match self {
+            Self::Created(revision) => HubRefUpdateOutcome::Updated(revision),
+            Self::AlreadyExists => HubRefUpdateOutcome::Conflict,
+            Self::Unsupported => HubRefUpdateOutcome::Unsupported,
+        }
+    }
+}
+
+impl HubRefPublicationMode {
+    /// Evaluate against the current head while holding the publication transaction.
+    pub(crate) fn conflicts_with(self, current: Option<&str>, parent: Option<&str>) -> bool {
+        match self {
+            Self::Upsert => false,
+            Self::CreateOnly => current.is_some(),
+            // A strict update must never recreate a deleted ref.
+            Self::UpdateOnly => parent.is_none() || current != parent,
+        }
+    }
+}
+
 /// One conditional change within an atomic repository ref transaction.
 #[derive(Debug, Clone)]
 pub struct HubRefChange {

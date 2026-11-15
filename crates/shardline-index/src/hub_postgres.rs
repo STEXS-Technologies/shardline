@@ -407,7 +407,7 @@ impl HubStore for PostgresIndexStore {
         &self,
         revision: &HubRevision,
     ) -> Result<HubRefUpdateOutcome, Self::Error> {
-        match self.publish_hub_revision_at(
+        self.publish_hub_revision_at(
             &revision.repo_id,
             revision.parent_sha.as_deref(),
             &revision.sha,
@@ -415,11 +415,8 @@ impl HubStore for PostgresIndexStore {
             revision.message.as_deref().unwrap_or(""),
             HubRefPublicationMode::UpdateOnly,
             Some(revision),
-        )? {
-            HubRefCreateOutcome::Created(stored) => Ok(HubRefUpdateOutcome::Updated(stored)),
-            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
-            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
-        }
+        )
+        .map(HubRefCreateOutcome::into_update)
     }
 
     fn update_revision_if_current(
@@ -430,18 +427,15 @@ impl HubStore for PostgresIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRefUpdateOutcome, Self::Error> {
-        match self.publish_hub_revision(
+        self.publish_hub_revision(
             repo_id,
             Some(expected_sha),
             new_sha,
             ref_name,
             message,
             HubRefPublicationMode::UpdateOnly,
-        )? {
-            HubRefCreateOutcome::Created(revision) => Ok(HubRefUpdateOutcome::Updated(revision)),
-            HubRefCreateOutcome::AlreadyExists => Ok(HubRefUpdateOutcome::Conflict),
-            HubRefCreateOutcome::Unsupported => Ok(HubRefUpdateOutcome::Unsupported),
-        }
+        )
+        .map(HubRefCreateOutcome::into_update)
     }
 
     fn create_revision_if_absent(
@@ -1265,14 +1259,7 @@ impl PostgresIndexStore {
             .fetch_optional(&mut *tx)
             .await?;
 
-            if matches!(mode, HubRefPublicationMode::CreateOnly) && current_ref.is_some() {
-                return Ok(HubRefCreateOutcome::AlreadyExists);
-            }
-
-            // Strict updates never reinterpret a deleted ref as branch creation.
-            if matches!(mode, HubRefPublicationMode::UpdateOnly)
-                && (parent_sha.is_none() || current_ref.as_deref() != parent_sha.as_deref())
-            {
+            if mode.conflicts_with(current_ref.as_deref(), parent_sha.as_deref()) {
                 return Ok(HubRefCreateOutcome::AlreadyExists);
             }
 
