@@ -55,7 +55,7 @@ pub use client_process::{native_client_output, native_client_output_with_input};
 pub use fixtures::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};
 pub use fixtures::{
     InvariantError, S3FaultProxy, S3ProxyFault, TempStorage, count_chunk_files,
-    count_files_recursive, deterministic_bytes,
+    count_files_recursive, deterministic_bytes, lcg_bytes,
 };
 pub use native_clients::{native_clients_required, require_native_client};
 pub use postgres_fixture::postgres_fixture_url;

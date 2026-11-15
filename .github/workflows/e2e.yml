@@ -239,7 +239,7 @@ jobs:
 
       - name: Qualify bounded SDK memory and byte identity at 256 MiB and 1 GiB
         run: >-
-          cargo nextest run --locked -p sdx --all-features --test e2e
+          cargo nextest run --locked --manifest-path e2e/Cargo.toml --all-features --test sdk_client_e2e
           --run-ignored all
           -E 'test(stream_large_file_memory_bounded_cat) or test(stream_gib_file_memory_bounded_cat)'
 

@@ -98,6 +98,9 @@ cargo make test-kubernetes
 ```
 
 The Docker gate includes server integration tests and the separate `e2e` workspace.
+SDK unit and mock-protocol tests stay in `sdx`; real-server SDK interoperability
+and memory qualification live in `e2e/sdk_client_e2e.rs` and
+`e2e/sdk_xorb_interop.rs`, so standalone SDK checks do not compile the server.
 Keep its SQLite and SQLx dependencies compatible with the main workspace and commit
 its refreshed lockfile when those dependencies change. The Kubernetes gate creates
 and removes a disposable kind cluster and verifies persisted data after pod replacement.

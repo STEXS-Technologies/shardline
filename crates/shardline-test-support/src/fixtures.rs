@@ -128,3 +128,16 @@ pub fn count_files_recursive(dir: &Path) -> usize {
 pub fn count_chunk_files(root: &Path) -> usize {
     count_files_recursive(&root.join("chunks"))
 }
+
+/// Deterministic little-endian LCG bytes for chunking and container fixtures.
+#[must_use]
+pub fn lcg_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(len);
+    let mut state = seed;
+    while data.len() < len {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        data.extend_from_slice(&state.to_le_bytes());
+    }
+    data.truncate(len);
+    data
+}

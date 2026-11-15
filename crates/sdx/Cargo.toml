@@ -69,11 +69,7 @@ shardline-storage = { workspace = true, features = ["test-fault-injection"] }
 
 [dev-dependencies]
 axum.workspace = true
-# Test-only dependency on the real server crate (established workspace pattern,
-# e.g. `crates/shardline/tests/backup_e2e.rs`). The sdx library itself must NOT
-# depend on shardline-server (SDX_PLAN.md §4.1).
-shardline-protocol.workspace = true
-shardline-server.workspace = true
+shardline-test-support.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 wiremock = "0.6"

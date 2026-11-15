@@ -260,21 +260,10 @@ impl Chunker {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use shardline_server::upload_ingest::cdc::CdcChunker;
+    use shardline_test_support::lcg_bytes as lcg_data;
+    use shardline_xet_core::cdc::CdcChunker;
 
     use super::{Chunk, Chunker, DEFAULT_TARGET_CHUNK_SIZE};
-
-    /// LCG pseudo-random data (the server's own test generator).
-    fn lcg_data(len: usize, seed: u64) -> Vec<u8> {
-        let mut data = Vec::with_capacity(len);
-        let mut state = seed;
-        while data.len() < len {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            data.extend_from_slice(&state.to_le_bytes());
-        }
-        data.truncate(len);
-        data
-    }
 
     /// SplitMix64 pseudo-random data (upstream xet-data test generator).
     fn splitmix_data(len: usize, seed: u64) -> Vec<u8> {

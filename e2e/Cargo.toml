@@ -8,6 +8,14 @@ license = "MIT OR Apache-2.0"
 [workspace]
 
 [[test]]
+name = "sdk_client_e2e"
+path = "sdk_client_e2e.rs"
+
+[[test]]
+name = "sdk_xorb_interop"
+path = "sdk_xorb_interop.rs"
+
+[[test]]
 name = "protocol_frontends_http"
 path = "protocol_frontends_http.rs"
 
