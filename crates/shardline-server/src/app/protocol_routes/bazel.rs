@@ -326,7 +326,7 @@ pub(crate) async fn bazel_head(
 
 #[cfg(test)]
 mod tests {
-    use std::{io, num::NonZeroUsize, path::Path, sync::Arc};
+    use std::{io, num::NonZeroUsize, sync::Arc};
 
     use axum::{
         Router,
@@ -389,30 +389,35 @@ mod tests {
         (state, tmp)
     }
 
-    async fn build_postgres_state(
-        database_url: &str,
-        root: &Path,
-        object_store: crate::object_store::ServerObjectStore,
-    ) -> Option<Arc<AppState>> {
-        let chunk_size = NonZeroUsize::new(65_536)?;
+    /// Builds a PostgreSQL fixture, optional only when no database is requested.
+    async fn build_bazel_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
+        let database_url = shardline_test_support::postgres_fixture_url("DATABASE_URL")?;
+        let tmp = TempDir::new().expect("Bazel fixture directory");
+        let root = tmp.path();
+        let object_store = crate::object_store::ServerObjectStore::local(root.join("objects"))
+            .expect("Bazel fixture object store");
+        let chunk_size = NonZeroUsize::new(65_536).expect("nonzero chunk size");
         let config = ServerConfig::new(
-            "127.0.0.1:0".parse().ok()?,
+            "127.0.0.1:0".parse().expect("fixture address"),
             "http://127.0.0.1:0".to_owned(),
             root.to_path_buf(),
             chunk_size,
         )
         .with_server_frontends([ServerFrontend::BazelHttp])
-        .ok()?;
+        .expect("configured PostgreSQL Bazel fixture");
         let backend = crate::PostgresBackend::new_with_object_store(
             root.to_path_buf(),
             "http://127.0.0.1:0".to_owned(),
             chunk_size,
-            database_url,
+            &database_url,
             object_store,
         )
         .await
-        .ok()?;
-        Some(Arc::new(AppState {
+        .expect("configured PostgreSQL Bazel fixture");
+        crate::apply_database_migrations(&backend.gc_barrier_pool)
+            .await
+            .expect("migrate PostgreSQL Bazel fixture");
+        let state = Arc::new(AppState {
             config,
             role: ServerRole::All,
             backend: ServerBackend::Postgres(backend),
@@ -421,20 +426,12 @@ mod tests {
             reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter: TransferLimiter::new(chunk_size, chunk_size),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            admission: crate::admission::WeightedAdmission::new(std::num::NonZeroUsize::new(256)?),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).expect("nonzero admission size"),
+            ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
-        }))
-    }
-
-    /// Builds a minimal [`AppState`] backed by a Postgres backend with a local
-    /// object store. Returns `None` outside the Postgres CI job.
-    async fn build_bazel_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
-        let database_url = std::env::var("DATABASE_URL").ok()?;
-        let tmp = TempDir::new().ok()?;
-        let object_store =
-            crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).ok()?;
-        let state = build_postgres_state(&database_url, tmp.path(), object_store).await?;
+        });
         Some((state, tmp))
     }
 

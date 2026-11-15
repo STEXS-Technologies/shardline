@@ -73,13 +73,7 @@ async fn build_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
 }
 
 async fn isolated_postgres_url() -> Option<String> {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => return None,
-        Err(std::env::VarError::NotUnicode(_value)) => {
-            panic!("configured PostgreSQL fixture URL must be valid Unicode")
-        }
-    };
+    let database_url = shardline_test_support::postgres_fixture_url("DATABASE_URL")?;
     let schema = format!(
         "s3_fixture_{}_{}",
         std::process::id(),
@@ -266,10 +260,9 @@ fn s3_router(state: Arc<AppState>) -> Router {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_put_rejects_lost_request_barrier_and_preserves_previous_object() {
-    if std::env::var("DATABASE_URL").is_err() {
+    let Some((mut state, _tmp)) = build_postgres_test_state().await else {
         return;
-    }
-    let (mut state, _tmp) = build_postgres_test_state().await.unwrap();
+    };
     let inner = Arc::get_mut(&mut state).unwrap();
     let backend = match &mut inner.backend {
         crate::ServerBackend::Postgres(backend) => backend,
