@@ -89,6 +89,49 @@ const fn repo_type_to_str(t: HubRepoType) -> &'static str {
     t.as_str()
 }
 
+fn decode_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<HubRepo> {
+    let rt_str: String = row.get(1)?;
+    let repo_type = HubRepoType::parse_str(&rt_str)
+        .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
+    Ok(HubRepo {
+        repo_id: row.get(0)?,
+        repo_type,
+        private: row.get::<_, i64>(2)? != 0,
+        default_branch: row.get(3)?,
+        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?)
+            .map_err(|error| sqlite_store_error(&error))?,
+        updated_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
+            .map_err(|error| sqlite_store_error(&error))?,
+    })
+}
+
+fn decode_revision(row: &rusqlite::Row<'_>) -> rusqlite::Result<HubRevision> {
+    Ok(HubRevision {
+        repo_id: row.get(0)?,
+        ref_name: row.get(1)?,
+        sha: row.get(2)?,
+        parent_sha: row.get(3)?,
+        message: row.get(4)?,
+        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
+            .map_err(|error| sqlite_store_error(&error))?,
+    })
+}
+
+fn decode_webhook(row: &rusqlite::Row<'_>) -> rusqlite::Result<HubWebhook> {
+    let events_str: String = row.get(3)?;
+    let active: i64 = row.get(5)?;
+    Ok(HubWebhook {
+        id: row.get(0)?,
+        repo_id: row.get(1)?,
+        url: row.get(2)?,
+        events: events_str.split(',').map(ToOwned::to_owned).collect(),
+        secret: row.get::<_, Option<String>>(4)?.map(SecretString::new),
+        active: active != 0,
+        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?)
+            .map_err(|error| sqlite_store_error(&error))?,
+    })
+}
+
 impl HubStore for LocalIndexStore {
     fn object_location(
         &self,
@@ -172,21 +215,7 @@ impl HubStore for LocalIndexStore {
                 "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                  FROM shardline_hub_repos WHERE repo_id = ?1",
                 params![repo_id],
-                |row| {
-                    let rt_str: String = row.get(1)?;
-                    let repo_type = HubRepoType::parse_str(&rt_str)
-                        .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
-                    Ok(HubRepo {
-                        repo_id: row.get(0)?,
-                        repo_type,
-                        private: row.get::<_, i64>(2)? != 0,
-                        default_branch: row.get(3)?,
-                        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?)
-                            .map_err(|e| sqlite_store_error(&e))?,
-                        updated_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                            .map_err(|e| sqlite_store_error(&e))?,
-                    })
-                },
+                decode_repo,
             )
             .optional()?;
             if let Some(repo) = &result {
@@ -208,21 +237,7 @@ impl HubStore for LocalIndexStore {
             "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
              FROM shardline_hub_repos ORDER BY repo_id",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let rt_str: String = row.get(1)?;
-            let repo_type = HubRepoType::parse_str(&rt_str)
-                .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
-            Ok(HubRepo {
-                repo_id: row.get(0)?,
-                repo_type,
-                private: row.get::<_, i64>(2)? != 0,
-                default_branch: row.get(3)?,
-                created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?)
-                    .map_err(|e| sqlite_store_error(&e))?,
-                updated_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                    .map_err(|e| sqlite_store_error(&e))?,
-            })
-        })?;
+        let rows = stmt.query_map([], decode_repo)?;
         let mut repos = Vec::new();
         for row in rows {
             repos.push(row?);
@@ -286,21 +301,7 @@ impl HubStore for LocalIndexStore {
                 name_prefix,
                 upper
             ],
-            |row| {
-                let rt_str: String = row.get(1)?;
-                let parsed_type = HubRepoType::parse_str(&rt_str)
-                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
-                Ok(HubRepo {
-                    repo_id: row.get(0)?,
-                    repo_type: parsed_type,
-                    private: row.get::<_, i64>(2)? != 0,
-                    default_branch: row.get(3)?,
-                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?)
-                        .map_err(|e| sqlite_store_error(&e))?,
-                    updated_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                        .map_err(|e| sqlite_store_error(&e))?,
-                })
-            },
+            decode_repo,
         )?;
         let repos = rows.collect::<Result<Vec<_>, _>>()?;
         verify_hub_repo_heads(self.root(), &repos)?;
@@ -487,17 +488,7 @@ impl HubStore for LocalIndexStore {
             "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
              FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2",
             params![repo_id, sha],
-            |row| {
-                Ok(HubRevision {
-                    repo_id: row.get(0)?,
-                    ref_name: row.get(1)?,
-                    sha: row.get(2)?,
-                    parent_sha: row.get(3)?,
-                    message: row.get(4)?,
-                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                        .map_err(|e| sqlite_store_error(&e))?,
-                })
-            },
+            decode_revision,
         )
         .optional()
         .map_err(Into::into)
@@ -514,17 +505,7 @@ impl HubStore for LocalIndexStore {
             "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
              FROM shardline_hub_revisions WHERE repo_id = ?1 ORDER BY created_at_unix_seconds DESC, rowid DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![repo_id, query_limit], |row| {
-            Ok(HubRevision {
-                repo_id: row.get(0)?,
-                ref_name: row.get(1)?,
-                sha: row.get(2)?,
-                parent_sha: row.get(3)?,
-                message: row.get(4)?,
-                created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                    .map_err(|e| sqlite_store_error(&e))?,
-            })
-        })?;
+        let rows = stmt.query_map(params![repo_id, query_limit], decode_revision)?;
         let mut revisions = Vec::new();
         for row in rows {
             revisions.push(row?);
@@ -904,20 +885,7 @@ impl HubStore for LocalIndexStore {
             "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
              FROM shardline_hub_webhooks WHERE repo_id = ?1",
         )?;
-        let rows = stmt.query_map(params![repo_id], |row| {
-            let events_str: String = row.get(3)?;
-            let active: i64 = row.get(5)?;
-            Ok(HubWebhook {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                url: row.get(2)?,
-                events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                secret: row.get::<_, Option<String>>(4)?.map(SecretString::new),
-                active: active != 0,
-                created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?)
-                    .map_err(|e| sqlite_store_error(&e))?,
-            })
-        })?;
+        let rows = stmt.query_map(params![repo_id], decode_webhook)?;
         let mut webhooks = Vec::new();
         for row in rows {
             webhooks.push(row?);
@@ -975,20 +943,7 @@ impl HubStore for LocalIndexStore {
              WHERE repo_id = ?1 AND active = 1 AND (',' || events || ',') LIKE ('%,' || ?2 || ',%')",
         )?;
         let escaped_event = escape_like(event);
-        let rows = stmt.query_map(params![repo_id, escaped_event], |row| {
-            let events_str: String = row.get(3)?;
-            let active: i64 = row.get(5)?;
-            Ok(HubWebhook {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                url: row.get(2)?,
-                events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                secret: row.get::<_, Option<String>>(4)?.map(SecretString::new),
-                active: active != 0,
-                created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?)
-                    .map_err(|e| sqlite_store_error(&e))?,
-            })
-        })?;
+        let rows = stmt.query_map(params![repo_id, escaped_event], decode_webhook)?;
         let mut webhooks = Vec::new();
         for row in rows {
             webhooks.push(row?);
@@ -1149,17 +1104,7 @@ impl LocalIndexStore {
                 "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
                  FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2",
                 params![repo_id, new_sha],
-                |row| {
-                    Ok(HubRevision {
-                        repo_id: row.get(0)?,
-                        ref_name: row.get(1)?,
-                        sha: row.get(2)?,
-                        parent_sha: row.get(3)?,
-                        message: row.get(4)?,
-                        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                            .map_err(|error| sqlite_store_error(&error))?,
-                    })
-                },
+                decode_revision,
             )?;
             if prepared.is_some_and(|expected| !revision.matches_prepared(expected)) {
                 return Err(rusqlite::Error::InvalidParameterName(

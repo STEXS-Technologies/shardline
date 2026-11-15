@@ -37,6 +37,43 @@ fn repo_type_from_str(s: &str) -> Result<HubRepoType, PostgresMetadataStoreError
     HubRepoType::parse_str(s).ok_or(PostgresMetadataStoreError::InvalidRepoType(s.to_owned()))
 }
 
+fn decode_repo(row: &sqlx::postgres::PgRow) -> Result<HubRepo, PostgresMetadataStoreError> {
+    Ok(HubRepo {
+        repo_id: row.try_get("repo_id")?,
+        repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
+        private: row.try_get::<bool, _>("private")?,
+        default_branch: row.try_get("default_branch")?,
+        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+        updated_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("updated_at_unix_seconds")?)?,
+    })
+}
+
+fn decode_revision(row: &sqlx::postgres::PgRow) -> Result<HubRevision, PostgresMetadataStoreError> {
+    Ok(HubRevision {
+        repo_id: row.try_get("repo_id")?,
+        ref_name: row.try_get("ref_name")?,
+        sha: row.try_get("sha")?,
+        parent_sha: row.try_get("parent_sha")?,
+        message: row.try_get("message")?,
+        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+    })
+}
+
+fn decode_webhook(row: &sqlx::postgres::PgRow) -> Result<HubWebhook, PostgresMetadataStoreError> {
+    let events_str: String = row.try_get("events")?;
+    Ok(HubWebhook {
+        id: row.try_get("id")?,
+        repo_id: row.try_get("repo_id")?,
+        url: row.try_get("url")?,
+        events: events_str.split(',').map(ToOwned::to_owned).collect(),
+        secret: row
+            .try_get::<Option<String>, _>("secret")?
+            .map(SecretString::new),
+        active: row.try_get::<bool, _>("active")?,
+        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+    })
+}
+
 async fn current_hub_ref_evidence(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     repository: &str,
@@ -245,18 +282,7 @@ impl HubStore for PostgresIndexStore {
                 return Ok(None);
             };
 
-            let repository = HubRepo {
-                repo_id: row.try_get("repo_id")?,
-                repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                private: row.try_get::<bool, _>("private")?,
-                default_branch: row.try_get("default_branch")?,
-                created_at_unix_seconds: i64_to_u64(
-                    row.try_get::<i64, _>("created_at_unix_seconds")?,
-                )?,
-                updated_at_unix_seconds: i64_to_u64(
-                    row.try_get::<i64, _>("updated_at_unix_seconds")?,
-                )?,
-            };
+            let repository = decode_repo(&row)?;
             verify_hub_ref_evidence(
                 &mut tx,
                 &repository.repo_id,
@@ -282,18 +308,7 @@ impl HubStore for PostgresIndexStore {
                 )
                 .fetch(&mut *tx);
                 while let Some(row) = rows.try_next().await? {
-                    repos.push(HubRepo {
-                        repo_id: row.try_get("repo_id")?,
-                        repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                        private: row.try_get::<bool, _>("private")?,
-                        default_branch: row.try_get("default_branch")?,
-                        created_at_unix_seconds: i64_to_u64(
-                            row.try_get::<i64, _>("created_at_unix_seconds")?,
-                        )?,
-                        updated_at_unix_seconds: i64_to_u64(
-                            row.try_get::<i64, _>("updated_at_unix_seconds")?,
-                        )?,
-                    });
+                    repos.push(decode_repo(&row)?);
                 }
             }
             verify_hub_repo_heads(&mut tx, &repos).await?;
@@ -362,18 +377,7 @@ impl HubStore for PostgresIndexStore {
                 .await?;
             let mut repos = Vec::with_capacity(rows.len());
             for row in rows {
-                repos.push(HubRepo {
-                    repo_id: row.try_get("repo_id")?,
-                    repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                    private: row.try_get::<bool, _>("private")?,
-                    default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("created_at_unix_seconds")?,
-                    )?,
-                    updated_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("updated_at_unix_seconds")?,
-                    )?,
-                });
+                repos.push(decode_repo(&row)?);
             }
             verify_hub_repo_heads(&mut tx, &repos).await?;
             tx.commit().await?;
@@ -572,19 +576,7 @@ impl HubStore for PostgresIndexStore {
             .bind(&sha)
             .fetch_optional(&pool)
             .await?;
-            row.map(|row| {
-                Ok(HubRevision {
-                    repo_id: row.try_get("repo_id")?,
-                    ref_name: row.try_get("ref_name")?,
-                    sha: row.try_get("sha")?,
-                    parent_sha: row.try_get("parent_sha")?,
-                    message: row.try_get("message")?,
-                    created_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("created_at_unix_seconds")?,
-                    )?,
-                })
-            })
-            .transpose()
+            row.as_ref().map(decode_revision).transpose()
         })
     }
 
@@ -609,16 +601,7 @@ impl HubStore for PostgresIndexStore {
 
             let mut revisions = Vec::new();
             while let Some(row) = rows.try_next().await? {
-                revisions.push(HubRevision {
-                    repo_id: row.try_get("repo_id")?,
-                    ref_name: row.try_get("ref_name")?,
-                    sha: row.try_get("sha")?,
-                    parent_sha: row.try_get("parent_sha")?,
-                    message: row.try_get("message")?,
-                    created_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("created_at_unix_seconds")?,
-                    )?,
-                });
+                revisions.push(decode_revision(&row)?);
             }
             Ok((revisions.len() <= limit).then_some(revisions))
         })
@@ -1077,20 +1060,7 @@ impl HubStore for PostgresIndexStore {
 
             let mut webhooks = Vec::new();
             while let Some(row) = rows.try_next().await? {
-                let events_str: String = row.try_get("events")?;
-                webhooks.push(HubWebhook {
-                    id: row.try_get("id")?,
-                    repo_id: row.try_get("repo_id")?,
-                    url: row.try_get("url")?,
-                    events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                    secret: row
-                        .try_get::<Option<String>, _>("secret")?
-                        .map(SecretString::new),
-                    active: row.try_get::<bool, _>("active")?,
-                    created_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("created_at_unix_seconds")?,
-                    )?,
-                });
+                webhooks.push(decode_webhook(&row)?);
             }
             Ok(webhooks)
         })
@@ -1177,20 +1147,7 @@ impl HubStore for PostgresIndexStore {
 
             let mut webhooks = Vec::new();
             while let Some(row) = rows.try_next().await? {
-                let events_str: String = row.try_get("events")?;
-                webhooks.push(HubWebhook {
-                    id: row.try_get("id")?,
-                    repo_id: row.try_get("repo_id")?,
-                    url: row.try_get("url")?,
-                    events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                    secret: row
-                        .try_get::<Option<String>, _>("secret")?
-                        .map(SecretString::new),
-                    active: row.try_get::<bool, _>("active")?,
-                    created_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("created_at_unix_seconds")?,
-                    )?,
-                });
+                webhooks.push(decode_webhook(&row)?);
             }
             Ok(webhooks)
         })
@@ -1340,16 +1297,7 @@ impl PostgresIndexStore {
             .fetch_one(&mut *tx)
             .await?;
 
-            let revision = HubRevision {
-                repo_id: row.try_get("repo_id")?,
-                ref_name: row.try_get("ref_name")?,
-                sha: row.try_get("sha")?,
-                parent_sha: row.try_get("parent_sha")?,
-                message: row.try_get("message")?,
-                created_at_unix_seconds: i64_to_u64(
-                    row.try_get::<i64, _>("created_at_unix_seconds")?,
-                )?,
-            };
+            let revision = decode_revision(&row)?;
             if prepared.is_some_and(|expected| !revision.matches_prepared(expected)) {
                 return Err(PostgresMetadataStoreError::RecordNotFound);
             }
