@@ -358,33 +358,9 @@ pub(super) fn managed_object_hash_or_object_key(
 /// live in-flight write look stale and get it reaped mid-write.
 pub(super) const STALE_TEMP_ARTIFACT_AGE_SECONDS: u64 = 60 * 60;
 
-/// Returns the embedded unix-nanoseconds creation timestamp of a temporary
-/// artifact key: `<managed-base>.tmp-<unix_nanos>-<counter>` where
-/// `<managed-base>` is a key this object store writes and `.tmp-<unix_nanos>-<counter>`
-/// is the temp-then-hardlink suffix produced by
-/// `write_anchored_temporary_file_shared` for EVERY local object write
-/// (chunks, xorb containers, shards, xorb chunk-cache sidecars, and the
-/// last-GC-clock anchor alike). Returns `None` when the key is not such a temp
-/// artifact.
-///
-/// The base is validated with [`is_gc_reaper_managed_base`], so the accepted
-/// key space mirrors exactly the keys the store writes through the
-/// temp-then-hardlink path: chunk `<2hex>/<64hex>`,
-/// `xorbs/default/<2hex>/<hash>.xorb`, `shards/<2hex>/<hash>.shard` (F-67),
-/// the xorb chunk-cache sidecar namespace `_xorb_chunks/<2hex>/<64hex>`, and
-/// the reserved GC clock anchor `gc/last-gc-clock-anchor` (F-99). This is
-/// important for two reasons:
-///
-/// * A matching key can never be a live object: the `.tmp-` suffix is only
-///   ever present on temp-then-hardlink write artifacts, and the final object
-///   is hard-linked/renamed to the suffix-free key. A crash between the temp
-///   write and the hardlink strands `<managed-base>.tmp-...`, which is exactly
-///   the artifact this predicate exists to reap.
-/// * It cannot match a user-controlled key: the namespaces above are
-///   server-internal, while user keys (for example S3 frontend objects under
-///   `protocols/s3/{scope}/{key}`) never parse as a store-written base key, so
-///   a user object that merely ends in `.tmp-<digits>-<digits>` is never
-///   reaped.
+/// Parses `<managed-base>.tmp-<unix_nanos>-<counter>`, accepting only decimal
+/// timestamps/counters and bases recognized by [`is_gc_reaper_managed_base`].
+/// A matching suffix alone must never make a user object eligible for reaping.
 fn temporary_artifact_unix_nanos(key: &ObjectKey, frontends: &[ServerFrontend]) -> Option<u128> {
     // `<managed-base>.tmp-<unix_nanos>-<counter>`
     let (base, temp_suffix) = key.as_str().rsplit_once(".tmp-")?;
@@ -396,12 +372,6 @@ fn temporary_artifact_unix_nanos(key: &ObjectKey, frontends: &[ServerFrontend]) 
     {
         return None;
     }
-    // The base must be exactly a key this store writes via the temp-then-
-    // hardlink local write path: a managed object key (chunk, xorb, or shard),
-    // the xorb chunk-cache sidecar namespace, or a reserved GC clock anchor/boot-observation key.
-    // Mirroring the store-written key space keeps the reaper's accepted keys
-    // identical to the namespace the rest of GC operates on, so a matching key
-    // can never be a live object or a user-controlled key (F-67, F-99).
     let Ok(base_key) = ObjectKey::parse(base) else {
         return None;
     };
@@ -411,44 +381,20 @@ fn temporary_artifact_unix_nanos(key: &ObjectKey, frontends: &[ServerFrontend]) 
     nanos_str.parse::<u128>().ok()
 }
 
-/// Returns true when `base_key` names a key this object store writes through
-/// the temp-then-hardlink local write path (`write_anchored_temporary_file_shared`
-/// followed by a hardlink or rename), so a stranded
-/// `<base>.tmp-<unix_nanos>-<counter>` sibling is a reaping candidate:
+/// Recognizes final keys written through the local temp-then-hardlink path:
+/// managed chunks, Xorbs and shards; Xorb chunk-cache sidecars; and the two
+/// reserved GC clock keys. A crash can strand a temporary sibling of these keys.
 ///
-/// * managed object keys — chunk `<2hex>/<64hex>`, xorb
-///   `xorbs/default/<2hex>/<hash>.xorb`, shard `shards/<2hex>/<hash>.shard`
-///   (mirroring [`managed_object_hash`], F-67);
-/// * the xorb chunk-cache sidecar namespace `_xorb_chunks/<2hex>/<64hex>`
-///   (written by `xorb_store::visit_stored_xorb_chunk_hashes`);
-/// * the reserved last-GC-clock anchor `gc/last-gc-clock-anchor` (written by
-///   `quarantine::write_last_gc_clock_anchor`).
-///
-/// Every final key above is written via the temp-then-hardlink path, so a
-/// crash between the temp write and the hardlink/rename strands
-/// `<base>.tmp-<unix_nanos>-<counter>`, which is exactly the artifact this
-/// reaper exists to collect (F-99).
-///
-/// The key space stays tight: a matching base can never be a live object (the
-/// `.tmp-` suffix is only ever present on temp-then-hardlink write artifacts),
-/// and user keys — for example S3 frontend objects under
-/// `protocols/s3/{scope}/{key}`, or any other `gc/`-shaped key that is not the
-/// exact anchor or boot-observation key — never match, so a user object that merely ends in
-/// `.tmp-<digits>-<digits>` is never reaped.
+/// Keep this namespace exact: user protocol keys, unrelated `gc/` keys and
+/// malformed sidecars must remain ineligible, regardless of their suffix or age.
+/// Only temporary siblings are reaped; the final keys themselves stay live.
 fn is_gc_reaper_managed_base(base_key: &ObjectKey, frontends: &[ServerFrontend]) -> bool {
-    if managed_object_hash(base_key, frontends)
-        .ok()
-        .is_some_and(|hash| hash.is_some())
-    {
-        return true;
-    }
-    if shardline_xet_adapter::xorb_chunks_cache_hash_from_key_if_present(base_key)
-        .ok()
-        .is_some_and(|hash| hash.is_some())
-    {
-        return true;
-    }
-    base_key.as_str() == LAST_GC_CLOCK_ANCHOR_KEY
+    matches!(managed_object_hash(base_key, frontends), Ok(Some(_)))
+        || matches!(
+            shardline_xet_adapter::xorb_chunks_cache_hash_from_key_if_present(base_key),
+            Ok(Some(_))
+        )
+        || base_key.as_str() == LAST_GC_CLOCK_ANCHOR_KEY
         || base_key.as_str() == crate::quarantine::GC_CLOCK_BOOT_OBSERVATION_KEY
 }
 
