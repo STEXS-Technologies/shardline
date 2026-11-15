@@ -1,16 +1,7 @@
 use shardline_protocol::ShardlineHash;
-use shardline_storage::{ObjectKey, ObjectKeyError};
+use shardline_storage::ObjectKey;
 
 use crate::object_store::ServerObjectStoreError;
-
-pub(crate) const fn map_object_key_error(error: ObjectKeyError) -> ServerObjectStoreError {
-    match error {
-        ObjectKeyError::Empty
-        | ObjectKeyError::UnsafePath
-        | ObjectKeyError::ControlCharacter
-        | ObjectKeyError::TooLong => ServerObjectStoreError::Overflow,
-    }
-}
 
 /// Returns the chunk object key for a hex-encoded content hash.
 ///
@@ -40,7 +31,7 @@ pub fn chunk_object_key(hash_hex: &str) -> Result<ObjectKey, ServerObjectStoreEr
     })?;
     let prefix = hash_hex.get(..2).ok_or(ServerObjectStoreError::Overflow)?;
     let key = format!("{prefix}/{hash_hex}");
-    ObjectKey::parse(&key).map_err(map_object_key_error)
+    ObjectKey::parse(&key).map_err(|_error| ServerObjectStoreError::Overflow)
 }
 
 /// Extracts the chunk hash from a chunk object key if the key matches the expected layout.

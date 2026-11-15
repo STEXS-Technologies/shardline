@@ -1179,25 +1179,6 @@ fn read_full_object_blackhole_zero_length() {
     assert!(result.unwrap().is_empty());
 }
 
-// ── map_object_key_error ──────────────────────────────────────────────
-
-#[test]
-fn map_object_key_error_all_variants_return_overflow() {
-    use crate::validation::map_object_key_error;
-    use shardline_storage::ObjectKeyError;
-    for error in [
-        ObjectKeyError::Empty,
-        ObjectKeyError::UnsafePath,
-        ObjectKeyError::ControlCharacter,
-        ObjectKeyError::TooLong,
-    ] {
-        assert!(matches!(
-            map_object_key_error(error),
-            ServerObjectStoreError::Overflow
-        ));
-    }
-}
-
 // ── read_full_object non-local path (blackhole, length > 0) ──────────
 
 #[test]
