@@ -1,3 +1,5 @@
+mod inventory;
+
 use std::collections::HashMap;
 
 use futures_util::TryStreamExt;
@@ -936,84 +938,14 @@ impl AsyncIndexStore for super::PostgresIndexStore {
 
     fn visit_quarantine_candidates<'operation, Visitor, VisitorError>(
         &'operation self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> IndexStoreFuture<'operation, (), VisitorError>
     where
         Self::Error: Into<VisitorError> + 'operation,
         Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let mut transaction = self
-                .pool
-                .begin()
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)?;
-            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                .execute(&mut *transaction)
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)?;
-            // Validate all rows, snapshots, and heads before materialization checks
-            // and callbacks, using bounded pages from one coherent snapshot.
-            for phase in 0..5 {
-                let mut cursor: Option<String> = None;
-                loop {
-                    let mut request = if cursor.is_some() {
-                        query("SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds FROM shardline_quarantine_candidates
-                               WHERE object_key > $1 ORDER BY object_key LIMIT 256")
-                    } else {
-                        query(
-                            "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds FROM shardline_quarantine_candidates ORDER BY object_key LIMIT 256",
-                        )
-                    };
-                    if let Some(key) = &cursor {
-                        request = request.bind(key);
-                    }
-                    let rows = request
-                        .fetch_all(&mut *transaction)
-                        .await
-                        .map_err(Self::Error::from)
-                        .map_err(Into::into)?;
-                    if rows.is_empty() {
-                        break;
-                    }
-                    let mut entries = Vec::with_capacity(rows.len());
-                    for row in rows {
-                        let entry = quarantine_candidate_from_row(&row).map_err(Into::into)?;
-                        cursor = Some(entry.object_key().as_str().to_owned());
-                        entries.push(entry);
-                    }
-                    if phase == 1 {
-                        for entry in &entries {
-                            quarantine_snapshot(entry, QuarantineLifecycleState::Active)
-                                .and_then(|snapshot| {
-                                    snapshot.evidence_operation().map_err(Self::Error::from)
-                                })
-                                .map_err(Into::into)?;
-                        }
-                    } else if phase == 2 || phase == 3 {
-                        verify_postgres_quarantine_evidence_batch(
-                            &mut *transaction,
-                            &entries,
-                            phase == 3,
-                        )
-                        .await
-                        .map_err(Into::into)?;
-                    } else if phase == 4 {
-                        for entry in entries {
-                            visitor(entry)?;
-                        }
-                    }
-                }
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)
-        })
+        Box::pin(inventory::visit(&self.pool, visitor))
     }
 
     fn upsert_quarantine_candidate<'operation>(
@@ -1274,84 +1206,14 @@ impl AsyncIndexStore for super::PostgresIndexStore {
 
     fn visit_retention_holds<'operation, Visitor, VisitorError>(
         &'operation self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> IndexStoreFuture<'operation, (), VisitorError>
     where
         Self::Error: Into<VisitorError> + 'operation,
         Visitor: FnMut(RetentionHold) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let mut transaction = self
-                .pool
-                .begin()
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)?;
-            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                .execute(&mut *transaction)
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)?;
-            // Validate all rows, snapshots, and heads before materialization checks
-            // and callbacks, using bounded pages from one coherent snapshot.
-            for phase in 0..5 {
-                let mut cursor: Option<String> = None;
-                loop {
-                    let mut request = if cursor.is_some() {
-                        query("SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds FROM shardline_retention_holds
-                               WHERE object_key > $1 ORDER BY object_key LIMIT 256")
-                    } else {
-                        query(
-                            "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds FROM shardline_retention_holds ORDER BY object_key LIMIT 256",
-                        )
-                    };
-                    if let Some(key) = &cursor {
-                        request = request.bind(key);
-                    }
-                    let rows = request
-                        .fetch_all(&mut *transaction)
-                        .await
-                        .map_err(Self::Error::from)
-                        .map_err(Into::into)?;
-                    if rows.is_empty() {
-                        break;
-                    }
-                    let mut entries = Vec::with_capacity(rows.len());
-                    for row in rows {
-                        let entry = retention_hold_from_row(&row).map_err(Into::into)?;
-                        cursor = Some(entry.object_key().as_str().to_owned());
-                        entries.push(entry);
-                    }
-                    if phase == 1 {
-                        for entry in &entries {
-                            retention_snapshot(entry, RetentionHoldLifecycleState::Active)
-                                .and_then(|snapshot| {
-                                    snapshot.evidence_operation().map_err(Self::Error::from)
-                                })
-                                .map_err(Into::into)?;
-                        }
-                    } else if phase == 2 || phase == 3 {
-                        verify_postgres_retention_evidence_batch(
-                            &mut *transaction,
-                            &entries,
-                            phase == 3,
-                        )
-                        .await
-                        .map_err(Into::into)?;
-                    } else if phase == 4 {
-                        for entry in entries {
-                            visitor(entry)?;
-                        }
-                    }
-                }
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)
-        })
+        Box::pin(inventory::visit(&self.pool, visitor))
     }
 
     fn upsert_retention_hold<'operation>(
@@ -1504,98 +1366,14 @@ impl AsyncIndexStore for super::PostgresIndexStore {
 
     fn visit_webhook_deliveries<'operation, Visitor, VisitorError>(
         &'operation self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> IndexStoreFuture<'operation, (), VisitorError>
     where
         Self::Error: Into<VisitorError> + 'operation,
         Visitor: FnMut(WebhookDelivery) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let mut transaction = self
-                .pool
-                .begin()
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)?;
-            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                .execute(&mut *transaction)
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)?;
-            // Preserve complete-row validation before evidence checks and any callbacks.
-            for phase in 0..5 {
-                let mut cursor: Option<[String; 4]> = None;
-                loop {
-                    let mut request = if cursor.is_some() {
-                        query("SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds FROM shardline_webhook_deliveries
-                        WHERE (provider, owner, repo, delivery_id) > ($1, $2, $3, $4)
-                        ORDER BY provider, owner, repo, delivery_id LIMIT 256")
-                    } else {
-                        query("SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds FROM shardline_webhook_deliveries
-                        ORDER BY provider, owner, repo, delivery_id LIMIT 256")
-                    };
-                    if let Some(key) = &cursor {
-                        for field in key {
-                            request = request.bind(field);
-                        }
-                    }
-                    let rows = request
-                        .fetch_all(&mut *transaction)
-                        .await
-                        .map_err(Self::Error::from)
-                        .map_err(Into::into)?;
-                    if rows.is_empty() {
-                        break;
-                    }
-                    let mut entries = Vec::with_capacity(rows.len());
-                    for row in rows {
-                        let entry = webhook_delivery_from_row(&row).map_err(Into::into)?;
-                        cursor = Some([
-                            row.try_get::<String, _>("provider")
-                                .map_err(Self::Error::from)
-                                .map_err(Into::into)?,
-                            row.try_get::<String, _>("owner")
-                                .map_err(Self::Error::from)
-                                .map_err(Into::into)?,
-                            row.try_get::<String, _>("repo")
-                                .map_err(Self::Error::from)
-                                .map_err(Into::into)?,
-                            row.try_get::<String, _>("delivery_id")
-                                .map_err(Self::Error::from)
-                                .map_err(Into::into)?,
-                        ]);
-                        entries.push(entry);
-                    }
-                    if phase == 1 {
-                        for entry in &entries {
-                            webhook_snapshot(entry, WebhookDeliveryLifecycleState::Processed)
-                                .and_then(|snapshot| {
-                                    snapshot.evidence_operation().map_err(Self::Error::from)
-                                })
-                                .map_err(Into::into)?;
-                        }
-                    } else if phase == 2 || phase == 3 {
-                        verify_postgres_webhook_evidence_batch(
-                            &mut *transaction,
-                            &entries,
-                            phase == 3,
-                        )
-                        .await
-                        .map_err(Into::into)?;
-                    } else if phase == 4 {
-                        for entry in entries {
-                            visitor(entry)?;
-                        }
-                    }
-                }
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)
-        })
+        Box::pin(inventory::visit(&self.pool, visitor))
     }
     fn delete_webhook_delivery<'operation>(
         &'operation self,
@@ -1849,94 +1627,14 @@ impl AsyncIndexStore for super::PostgresIndexStore {
 
     fn visit_provider_repository_states<'operation, Visitor, VisitorError>(
         &'operation self,
-        mut visitor: Visitor,
+        visitor: Visitor,
     ) -> IndexStoreFuture<'operation, (), VisitorError>
     where
         Self::Error: Into<VisitorError> + 'operation,
         Visitor: FnMut(ProviderRepositoryState) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            let mut transaction = self
-                .pool
-                .begin()
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)?;
-            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                .execute(&mut *transaction)
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)?;
-            // Preserve complete-row validation before evidence checks and any callbacks.
-            for phase in 0..5 {
-                let mut cursor: Option<[String; 3]> = None;
-                loop {
-                    let mut request = if cursor.is_some() {
-                        query("SELECT provider, owner, repo, last_access_changed_at_unix_seconds, last_revision_pushed_at_unix_seconds, last_pushed_revision, last_cache_invalidated_at_unix_seconds, last_authorization_rechecked_at_unix_seconds, last_drift_checked_at_unix_seconds FROM shardline_provider_repository_states
-                        WHERE (provider, owner, repo) > ($1, $2, $3)
-                        ORDER BY provider, owner, repo LIMIT 256")
-                    } else {
-                        query("SELECT provider, owner, repo, last_access_changed_at_unix_seconds, last_revision_pushed_at_unix_seconds, last_pushed_revision, last_cache_invalidated_at_unix_seconds, last_authorization_rechecked_at_unix_seconds, last_drift_checked_at_unix_seconds FROM shardline_provider_repository_states
-                        ORDER BY provider, owner, repo LIMIT 256")
-                    };
-                    if let Some(key) = &cursor {
-                        for field in key {
-                            request = request.bind(field);
-                        }
-                    }
-                    let rows = request
-                        .fetch_all(&mut *transaction)
-                        .await
-                        .map_err(Self::Error::from)
-                        .map_err(Into::into)?;
-                    if rows.is_empty() {
-                        break;
-                    }
-                    let mut entries = Vec::with_capacity(rows.len());
-                    for row in rows {
-                        let entry = provider_repository_state_from_row(&row).map_err(Into::into)?;
-                        cursor = Some([
-                            row.try_get::<String, _>("provider")
-                                .map_err(Self::Error::from)
-                                .map_err(Into::into)?,
-                            row.try_get::<String, _>("owner")
-                                .map_err(Self::Error::from)
-                                .map_err(Into::into)?,
-                            row.try_get::<String, _>("repo")
-                                .map_err(Self::Error::from)
-                                .map_err(Into::into)?,
-                        ]);
-                        entries.push(entry);
-                    }
-                    if phase == 1 {
-                        for entry in &entries {
-                            crate::provider_evidence::snapshot_from_state(entry)
-                                .and_then(|snapshot| snapshot.evidence_operation())
-                                .map_err(Self::Error::from)
-                                .map_err(Into::into)?;
-                        }
-                    } else if phase == 2 || phase == 3 {
-                        verify_postgres_provider_evidence_batch(
-                            &mut *transaction,
-                            &entries,
-                            phase == 3,
-                        )
-                        .await
-                        .map_err(Into::into)?;
-                    } else if phase == 4 {
-                        for entry in entries {
-                            visitor(entry)?;
-                        }
-                    }
-                }
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(Self::Error::from)
-                .map_err(Into::into)
-        })
+        Box::pin(inventory::visit(&self.pool, visitor))
     }
     fn upsert_provider_repository_state<'operation>(
         &'operation self,
