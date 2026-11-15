@@ -906,33 +906,36 @@ mod tests {
 
     // ── store_uploaded_xorb_with_metrics error propagation ─────────────
 
-    #[test]
-    fn store_uploaded_xorb_with_metrics_propagates_error() {
+    #[tokio::test]
+    async fn store_uploaded_xorb_with_metrics_rejects_invalid_hashes() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let result = async_store_xorb_with_metrics(&object_store, "invalid-hash", b"data");
-        assert!(result.is_err(), "expected error for invalid hash");
+        for (hash, body) in [
+            ("invalid-hash", b"data".as_slice()),
+            ("invalid", b"test".as_slice()),
+            ("", b"data".as_slice()),
+        ] {
+            let result = super::store_uploaded_xorb_with_metrics(&object_store, hash, body).await;
+            assert!(
+                result.is_err(),
+                "hash {hash:?}: expected rejection, got {result:?}"
+            );
+        }
     }
 
     // ── normalize_serialized_xorb error paths ──────────────────────────
 
     #[test]
-    fn normalize_serialized_xorb_rejects_empty_bytes() {
-        let hash = parse_xet_hash_hex(&"ab".repeat(32)).unwrap();
-        let result = normalize_serialized_xorb(hash, b"");
-        assert!(result.is_err(), "expected error for empty bytes");
-    }
-
-    #[test]
-    fn normalize_serialized_xorb_rejects_garbage_bytes() {
-        use shardline_protocol::ShardlineHash;
+    fn normalize_serialized_xorb_rejects_malformed_bytes() {
         let hash = ShardlineHash::from_bytes([0xab; 32]);
-        let result = normalize_serialized_xorb(hash, b"not-a-xorb");
-        assert!(
-            matches!(result, Err(XetAdapterError::InvalidSerializedXorb)),
-            "expected InvalidSerializedXorb, got {result:?}"
-        );
+        assert!(normalize_serialized_xorb(hash, b"").is_err());
+        for body in [b"not-a-xorb".as_slice(), b"garbage bytes here"] {
+            let result = normalize_serialized_xorb(hash, body);
+            assert!(
+                matches!(result, Err(XetAdapterError::InvalidSerializedXorb)),
+                "body {body:?}: expected InvalidSerializedXorb, got {result:?}"
+            );
+        }
     }
 
     // ── decompression-bomb rejection ────────────────────────────────────
@@ -2109,15 +2112,6 @@ mod tests {
         assert_eq!(result.unwrap(), None);
     }
 
-    // ── normalize_serialized_xorb with empty/invalid input ─────────────
-
-    #[test]
-    fn normalize_serialized_xorb_rejects_garbage() {
-        let hash = parse_xet_hash_hex(&"ab".repeat(32)).unwrap();
-        let result = normalize_serialized_xorb(hash, b"garbage bytes here");
-        assert!(result.is_err());
-    }
-
     // ── Container persistence accounting ─────────────────────────────
 
     #[test]
@@ -2138,24 +2132,6 @@ mod tests {
             assert!(result.was_inserted, "chunks={num_chunks}");
             assert!(result.stored_bytes > 0, "chunks={num_chunks}");
         }
-    }
-
-    // ── store_uploaded_xorb_with_metrics error handling ───────────────
-
-    #[test]
-    fn store_uploaded_xorb_with_metrics_rejects_bad_hash() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let result = async_store_xorb_with_metrics(&object_store, "invalid", b"test");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn store_uploaded_xorb_with_metrics_rejects_wrong_hash_format() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let result = async_store_xorb_with_metrics(&object_store, "", b"data");
-        assert!(result.is_err());
     }
 
     // ── xorb_object_key edge behavior ─────────────────────────────────
