@@ -484,25 +484,19 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         let Some(token) = reservation.owner_token().map(ToOwned::to_owned) else {
             return;
         };
-        let redis_key = Self::redis_key(key);
-        let loading_key = Self::loading_key(&redis_key);
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let loading_key = Self::loading_key(&Self::redis_key(key));
         let cache = self.clone();
-        let operation_timeout = self.operation_timeout;
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let release = async {
+        handle.spawn(async move {
+            let _ignored = cache
+                .with_operation_timeout(async {
                     let mut connection = cache.get_connection().await?;
-                    let _deleted = RedisReconstructionCache::compare_delete_loading(
-                        &mut connection,
-                        &loading_key,
-                        &token,
-                    )
-                    .await?;
-                    Ok::<(), ReconstructionCacheError>(())
-                };
-                let _ignored = tokio::time::timeout(operation_timeout, release).await;
-            });
-        }
+                    Self::compare_delete_loading(&mut connection, &loading_key, &token).await
+                })
+                .await;
+        });
     }
 }
 
