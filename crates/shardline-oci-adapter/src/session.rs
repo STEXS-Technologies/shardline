@@ -388,22 +388,26 @@ pub async fn repair_upload_session_evidence(
     let (evidence, snapshot_evidence) = if let Some(head) = persisted.journal_head {
         let records = read_evidence_journal(root, session_id).await?;
         let head = usize::try_from(head)?;
-        let committed = records.get(..head).ok_or_else(|| {
+        records.get(..head).ok_or_else(|| {
             OciAdapterError::Reliability("OCI evidence journal head is missing".into())
         })?;
+        let mut events = Vec::new();
+        let mut snapshot_events = Vec::new();
+        for record in records.into_iter().take(head) {
+            events.extend(record.evidence);
+            snapshot_events.extend(record.snapshot_evidence);
+        }
         (
             SessionEvidenceLog::from_events(
-                committed
-                    .iter()
-                    .flat_map(|record| record.evidence.iter().cloned())
+                events
+                    .into_iter()
                     .map(serde_json::from_value::<StateTransitionEvent>)
                     .collect::<Result<Vec<_>, _>>()?,
             )
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?,
             SnapshotEvidenceLog::from_events(
-                committed
-                    .iter()
-                    .flat_map(|record| record.snapshot_evidence.iter().cloned())
+                snapshot_events
+                    .into_iter()
                     .map(serde_json::from_value::<SnapshotEvidenceEvent<DigestSnapshot>>)
                     .collect::<Result<Vec<_>, _>>()?,
             )
