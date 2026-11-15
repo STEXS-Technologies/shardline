@@ -14,7 +14,7 @@
 //!     `select_upstream_base_url`, `is_transfer_path`) and the XET upload
 //!     machinery (`authenticated_translator`, `upload_bytes`) from
 //!     `e2e/role_split_e2e.rs`;
-//!   - `SplitMix64`, `deterministic_bytes`, `sha256_hex`, `count_chunk_files`,
+//!   - `deterministic_bytes`, `sha256_hex`, `count_chunk_files`,
 //!     `wait_until` from the drill crates, plus the `PanicStatus` inspector.
 //!
 //! Two documented adaptations vs the original design (both verified against
@@ -50,8 +50,7 @@
     clippy::expect_used,
     clippy::panic,
     clippy::needless_borrows_for_generic_args,
-    clippy::unnecessary_map_or,
-    dead_code
+    clippy::unnecessary_map_or
 )]
 
 use std::{
@@ -153,36 +152,6 @@ fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
         out.push((state & 0xff) as u8);
     }
     out
-}
-
-/// SplitMix64 — deterministic RNG (spec-verbatim; kept for the seeded-drill
-/// flavor; the kill point itself is FIXED at iteration 3, no RNG).
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    const fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    const fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    const fn next_usize(&mut self, bound: usize) -> usize {
-        (self.next_u64() as usize).rem_euclid(bound)
-    }
-
-    const fn next_range(&mut self, lo: usize, hi: usize) -> usize {
-        lo.saturating_add(self.next_usize(hi.saturating_sub(lo).saturating_add(1)))
-    }
-
-    const fn pick<'item, T>(&mut self, items: &'item [T]) -> &'item T {
-        &items[self.next_usize(items.len())]
-    }
 }
 
 fn count_files_recursive(dir: &Path) -> usize {
