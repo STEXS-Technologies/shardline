@@ -2916,26 +2916,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_object_invalid_oid_returns_422() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/lfs/objects/not-a-valid-oid")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["message"], "invalid oid");
+    async fn object_handlers_reject_invalid_oid() {
+        for (method, path, header, body) in [
+            ("GET", "/v1/lfs/objects/not-a-valid-oid", None, ""),
+            ("HEAD", "/v1/lfs/objects/not-a-valid-oid", None, ""),
+            (
+                "PUT",
+                "/v1/lfs/objects/not-a-valid-oid",
+                Some(("content-type", "application/octet-stream")),
+                "hello",
+            ),
+            ("DELETE", "/v1/lfs/objects/not-a-valid-oid", None, ""),
+            (
+                "PATCH",
+                "/v1/lfs/objects/not-a-valid-oid",
+                Some(("content-range", "bytes 0-4/8")),
+                "hello",
+            ),
+            ("POST", "/v1/lfs/objects/not-a-valid-oid/verify", None, ""),
+        ] {
+            let (state, _tmp) = build_test_state().await;
+            let app = lfs_router(state);
+            let mut request = Request::builder().method(method).uri(path);
+            if let Some((name, value)) = header {
+                request = request.header(name, value);
+            }
+            let response = app
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{method} {path}"
+            );
+            if method != "HEAD" {
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let parsed: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(parsed["message"], "invalid oid", "{method} {path}");
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3051,25 +3073,6 @@ mod tests {
         assert_eq!(content_length, content.len() as u64);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn head_object_invalid_oid_returns_422() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("HEAD")
-                    .uri("/v1/lfs/objects/not-a-valid-oid")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
     // =========================================================================
     // lfs_put_object tests
     // =========================================================================
@@ -3143,31 +3146,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_object_invalid_oid_returns_422() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/v1/lfs/objects/not-a-valid-oid")
-                    .header("content-type", "application/octet-stream")
-                    .body(Body::from(b"hello".to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["message"], "invalid oid");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3360,25 +3338,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(head.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_object_invalid_oid_returns_422() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/v1/lfs/objects/not-a-valid-oid")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     // =========================================================================
@@ -3645,26 +3604,6 @@ mod tests {
             .unwrap();
         let parsed: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["message"], "invalid Content-Range header");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn patch_object_invalid_oid_returns_422() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri("/v1/lfs/objects/not-a-valid-oid")
-                    .header("content-range", "bytes 0-4/8")
-                    .body(Body::from(b"hello".to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     // =========================================================================
@@ -4021,25 +3960,6 @@ mod tests {
 
         // Content-Length != expected_chunk_size → RangeNotSatisfiable
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn verify_object_invalid_oid_returns_422() {
-        let (state, _tmp) = build_test_state().await;
-        let app = lfs_router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lfs/objects/not-a-valid-oid/verify")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
