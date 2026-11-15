@@ -210,13 +210,13 @@ where
     ObjectAdapter: ObjectStore,
     ObjectAdapter::Error: Into<GcError>,
 {
-    let object_key_string = object_key.as_str().to_owned();
-    if referenced_object_keys.contains(&object_key_string)
-        || missing_optional_object_keys.contains(&object_key_string)
+    if referenced_object_keys.contains(object_key.as_str())
+        || missing_optional_object_keys.contains(object_key.as_str())
     {
         return Ok(());
     }
 
+    let object_key_string = object_key.as_str().to_owned();
     if object_store
         .metadata(object_key)
         .map_err(Into::into)?
@@ -236,10 +236,9 @@ fn collect_live_chunk_references_from_protocol_object(
     object_key: &ObjectKey,
     reachability: &mut ReachabilityAccumulator,
 ) -> Result<bool, GcError> {
-    let object_key_string = object_key.as_str().to_owned();
     if let Some(present) = reachability
         .inspected_protocol_objects
-        .get(&object_key_string)
+        .get(object_key.as_str())
     {
         return Ok(*present);
     }
@@ -259,7 +258,7 @@ fn collect_live_chunk_references_from_protocol_object(
     )?;
     reachability
         .inspected_protocol_objects
-        .insert(object_key_string, present);
+        .insert(object_key.as_str().to_owned(), present);
     Ok(present)
 }
 
