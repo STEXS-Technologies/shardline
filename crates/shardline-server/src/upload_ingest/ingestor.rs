@@ -450,23 +450,16 @@ impl FileUploadIngestor {
         packed.push(chunk, self.next_offset).await
     }
 
-    /// `windows(2)` always yields slices of exactly two elements, so indexing
-    /// at 0 and 1 is infallible.
     fn record_completed_chunks(&mut self) -> Result<(), ServerError> {
         let expected_chunks = usize::try_from(self.next_sequence)?;
         if self.completed_chunks.len() != expected_chunks {
             return Err(ServerError::Overflow);
         }
 
-        let already_sorted =
-            self.completed_chunks
-                .windows(2)
-                .all(|w: &[SequencedStoredChunkOutcome]| {
-                    w.first()
-                        .zip(w.get(1))
-                        .is_some_and(|(a, b)| a.sequence <= b.sequence)
-                });
-        if !already_sorted {
+        if !self
+            .completed_chunks
+            .is_sorted_by_key(|outcome| outcome.sequence)
+        {
             self.completed_chunks
                 .sort_unstable_by_key(|outcome| outcome.sequence);
         }
@@ -1112,31 +1105,41 @@ mod tests {
         // After flush, the buffer should be recycled
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_record_completed_chunks_already_sorted() {
-        // Verify that already-sorted completed chunks don't need re-sorting.
-        let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128).unwrap();
-        let mut ingestor = FileUploadIngestor::new(chunk_size, false);
+    #[test]
+    fn completed_chunks_preserve_file_order_regardless_of_completion_order() {
+        use super::super::chunk_store::{SequencedStoredChunkOutcome, StoredChunkOutcome};
 
-        // Send data that reaches CDC boundaries
-        ingestor
-            .ingest_body_chunk(
-                &object_store,
-                &Bytes::from_static(
-                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-                ),
-            )
-            .await
-            .unwrap();
+        for order in [vec![], vec![0, 1, 2], vec![2, 0, 1]] {
+            let mut ingestor = FileUploadIngestor::new(NonZeroUsize::new(128).unwrap(), false);
+            ingestor.next_sequence = u64::try_from(order.len()).unwrap();
+            ingestor.next_offset = ingestor.next_sequence * 4;
+            ingestor.completed_chunks = order
+                .into_iter()
+                .map(|sequence| SequencedStoredChunkOutcome {
+                    sequence,
+                    offset: sequence * 4,
+                    stored: StoredChunkOutcome {
+                        hash_hex: sequence.to_string(),
+                        chunk_length: 4,
+                        compressed_length: 4,
+                        inserted: true,
+                    },
+                })
+                .collect();
 
-        // completed_chunks should already be in sequence order
-        let (record, _response) = ingestor
-            .finish(&object_store, "presorted.bin", None, None)
-            .await
-            .unwrap();
-        assert!(!record.chunks.is_empty());
-        assert_eq!(record.total_bytes, 72);
+            ingestor.record_completed_chunks().unwrap();
+
+            let actual: Vec<_> = ingestor
+                .records
+                .iter()
+                .map(|record| (record.hash.clone(), record.offset))
+                .collect();
+            let expected: Vec<_> = (0..ingestor.next_sequence)
+                .map(|sequence| (sequence.to_string(), sequence * 4))
+                .collect();
+            assert_eq!(actual, expected);
+            assert_eq!(ingestor.stored_bytes, ingestor.next_offset);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
