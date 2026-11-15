@@ -1143,7 +1143,7 @@ impl UnorderedWriterProgress {
 /// future and sends the result through an unbounded channel; the consumer
 /// (an [`UnorderedDownloadStream`]) reads in completion order.
 pub struct UnorderedWriter {
-    result_tx: UnboundedSender<Result<CompletedTerm, SdxError>>,
+    completed_tx: UnboundedSender<CompletedTerm>,
     run_state: Arc<RunState>,
     progress: Arc<UnorderedWriterProgress>,
     task_set: JoinSet<Result<u64, SdxError>>,
@@ -1181,7 +1181,7 @@ impl DataWriter for UnorderedWriter {
             .bytes_in_progress
             .fetch_add(expected_size, Ordering::Relaxed);
 
-        let result_tx = self.result_tx.clone();
+        let completed_tx = self.completed_tx.clone();
         let run_state = self.run_state.clone();
         let progress = self.progress.clone();
 
@@ -1203,13 +1203,10 @@ impl DataWriter for UnorderedWriter {
             }
             .await;
 
-            let completed_bytes = result
-                .as_ref()
-                .map(|term| u64::try_from(term.data.len()).unwrap_or(u64::MAX))
-                .unwrap_or(0);
-            match result {
+            let completed_bytes = match result {
                 Ok(term) => {
-                    drop(result_tx.send(Ok(term)));
+                    drop(completed_tx.send(term));
+                    expected_size
                 }
                 Err(error) => {
                     // `SdxError` is not `Clone`: store the real error in the
@@ -1217,8 +1214,9 @@ impl DataWriter for UnorderedWriter {
                     // `cancelled()` branch) instead of sending a marker. The
                     // consumer's `check_error` then surfaces the real error.
                     run_state.set_error(error);
+                    0
                 }
-            }
+            };
 
             progress
                 .bytes_in_progress
@@ -1251,7 +1249,7 @@ impl DataWriter for UnorderedWriter {
 /// The three-part result of building an unordered streaming writer.
 type UnorderedStreamingWriter = (
     Box<dyn DataWriter>,
-    UnboundedReceiver<Result<CompletedTerm, SdxError>>,
+    UnboundedReceiver<CompletedTerm>,
     Arc<UnorderedWriterProgress>,
 );
 
@@ -1261,20 +1259,20 @@ impl UnorderedWriter {
     /// Returns the writer (for the reconstruction task), the receiver end of
     /// the completion channel, and the shared progress counters.
     pub(crate) fn new_streaming(run_state: Arc<RunState>) -> UnorderedStreamingWriter {
-        let (result_tx, result_rx) = unbounded_channel();
+        let (completed_tx, completed_rx) = unbounded_channel();
         let progress = Arc::new(UnorderedWriterProgress {
             terms_in_progress: AtomicU64::new(0),
             bytes_in_progress: AtomicU64::new(0),
         });
         let writer = Box::new(Self {
-            result_tx,
+            completed_tx,
             run_state,
             progress: progress.clone(),
             task_set: JoinSet::new(),
             total_bytes_sent: 0,
             finished: false,
         });
-        (writer, result_rx, progress)
+        (writer, completed_rx, progress)
     }
 }
 
@@ -2597,7 +2595,7 @@ pub struct UnorderedDownloadStream {
     /// Shared atomic progress counters (also held by the writer and its tasks).
     progress: Arc<UnorderedWriterProgress>,
     /// Channel receiver for completed terms from spawned tasks.
-    receiver: UnboundedReceiver<Result<CompletedTerm, SdxError>>,
+    receiver: UnboundedReceiver<CompletedTerm>,
     /// Whether the stream has finished (no more data).
     finished: bool,
     /// Shared run state with the `FileReconstructor`.
@@ -2679,8 +2677,8 @@ impl UnorderedDownloadStream {
         }
         self.start();
 
-        if let Ok(result) = self.receiver.try_recv() {
-            return self.process_term(result);
+        if let Ok(term) = self.receiver.try_recv() {
+            return self.process_term(term);
         }
         let next_item = tokio::select! {
             biased;
@@ -2688,7 +2686,7 @@ impl UnorderedDownloadStream {
             () = self.run_state.cancelled() => None,
         };
         match next_item {
-            Some(result) => self.process_term(result),
+            Some(term) => self.process_term(term),
             None => {
                 if self.run_state.is_cancelled() {
                     let terminal = self.run_state.check_error();
@@ -2722,18 +2720,14 @@ impl UnorderedDownloadStream {
         block_on_download(&runtime, self.next())
     }
 
-    fn process_term(
-        &mut self,
-        result: Result<CompletedTerm, SdxError>,
-    ) -> Result<Option<(u64, Bytes)>, SdxError> {
+    fn process_term(&mut self, term: CompletedTerm) -> Result<Option<(u64, Bytes)>, SdxError> {
         if self.run_state.is_cancelled() {
-            drop(result);
+            drop(term);
             let terminal = self.run_state.check_error();
             self.cancel();
             terminal?;
             return Ok(None);
         }
-        let term = result?;
         let offset = term.byte_range.start;
         let data = term.data;
         // The buffer permit is released only after the consumer has received
@@ -3615,8 +3609,7 @@ mod tests {
         writer.finish().await.unwrap();
 
         let mut items = Vec::new();
-        while let Some(result) = receiver.recv().await {
-            let term = result.unwrap();
+        while let Some(term) = receiver.recv().await {
             items.push((term.byte_range.start, term.data.to_vec()));
             drop(term.permit);
         }
@@ -4539,7 +4532,7 @@ mod tests {
         assert_eq!(peak_held, cap);
         assert!(peak_held > 0);
 
-        let initial = stream.receiver.try_recv().unwrap().unwrap();
+        let initial = stream.receiver.try_recv().unwrap();
         {
             let backing = initial
                 .permit
@@ -4561,7 +4554,7 @@ mod tests {
         drop(waiting);
 
         let mut received = std::collections::BTreeMap::new();
-        let (offset, chunk) = stream.process_term(Ok(initial)).unwrap().unwrap();
+        let (offset, chunk) = stream.process_term(initial).unwrap().unwrap();
         assert!(received.insert(offset, chunk).is_none());
         while let Some((offset, chunk)) = stream.next().await.unwrap() {
             assert!(received.insert(offset, chunk).is_none());
