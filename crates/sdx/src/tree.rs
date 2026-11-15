@@ -272,7 +272,7 @@ impl<'session> MetadataClient<'session> {
         let retry = self.write_retry();
         let token = self.tokens.write_token().await?;
         let route = self.repo_route(XET_PATH_ROUTE);
-        let url = build_url(self.api_base, &route, no_query());
+        let url = build_url(self.api_base, &route, &[]);
         // Substitute the `{*path}` wildcard with the remote path (axum decodes
         // the captured value; encode each segment so special characters survive).
         let url = url.replace("{*path}", &encode_path_segments(remote));
@@ -303,7 +303,7 @@ impl<'session> MetadataClient<'session> {
         let retry = self.write_retry();
         let token = self.tokens.write_token().await?;
         let route = self.repo_route(XET_PATH_ROUTE);
-        let mut url = build_url(self.api_base, &route, no_query());
+        let mut url = build_url(self.api_base, &route, &[]);
         url = url.replace("{*path}", &encode_path_segments(remote));
         if recursive {
             url.push_str("?recursive=true");
@@ -426,16 +426,7 @@ impl XetClient {
 
 /// Builds a URL from an API base + route template + query pairs, percent-
 /// encoding query values (URL-safe, avoids `Url::parse` fallibility).
-/// An empty query parameter slice (gives `build_url` a concrete element type).
-pub(crate) const fn no_query() -> &'static [(&'static str, &'static str)] {
-    &[]
-}
-
-pub(crate) fn build_url<K: AsRef<str>, V: AsRef<str>>(
-    api_base: &str,
-    route: &str,
-    query: &[(K, V)],
-) -> String {
+pub(crate) fn build_url(api_base: &str, route: &str, query: &[(&str, &str)]) -> String {
     let mut url = format!("{}{}", api_base.trim_end_matches('/'), route);
     if !query.is_empty() {
         url.push('?');
@@ -443,9 +434,9 @@ pub(crate) fn build_url<K: AsRef<str>, V: AsRef<str>>(
             if index > 0 {
                 url.push('&');
             }
-            url.push_str(key.as_ref());
+            url.push_str(key);
             url.push('=');
-            url.push_str(&encode_query(value.as_ref()));
+            url.push_str(&encode_query(value));
         }
     }
     url

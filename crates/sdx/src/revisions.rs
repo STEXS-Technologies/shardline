@@ -96,7 +96,7 @@ impl MetadataClient<'_> {
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
-        let url = crate::tree::build_url(self.api_base, &route, crate::tree::no_query());
+        let url = crate::tree::build_url(self.api_base, &route, &[]);
         match self
             .send_json::<Revision>(
                 &retry,
@@ -122,7 +122,7 @@ impl MetadataClient<'_> {
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
-        let url = crate::tree::build_url(self.api_base, &route, crate::tree::no_query());
+        let url = crate::tree::build_url(self.api_base, &route, &[]);
         let _: DeleteRevisionResponse = self
             .send_json(
                 &retry,
