@@ -59,37 +59,17 @@ async fn build_oci_postgres_state(
     root: std::path::PathBuf,
     object_store: crate::ServerObjectStore,
 ) -> Option<Arc<AppState>> {
-    let chunk_size = NonZeroUsize::new(65_536)?;
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().ok()?,
-        "http://127.0.0.1:8080".to_owned(),
-        root.clone(),
-        chunk_size,
-    )
-    .with_server_frontends([ServerFrontend::Oci])
-    .ok()?;
+    let config = oci_test_config(root.clone());
     let backend = crate::PostgresBackend::new_with_object_store(
         root,
         "http://127.0.0.1:8080".to_owned(),
-        chunk_size,
+        config.chunk_size(),
         database_url,
         object_store,
     )
     .await
     .ok()?;
-    Some(Arc::new(AppState {
-        config,
-        role: ServerRole::All,
-        backend: ServerBackend::Postgres(backend),
-        auth: None,
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(NonZeroUsize::new(4096)?, NonZeroUsize::new(16)?),
-        oci_registry_token_limiter: Arc::new(Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256)?),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    }))
+    Some(oci_test_state(config, ServerBackend::Postgres(backend)))
 }
 
 /// Builds a minimal [`AppState`] backed by a local filesystem backend rooted
@@ -102,24 +82,29 @@ async fn build_oci_postgres_state(
 /// backend initialisation) fails.
 pub(crate) async fn build_oci_test_state() -> OciTestContext {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
-    let root = temp.path().to_path_buf();
-    let bind_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let chunk_size = NonZeroUsize::new(65536).unwrap();
-
-    let config = ServerConfig::new(
-        bind_addr,
-        "http://127.0.0.1:8080".to_owned(),
-        root,
-        chunk_size,
-    )
-    .with_server_frontends([ServerFrontend::Oci])
-    .expect("failed to set server frontends");
-
+    let config = oci_test_config(temp.path().to_path_buf());
     let backend = ServerBackend::from_config(&config)
         .await
         .expect("failed to create backend");
 
-    let state = Arc::new(AppState {
+    let state = oci_test_state(config, backend);
+
+    OciTestContext { _temp: temp, state }
+}
+
+fn oci_test_config(root: std::path::PathBuf) -> ServerConfig {
+    ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        root,
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_server_frontends([ServerFrontend::Oci])
+    .expect("failed to set server frontends")
+}
+
+fn oci_test_state(config: ServerConfig, backend: ServerBackend) -> Arc<AppState> {
+    Arc::new(AppState {
         config,
         role: ServerRole::All,
         backend,
@@ -136,9 +121,7 @@ pub(crate) async fn build_oci_test_state() -> OciTestContext {
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
-    });
-
-    OciTestContext { _temp: temp, state }
+    })
 }
 
 /// Builds an Axum [`Router`] with the OCI dispatch routes wired up for the
