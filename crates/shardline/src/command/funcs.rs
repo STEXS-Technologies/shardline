@@ -93,7 +93,11 @@ where
         args.push(OsString::from("shardline"));
     }
 
-    let definition = CliDefinition::try_parse_from(args).map_err(CliParseError::from)?;
+    let CliDefinition {
+        command,
+        env_file,
+        config,
+    } = CliDefinition::try_parse_from(args).map_err(CliParseError::from)?;
 
     // Load the --env-file into the process environment before any
     // configuration resolution, so env vars referenced in config files
@@ -101,46 +105,37 @@ where
     // `gc schedule install --env-file` names the EnvironmentFile to emit
     // into the unit; it is not an input dotenv file for this invocation.
     let gc_schedule_install = matches!(
-        &definition.command,
+        &command,
         CliDefinitionCommand::Gc(gc_args)
             if matches!(gc_args.command, Some(GcSubcommand::Schedule(_)))
     );
-    let env_file = definition.env_file.clone();
-    let config = definition.config.clone();
     // Reject command-level validation errors before changing process state.
     // Embedded callers can recover from a failed parse without inheriting
     // its dotenv variables or selected configuration path.
-    let command = match definition {
-        CliDefinition {
-            command:
-                CliDefinitionCommand::Admin(super::definition::AdminCommandArgs {
-                    command: AdminSubcommand::RepositoryPolicy(policy_args),
-                }),
-            ..
-        } if managed => ParsedCommand::RepositoryPolicy(policy_args),
-        CliDefinition {
-            command: CliDefinitionCommand::History(history_args),
-            ..
-        } if managed => ParsedCommand::History(history_args),
+    let command = match command {
+        CliDefinitionCommand::Admin(super::definition::AdminCommandArgs {
+            command: AdminSubcommand::RepositoryPolicy(policy_args),
+        }) if managed => ParsedCommand::RepositoryPolicy(policy_args),
+        CliDefinitionCommand::History(history_args) if managed => {
+            ParsedCommand::History(history_args)
+        }
         #[cfg(target_os = "linux")]
-        CliDefinition {
-            command: CliDefinitionCommand::Maintenance(maintenance_args),
-            ..
-        } if managed => ParsedCommand::Maintenance {
-            state_dir: maintenance_args.state_dir,
-            task_id: maintenance_args.task_id,
-            operation: maintenance_args.command,
-        },
+        CliDefinitionCommand::Maintenance(maintenance_args) if managed => {
+            ParsedCommand::Maintenance {
+                state_dir: maintenance_args.state_dir,
+                task_id: maintenance_args.task_id,
+                operation: maintenance_args.command,
+            }
+        }
         #[cfg(target_os = "linux")]
-        CliDefinition {
-            command: CliDefinitionCommand::MaintenanceWorker(worker_args),
-            ..
-        } if managed => ParsedCommand::MaintenanceWorker {
-            journal: worker_args.journal,
-            scope: worker_args.scope,
-            generation: worker_args.generation,
-        },
-        definition => ParsedCommand::Existing(CliCommand::try_from(definition)?),
+        CliDefinitionCommand::MaintenanceWorker(worker_args) if managed => {
+            ParsedCommand::MaintenanceWorker {
+                journal: worker_args.journal,
+                scope: worker_args.scope,
+                generation: worker_args.generation,
+            }
+        }
+        command => ParsedCommand::Existing(CliCommand::try_from(command)?),
     };
     #[cfg(not(target_os = "linux"))]
     let _ = managed;
@@ -209,11 +204,11 @@ pub(crate) fn cli_definition_command() -> clap::Command {
     CliDefinition::command()
 }
 
-impl TryFrom<CliDefinition> for CliCommand {
+impl TryFrom<CliDefinitionCommand> for CliCommand {
     type Error = CliParseError;
 
-    fn try_from(value: CliDefinition) -> Result<Self, Self::Error> {
-        match value.command {
+    fn try_from(value: CliDefinitionCommand) -> Result<Self, Self::Error> {
+        match value {
             CliDefinitionCommand::History(_) => Err(CliParseError::validation(
                 ErrorKind::InvalidSubcommand,
                 "history inspection must be dispatched through shardline::run",
