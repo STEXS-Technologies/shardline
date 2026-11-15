@@ -1,7 +1,6 @@
 use axum::body::Bytes;
 use bytes::BytesMut;
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
-use tokio::task;
+use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, PutOutcome};
 use tracing::{debug, trace};
 
 use super::body_reader::ChunkBuffer;
@@ -39,7 +38,6 @@ struct ChunkStorageRequest {
     compressed: Bytes,
     hash_hex: String,
     chunk_length: u64,
-    compressed_length: u64,
 }
 
 fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageRequest, ServerError> {
@@ -71,7 +69,6 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
         compressed: super::buffer_admission::into_bytes(compressed, raw_owner.clone()),
         hash_hex,
         chunk_length,
-        compressed_length,
     })
 }
 
@@ -97,8 +94,13 @@ pub(super) async fn put_if_absent_with_verified_cache(
 ) -> Result<(StoredChunkOutcome, Option<BytesMut>), ServerError> {
     let request = chunk_object_key_and_integrity(&chunk)?;
     let ChunkBuffer(bytes) = chunk;
-    let (outcome, compressed_bytes) =
-        put_if_absent_pooled_bytes(object_store, &request, request.compressed.clone()).await?;
+    let outcome = AsyncObjectStore::put_if_absent(
+        object_store,
+        &request.key,
+        ObjectBody::from_bytes(request.compressed.clone()),
+        &request.integrity,
+    )
+    .await?;
     record_dedup_on_already_exists(outcome, request.chunk_length);
     if outcome == PutOutcome::AlreadyExists
         && matches!(object_store, ServerObjectStore::S3(_))
@@ -107,18 +109,17 @@ pub(super) async fn put_if_absent_with_verified_cache(
         cache
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .remember_verified_existing(&request.hash_hex, &bytes, request.compressed_length)?;
+            .remember_verified_existing(&request.hash_hex, &bytes, request.integrity.length())?;
     }
     let ChunkStorageRequest {
         hash_hex,
         chunk_length,
-        compressed_length,
+        integrity,
         compressed,
         ..
     } = request;
-    // Release our encoded owners before attempting raw buffer reuse. Any
+    // Release the encoded owner before attempting raw buffer reuse. Any
     // outstanding storage clone continues to retain its raw admission owner.
-    drop(compressed_bytes);
     drop(compressed);
     // Return the original (uncompressed) bytes for reuse as a pending buffer
     let reusable_buffer = bytes.try_into_mut().ok();
@@ -126,51 +127,11 @@ pub(super) async fn put_if_absent_with_verified_cache(
         StoredChunkOutcome {
             hash_hex,
             chunk_length,
-            compressed_length,
+            compressed_length: integrity.length(),
             inserted: matches!(outcome, PutOutcome::Inserted),
         },
         reusable_buffer,
     ))
-}
-
-async fn put_if_absent_pooled_bytes(
-    object_store: &ServerObjectStore,
-    request: &ChunkStorageRequest,
-    bytes: Bytes,
-) -> Result<(PutOutcome, Bytes), ServerError> {
-    match object_store {
-        ServerObjectStore::Local(store) => {
-            let store = store.clone();
-            let key = request.key.clone();
-            let integrity = request.integrity;
-            task::spawn_blocking(move || {
-                let outcome = store
-                    .put_if_absent(&key, ObjectBody::from_bytes(bytes.clone()), &integrity)
-                    .map_err(ServerError::from)?;
-                Ok((outcome, bytes))
-            })
-            .await
-            .map_err(ServerError::BlockingTask)?
-        }
-        ServerObjectStore::S3(store) => {
-            let outcome = shardline_storage::AsyncObjectStore::put_if_absent(
-                store,
-                &request.key,
-                ObjectBody::from_bytes(bytes.clone()),
-                &request.integrity,
-            )
-            .await?;
-            Ok((outcome, bytes))
-        }
-        ServerObjectStore::Blackhole => {
-            let outcome = object_store.put_if_absent(
-                &request.key,
-                ObjectBody::from_bytes(bytes.clone()),
-                &request.integrity,
-            )?;
-            Ok((outcome, bytes))
-        }
-    }
 }
 
 #[cfg(test)]
@@ -232,7 +193,7 @@ mod tests {
         assert_eq!(request.hash_hex, expected_hex);
         // Small data may not compress below raw length (LZ4 adds size prefix overhead),
         // but the compressed length must be consistent
-        assert!(request.compressed_length > 0);
+        assert!(request.integrity.length() > 0);
     }
 
     #[test]
@@ -746,9 +707,9 @@ mod tests {
         let chunk = ChunkBuffer(Bytes::from(vec![0u8; 4096]));
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
         assert!(
-            request.compressed_length <= request.chunk_length,
+            request.integrity.length() <= request.chunk_length,
             "compressible data should not expand (compressed={} vs raw={})",
-            request.compressed_length,
+            request.integrity.length(),
             request.chunk_length
         );
     }
@@ -759,7 +720,7 @@ mod tests {
         let chunk = ChunkBuffer(Bytes::from(data));
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
         // Small data with LZ4 prepend_size overhead may be larger than raw
-        assert!(request.compressed_length > 0);
+        assert!(request.integrity.length() > 0);
         assert_eq!(request.chunk_length, 128);
     }
 }
