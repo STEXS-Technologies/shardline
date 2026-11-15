@@ -3971,6 +3971,59 @@ rebuild/backfill machinery before lookup can discover them. Storage tests also
 exercise the S3-compatible object-store fixture; these measurements use local
 physical storage. Benchmark output includes inventories and per-lane logs.
 
+### PostgreSQL/MinIO GC recovery qualification (2026-11-15)
+
+Four existing deployment fault drills passed against a frozen binary built from
+clean commit `45fd33b484df17ec439bb3d5606a9bee97d7b646`, using real local
+PostgreSQL and MinIO containers. The acknowledgement drills also provision Redis.
+The binary used Rust `1.99.0 (b940084d7 2026-09-28)`, the dev profile with debug
+information disabled, and all CLI features. Its SHA-256 was
+`efa91c53f87ceec68820bcfafb2b629a94e2d360120968e288da6cc23ba975a5`.
+
+| Existing drill | Result | Test elapsed time |
+| --- | --- | ---: |
+| `native_source_gc_sigkill_preserves_live_bytes_and_expired_orphan_recovery` | Passed | 16.955 s |
+| `drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed` | Passed | 12.016 s |
+| `drill_gc_delayed_delete_rejects_hold_after_takeover` | Passed | 16.511 s |
+| `drill_gc_saved_reply_recovers_after_database_outage` | Passed | 42.889 s |
+
+These cover process death during a source read, preservation of referenced
+native content, reclamation of an expired orphan after restart, lost remote
+delete acknowledgements, deletion takeover fencing, and recovery of a saved
+reply after a database outage. Timings include fixture setup and deliberate
+fault waits; they are not upload latency or throughput measurements.
+
+To repeat from that clean commit, with Docker and cargo-nextest available:
+
+```bash
+export RUSTC_WRAPPER=
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_BUILD_JOBS=4
+cargo build --locked --all-features -p shardline
+# Freeze the executable before compiling the server test harness.
+qualification_output=$(mktemp -d)
+cp target/debug/shardline "$qualification_output/shardline"
+export CARGO_BIN_EXE_shardline="$qualification_output/shardline"
+export SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 SHARDLINE_CHAOS_DEPLOYMENT=1
+cargo nextest run --locked -p shardline-server --all-features \
+  --test deployment_chaos \
+  -E 'test(native_source_gc_sigkill_preserves_live_bytes_and_expired_orphan_recovery) | test(drill_gc_applied_remote_delete_with_lost_acknowledgement_is_not_replayed) | test(drill_gc_delayed_delete_rejects_hold_after_takeover) | test(drill_gc_saved_reply_recovers_after_database_outage)' \
+  --test-threads 1 --success-output immediate --failure-output immediate
+```
+
+If `CARGO_TARGET_DIR` is configured, copy the binary from that target directory
+instead. The recorded run used a shared target directory and ran the source-GC
+drill separately from the three acknowledgement drills. All four selected tests
+executed; other deployment tests were excluded by the filter. No selected test
+reported a missing-prerequisite skip.
+
+This is targeted local fault qualification, not the complete
+[distributed integrity gate](../CONTRIBUTING.md), independent CI evidence, or
+production-scale qualification. Concurrent cross-protocol uploads, multi-tenant
+isolation under load, and PostgreSQL/object-store throughput and read
+amplification still require a separate measured run. The local physical-reuse
+benchmark above remains a separate result.
+
 ### Standalone index checks without inherited S3 dependencies (2026-11-15)
 
 Compared `b38e851f` with `e83bdc5a`. Workspace storage dependencies no longer
