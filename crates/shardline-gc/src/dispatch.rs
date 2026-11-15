@@ -18,38 +18,16 @@ pub(super) fn optional_chunk_container_keys(
     frontends: &[ServerFrontend],
     chunk_hash: &str,
 ) -> Result<Vec<ObjectKey>, GcError> {
-    let mut object_keys = Vec::new();
-    for frontend in frontends {
-        match frontend {
-            // Hub uploads use the same native Xet storage even when the public
-            // Xet frontend was not selected separately.
-            ServerFrontend::Xet | ServerFrontend::Hub => {
-                let object_key = xorb_object_key(chunk_hash)?;
-                if !object_keys.contains(&object_key) {
-                    object_keys.push(object_key);
-                }
-                // Also reference the xorb chunk-hash cache sidecar so the
-                // GC does not treat it as an orphan.  The sidecar shares
-                // the same xorb hash and is safe to reference alongside
-                // the xorb container itself.
-                let cache_prefix = chunk_hash.get(..2).ok_or(GcError::InvalidContentHash)?;
-                let cache_key_str = format!("_xorb_chunks/{cache_prefix}/{chunk_hash}");
-                if let Ok(cache_key) = ObjectKey::parse(&cache_key_str)
-                    && !object_keys.contains(&cache_key)
-                {
-                    object_keys.push(cache_key);
-                }
-            }
-            // S3 protocol keys are skipped by `scan_orphan_objects`'s
-            // unrecognized-key path and chunks are record-protected, so GC/fsck
-            // need no behavior change.
-            ServerFrontend::Lfs
-            | ServerFrontend::BazelHttp
-            | ServerFrontend::Oci
-            | ServerFrontend::S3 => {}
-        }
+    if !uses_native_xet_storage(frontends) {
+        return Ok(Vec::new());
     }
-
+    let mut object_keys = vec![xorb_object_key(chunk_hash)?];
+    // Keep the derived member-cache sidecar alongside its source container.
+    let cache_prefix = chunk_hash.get(..2).ok_or(GcError::InvalidContentHash)?;
+    let cache_key = format!("_xorb_chunks/{cache_prefix}/{chunk_hash}");
+    if let Ok(cache_key) = ObjectKey::parse(&cache_key) {
+        object_keys.push(cache_key);
+    }
     Ok(object_keys)
 }
 
@@ -68,25 +46,13 @@ pub(super) fn managed_protocol_object_identity(
     frontends: &[ServerFrontend],
     key: &ObjectKey,
 ) -> Result<Option<String>, GcError> {
-    for frontend in frontends {
-        match frontend {
-            ServerFrontend::Xet | ServerFrontend::Hub => {
-                if let Some(hash) = xorb_hash_from_object_key_if_present(key)? {
-                    return Ok(Some(hash.to_owned()));
-                }
-                if let Some(hash) = shard_hash_from_object_key_if_present(key)? {
-                    return Ok(Some(hash.to_owned()));
-                }
-            }
-            // S3 objects are handled by the unrecognized-key path; no-op here.
-            ServerFrontend::Lfs
-            | ServerFrontend::BazelHttp
-            | ServerFrontend::Oci
-            | ServerFrontend::S3 => {}
-        }
+    if !uses_native_xet_storage(frontends) {
+        return Ok(None);
     }
-
-    Ok(None)
+    if let Some(hash) = xorb_hash_from_object_key_if_present(key)? {
+        return Ok(Some(hash.to_owned()));
+    }
+    Ok(shard_hash_from_object_key_if_present(key)?.map(str::to_owned))
 }
 
 pub(super) fn visit_protocol_object_member_chunks<Visitor>(
@@ -98,35 +64,24 @@ pub(super) fn visit_protocol_object_member_chunks<Visitor>(
 where
     Visitor: FnMut(String) -> Result<(), GcError>,
 {
-    for frontend in frontends {
-        match frontend {
-            ServerFrontend::Xet | ServerFrontend::Hub => {
-                if xorb_hash_from_object_key_if_present(object_key)?.is_some() {
-                    let mut result = Ok(());
-                    let present = visit_stored_xorb_chunk_hashes_if_present(
-                        object_store,
-                        object_key,
-                        |chunk_hash_hex| match visitor(chunk_hash_hex) {
-                            Ok(()) => Ok(()),
-                            Err(e) => {
-                                result = Err(e);
-                                Err(XetAdapterError::NotFound)
-                            }
-                        },
-                    )?;
-                    result?;
-                    return Ok(present);
+    if !uses_native_xet_storage(frontends)
+        || xorb_hash_from_object_key_if_present(object_key)?.is_none()
+    {
+        return Ok(false);
+    }
+    let mut result = Ok(());
+    let present =
+        visit_stored_xorb_chunk_hashes_if_present(object_store, object_key, |chunk_hash_hex| {
+            match visitor(chunk_hash_hex) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    result = Err(error);
+                    Err(XetAdapterError::NotFound)
                 }
             }
-            // S3 chunks are record-protected, so GC/fsck need no behavior change.
-            ServerFrontend::Lfs
-            | ServerFrontend::BazelHttp
-            | ServerFrontend::Oci
-            | ServerFrontend::S3 => {}
-        }
-    }
-
-    Ok(false)
+        })?;
+    result?;
+    Ok(present)
 }
 
 #[cfg(test)]
