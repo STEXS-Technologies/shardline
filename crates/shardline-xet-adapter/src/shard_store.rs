@@ -593,8 +593,9 @@ fn read_bounded_file_sections<R: Read>(
                     .map_err(|error| invalid_serialized_shard(&error))?,
             );
         }
-        let mut verification = Vec::with_capacity(segment_count);
+        let mut verification = Vec::new();
         if header.contains_verification() {
+            verification.reserve_exact(segment_count);
             for _ in 0..segment_count {
                 verification.push(
                     FileVerificationEntry::deserialize(reader, version)
