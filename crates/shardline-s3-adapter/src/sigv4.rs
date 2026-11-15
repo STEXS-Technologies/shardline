@@ -648,7 +648,6 @@ fn optional_unique<'pairs>(
 
 fn query_pairs(uri: &Uri) -> Result<Vec<(String, String)>, S3Error> {
     uri.query()
-        .filter(|query| !query.is_empty())
         .unwrap_or("")
         .split('&')
         .filter(|pair| !pair.is_empty())
@@ -666,16 +665,12 @@ fn query_pairs(uri: &Uri) -> Result<Vec<(String, String)>, S3Error> {
 }
 
 fn encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
-                char::from(byte).to_string()
-            } else {
-                format!("%{byte:02X}")
-            }
-        })
-        .collect()
+    const ESCAPED: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'~');
+    percent_encoding::utf8_percent_encode(value, ESCAPED).to_string()
 }
 
 #[cfg(test)]

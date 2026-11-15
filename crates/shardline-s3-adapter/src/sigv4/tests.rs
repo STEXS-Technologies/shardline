@@ -548,3 +548,16 @@ fn official_presigned_vector_expiry_and_query_tampering() {
         );
     }
 }
+
+#[test]
+fn canonical_encoding_preserves_unreserved_and_escapes_utf8_bytes() {
+    for (value, expected) in [
+        ("", ""),
+        ("AZaz09-_.~", "AZaz09-_.~"),
+        (" /+%=", "%20%2F%2B%25%3D"),
+        ("é/雪", "%C3%A9%2F%E9%9B%AA"),
+        ("\0\r\n", "%00%0D%0A"),
+    ] {
+        assert_eq!(encode(value), expected);
+    }
+}
