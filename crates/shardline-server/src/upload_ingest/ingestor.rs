@@ -161,24 +161,11 @@ impl FileUploadIngestor {
             sha256.update(bytes);
         }
 
-        // Accumulate incoming bytes
         self.pending.extend_from_slice(bytes);
-
-        // Loop to find and flush multiple chunks from pending
-        loop {
-            let boundary = {
-                if self.pending.len() < self.cdc_chunker.min_chunk() {
-                    None
-                } else {
-                    self.cdc_chunker.find_boundary(&self.pending)
-                }
-            };
-            match boundary {
-                Some(b) => {
-                    self.flush_pending_chunk_at(object_store, b).await?;
-                }
-                None => break,
-            }
+        while self.pending.len() >= self.cdc_chunker.min_chunk()
+            && let Some(boundary) = self.cdc_chunker.find_boundary(&self.pending)
+        {
+            self.flush_pending_chunk_at(object_store, boundary).await?;
         }
 
         Ok(())
@@ -1067,85 +1054,44 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_dedup_records_savings_metric_across_identical_uploads() {
-        // Verify the ingestor plumbing: the ingestor → chunk_store pipeline
-        // correctly processes identical content twice. The actual dedup metric
-        // emission is tested at the chunk_store level with a Local store
-        // (dedup_records_savings_metric_on_already_exists).
-        // Use blackhole so chunks complete synchronously.
+    async fn blackhole_uploads_preserve_cdc_accounting_without_reporting_reuse() {
         let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128).unwrap();
-        let content = b"aaaabbbbccccdddd"; // 16 bytes → 4 chunks of 4
-
-        // First upload
-        let mut first = FileUploadIngestor::new(chunk_size, false);
-        first
-            .ingest_body_chunk(&object_store, &Bytes::from_static(content))
-            .await
-            .unwrap();
-        let (_record, first_response) = first
-            .finish(&object_store, "first.bin", None, None)
-            .await
-            .unwrap();
-        assert!(first_response.inserted_chunks >= 1);
-        assert_eq!(first_response.reused_chunks, 0);
-
-        // Second upload with same content
-        let mut second = FileUploadIngestor::new(chunk_size, false);
-        second
-            .ingest_body_chunk(&object_store, &Bytes::from_static(content))
-            .await
-            .unwrap();
-        let (_record, second_response) = second
-            .finish(&object_store, "second.bin", None, None)
-            .await
-            .unwrap();
-        // Blackhole always returns Inserted
-        assert!(second_response.inserted_chunks >= 1);
-        assert_eq!(second_response.reused_chunks, 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_cdc_produces_non_zero_chunks_with_blackhole() {
-        // Verify CDC produces chunks with non-zero length via Blackhole store.
-        let object_store = ServerObjectStore::blackhole();
-        let target_chunk_size = NonZeroUsize::new(128).unwrap();
-        let mut ingestor = FileUploadIngestor::new_with_parallelism(
-            target_chunk_size,
-            false,
-            NonZeroUsize::new(2).unwrap(),
-            &crate::admission::ExecutionPools::default_sizes().hashing,
-        );
-        // CDC chunker is created by default
-
-        // Send enough data to produce multiple CDC chunks
         let data: Vec<u8> = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
             .iter()
             .copied()
             .cycle()
             .take(5760)
             .collect();
-        let body = Bytes::from(data);
-        let ingested = ingestor.ingest_body_chunk(&object_store, &body).await;
-        assert!(ingested.is_ok());
-
-        let (_record, response) = ingestor
-            .finish(&object_store, "cdc-test.bin", None, None)
-            .await
-            .unwrap();
-
-        // Should have produced at least one chunk
-        assert!(response.inserted_chunks > 0);
-        // Total bytes should match input
-        assert_eq!(response.stored_bytes, 5760);
-
-        // Each chunk should have non-zero length
-        for chunk in &response.chunks {
-            assert!(chunk.length > 0);
+        for body in [Bytes::from_static(b"aaaabbbbccccdddd"), Bytes::from(data)] {
+            // The blackhole always reports insertion, including repeat uploads.
+            for file_id in ["first.bin", "second.bin"] {
+                let mut ingestor = FileUploadIngestor::new_with_parallelism(
+                    NonZeroUsize::new(128).unwrap(),
+                    false,
+                    NonZeroUsize::new(2).unwrap(),
+                    &crate::admission::ExecutionPools::default_sizes().hashing,
+                );
+                ingestor
+                    .ingest_body_chunk(&object_store, &body)
+                    .await
+                    .unwrap();
+                let (_record, response) = ingestor
+                    .finish(&object_store, file_id, None, None)
+                    .await
+                    .unwrap();
+                assert!(response.inserted_chunks > 0);
+                assert_eq!(response.reused_chunks, 0);
+                assert_eq!(response.stored_bytes, body.len() as u64);
+                assert!(response.chunks.iter().all(|chunk| chunk.length > 0));
+                assert_eq!(
+                    response
+                        .chunks
+                        .iter()
+                        .map(|chunk| chunk.length)
+                        .sum::<u64>(),
+                    body.len() as u64,
+                );
+            }
         }
-
-        // The total of all chunk lengths should equal the input size
-        let total_chunk_bytes: u64 = response.chunks.iter().map(|c| c.length).sum();
-        assert_eq!(total_chunk_bytes, 5760);
     }
 }
