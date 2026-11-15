@@ -697,15 +697,13 @@ async fn coordinator_store_content_addressed_blob_enforces_size_limits() {
         ("below-boundary", 5, b"abc".to_vec()),
     ] {
         let storage = tempfile::tempdir().unwrap();
-        let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
         let objects = LocalObjectStore::new(storage.path().join("objects")).unwrap();
-        let object_store = SyncObjectStoreBridge::new(objects.clone());
         let limits = CasLimits::new(
             NonZeroU64::new(100).unwrap(),
             NonZeroU64::new(100).unwrap(),
             NonZeroU64::new(max).unwrap(),
         );
-        let coordinator = CasCoordinator::new(index, object_store, (), limits);
+        let coordinator = CasCoordinator::new((), objects.clone(), (), limits);
         let key = xorb_key("ab", name);
         let length = u64::try_from(body.len()).unwrap();
         let integrity = ObjectIntegrity::new(blake3_hash(&body), length);

@@ -70,13 +70,7 @@ impl<I, O, R> CasCoordinator<I, O, R> {
     }
 }
 
-impl<I, O, R> CasCoordinator<I, O, R>
-where
-    I: AsyncIndexStore + Send + Sync,
-    <I as AsyncIndexStore>::Error: std::error::Error + Send + Sync + 'static,
-    O: AsyncObjectStore + Clone + 'static,
-    <O as AsyncObjectStore>::Error: std::error::Error + Send + Sync + 'static,
-{
+impl<I, O: AsyncObjectStore, R> CasCoordinator<I, O, R> {
     /// # Errors
     ///
     /// Returns CasError when the body exceeds the configured limit or the
