@@ -3750,24 +3750,24 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`4c57ff2345b3fcae2eb4add575154cd2e3b071bd`. It counts all tracked `.rs`
+`248c9250dace1da32bb972b3f9c3df0daa7dfef3`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 580,204 | 23,445 (3.88%) |
-| Server | 220,570 | 211,036 | 9,534 (4.32%) |
+| Entire repository | 603,649 | 579,893 | 23,756 (3.94%) |
+| Server | 220,570 | 210,914 | 9,656 (4.38%) |
 | Server core | 6,454 | 5,580 | 874 (13.54%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,391 | 982 (4.82%) |
 | S3 adapter | 10,954 | 10,253 | 701 (6.40%) |
 | Xet adapter | 17,801 | 15,986 | 1,815 (10.20%) |
 | OCI adapter | 7,700 | 6,977 | 723 (9.39%) |
-| Cache | 6,573 | 5,856 | 717 (10.91%) |
+| Cache | 6,573 | 5,786 | 787 (11.97%) |
 | Index | 71,472 | 68,525 | 2,947 (4.12%) |
-| CAS | 3,447 | 2,977 | 470 (13.64%) |
+| CAS | 3,447 | 2,858 | 589 (17.09%) |
 | GC | 10,954 | 10,634 | 320 (2.92%) |
 | Fsck | 8,989 | 8,501 | 488 (5.43%) |
 | Rebuild | 4,326 | 4,081 | 245 (5.66%) |
@@ -3840,6 +3840,28 @@ consolidating journal write/sync/length accounting. These tests ran on Linux;
 the portable filesystem branch was not executed. Tests used Rust 1.99 and strict
 Clippy used Rust 1.100. These checks do not measure throughput or build-time gains.
 
+At `c3dc54cd`, all 58 CAS tests passed with all features after simplifying
+upload lifecycle orchestration and raw-blob storage requirements. The raw-blob
+contract uses a unit index to prove that writing an object does not require an
+index implementation. Duplicate error tests were consolidated without dropping
+variant messages or conversion categories; derived-trait smoke tests were removed.
+
+At `724c732d`, all 150 cache tests passed, including 20 Redis integration tests
+with `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1` and Docker infrastructure required.
+This covers loader cancellation, replacement accounting, stale reservation
+rejection, cross-replica loading, TTL expiry and mutual TLS. Ten key-format tests
+became one table retaining every input and asserting complete serialized keys.
+
+At `bed20c61`, all 12 selected transfer-limiter and related error tests passed.
+The closed-semaphore test now closes the semaphore, and timeout coverage uses
+paused time without a spawned task. At `248c9250`, all 47 download-stream tests
+passed after simplifying container routing and grouping, eliminating a full
+file-record clone, and consolidating four range tests across both local and
+dispatched reads. Integrity, truncation, file-growth and cancellation tests remain.
+Strict library/test Clippy passed for CAS, cache and server at their respective
+revisions. Tests used Rust 1.99 and strict Clippy used Rust 1.100. These checks
+provide no new production-throughput or build-time measurement.
+
 At `46fe2321`, raw-Xorb construction shares one implementation and server
 packing omits an unused boundary vector. Thirty-two duplicated compression/raw
 smoke tests were consolidated, moving their unique wire-value, scheme-name and
@@ -3895,8 +3917,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 4c57ff2345b3fcae2eb4add575154cd2e3b071bd -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 4c57ff2345b3fcae2eb4add575154cd2e3b071bd -- '*.rs' | wc -l
+git grep -I -n '^' 248c9250dace1da32bb972b3f9c3df0daa7dfef3 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 248c9250dace1da32bb972b3f9c3df0daa7dfef3 -- '*.rs' | wc -l
 ```
 
 The cleanup reuses Cargo build artifacts, narrows ordinary binary and
