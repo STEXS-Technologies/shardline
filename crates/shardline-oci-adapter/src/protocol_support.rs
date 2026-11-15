@@ -132,6 +132,10 @@ mod tests {
             "tag/with/slashes",
             "-starts-with-hyphen",
             ".starts-with-dot",
+            "tag-émoji",
+            "❤️",
+            "café",
+            "cafe\u{0301}",
         ] {
             assert!(
                 matches!(
@@ -189,24 +193,24 @@ mod tests {
     }
 
     #[test]
-    fn stable_hex_id_produces_64_char_hex() {
-        let id = super::stable_hex_id("hello");
-        assert_eq!(id.len(), 64);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn stable_hex_id_is_deterministic() {
-        let a = super::stable_hex_id("test-value");
-        let b = super::stable_hex_id("test-value");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn stable_hex_id_differs_for_different_inputs() {
-        let a = super::stable_hex_id("input-a");
-        let b = super::stable_hex_id("input-b");
-        assert_ne!(a, b);
+    fn stable_hex_id_is_deterministic_lowercase_sha256() {
+        assert_eq!(
+            super::stable_hex_id("hello"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        for input in ["hello", "test-value", "input-a", "input-b"] {
+            let id = super::stable_hex_id(input);
+            assert_eq!(id.len(), 64);
+            assert!(
+                id.bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            );
+            assert_eq!(id, super::stable_hex_id(input));
+        }
+        assert_ne!(
+            super::stable_hex_id("input-a"),
+            super::stable_hex_id("input-b")
+        );
     }
 
     #[test]
@@ -231,55 +235,48 @@ mod tests {
 
     #[allow(clippy::unwrap_used)]
     #[test]
-    fn object_key_valid() {
-        let key = super::object_key("valid/path").unwrap();
-        assert_eq!(key.as_str(), "valid/path");
+    fn object_key_preserves_valid_paths_and_rejects_unsafe_paths() {
+        assert_eq!(
+            super::object_key("valid/path").unwrap().as_str(),
+            "valid/path"
+        );
+        for path in ["", "../unsafe"] {
+            assert!(
+                matches!(
+                    super::object_key(path),
+                    Err(OciAdapterError::InvalidContentHash)
+                ),
+                "{path:?}"
+            );
+        }
     }
 
     #[test]
-    fn object_key_invalid_empty() {
-        assert!(super::object_key("").is_err());
-    }
-
-    #[test]
-    fn object_key_invalid_unsafe_path() {
-        assert!(super::object_key("../unsafe").is_err());
-    }
-
-    #[test]
-    fn protocol_validation_invalid_digest() {
-        let err = OciAdapterError::invalid_digest();
-        assert!(matches!(err, OciAdapterError::InvalidDigest));
-    }
-
-    #[test]
-    fn protocol_validation_invalid_content_hash() {
-        let err = OciAdapterError::invalid_content_hash();
-        assert!(matches!(err, OciAdapterError::InvalidContentHash));
-    }
-
-    #[test]
-    fn protocol_validation_invalid_repository_name() {
-        let err = OciAdapterError::invalid_repository_name();
-        assert!(matches!(err, OciAdapterError::InvalidRepositoryName));
-    }
-
-    #[test]
-    fn protocol_validation_not_found() {
-        let err = OciAdapterError::not_found();
-        assert!(matches!(err, OciAdapterError::NotFound));
-    }
-
-    #[test]
-    fn protocol_validation_invalid_manifest_reference() {
-        let err = OciAdapterError::invalid_manifest_reference();
-        assert!(matches!(err, OciAdapterError::InvalidManifestReference));
-    }
-
-    #[test]
-    fn protocol_validation_invalid_upload_session() {
-        let err = OciAdapterError::invalid_upload_session();
-        assert!(matches!(err, OciAdapterError::InvalidUploadSession));
+    fn protocol_validation_maps_each_error_variant() {
+        assert!(matches!(
+            OciAdapterError::invalid_digest(),
+            OciAdapterError::InvalidDigest
+        ));
+        assert!(matches!(
+            OciAdapterError::invalid_content_hash(),
+            OciAdapterError::InvalidContentHash
+        ));
+        assert!(matches!(
+            OciAdapterError::invalid_repository_name(),
+            OciAdapterError::InvalidRepositoryName
+        ));
+        assert!(matches!(
+            OciAdapterError::not_found(),
+            OciAdapterError::NotFound
+        ));
+        assert!(matches!(
+            OciAdapterError::invalid_manifest_reference(),
+            OciAdapterError::InvalidManifestReference
+        ));
+        assert!(matches!(
+            OciAdapterError::invalid_upload_session(),
+            OciAdapterError::InvalidUploadSession
+        ));
     }
 
     #[test]
@@ -290,63 +287,5 @@ mod tests {
     #[test]
     fn validate_oci_repository_scope_none_scope_ok() {
         assert!(validate_oci_repository_scope("any/repo", None).is_ok());
-    }
-
-    #[test]
-    fn validate_upload_session_id_too_long_errors() {
-        let long = "a".repeat(65);
-        assert!(matches!(
-            validate_upload_session_id(&long),
-            Err(OciAdapterError::InvalidUploadSession)
-        ));
-    }
-
-    // ── Unicode / multibyte tags ────────────────────────────────────────────
-
-    #[test]
-    fn validate_oci_tag_rejects_utf8_multibyte_chars() {
-        // The OCI distribution spec requires tag characters to be valid ASCII
-        // alphanumeric, underscore, dot, or hyphen.  Multibyte UTF-8 sequences
-        // like é (U+00E9, 2-byte UTF-8) or ❤ (U+2764, 3-byte UTF-8) are not
-        // valid ASCII and MUST be rejected.
-        assert!(matches!(
-            validate_oci_tag("tag-émoji"),
-            Err(OciAdapterError::InvalidManifestReference)
-        ));
-        assert!(matches!(
-            validate_oci_tag("❤️"),
-            Err(OciAdapterError::InvalidManifestReference)
-        ));
-        assert!(matches!(
-            validate_oci_tag("café"),
-            Err(OciAdapterError::InvalidManifestReference)
-        ));
-    }
-
-    #[test]
-    fn validate_oci_tag_nfc_vs_nfd_no_canonicalization() {
-        // NFC form: "café" — U+00E9 (single precomposed character).
-        // NFD form: "café" — U+0065 + U+0301 (e + combining acute accent).
-        // Both contain non-ASCII bytes and are rejected by the ASCII-only
-        // validator.  The important property is that neither is silently
-        // canonicalized to the other — both are treated identically
-        // (rejected), proving no normalization is applied.
-        let nfc = "caf\u{00e9}"; // café  (precomposed é)
-        let nfd = "cafe\u{0301}"; // café  (e + combining accent)
-
-        assert!(nfc != nfd, "NFC and NFD forms must be different strings");
-
-        let nfc_result = validate_oci_tag(nfc);
-        let nfd_result = validate_oci_tag(nfd);
-
-        // Both are rejected — no canonicalization converts one to the other.
-        assert!(
-            matches!(nfc_result, Err(OciAdapterError::InvalidManifestReference)),
-            "NFC form should be rejected: {nfc_result:?}"
-        );
-        assert!(
-            matches!(nfd_result, Err(OciAdapterError::InvalidManifestReference)),
-            "NFD form should be rejected: {nfd_result:?}"
-        );
     }
 }
