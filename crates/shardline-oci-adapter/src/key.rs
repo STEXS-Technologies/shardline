@@ -1,4 +1,5 @@
 use shardline_protocol::RepositoryScope;
+use shardline_server_core::validate_content_hash_with;
 use shardline_storage::{ObjectKey, ObjectPrefix};
 
 use crate::{
@@ -110,15 +111,10 @@ fn oci_object_key(
 }
 
 fn validate_scope_namespace(scope_namespace: &str) -> Result<(), OciAdapterError> {
-    if scope_namespace == "global"
-        || (scope_namespace.len() == 64
-            && scope_namespace
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    {
+    if scope_namespace == "global" {
         return Ok(());
     }
-    Err(OciAdapterError::InvalidContentHash)
+    validate_content_hash_with(scope_namespace, || OciAdapterError::InvalidContentHash)
 }
 
 fn oci_object_key_from_namespace(
@@ -129,7 +125,7 @@ fn oci_object_key_from_namespace(
 ) -> Result<ObjectKey, OciAdapterError> {
     validate_repository(repository)?;
     validate_scope_namespace(scope_namespace)?;
-    parse_sha256_digest(&format!("sha256:{digest_hex}"))?;
+    validate_content_hash_with(digest_hex, || OciAdapterError::InvalidDigest)?;
     object_key(&format!(
         "protocols/oci/{scope_namespace}/repos/{}/{object_namespace}/{digest_hex}",
         stable_hex_id(repository),
@@ -269,7 +265,7 @@ pub fn oci_tag_target_key(
 ) -> Result<ObjectKey, OciAdapterError> {
     validate_repository(repository)?;
     validate_oci_repository_scope(repository, repository_scope)?;
-    parse_sha256_digest(&format!("sha256:{digest_hex}"))?;
+    validate_content_hash_with(digest_hex, || OciAdapterError::InvalidDigest)?;
     validate_oci_tag(tag)?;
     object_key(&format!(
         "protocols/oci/{}/repos/{}/tag-targets/{}/{}",
@@ -290,7 +286,7 @@ pub fn oci_tag_target_prefix(
 ) -> Result<ObjectPrefix, OciAdapterError> {
     validate_repository(repository)?;
     validate_oci_repository_scope(repository, repository_scope)?;
-    parse_sha256_digest(&format!("sha256:{digest_hex}"))?;
+    validate_content_hash_with(digest_hex, || OciAdapterError::InvalidDigest)?;
     ObjectPrefix::parse(&format!(
         "protocols/oci/{}/repos/{}/tag-targets/{}/",
         scope_namespace(repository_scope),
