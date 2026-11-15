@@ -488,32 +488,7 @@ impl S3ObjectStore {
         key: &ObjectKey,
         output: &mut File,
     ) -> Result<Option<u64>, S3ObjectStoreError> {
-        let location = self.location_for_key(key)?;
-        self.block_on_result(async {
-            let result = match self.inner.get(&location).await {
-                Ok(result) => result,
-                Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
-                Err(error) => return Err(S3ObjectStoreError::External(error)),
-            };
-            let expected_length = result.meta.size;
-            let mut written = 0_u64;
-            let mut stream = stream_payload_for_range(result, 0..expected_length)?;
-            while let Some(bytes) = stream.next().await {
-                let bytes = bytes?;
-                written = written
-                    .checked_add(
-                        u64::try_from(bytes.len())
-                            .map_err(|_error| S3ObjectStoreError::IntegrityLengthMismatch)?,
-                    )
-                    .filter(|length| *length <= expected_length)
-                    .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
-                std::io::Write::write_all(output, &bytes).map_err(S3ObjectStoreError::Io)?;
-            }
-            if written != expected_length {
-                return Err(S3ObjectStoreError::IntegrityLengthMismatch);
-            }
-            Ok(Some(written))
-        })
+        self.copy_object_to_writer_if_present(key, output)
     }
 
     /// Copies an object directly to a writer using one GET, without allocating
@@ -536,24 +511,7 @@ impl S3ObjectStore {
                 Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
                 Err(error) => return Err(S3ObjectStoreError::External(error)),
             };
-            let expected_length = result.meta.size;
-            let mut written = 0_u64;
-            let mut stream = stream_payload_for_range(result, 0..expected_length)?;
-            while let Some(bytes) = stream.next().await {
-                let bytes = bytes?;
-                written = written
-                    .checked_add(
-                        u64::try_from(bytes.len())
-                            .map_err(|_error| S3ObjectStoreError::IntegrityLengthMismatch)?,
-                    )
-                    .filter(|length| *length <= expected_length)
-                    .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
-                output.write_all(&bytes).map_err(S3ObjectStoreError::Io)?;
-            }
-            if written != expected_length {
-                return Err(S3ObjectStoreError::IntegrityLengthMismatch);
-            }
-            Ok(Some(expected_length))
+            copy_snapshot_to_writer(result, output).await.map(Some)
         })
     }
 
@@ -586,21 +544,7 @@ impl S3ObjectStore {
             let capacity = usize::try_from(expected_length)
                 .map_err(|_error| S3ObjectReadError::ObjectTooLarge)?;
             let mut output = Vec::with_capacity(capacity);
-            let mut stream = stream_payload_for_range(result, 0..expected_length)?;
-            while let Some(bytes) = stream.next().await {
-                let bytes = bytes?;
-                let next_length = output
-                    .len()
-                    .checked_add(bytes.len())
-                    .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
-                if next_length > capacity {
-                    return Err(S3ObjectStoreError::IntegrityLengthMismatch.into());
-                }
-                output.extend_from_slice(&bytes);
-            }
-            if output.len() != capacity {
-                return Err(S3ObjectStoreError::IntegrityLengthMismatch.into());
-            }
+            copy_snapshot_to_writer(result, &mut output).await?;
             Ok(Some((output, expected_length)))
         })
     }
@@ -1283,6 +1227,30 @@ pub(crate) fn validated_external_range(range: ByteRange) -> Result<Range<u64>, S
         .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
 
     Ok(range.start()..end_exclusive)
+}
+
+async fn copy_snapshot_to_writer(
+    result: GetResult,
+    output: &mut impl Write,
+) -> Result<u64, S3ObjectStoreError> {
+    let expected_length = result.meta.size;
+    let mut written = 0_u64;
+    let mut stream = stream_payload_for_range(result, 0..expected_length)?;
+    while let Some(bytes) = stream.next().await {
+        let bytes = bytes?;
+        written = written
+            .checked_add(
+                u64::try_from(bytes.len())
+                    .map_err(|_error| S3ObjectStoreError::IntegrityLengthMismatch)?,
+            )
+            .filter(|length| *length <= expected_length)
+            .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
+        output.write_all(&bytes).map_err(S3ObjectStoreError::Io)?;
+    }
+    if written != expected_length {
+        return Err(S3ObjectStoreError::IntegrityLengthMismatch);
+    }
+    Ok(expected_length)
 }
 
 pub(crate) fn stream_payload_for_range(

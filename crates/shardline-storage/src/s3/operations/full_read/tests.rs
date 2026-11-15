@@ -105,3 +105,37 @@ async fn propagates_body_failures_after_partial_output() {
     );
     assert!(copy_payload_to_file(result, &mut file).await.is_err());
 }
+
+#[tokio::test]
+async fn snapshot_copy_preserves_range_and_integrity_errors() {
+    for (size, range, body) in [
+        (3, 0..3, "abc"),
+        (0, 0..0, ""),
+        (3, 1..3, "bc"),
+        (3, 0..3, "ab"),
+        (3, 0..3, "abcd"),
+    ] {
+        let partial = range != (0..size);
+        let mut output = Vec::new();
+        let result = super::super::copy_snapshot_to_writer(
+            response(size, range, vec![Ok(Bytes::from(body))]),
+            &mut output,
+        )
+        .await;
+        if partial {
+            assert!(matches!(
+                result,
+                Err(crate::S3ObjectStoreError::RangeOutOfBounds)
+            ));
+            assert!(output.is_empty());
+        } else if body.len() as u64 != size {
+            assert!(matches!(
+                result,
+                Err(crate::S3ObjectStoreError::IntegrityLengthMismatch)
+            ));
+        } else {
+            assert_eq!(result.unwrap(), size);
+            assert_eq!(output, body.as_bytes());
+        }
+    }
+}
