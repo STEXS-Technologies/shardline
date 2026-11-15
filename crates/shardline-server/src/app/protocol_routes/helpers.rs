@@ -445,80 +445,68 @@ mod tests {
     }
 
     #[test]
-    fn parse_query_map_returns_empty_for_no_query() {
-        let uri: Uri = "/v2/repo/blobs/uploads".parse().unwrap();
-        let result = parse_query_map(&uri).unwrap();
-        assert!(result.is_empty());
+    fn query_maps_preserve_decoded_keys_and_last_values() {
+        for (uri, expected) in [
+            ("/v2/repo/blobs/uploads", vec![]),
+            (
+                "/v2/repo/blobs/uploads?mount=abc123",
+                vec![("mount", "abc123")],
+            ),
+            (
+                "/v2/repo/blobs/uploads?a=1&b=2",
+                vec![("a", "1"), ("b", "2")],
+            ),
+            ("/v2/repo/blobs/uploads?a=1&a=2", vec![("a", "2")]),
+        ] {
+            let result = parse_query_map(&uri.parse().unwrap()).unwrap();
+            let pairs: Vec<_> = result
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            assert_eq!(pairs, expected, "{uri}");
+        }
     }
 
     #[test]
-    fn parse_query_map_parses_single_key_value() {
-        let uri: Uri = "/v2/repo/blobs/uploads?mount=abc123".parse().unwrap();
-        let result = parse_query_map(&uri).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get("mount").unwrap(), "abc123");
+    fn query_values_preserve_all_matching_values_in_order() {
+        for (uri, expected) in [
+            ("/v2/repo/blobs/uploads", vec![]),
+            ("/v2/repo/blobs/uploads?scope=repo:pull", vec!["repo:pull"]),
+            ("/v2/repo/blobs/uploads?scope=a&scope=b", vec!["a", "b"]),
+            ("/v2/repo/blobs/uploads?other=val", vec![]),
+        ] {
+            assert_eq!(
+                parse_query_values(&uri.parse().unwrap(), "scope").unwrap(),
+                expected,
+                "{uri}"
+            );
+        }
     }
 
     #[test]
-    fn parse_query_map_parses_multiple_key_values() {
-        let uri: Uri = "/v2/repo/blobs/uploads?a=1&b=2".parse().unwrap();
-        let result = parse_query_map(&uri).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result.get("a").unwrap(), "1");
-        assert_eq!(result.get("b").unwrap(), "2");
-    }
-
-    #[test]
-    fn parse_query_map_rejects_oversized_query() {
-        let long_value = "a".repeat(super::super::super::MAX_PROTOCOL_QUERY_BYTES + 1);
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/repo/blobs/uploads?key={long_value}"))
-            .build()
+    fn query_parsers_enforce_the_same_byte_limit() {
+        let limit = super::super::super::MAX_PROTOCOL_QUERY_BYTES;
+        let at_limit = "a".repeat(limit);
+        let uri: Uri = format!("/v2/repo/blobs/uploads?{at_limit}")
+            .parse()
             .unwrap();
-        assert!(matches!(
-            parse_query_map(&uri),
-            Err(ServerError::RequestQueryTooLarge)
-        ));
-    }
-
-    #[test]
-    fn parse_query_values_returns_empty_for_no_query() {
-        let uri: Uri = "/v2/repo/blobs/uploads".parse().unwrap();
-        let result = parse_query_values(&uri, "scope").unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn parse_query_values_extracts_matching_key() {
-        let uri: Uri = "/v2/repo/blobs/uploads?scope=repo:pull".parse().unwrap();
-        let result = parse_query_values(&uri, "scope").unwrap();
-        assert_eq!(result, vec!["repo:pull"]);
-    }
-
-    #[test]
-    fn parse_query_values_extracts_multiple_matching_keys() {
-        let uri: Uri = "/v2/repo/blobs/uploads?scope=a&scope=b".parse().unwrap();
-        let result = parse_query_values(&uri, "scope").unwrap();
-        assert_eq!(result, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn parse_query_values_returns_empty_when_key_missing() {
-        let uri: Uri = "/v2/repo/blobs/uploads?other=val".parse().unwrap();
-        let result = parse_query_values(&uri, "scope").unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn parse_query_values_rejects_oversized_query() {
-        let long_value = "a".repeat(super::super::super::MAX_PROTOCOL_QUERY_BYTES + 1);
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/repo/blobs/uploads?scope={long_value}"))
-            .build()
-            .unwrap();
-        assert!(matches!(
-            parse_query_values(&uri, "scope"),
-            Err(ServerError::RequestQueryTooLarge)
-        ));
+        assert_eq!(parse_query_map(&uri).unwrap().len(), 1);
+        assert_eq!(parse_query_values(&uri, &at_limit).unwrap(), vec![""]);
+        let oversized = "a".repeat(limit + 1);
+        for query in [
+            oversized.clone(),
+            format!("key={oversized}"),
+            format!("scope={oversized}"),
+        ] {
+            let uri: Uri = format!("/v2/repo/blobs/uploads?{query}").parse().unwrap();
+            assert!(matches!(
+                parse_query_map(&uri),
+                Err(ServerError::RequestQueryTooLarge)
+            ));
+            assert!(matches!(
+                parse_query_values(&uri, "scope"),
+                Err(ServerError::RequestQueryTooLarge)
+            ));
+        }
     }
 }
