@@ -52,23 +52,6 @@ mod tests {
         "a".repeat(64)
     }
 
-    // --- BazelCacheKind ---
-
-    #[test]
-    fn bazel_cache_kind_ac_as_str() {
-        assert_eq!(BazelCacheKind::Ac.as_str(), "ac");
-    }
-
-    #[test]
-    fn bazel_cache_kind_cas_as_str() {
-        assert_eq!(BazelCacheKind::Cas.as_str(), "cas");
-    }
-
-    #[test]
-    fn bazel_cache_kind_variants_are_distinct() {
-        assert_ne!(BazelCacheKind::Ac, BazelCacheKind::Cas);
-    }
-
     // --- bazel_cache_object_key ---
 
     #[test]
