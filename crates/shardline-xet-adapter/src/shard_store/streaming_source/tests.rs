@@ -182,16 +182,12 @@ async fn remote_source_and_repeated_terms_use_only_streams() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn source_changes_before_revisited_terms_are_rejected() {
-    assert!(exercise(Fault::Corrupt).await.is_err());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn source_removed_before_revisited_terms_is_rejected() {
-    assert!(exercise(Fault::Missing).await.is_err());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ignored_backend_range_cannot_feed_the_file_digest() {
-    assert!(exercise(Fault::IgnoreRange).await.is_err());
+async fn revisited_terms_reject_corrupt_missing_and_ignored_range_sources() {
+    for (name, fault) in [
+        ("corrupt", Fault::Corrupt),
+        ("missing", Fault::Missing),
+        ("ignored range", Fault::IgnoreRange),
+    ] {
+        assert!(exercise(fault).await.is_err(), "source fault: {name}");
+    }
 }

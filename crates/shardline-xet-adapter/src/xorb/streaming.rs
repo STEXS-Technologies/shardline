@@ -209,14 +209,11 @@ impl<'request> StreamingXorb<'request> {
         {
             return Err(XetAdapterError::InvalidSerializedXorb);
         }
-        let base = members
+        let first = members
             .first()
-            .ok_or(XetAdapterError::InvalidSerializedXorb)?
-            .packed_start();
-        let unpacked_base = members
-            .first()
-            .ok_or(XetAdapterError::InvalidSerializedXorb)?
-            .unpacked_start();
+            .ok_or(XetAdapterError::InvalidSerializedXorb)?;
+        let base = first.packed_start();
+        let unpacked_base = first.unpacked_start();
         for (((member, hash), packed), unpacked) in members
             .iter()
             .zip(self.info.chunk_hashes)
