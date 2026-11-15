@@ -898,22 +898,12 @@ pub(crate) async fn lfs_batch(
     // from the request headers exactly as the per-object handlers do.
     let auth = authorize_repository(&state, &headers, requested_scope)?;
     if request.objects.len() > MAX_LFS_BATCH_OBJECTS {
-        return Ok((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "too many objects in batch request" })),
-        )
-            .into_response());
+        return Ok(lfs_validation_response("too many objects in batch request"));
     }
     if let Some(hash_algo) = request.hash_algo.as_deref()
         && hash_algo != "sha256"
     {
-        return Ok((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "unsupported hash algorithm" })),
-        )
-            .into_response());
+        return Ok(lfs_validation_response("unsupported hash algorithm"));
     }
 
     // Determine the transfer adapter. Prefer "xet" when the client supports it
@@ -946,12 +936,7 @@ pub(crate) async fn lfs_batch(
     } else if request.transfers.is_empty() || supports_basic {
         "basic"
     } else {
-        return Ok((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "unsupported transfer adapter" })),
-        )
-            .into_response());
+        return Ok(lfs_validation_response("unsupported transfer adapter"));
     };
     let cas_url = state
         .config
@@ -1876,12 +1861,7 @@ pub(crate) async fn lfs_verify_object(
     let computed_hash = hex::encode(hasher.finalize());
 
     if computed_hash != oid {
-        return Ok((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "SHA-256 hash mismatch" })),
-        )
-            .into_response());
+        return Ok(lfs_validation_response("SHA-256 hash mismatch"));
     }
 
     Ok(StatusCode::OK.into_response())
