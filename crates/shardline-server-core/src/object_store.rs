@@ -424,14 +424,10 @@ impl ServerObjectStore {
         let mut output = NamedTempFile::new()?;
         match self {
             Self::Local(store) => {
-                let Some(metadata) = ObjectStore::metadata(store, object_key)? else {
+                let Some((mut input, length)) = open_local_file_if_present(store, object_key)?
+                else {
                     return Ok(None);
                 };
-                let mut input = store.open_object_file(object_key)?;
-                let length = input.metadata()?.len();
-                if length != metadata.length() {
-                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
-                }
                 std::io::copy(&mut input, output.as_file_mut())?;
                 Ok(Some((output, length)))
             }
@@ -481,14 +477,9 @@ impl ServerObjectStore {
         checkpoint()?;
         match self {
             Self::Local(store) => {
-                let Some(metadata) = ObjectStore::metadata(store, object_key)? else {
+                let Some((file, length)) = open_local_file_if_present(store, object_key)? else {
                     return Ok(None);
                 };
-                let file = store.open_object_file(object_key)?;
-                let length = file.metadata()?.len();
-                if length != metadata.length() {
-                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
-                }
                 checkpoint()?;
                 Ok(Some((MaterializedObject::Local(file), length)))
             }
@@ -859,14 +850,7 @@ impl ServerObjectStore {
             if actual_length != length {
                 return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
             }
-            let capacity = usize::try_from(length)?;
-            let mut output = Vec::with_capacity(capacity);
-            let mut limited = file.take(length);
-            Read::read_to_end(&mut limited, &mut output)?;
-            if output.len() != capacity {
-                return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
-            }
-            return Ok(output);
+            return read_file_bytes(file, length);
         }
 
         let end = length
@@ -891,30 +875,13 @@ impl ServerObjectStore {
     ) -> Result<Option<(Vec<u8>, u64)>, BoundedObjectReadError> {
         match self {
             Self::Local(store) => {
-                let Some(metadata) = ObjectStore::metadata(store, object_key)
-                    .map_err(ServerObjectStoreError::from)?
-                else {
+                let Some((file, length)) = open_local_file_if_present(store, object_key)? else {
                     return Ok(None);
                 };
-                let file = store
-                    .open_object_file(object_key)
-                    .map_err(ServerObjectStoreError::from)?;
-                let length = file.metadata().map_err(ServerObjectStoreError::from)?.len();
-                if length != metadata.length() {
-                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch.into());
-                }
                 if length > maximum_length {
                     return Err(BoundedObjectReadError::ObjectTooLarge);
                 }
-                let capacity = usize::try_from(length).map_err(ServerObjectStoreError::from)?;
-                let mut output = Vec::with_capacity(capacity);
-                let mut limited = file.take(length);
-                Read::read_to_end(&mut limited, &mut output)
-                    .map_err(ServerObjectStoreError::from)?;
-                if output.len() != capacity {
-                    return Err(ServerObjectStoreError::StoredObjectLengthMismatch.into());
-                }
-                Ok(Some((output, length)))
+                Ok(Some((read_file_bytes(file, length)?, length)))
             }
             Self::S3(store) => store
                 .read_object_if_present(object_key, maximum_length)
@@ -929,6 +896,35 @@ impl ServerObjectStore {
             Self::Blackhole => Ok(None),
         }
     }
+}
+
+// Compare the opened inode's length with the stored metadata before use.
+fn open_local_file_if_present(
+    store: &LocalObjectStore,
+    object_key: &ObjectKey,
+) -> Result<Option<(std::fs::File, u64)>, ServerObjectStoreError> {
+    let Some(metadata) = ObjectStore::metadata(store, object_key)? else {
+        return Ok(None);
+    };
+    let file = store.open_object_file(object_key)?;
+    let length = file.metadata()?.len();
+    if length != metadata.length() {
+        return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+    }
+    Ok(Some((file, length)))
+}
+
+// Callers establish the length and memory bound before reading. Recheck the
+// observed bytes because an open local file can be truncated after metadata.
+fn read_file_bytes(file: std::fs::File, length: u64) -> Result<Vec<u8>, ServerObjectStoreError> {
+    let capacity = usize::try_from(length)?;
+    let mut output = Vec::with_capacity(capacity);
+    let mut limited = file.take(length);
+    Read::read_to_end(&mut limited, &mut output)?;
+    if output.len() != capacity {
+        return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+    }
+    Ok(output)
 }
 
 /// Reads the full contents of an object from the store.
