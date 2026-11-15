@@ -183,72 +183,36 @@ fn jwk_deserialize_invalid_type_missing_kid() {
 }
 
 #[test]
-fn jwks_response_deserialize_empty_keys() {
-    let json = json!({ "keys": [] });
-    let resp: JwksResponse = serde_json::from_value(json).expect("empty keys array");
-    assert!(resp.keys.is_empty());
-}
-
-#[test]
-fn jwks_response_deserialize_multiple_keys() {
-    let json = json!({
-        "keys": [
-            { "kid": "k1", "kty": "RSA", "n": "n1", "e": "e1" },
-            { "kid": "k2", "kty": "EC",
-        "crv": "P-256", "x": "x2", "y": "y2" },
-            { "kid": "k3", "kty": "RSA", "n": "n3", "e": "e3" }
-        ]
-    });
-    let resp: JwksResponse = serde_json::from_value(json).expect("multiple keys");
-    assert_eq!(resp.keys.len(), 3);
-    assert_eq!(resp.keys[0].kid, "k1");
-    assert_eq!(resp.keys[1].kid, "k2");
-    assert_eq!(resp.keys[2].kid, "k3");
+fn jwks_response_preserves_key_order_and_ignores_extra_fields() {
+    for (document, expected_ids) in [
+        (json!({ "keys": [] }), vec![]),
+        (json!({ "keys": [], "extra": "field" }), vec![]),
+        (
+            json!({ "keys": [
+                { "kid": "k1", "kty": "RSA", "n": "n1", "e": "e1" },
+                { "kid": "k2", "kty": "EC", "crv": "P-256", "x": "x2", "y": "y2" },
+                { "kid": "k3", "kty": "RSA", "n": "n3", "e": "e3" }
+            ] }),
+            vec!["k1", "k2", "k3"],
+        ),
+        (
+            json!({ "keys": [
+                { "kid": "k1", "kty": "RSA", "alg": "RS256", "n": "m", "e": "e" },
+                { "kid": "k2", "kty": "EC", "alg": "ES256", "crv": "P-256", "x": "x", "y": "y" }
+            ] }),
+            vec!["k1", "k2"],
+        ),
+    ] {
+        let response: JwksResponse = serde_json::from_value(document).expect("valid JWKS document");
+        let ids: Vec<_> = response.keys.iter().map(|key| key.kid.as_str()).collect();
+        assert_eq!(ids, expected_ids);
+    }
 }
 
 #[test]
 fn jwks_response_deserialize_missing_keys_field() {
-    let json = json!({});
-    let result: Result<JwksResponse, _> = serde_json::from_value(json);
+    let result = serde_json::from_value::<JwksResponse>(json!({}));
     assert!(result.is_err(), "missing 'keys' field should fail");
-}
-
-#[test]
-fn jwks_response_deserialize_with_keys() {
-    let json = json!({
-        "keys": [
-            {
-                "kid": "k1",
-                "kty": "RSA",
-                "alg": "RS256",
-                "n": "m",
-                "e": "e"
-            },
-            {
-                "kid": "k2",
-                "kty": "EC",
-                "alg": "ES256",
-                "crv": "P-256",
-                "x": "x",
-                "y": "y"
-            }
-        ]
-    });
-    let resp: JwksResponse =
-        serde_json::from_value(json).expect("should deserialize JWKS response");
-    assert_eq!(resp.keys.len(), 2);
-    assert_eq!(resp.keys[0].kid, "k1");
-    assert_eq!(resp.keys[1].kid, "k2");
-}
-
-#[test]
-fn jwks_response_deserialize_extra_fields() {
-    let json = json!({
-        "keys": [],
-        "extra": "field"
-    });
-    let resp: JwksResponse = serde_json::from_value(json).expect("extra fields should be ignored");
-    assert!(resp.keys.is_empty());
 }
 
 #[test]
