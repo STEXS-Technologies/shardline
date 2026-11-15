@@ -2051,24 +2051,20 @@ async fn sweep_expired_sessions_with_usage_locked(
         if validate_upload_id(file_name).is_err() {
             continue;
         }
-        let expired = match load_session_at(&path, ttl_seconds, now_unix_seconds).await {
-            Ok((session, _evidence)) => {
-                add_session_usage(&session, &mut usage);
-                false
+        match load_session_at(&path, ttl_seconds, now_unix_seconds).await {
+            Ok((session, _evidence)) => add_session_usage(&session, &mut usage),
+            Err(S3SessionError::NotFound) => {
+                // Serialize the delete against an in-flight part write for this
+                // session: an UploadPart holds this lock across its body stream
+                // (F-10), so we cannot remove the directory mid-write.
+                let part_lock = acquire_session_part_lock_for_root(root, file_name);
+                let _part_guard = part_lock.lock().await;
+                let _part_file_guard = lock_session_parts(root, file_name).await?;
+                if delete_session_dir(&path).await.is_ok() {
+                    removed = removed.saturating_add(1);
+                }
             }
-            Err(S3SessionError::NotFound) => true,
-            Err(_error) => continue,
-        };
-        if expired {
-            // Serialize the delete against an in-flight part write for this
-            // session: an UploadPart holds this lock across its body stream
-            // (F-10), so we cannot remove the directory mid-write.
-            let part_lock = acquire_session_part_lock_for_root(root, file_name);
-            let _part_guard = part_lock.lock().await;
-            let _part_file_guard = lock_session_parts(root, file_name).await?;
-            if delete_session_dir(&path).await.is_ok() {
-                removed = removed.saturating_add(1);
-            }
+            Err(_error) => {}
         }
     }
     Ok((removed, usage))

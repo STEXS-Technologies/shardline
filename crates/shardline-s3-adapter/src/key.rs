@@ -42,7 +42,7 @@ pub fn encode_bucket(owner: &str, name: &str) -> String {
 /// Decodes a `{owner}.{name}` S3 bucket into its parts.
 ///
 /// The bucket is split on the *first* `.` (`a.b.c` decodes to owner `a` and
-/// name `b.c`). Owners containing a `.` are not addressable and are rejected.
+/// name `b.c`). An owner containing a `.` cannot be represented by this layout.
 ///
 /// # Examples
 ///
@@ -65,15 +65,12 @@ pub fn encode_bucket(owner: &str, name: &str) -> String {
 /// # Errors
 ///
 /// Returns [`BucketDecodeError`] when the bucket is missing the `.` separator,
-/// the decoded owner contains a `.`, the bucket is not lowercase or exceeds
+/// the bucket is not lowercase or exceeds
 /// 63 characters, or the owner or name is empty.
 pub fn decode_bucket(bucket: &str) -> Result<(String, String), BucketDecodeError> {
     let Some((owner, name)) = bucket.split_once('.') else {
         return Err(BucketDecodeError::MissingSeparator);
     };
-    if owner.contains('.') {
-        return Err(BucketDecodeError::OwnerContainsDot);
-    }
     if owner.is_empty() || name.is_empty() {
         return Err(BucketDecodeError::EmptyPart);
     }

@@ -141,9 +141,6 @@ pub fn parse_list_objects_v1_params(
                 params.max_keys = parsed.min(MAX_LIST_KEYS);
             }
             "marker" => params.marker = Some(value.clone()),
-            "continuation-token" => {} // v2-only; ignored by v1
-            "start-after" => {}        // v2-only; ignored by v1
-            "encoding-type" => {}      // validated separately
             _ => {}
         }
     }
@@ -202,8 +199,6 @@ pub fn parse_list_objects_v2_params(
                 params.continuation_token = Some(decode_continuation_token(value)?);
             }
             "start-after" => params.start_after = Some(value.clone()),
-            "marker" => {}        // v1-only; ignored by ListObjectsV2
-            "encoding-type" => {} // validated separately
             _ => {}
         }
     }
