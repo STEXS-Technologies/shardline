@@ -61,6 +61,13 @@ pub(crate) struct PersistedOciUploadSession {
     pub(crate) reliability_head_metadata: bool,
 }
 
+/// Session state together with its verified lifecycle and snapshot evidence.
+type VerifiedUploadSession = (
+    OciUploadSession,
+    SessionEvidenceLog,
+    SnapshotEvidenceLog<DigestSnapshot>,
+);
+
 const SESSION_EVIDENCE_JOURNAL: &str = "evidence.log";
 type SessionPersistLockKey = (PathBuf, String);
 type SessionPersistLockMap = std::sync::Mutex<HashMap<SessionPersistLockKey, Weak<Mutex<()>>>>;
@@ -520,14 +527,7 @@ pub(crate) async fn read_persisted_upload_session(
 async fn read_persisted_upload_session_with_snapshot(
     root: &Path,
     session_id: &str,
-) -> Result<
-    (
-        OciUploadSession,
-        SessionEvidenceLog,
-        SnapshotEvidenceLog<DigestSnapshot>,
-    ),
-    OciAdapterError,
-> {
+) -> Result<VerifiedUploadSession, OciAdapterError> {
     if let Some(head) = read_persisted_upload_session_head(root, session_id).await? {
         return Ok(head);
     }
@@ -537,14 +537,7 @@ async fn read_persisted_upload_session_with_snapshot(
 async fn read_persisted_upload_session_head(
     root: &Path,
     session_id: &str,
-) -> Result<
-    Option<(
-        OciUploadSession,
-        SessionEvidenceLog,
-        SnapshotEvidenceLog<DigestSnapshot>,
-    )>,
-    OciAdapterError,
-> {
+) -> Result<Option<VerifiedUploadSession>, OciAdapterError> {
     protocol_support::validate_upload_session_id(session_id)?;
     let metadata_path = upload_metadata_path(root, session_id);
     let bytes = match read_upload_file_async(root, &metadata_path).await {
@@ -676,14 +669,7 @@ fn verify_oci_merkle_heads(
 async fn read_persisted_upload_session_with_snapshot_full(
     root: &Path,
     session_id: &str,
-) -> Result<
-    (
-        OciUploadSession,
-        SessionEvidenceLog,
-        SnapshotEvidenceLog<DigestSnapshot>,
-    ),
-    OciAdapterError,
-> {
+) -> Result<VerifiedUploadSession, OciAdapterError> {
     protocol_support::validate_upload_session_id(session_id)?;
     let metadata_path = upload_metadata_path(root, session_id);
     let bytes = read_upload_file_async(root, &metadata_path)
