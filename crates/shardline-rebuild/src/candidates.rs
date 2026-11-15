@@ -286,26 +286,12 @@ mod tests {
         scope: RepositoryScope,
     ) -> FileRecord {
         FileRecord {
-            deduplication_domain: None,
-            file_id: file_id.to_owned(),
-            content_hash: content_hash.to_owned(),
-            total_bytes: 0,
-            chunk_size: 0,
-            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: Some(scope),
-            chunks: Vec::new(),
+            ..make_file_record(file_id, content_hash)
         }
     }
 
-    fn make_scope() -> RepositoryScope {
-        RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", Some("main")).unwrap()
-    }
-
     // ---- collect_candidate tests ----
-
-    fn empty_report() -> IndexRebuildReport {
-        IndexRebuildReport::default()
-    }
 
     fn open_db(root: &std::path::Path) -> rusqlite::Connection {
         rusqlite::Connection::open(root.join("metadata.sqlite3"))
@@ -389,7 +375,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -415,7 +401,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -438,7 +424,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -496,7 +482,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -554,7 +540,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -595,7 +581,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -634,7 +620,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -674,7 +660,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -715,7 +701,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -769,7 +755,7 @@ mod tests {
 
         let mut candidates = HashMap::new();
         let mut xorbs = HashSet::new();
-        let mut report = empty_report();
+        let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
             collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
@@ -784,57 +770,40 @@ mod tests {
     // ---- rebuild_key tests ----
 
     #[test]
-    fn rebuild_key_with_none_scope_has_no_repository_fields() {
+    fn rebuild_keys_preserve_repository_identity_and_revision() {
         let record = make_file_record("file.txt", &valid_hex_hash());
-        let key = rebuild_key(&record);
+        assert_eq!(
+            rebuild_key(&record),
+            RebuildKey {
+                provider: None,
+                owner: None,
+                name: None,
+                revision: None,
+                file_id: "file.txt".to_owned(),
+            }
+        );
 
-        assert_eq!(key.provider, None);
-        assert_eq!(key.owner, None);
-        assert_eq!(key.name, None);
-        assert_eq!(key.revision, None);
-        assert_eq!(key.file_id, "file.txt");
-    }
-
-    #[test]
-    fn rebuild_key_with_scope_populates_all_fields() {
-        let scope = make_scope();
-        let record = make_file_record_with_scope("data.bin", &valid_hex_hash(), scope);
-        let key = rebuild_key(&record);
-
-        assert_eq!(key.provider, Some("github"));
-        assert_eq!(key.owner, Some("team".to_owned()));
-        assert_eq!(key.name, Some("repo".to_owned()));
-        assert_eq!(key.revision, Some("main".to_owned()));
-        assert_eq!(key.file_id, "data.bin");
-    }
-
-    #[test]
-    fn rebuild_key_with_scope_without_revision() {
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitLab, "org", "project", None).unwrap();
-        let record = make_file_record_with_scope("readme.md", &valid_hex_hash(), scope);
-        let key = rebuild_key(&record);
-
-        assert_eq!(key.provider, Some("gitlab"));
-        assert_eq!(key.owner, Some("org".to_owned()));
-        assert_eq!(key.name, Some("project".to_owned()));
-        assert_eq!(key.revision, None);
-        assert_eq!(key.file_id, "readme.md");
-    }
-
-    #[test]
-    fn rebuild_key_uses_provider_directory_mapping() {
-        for (provider, expected_dir) in [
+        for (provider, directory) in [
             (RepositoryProvider::GitHub, "github"),
             (RepositoryProvider::Gitea, "gitea"),
             (RepositoryProvider::GitLab, "gitlab"),
             (RepositoryProvider::Codeberg, "codeberg"),
             (RepositoryProvider::Generic, "generic"),
         ] {
-            let scope = RepositoryScope::new(provider, "owner", "name", None).unwrap();
-            let record = make_file_record_with_scope("f", &valid_hex_hash(), scope);
-            let key = rebuild_key(&record);
-            assert_eq!(key.provider, Some(expected_dir));
+            for revision in [None, Some("main")] {
+                let scope = RepositoryScope::new(provider, "team", "repo", revision).unwrap();
+                let record = make_file_record_with_scope("data.bin", &valid_hex_hash(), scope);
+                assert_eq!(
+                    rebuild_key(&record),
+                    RebuildKey {
+                        provider: Some(directory),
+                        owner: Some("team".to_owned()),
+                        name: Some("repo".to_owned()),
+                        revision: revision.map(str::to_owned),
+                        file_id: "data.bin".to_owned(),
+                    }
+                );
+            }
         }
     }
 
