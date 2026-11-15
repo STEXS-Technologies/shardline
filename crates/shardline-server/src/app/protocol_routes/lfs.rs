@@ -168,8 +168,12 @@ fn request_object_key(oid: &str, repository: &AuthorizedRepository) -> Option<Ob
 
 /// Returns a 422 UNPROCESSABLE_ENTITY response for LFS validation errors.
 fn lfs_validation_response(message: &str) -> Response {
+    lfs_error_response(StatusCode::UNPROCESSABLE_ENTITY, message)
+}
+
+fn lfs_error_response(status: StatusCode, message: &str) -> Response {
     (
-        StatusCode::UNPROCESSABLE_ENTITY,
+        status,
         [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
         Json(json!({ "message": message })),
     )
@@ -1194,12 +1198,10 @@ pub(crate) async fn lfs_patch_object(
     let content_range = match single_range_header(&headers, CONTENT_RANGE)? {
         Some(value) => value.to_str().unwrap_or(""),
         None => {
-            return Ok((
+            return Ok(lfs_error_response(
                 StatusCode::RANGE_NOT_SATISFIABLE,
-                [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-                Json(json!({ "message": "missing Content-Range header" })),
-            )
-                .into_response());
+                "missing Content-Range header",
+            ));
         }
     };
 
@@ -1207,29 +1209,23 @@ pub(crate) async fn lfs_patch_object(
     let (offset, end, total) = match parse_content_range(content_range) {
         Ok(range) => range,
         Err(()) => {
-            return Ok((
+            return Ok(lfs_error_response(
                 StatusCode::RANGE_NOT_SATISFIABLE,
-                [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-                Json(json!({ "message": "invalid Content-Range header" })),
-            )
-                .into_response());
+                "invalid Content-Range header",
+            ));
         }
     };
     if total == 0 || end >= total {
-        return Ok((
+        return Ok(lfs_error_response(
             StatusCode::RANGE_NOT_SATISFIABLE,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "Content-Range exceeds object length" })),
-        )
-            .into_response());
+            "Content-Range exceeds object length",
+        ));
     }
     if total > MAX_LFS_OBJECT_SIZE {
-        return Ok((
+        return Ok(lfs_error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "declared object size exceeds maximum allowed" })),
-        )
-            .into_response());
+            "declared object size exceeds maximum allowed",
+        ));
     }
 
     let expected_chunk_size = end
@@ -1238,12 +1234,10 @@ pub(crate) async fn lfs_patch_object(
         .checked_add(1)
         .ok_or(ServerError::Overflow)?;
     if expected_chunk_size > MAX_LFS_PATCH_CHUNK_BYTES as u64 {
-        return Ok((
+        return Ok(lfs_error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "LFS PATCH chunks must be at most 8 MiB; split the range" })),
-        )
-            .into_response());
+            "LFS PATCH chunks must be at most 8 MiB; split the range",
+        ));
     }
 
     let content_length = headers
@@ -1252,12 +1246,10 @@ pub(crate) async fn lfs_patch_object(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
     if content_length != expected_chunk_size {
-        return Ok((
+        return Ok(lfs_error_response(
             StatusCode::RANGE_NOT_SATISFIABLE,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "Content-Length does not match Content-Range" })),
-        )
-            .into_response());
+            "Content-Length does not match Content-Range",
+        ));
     }
 
     let start = Instant::now();
@@ -1269,22 +1261,18 @@ pub(crate) async fn lfs_patch_object(
     let chunk_size = chunk_bytes.len() as u64;
 
     if chunk_size != expected_chunk_size {
-        return Ok((
+        return Ok(lfs_error_response(
             StatusCode::RANGE_NOT_SATISFIABLE,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "actual body length does not match Content-Range" })),
-        )
-            .into_response());
+            "actual body length does not match Content-Range",
+        ));
     }
 
     match state.backend.object_length(&object_key).await {
         Ok(_length) => {
-            return Ok((
+            return Ok(lfs_error_response(
                 StatusCode::CONFLICT,
-                [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-                Json(json!({ "message": "object upload is already complete" })),
-            )
-                .into_response());
+                "object upload is already complete",
+            ));
         }
         Err(ServerError::NotFound) => {}
         Err(error) => return Err(error),
@@ -1826,12 +1814,10 @@ pub(crate) async fn lfs_verify_object(
     let total_length = snapshot.total_length;
 
     if total_length > MAX_LFS_VERIFY_BYTES {
-        return Ok((
+        return Ok(lfs_error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "object too large for server-side verification" })),
-        )
-            .into_response());
+            "object too large for server-side verification",
+        ));
     }
 
     // Stream the object through a SHA-256 hasher in fixed-size chunks
