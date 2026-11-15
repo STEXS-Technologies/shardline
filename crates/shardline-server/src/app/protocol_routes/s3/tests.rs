@@ -43,7 +43,7 @@ use crate::app::AppState;
 
 use super::test_support::{
     BUCKET, NAME, OWNER, body_bytes, build_state, build_state_with_backend, build_test_state,
-    build_test_state_with_options, mint_token, put_request, sigv4_auth, test_config,
+    build_test_state_with_options, extract_tag, mint_token, put_request, sigv4_auth, test_config,
 };
 use super::{
     bucket::{
@@ -1796,15 +1796,6 @@ async fn create_upload_id(app: &Router) -> String {
     assert_eq!(response.status(), StatusCode::OK);
     let xml = String::from_utf8(body_bytes(response).await).unwrap();
     extract_tag(&xml, "UploadId")
-}
-
-/// Extracts the text content of the first `<tag>…</tag>` occurrence.
-fn extract_tag(xml: &str, tag: &str) -> String {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open).unwrap() + open.len();
-    let end = xml.find(&close).unwrap();
-    xml[start..end].to_owned()
 }
 
 type ObservedPartEtags = std::collections::HashMap<(String, u32), String>;

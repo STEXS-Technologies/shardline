@@ -129,3 +129,13 @@ pub(super) fn build_state_with_backend(
         protocol_metrics: ProtocolMetrics::default(),
     })
 }
+
+/// Extract the text content of the first fixture XML tag.
+#[allow(clippy::arithmetic_side_effects)]
+pub(super) fn extract_tag(xml: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open).unwrap() + open.len();
+    let end = xml.find(&close).unwrap();
+    xml[start..end].to_owned()
+}

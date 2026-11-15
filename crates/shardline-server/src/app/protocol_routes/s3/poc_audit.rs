@@ -39,8 +39,8 @@ use tower::ServiceExt;
 use crate::{ServerConfig, ServerFrontend, ServerRole, app::AppState};
 
 use super::test_support::{
-    BUCKET, NAME, OWNER, TEST_SIGNING_KEY, body_bytes, build_test_state, mint_token, put_request,
-    sigv4_auth,
+    BUCKET, NAME, OWNER, TEST_SIGNING_KEY, body_bytes, build_test_state, extract_tag, mint_token,
+    put_request, sigv4_auth,
 };
 use super::{
     S3_OBJECT_UPLOAD_LOCKS, acquire_object_upload_lock_for_root,
@@ -111,14 +111,6 @@ fn get_request(uri: String) -> axum::http::Request<Body> {
         )
         .body(Body::empty())
         .unwrap()
-}
-
-fn extract_tag(xml: &str, tag: &str) -> String {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open).unwrap() + open.len();
-    let end = xml.find(&close).unwrap();
-    xml[start..end].to_owned()
 }
 
 async fn create_upload_id(app: &Router, key: &str) -> String {
