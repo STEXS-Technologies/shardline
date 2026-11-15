@@ -244,7 +244,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
         shardline_reliability::verify_or_repair_snapshot_evidence(snapshot_evidence, snapshot)
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     let metadata_path = upload_metadata_path(root, session_id);
-    let existing = match read_upload_file_async(root, &metadata_path).await {
+    let mut existing = match read_upload_file_async(root, &metadata_path).await {
         Ok(bytes) => match serde_json::from_slice::<PersistedOciUploadSession>(&bytes) {
             Ok(persisted) => Some(persisted),
             Err(error) if reliability_envelope_field_present(&bytes) => {
@@ -274,17 +274,17 @@ pub(crate) async fn persist_upload_session_with_evidence(
         .as_ref()
         .and_then(|value| value.merkle_snapshot_sequence);
     let mut previous_merkle_evidence = existing
-        .as_ref()
-        .and_then(|value| value.merkle_evidence_commit.clone());
+        .as_mut()
+        .and_then(|value| value.merkle_evidence_commit.take());
     let mut previous_merkle_snapshot = existing
-        .as_ref()
-        .and_then(|value| value.merkle_snapshot_commit.clone());
+        .as_mut()
+        .and_then(|value| value.merkle_snapshot_commit.take());
     let mut previous_merkle_evidence_previous = existing
-        .as_ref()
-        .and_then(|value| value.merkle_evidence_previous_commit.clone());
+        .as_mut()
+        .and_then(|value| value.merkle_evidence_previous_commit.take());
     let mut previous_merkle_snapshot_previous = existing
-        .as_ref()
-        .and_then(|value| value.merkle_snapshot_previous_commit.clone());
+        .as_mut()
+        .and_then(|value| value.merkle_snapshot_previous_commit.take());
     if last_evidence_sequence.is_none() {
         last_evidence_sequence = existing
             .as_ref()
@@ -330,7 +330,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
                 {
                     last_merkle_evidence_sequence =
                         event.get("sequence").and_then(serde_json::Value::as_u64);
-                    previous_merkle_evidence_previous = previous_merkle_evidence.clone();
+                    previous_merkle_evidence_previous = previous_merkle_evidence.take();
                     previous_merkle_evidence = Some(commit.clone());
                 }
                 if let (Some(event), Some(commit)) = (
@@ -339,7 +339,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
                 ) {
                     last_merkle_snapshot_sequence =
                         event.get("sequence").and_then(serde_json::Value::as_u64);
-                    previous_merkle_snapshot_previous = previous_merkle_snapshot.clone();
+                    previous_merkle_snapshot_previous = previous_merkle_snapshot.take();
                     previous_merkle_snapshot = Some(commit.clone());
                 }
             }
@@ -439,13 +439,13 @@ pub(crate) async fn persist_upload_session_with_evidence(
     }
     let journal_evidence_head = evidence.events().last().cloned().or_else(|| {
         existing
-            .as_ref()
-            .and_then(|value| value.journal_evidence_head.clone())
+            .as_mut()
+            .and_then(|value| value.journal_evidence_head.take())
     });
     let journal_snapshot_head = snapshot_evidence.events().last().cloned().or_else(|| {
         existing
-            .as_ref()
-            .and_then(|value| value.journal_snapshot_head.clone())
+            .as_mut()
+            .and_then(|value| value.journal_snapshot_head.take())
     });
     let bytes = serde_json::to_vec(&PersistedOciUploadSession {
         session: session.clone(),
