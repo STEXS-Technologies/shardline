@@ -303,15 +303,10 @@ async fn delete_upload_session_files(root: &Path, session_id: &str) -> Result<()
     ];
     let mut first_error = None;
     for path in &paths {
-        let result = delete_upload_file(root, path).await;
-        match result {
-            Ok(()) => {}
-            Err(ref error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(OciAdapterError::Io(error));
-                }
-            }
+        if let Err(error) = delete_upload_file(root, path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            first_error = first_error.or(Some(OciAdapterError::Io(error)));
         }
     }
     first_error.map_or_else(|| Ok(()), Err)
