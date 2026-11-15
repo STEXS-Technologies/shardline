@@ -3750,14 +3750,14 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`1e4d39583dbc20d46a2459f47a25aee8d7b81534`. It counts all tracked `.rs`
+`00527e3ad9d3c799b8432406b9a77e7b7efc3864`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 580,554 | 23,095 (3.83%) |
+| Entire repository | 603,649 | 580,503 | 23,146 (3.83%) |
 | Server | 220,570 | 211,055 | 9,515 (4.31%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
@@ -3795,11 +3795,14 @@ and native-client prerequisites were not required in this run; tests with option
 fixture guards do not establish those integration guarantees. This is not a
 production or hosted-CI qualification.
 
-At `9d0f366d`, the complete SDK test run passed all 357 tests, including
-12 public-API conformance tests against the independent mock frontend. Recent
-SDK simplifications remove redundant upload counters and grouped-stream state,
-borrow immutable retry inputs and metadata clients, and move completed session
-metadata into finalization. Strict SDK Clippy also passed. The mock frontend
+At `00527e3a`, the complete SDK test run passed all 358 tests, including
+12 public-API conformance tests against the independent mock frontend. Strict
+SDK library/test Clippy passed with Rust 1.100; tests used Rust 1.99. Recent
+simplifications remove redundant cache and upload-group state, retain only byte
+offsets in decoded blocks, and stream Xorb upload bytes directly without a boxed
+stream or separate length counter. Tests check frame boundaries and exact remaining
+lengths, persisted cache eviction order, cancellation and permit lifetimes. These
+runs do not measure a throughput or build-time improvement. The mock frontend
 does not qualify the production server or its tree/revision routes.
 
 At `46fe2321`, raw-Xorb construction shares one implementation and server
@@ -3857,8 +3860,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 1e4d39583dbc20d46a2459f47a25aee8d7b81534 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 1e4d39583dbc20d46a2459f47a25aee8d7b81534 -- '*.rs' | wc -l
+git grep -I -n '^' 00527e3ad9d3c799b8432406b9a77e7b7efc3864 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 00527e3ad9d3c799b8432406b9a77e7b7efc3864 -- '*.rs' | wc -l
 ```
 
 The cleanup reuses Cargo build artifacts, narrows ordinary binary and
