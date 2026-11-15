@@ -922,21 +922,7 @@ impl LifecycleStore for LocalIndexStore {
         let rows = statement.query_map([], super::helpers::quarantine_candidate_from_row)?;
         let candidates = collect_rows(rows)?;
         drop(statement);
-        let object_keys = candidates
-            .iter()
-            .map(|candidate| candidate.object_key().as_str().to_owned())
-            .collect::<Vec<_>>();
-        let evidence = load_quarantine_evidence_batch(&transaction, &object_keys)?;
-        for candidate in &candidates {
-            let snapshot =
-                super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
-            let evidence = evidence.get(candidate.object_key().as_str()).ok_or(
-                LocalIndexStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::OperationMismatch,
-                ),
-            )?;
-            verify_snapshot_evidence(evidence, &snapshot)?;
-        }
+        QuarantineCandidate::verify_batch(&transaction, &candidates)?;
         transaction.commit()?;
         Ok(candidates)
     }
@@ -1176,20 +1162,7 @@ impl LifecycleStore for LocalIndexStore {
         let rows = statement.query_map([], super::helpers::retention_hold_from_row)?;
         let holds = collect_rows(rows)?;
         drop(statement);
-        let object_keys = holds
-            .iter()
-            .map(|hold| hold.object_key().as_str().to_owned())
-            .collect::<Vec<_>>();
-        let evidence = load_retention_evidence_batch(&transaction, &object_keys)?;
-        for hold in &holds {
-            let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
-            let evidence = evidence.get(hold.object_key().as_str()).ok_or(
-                LocalIndexStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::OperationMismatch,
-                ),
-            )?;
-            verify_snapshot_evidence(evidence, &snapshot)?;
-        }
+        RetentionHold::verify_batch(&transaction, &holds)?;
         transaction.commit()?;
         Ok(holds)
     }
@@ -1435,17 +1408,7 @@ impl LifecycleStore for LocalIndexStore {
         let rows = statement.query_map([], super::helpers::webhook_delivery_from_row)?;
         let deliveries = collect_rows(rows)?;
         drop(statement);
-        let evidence = load_webhook_evidence_batch(&transaction, &deliveries)?;
-        for delivery in &deliveries {
-            let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-            let operation_id = snapshot.evidence_operation()?.operation_id;
-            let evidence = evidence
-                .get(&operation_id)
-                .ok_or(LocalIndexStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::OperationMismatch,
-                ))?;
-            verify_snapshot_evidence(evidence, &snapshot)?;
-        }
+        WebhookDelivery::verify_batch(&transaction, &deliveries)?;
         transaction.commit()?;
         Ok(deliveries)
     }
@@ -1743,27 +1706,7 @@ impl LifecycleStore for LocalIndexStore {
             collect_rows(rows)?
         };
         let transaction = connection.transaction()?;
-        let snapshots = states
-            .iter()
-            .map(snapshot_from_state)
-            .collect::<Result<Vec<_>, _>>()?;
-        let evidence = load_provider_evidence_batch(&transaction, &snapshots)?;
-        for (_state, snapshot) in states.iter().zip(snapshots) {
-            let operation_id = super::helpers::provider_evidence_operation_id(&snapshot);
-            let stored = evidence
-                .get(&operation_id)
-                .ok_or(LocalIndexStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::OperationMismatch,
-                ))?;
-            if stored.events().is_empty() {
-                verify_provider_lifecycle_events(
-                    ProviderEvidenceLog::baseline(snapshot.clone())?.events(),
-                    &snapshot,
-                )?;
-            } else {
-                stored.verify_for(&snapshot)?;
-            }
-        }
+        ProviderRepositoryState::verify_batch(&transaction, &states)?;
         transaction.commit()?;
         Ok(states)
     }
@@ -3565,6 +3508,7 @@ mod tests {
             )
             .is_err()
         );
+        assert!(LifecycleStore::list_provider_repository_states(&store).is_err());
     }
 
     #[test]
@@ -4414,6 +4358,7 @@ mod tests {
             )
             .unwrap();
         assert!(LifecycleStore::quarantine_candidate(&store, candidate.object_key()).is_err());
+        assert!(LifecycleStore::list_quarantine_candidates(&store).is_err());
     }
 
     #[test]
@@ -4438,6 +4383,7 @@ mod tests {
             )
             .unwrap();
         assert!(LifecycleStore::retention_hold(&store, hold.object_key()).is_err());
+        assert!(LifecycleStore::list_retention_holds(&store).is_err());
     }
 
     #[test]
