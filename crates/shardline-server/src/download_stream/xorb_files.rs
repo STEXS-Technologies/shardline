@@ -57,8 +57,7 @@ pub(super) async fn file_stream_with_decode_budget(
         chunk.offset = 0;
         let hash = chunk.hash.clone();
         group.chunks.push(chunk);
-        while chunks.peek().is_some_and(|next| next.hash == hash) {
-            let mut next_chunk = chunks.next().ok_or(ServerError::Overflow)?;
+        while let Some(mut next_chunk) = chunks.next_if(|next| next.hash == hash) {
             next_chunk.offset = next_chunk
                 .offset
                 .checked_sub(base)
@@ -81,7 +80,7 @@ pub(super) async fn file_stream_with_decode_budget(
                 end.checked_sub(base).ok_or(ServerError::Overflow)?,
             )
             .map_err(|_error| ServerError::RangeNotSatisfiable)?;
-            groups.push((group, Some(relative)));
+            groups.push((group, relative));
         }
     }
 
@@ -124,20 +123,19 @@ pub(super) async fn file_stream_with_decode_budget(
 async fn container_stream(
     store: ServerObjectStore,
     record: FileRecord,
-    range: Option<ByteRange>,
+    range: ByteRange,
     pool: BoundedPool,
     decoded_byte_budget: usize,
     explicit_range: bool,
 ) -> Result<ServerByteStream, ServerError> {
     if explicit_range
-        && let Some(range) = range
         && let Some(stream) =
             super::authenticated_range::file_stream(store.clone(), &record, range, pool.clone())
                 .await?
     {
         return Ok(stream);
     }
-    single_container_file_stream(store, record, range, pool, decoded_byte_budget).await
+    single_container_file_stream(store, record, Some(range), pool, decoded_byte_budget).await
 }
 
 #[cfg(test)]
