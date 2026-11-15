@@ -869,12 +869,6 @@ fn needs_xorb_cut(pending_bytes: usize, pending_chunks: usize, next_len: usize) 
         ) < next_len
 }
 
-/// One batch emitted by the blocking ingest task.
-enum ChunkBatch {
-    Chunks(Vec<Chunk>),
-    Done,
-}
-
 /// Upload session for one repository (write side).
 ///
 /// Create one via [`crate::XetClient::upload_session`] (reusable across
@@ -979,19 +973,14 @@ impl UploadSession {
         let _operation = self.inner.lifecycle.read().await;
         self.check_not_finalized().await?;
         let mut pipeline = FileUploadPipeline::new(self.clone());
-        let (tx, mut rx) = mpsc::channel::<Result<ChunkBatch, SdxError>>(2);
+        let (tx, mut rx) = mpsc::channel::<Vec<Chunk>>(2);
         let chunk_target = self.inner.chunk_target_size;
         let reader_task =
             tokio::task::spawn_blocking(move || feed_reader(reader, &tx, chunk_target));
 
-        while let Some(batch) = rx.recv().await {
-            match batch? {
-                ChunkBatch::Chunks(chunks) => {
-                    for chunk in chunks {
-                        pipeline.process_chunk(chunk).await?;
-                    }
-                }
-                ChunkBatch::Done => break,
+        while let Some(chunks) = rx.recv().await {
+            for chunk in chunks {
+                pipeline.process_chunk(chunk).await?;
             }
         }
         // Channel EOF can mean a reader error or panic rather than successful
@@ -1168,14 +1157,14 @@ impl UploadSession {
 }
 
 /// Blocking ingest task: reads `reader` in 8 MiB blocks, chunks on the compute
-/// thread, and forwards zero-copy chunk batches (then a `Done` marker).
+/// thread, and forwards zero-copy chunk batches. The task result reports completion.
 fn feed_reader<R: Read + Send + 'static>(
     mut reader: R,
-    tx: &mpsc::Sender<Result<ChunkBatch, SdxError>>,
+    tx: &mpsc::Sender<Vec<Chunk>>,
     chunk_target: usize,
 ) -> Result<(), SdxError> {
     let send = |batch| {
-        tx.blocking_send(Ok(batch))
+        tx.blocking_send(batch)
             .map_err(|_error| SdxError::UploadSession("ingest channel closed".to_owned()))
     };
     let mut chunker = Chunker::new(chunk_target);
@@ -1195,13 +1184,13 @@ fn feed_reader<R: Read + Send + 'static>(
         let block = Bytes::copy_from_slice(buffer.get(..n).unwrap_or_default());
         let chunks = chunker.next_block_bytes(&block, false);
         if !chunks.is_empty() {
-            send(ChunkBatch::Chunks(chunks))?;
+            send(chunks)?;
         }
     }
     if let Some(tail) = chunker.finish() {
-        send(ChunkBatch::Chunks(vec![tail]))?;
+        send(vec![tail])?;
     }
-    send(ChunkBatch::Done)
+    Ok(())
 }
 
 #[cfg(test)]
