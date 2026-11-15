@@ -491,8 +491,7 @@ enum Placement {
     Known {
         hash: MerkleHash,
         len: u64,
-        xorb_hash: MerkleHash,
-        chunk_index: u32,
+        location: ChunkLocation,
     },
 }
 
@@ -501,9 +500,8 @@ struct FileUploadPipeline {
     session: UploadSession,
     chunker: Chunker,
     placements: Vec<Placement>,
-    /// Per `Placement::New`, in order, the (xorb_hash, xorb chunk index) the
-    /// chunk was cut into.
-    new_chunk_xorbs: Vec<(MerkleHash, u32)>,
+    /// Physical locations for `Placement::New` chunks, in placement order.
+    new_chunk_locations: Vec<ChunkLocation>,
     /// Pending new chunks not yet cut into a xorb, with their file offsets.
     pending: Vec<(Chunk, u64)>,
     pending_bytes: usize,
@@ -517,7 +515,7 @@ impl FileUploadPipeline {
             session,
             chunker: Chunker::new(chunk_target),
             placements: Vec::new(),
-            new_chunk_xorbs: Vec::new(),
+            new_chunk_locations: Vec::new(),
             pending: Vec::new(),
             pending_bytes: 0,
             total_bytes: 0,
@@ -555,8 +553,7 @@ impl FileUploadPipeline {
             self.placements.push(Placement::Known {
                 hash,
                 len,
-                xorb_hash: location.xorb_hash,
-                chunk_index: location.chunk_index,
+                location,
             });
             self.total_bytes = self.total_bytes.saturating_add(len);
             return Ok(());
@@ -623,8 +620,10 @@ impl FileUploadPipeline {
                 self.placements.push(Placement::Known {
                     hash,
                     len,
-                    xorb_hash: xorb.xorb_hash,
-                    chunk_index: index,
+                    location: ChunkLocation {
+                        xorb_hash: xorb.xorb_hash,
+                        chunk_index: index,
+                    },
                 });
                 self.total_bytes = self.total_bytes.saturating_add(len);
                 return Ok(());
@@ -763,8 +762,7 @@ impl FileUploadPipeline {
                 chunk_index: u32::try_from(index).unwrap_or(u32::MAX),
             };
             state.chunk_locations.insert(chunk.hash(), location);
-            self.new_chunk_xorbs
-                .push((xorb_hash, u32::try_from(index).unwrap_or(u32::MAX)));
+            self.new_chunk_locations.push(location);
         }
         self.pending.clear();
         self.pending_bytes = 0;
@@ -785,25 +783,19 @@ impl FileUploadPipeline {
 
         // Build the file's segments from the ordered placements.
         let mut segments: Vec<ShardSegment> = Vec::new();
-        let mut new_index = 0usize;
+        let mut new_locations = self.new_chunk_locations.iter();
         for placement in &self.placements {
-            let (xorb_hash, chunk_index, len) = match placement {
-                Placement::Known {
-                    xorb_hash,
-                    chunk_index,
-                    len,
-                    ..
-                } => (*xorb_hash, u64::from(*chunk_index), *len),
-                Placement::New { len, .. } => {
-                    let (xorb_hash, chunk_index) = self
-                        .new_chunk_xorbs
-                        .get(new_index)
-                        .copied()
-                        .unwrap_or_else(|| (MerkleHash::default(), 0));
-                    new_index = new_index.saturating_add(1);
-                    (xorb_hash, u64::from(chunk_index), *len)
-                }
+            let (location, len) = match placement {
+                Placement::Known { location, len, .. } => (location, *len),
+                Placement::New { len, .. } => (
+                    new_locations.next().ok_or_else(|| {
+                        SdxError::UploadSession("new chunk has no Xorb location".to_owned())
+                    })?,
+                    *len,
+                ),
             };
+            let xorb_hash = location.xorb_hash;
+            let chunk_index = u64::from(location.chunk_index);
             if let Some(last) = segments.last_mut()
                 && last.xorb_hash == xorb_hash
                 && last.chunk_index_end == chunk_index
@@ -834,13 +826,13 @@ impl FileUploadPipeline {
         };
 
         let xorb_count = self
-            .new_chunk_xorbs
+            .new_chunk_locations
             .iter()
-            .map(|(hash, _)| *hash)
+            .map(|location| location.xorb_hash)
             .collect::<std::collections::HashSet<_>>()
             .len() as u64;
         let chunk_count = u64::try_from(chunk_list.len()).unwrap_or(u64::MAX);
-        let inserted_chunks = u64::try_from(self.new_chunk_xorbs.len()).unwrap_or(u64::MAX);
+        let inserted_chunks = u64::try_from(self.new_chunk_locations.len()).unwrap_or(u64::MAX);
         let info = UploadFileInfo {
             file_id: xet_hash_hex_string(file_hash),
             total_bytes: self.total_bytes,
@@ -1488,6 +1480,26 @@ mod tests {
         drop(held);
         assert_eq!(session.inner.upload_permits.available_permits(), slots);
         assert!(session.finalize().await.unwrap().files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_new_chunk_location_does_not_publish_file_metadata() {
+        let (_server, client) = mock_client().await;
+        let session = client.upload_session().unwrap();
+        let mut pipeline = super::FileUploadPipeline::new(session.clone());
+        pipeline.placements.push(super::Placement::New {
+            hash: compute_chunk_hash(b"unplaced"),
+            len: 8,
+        });
+        let result = pipeline.finish().await;
+        assert!(
+            matches!(result, Err(crate::SdxError::UploadSession(message))
+            if message == "new chunk has no Xorb location")
+        );
+        let state = session.inner.state.lock().await;
+        assert!(state.file_infos.is_empty());
+        assert!(state.file_reports.is_empty());
+        assert!(state.pending_registrations.is_empty());
     }
 
     #[tokio::test]
