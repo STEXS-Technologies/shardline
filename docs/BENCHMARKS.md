@@ -4057,6 +4057,54 @@ deployment tests were excluded by the filter. No selected test reported a
 missing-prerequisite skip. This extends the local recovery evidence; it does
 not qualify the complete distributed integrity gate or concurrent throughput.
 
+### Additional resumable-upload recovery checks (2026-11-15)
+
+The frozen `128f7c5eea9d2807b97ef3299d333c9ddae05f72` ingestion candidate
+(SHA-256 `f037e781827085069d6887a98849d7f413d9d0110b6b67f704ef30ba7c2079b4`)
+was exercised against real local PostgreSQL and MinIO containers using the
+existing deployment harness:
+
+| Existing drill | Result | Test elapsed time |
+| --- | --- | ---: |
+| `drill_deploy_minio_kill_mid_lfs_patch_staging` | Passed | 15.393 s |
+| `drill_deploy_postgres_kill_mid_oci_blob_upload` | Passed | 48.234 s |
+| `drill_deploy_server_kill_during_s3_upload_part_copy` | Passed after fixing the test proxy | 16.160 s |
+
+The first two checks verify resumable staging and byte-exact completion after
+object-store or database recovery. The part-copy check kills the real server
+while a source read is deliberately paused, verifies that no partial part was
+published, then retries and checks the complete destination bytes.
+
+The initial part-copy run timed out during multipart completion with both the
+candidate and the earlier `45fd33b4` executable. The fault proxy serialized all
+connections: a large response could block its only worker while the streaming
+consumer needed another object through that same proxy. The shared proxy now
+serves connections concurrently and joins its connection workers on shutdown.
+The existing crash drill then passed with its original request timeout and
+assertions. No server or ingestion code changed for this fixture correction.
+
+Reproduce these checks after the build/environment setup above, pointing
+`CARGO_BIN_EXE_shardline` at the frozen candidate:
+
+```bash
+cargo nextest run --locked -p shardline-server --all-features \
+  --test deployment_chaos \
+  -E 'test(drill_deploy_minio_kill_mid_lfs_patch_staging) | test(drill_deploy_postgres_kill_mid_oci_blob_upload) | test(drill_deploy_server_kill_during_s3_upload_part_copy)' \
+  --test-threads 1 --success-output immediate --failure-output immediate
+```
+
+All three selected tests passed together in 79.788 seconds with the final proxy
+implementation; 47 other deployment tests were excluded by the filter. No
+selected test reported a runtime prerequisite skip. These elapsed times include
+fixture setup and fault waits on a shared host running another qualification;
+they are not latency or throughput measurements.
+
+A fourth attempted check, `drill_deploy_partition_during_lfs_patch_repair`,
+failed before fault injection because the required `nicolaka/netshoot:v0.13`
+image was unavailable locally and Docker could not resolve its registry. It
+is **not qualified** by this run. These results remain targeted local recovery
+evidence, not a passing full distributed integrity gate or CI release result.
+
 ### Concurrent S3 and GC measurements (2026-11-15)
 
 The existing `validate_performance.py` harness completed 12 lanes against the

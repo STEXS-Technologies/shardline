@@ -104,29 +104,37 @@ impl S3FaultProxy {
         let worker_injected = Arc::clone(&injected);
         let (stop, stopped) = mpsc::channel();
         let thread = thread::spawn(move || {
-            loop {
-                if stopped.try_recv().is_ok() {
-                    break;
-                }
-                match listener.accept() {
-                    Ok((client, _address)) => {
-                        proxy_one_s3_request(
-                            client,
-                            &upstream,
-                            fault.clone(),
-                            &worker_armed,
-                            &worker_injected,
-                            &worker_requests,
-                            &worker_get_response_bytes,
-                        )
-                        .ok();
+            // A streamed response may wait for a client that needs another
+            // object first. Serve connections independently, and join them all
+            // before proxy shutdown completes.
+            let forward = |client| {
+                proxy_one_s3_request(
+                    client,
+                    &upstream,
+                    fault.clone(),
+                    &worker_armed,
+                    &worker_injected,
+                    &worker_requests,
+                    &worker_get_response_bytes,
+                )
+                .ok();
+            };
+            thread::scope(|scope| {
+                loop {
+                    if stopped.try_recv().is_ok() {
+                        break;
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
+                    match listener.accept() {
+                        Ok((client, _address)) => {
+                            scope.spawn(move || forward(client));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_error) => break,
                     }
-                    Err(_error) => break,
                 }
-            }
+            });
         });
         Ok(Self {
             endpoint,
