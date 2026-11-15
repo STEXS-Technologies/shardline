@@ -38,10 +38,9 @@ static BEFORE_LOCAL_WRITE_HOOK: LazyLock<Mutex<LocalWriteHookSlot>> =
 
 #[cfg(test)]
 pub(crate) fn set_before_local_write_hook(path: PathBuf, hook: impl FnOnce() + Send + 'static) {
-    let mut slot = match BEFORE_LOCAL_WRITE_HOOK.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    let mut slot = BEFORE_LOCAL_WRITE_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     *slot = Some(LocalWriteHookRegistration {
         path,
         hook: Box::new(hook),
@@ -50,12 +49,11 @@ pub(crate) fn set_before_local_write_hook(path: PathBuf, hook: impl FnOnce() + S
 
 #[cfg(test)]
 fn run_before_local_write_hook(path: &Path) {
-    let hook = match BEFORE_LOCAL_WRITE_HOOK.lock() {
-        Ok(mut guard) => take_matching_local_write_hook(&mut guard, path),
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            take_matching_local_write_hook(&mut guard, path)
-        }
+    let hook = {
+        let mut slot = BEFORE_LOCAL_WRITE_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        take_matching_local_write_hook(&mut slot, path)
     };
     if let Some(hook) = hook {
         hook();
@@ -302,7 +300,6 @@ impl Write for AtomicOutputFile {
 pub(crate) struct AtomicOutputFile {
     file: File,
     temporary_path: PathBuf,
-    final_path: PathBuf,
     anchored: AnchoredTarget,
     committed: bool,
 }
@@ -315,7 +312,6 @@ impl AtomicOutputFile {
 
     pub(crate) fn create(path: &Path, create_parent: bool) -> io::Result<Self> {
         let anchored = open_anchored_target(path, create_parent)?;
-        let final_path = anchored.final_path();
         let temporary_path = fd_child_path(
             anchored.parent_dir(),
             &temporary_file_name(anchored.file_name()),
@@ -324,7 +320,6 @@ impl AtomicOutputFile {
         Ok(Self {
             file,
             temporary_path,
-            final_path,
             anchored,
             committed: false,
         })
@@ -334,7 +329,7 @@ impl AtomicOutputFile {
         self.file.flush()?;
         self.file.sync_all()?;
         run_before_local_write_hook(&self.anchored.logical_path());
-        ensure_existing_target_is_regular_or_missing(&self.final_path)?;
+        ensure_existing_target_is_regular_or_missing(&self.anchored.final_path())?;
         let temp_name = self
             .temporary_path
             .file_name()
