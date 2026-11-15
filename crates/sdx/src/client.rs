@@ -544,20 +544,14 @@ impl XetClientBuilder {
         if !session_id.is_empty() {
             transfer = transfer.with_session_id(session_id);
         }
-        let (buffer_semaphore, limits) = match self.buffer_capacity {
-            Some(capacity) => (
-                Arc::new(BufferSemaphore::new(capacity, capacity, capacity)),
-                self.limits,
+        let buffer_semaphore = Arc::new(match self.buffer_capacity {
+            Some(capacity) => BufferSemaphore::new(capacity, capacity, capacity),
+            None => BufferSemaphore::new(
+                DEFAULT_DOWNLOAD_BUFFER_SIZE,
+                DEFAULT_DOWNLOAD_BUFFER_SIZE,
+                DEFAULT_DOWNLOAD_BUFFER_LIMIT,
             ),
-            None => (
-                Arc::new(BufferSemaphore::new(
-                    DEFAULT_DOWNLOAD_BUFFER_SIZE,
-                    DEFAULT_DOWNLOAD_BUFFER_SIZE,
-                    DEFAULT_DOWNLOAD_BUFFER_LIMIT,
-                )),
-                self.limits,
-            ),
-        };
+        });
         let download_permits = Arc::new(tokio::sync::Semaphore::new(
             self.download_concurrency.max(1),
         ));
@@ -581,7 +575,7 @@ impl XetClientBuilder {
                 buffer_semaphore,
                 active_downloads: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 download_permits,
-                limits,
+                limits: self.limits,
                 chunk_cache,
                 xorb_fetch_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 upload_chunk_size: self.upload_chunk_size,
@@ -605,18 +599,15 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, RepositoryId), SdxError> {
             url.scheme()
         )));
     }
-    let segments: Vec<&str> = url
-        .path_segments()
-        .map(|segments| segments.collect())
-        .unwrap_or_default();
-    if segments.len() != 4 {
+    let segment_count = url.path_segments().map_or(0, Iterator::count);
+    if segment_count != 4 {
         return Err(SdxError::InvalidEndpoint(format!(
-            "expected exactly provider/owner/repo/revision in {endpoint:?}, got {} segment(s)",
-            segments.len()
+            "expected exactly provider/owner/repo/revision in {endpoint:?}, got {segment_count} segment(s)"
         )));
     }
-    let parsed = crate::url::XetUrl::parse(endpoint)?;
-    Ok((parsed.api_base.clone(), parsed.repository_id()))
+    let parsed = crate::url::XetUrl::from_parsed_url(&url, endpoint)?;
+    let repository = parsed.repository_id();
+    Ok((parsed.api_base, repository))
 }
 
 #[cfg(test)]

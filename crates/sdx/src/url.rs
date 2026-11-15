@@ -73,6 +73,11 @@ impl XetUrl {
         let url = Url::parse(input).map_err(|error| {
             SdxError::InvalidEndpoint(format!("cannot parse {input:?}: {error}"))
         })?;
+        Self::from_parsed_url(&url, input)
+    }
+
+    /// Shares identity/path decoding with the builder's stricter endpoint parser.
+    pub(crate) fn from_parsed_url(url: &Url, input: &str) -> Result<Self, SdxError> {
         if url.scheme() != "xet" {
             return Err(SdxError::InvalidEndpoint(format!(
                 "unsupported scheme {:?} in {input:?}; expected xet://",
