@@ -118,20 +118,31 @@ impl ProtocolChunkReuse {
                 }
                 self.members.push_front(members);
             }
-            let Some(mut record) = self
-                .members
-                .iter()
-                .find_map(|members| members.get(&hash))
-                .cloned()
-            else {
-                return Ok(None);
-            };
-            if record.length != u64::try_from(bytes.len())? {
-                return Err(ServerError::InvalidContentHash);
-            }
-            record.offset = offset;
-            Ok(Some(record))
+            self.cached(&hash, bytes.len(), offset)
         })
+    }
+
+    /// Only returns members whose complete source has already been verified
+    /// for this upload's reuse domain. This never probes metadata or storage.
+    pub(super) fn cached(
+        &self,
+        hash: &str,
+        length: usize,
+        offset: u64,
+    ) -> Result<Option<FileChunkRecord>, ServerError> {
+        let Some(mut record) = self
+            .members
+            .iter()
+            .find_map(|members| members.get(hash))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if record.length != u64::try_from(length)? {
+            return Err(ServerError::InvalidContentHash);
+        }
+        record.offset = offset;
+        Ok(Some(record))
     }
 
     pub(super) async fn register(

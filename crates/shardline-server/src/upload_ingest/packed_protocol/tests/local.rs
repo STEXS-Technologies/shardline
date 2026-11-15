@@ -385,3 +385,93 @@ async fn protocol_ingest_reuses_physical_members_across_s3_and_basic_lfs() {
         }
     }
 }
+
+#[tokio::test]
+async fn source_published_mid_upload_reuses_buffered_members_without_repacking_them() {
+    for changed_prefix in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let backend = crate::LocalBackend::new(
+            root.path().to_owned(),
+            "http://localhost".to_owned(),
+            NonZeroUsize::new(64 * 1024).unwrap(),
+        )
+        .await
+        .unwrap();
+        let objects = backend.object_store();
+        let scope = shardline_protocol::RepositoryScope::new(
+            shardline_protocol::RepositoryProvider::Generic,
+            "alice",
+            "repo",
+            Some("main"),
+        )
+        .unwrap();
+        let source = shardline_test_support::lcg_bytes(2 * 1024 * 1024, 123);
+        let mut incoming = source.clone();
+        if changed_prefix {
+            incoming[..256 * 1024].fill(0x5a);
+        }
+        let pool = crate::admission::BoundedPool::new(NonZeroUsize::MIN);
+        let mut upload = FileUploadIngestor::new_with_parallelism(
+            NonZeroUsize::new(64 * 1024).unwrap(),
+            false,
+            NonZeroUsize::new(8).unwrap(),
+            &pool,
+        )
+        .with_packed_protocol_storage(&objects, &pool)
+        .with_protocol_chunk_reuse(
+            crate::ServerBackend::Local(backend.clone()),
+            Some(scope.clone()),
+        );
+        upload
+            .ingest_body_chunk(&objects, &Bytes::copy_from_slice(&incoming[..1024 * 1024]))
+            .await
+            .unwrap();
+        // Another upload publishes after the first half missed discovery, but
+        // before the remainder discovers and verifies its complete container.
+        backend
+            .upload_protocol_stream(
+                "concurrent-source",
+                crate::upload_ingest::RequestBodyReader::from_bytes(Bytes::from(source)),
+                None,
+                Some(&scope),
+            )
+            .await
+            .unwrap();
+        let physical_bytes = || {
+            ObjectStore::list_prefix(&objects, &ObjectPrefix::parse("xorbs/").unwrap())
+                .unwrap()
+                .iter()
+                .map(|entry| entry.length())
+                .sum::<u64>()
+        };
+        let before = physical_bytes();
+        upload
+            .ingest_body_chunk(&objects, &Bytes::copy_from_slice(&incoming[1024 * 1024..]))
+            .await
+            .unwrap();
+        assert_eq!(pool.available_buffer_permits(), 1);
+        let (record, response) = upload.finish(&objects, "racing", None, None).await.unwrap();
+        assert_read(&objects, &record, &incoming).await;
+        assert!(
+            response
+                .chunks
+                .windows(2)
+                .all(|pair| pair[0].offset < pair[1].offset)
+        );
+        if changed_prefix {
+            assert!(response.inserted_chunks > 0);
+            assert!(
+                response.stored_bytes < 512 * 1024,
+                "buffered shared members must be reused too"
+            );
+            assert!(physical_bytes() - before < 512 * 1024);
+        } else {
+            assert_eq!(
+                response.inserted_chunks, 0,
+                "late discovery must also reuse the buffered prefix"
+            );
+            assert_eq!(physical_bytes(), before);
+        }
+        assert!(response.reused_chunks > 0);
+    }
+}

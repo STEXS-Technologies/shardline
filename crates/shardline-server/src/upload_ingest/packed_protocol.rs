@@ -1,6 +1,7 @@
 //! Shared bounded container packing, with optional standalone-chunk accounting.
 use shardline_index::{FileChunkRecord, xet_hash_hex_string};
 use shardline_storage::{ObjectBody, ObjectIntegrity, PutOutcome};
+use shardline_xet_core::merklehash::compute_data_hash;
 
 use super::{
     body_reader::ChunkBuffer,
@@ -61,7 +62,41 @@ impl PackedProtocolUpload {
         if let Some(reuse) = &mut self.reuse
             && let Some(record) = reuse.find(chunk, offset).await?
         {
+            // A source may have become visible after earlier chunks missed
+            // discovery. Reuse those now-verified members before packing them.
+            let record_start = self.result.records.len();
+            let chunk_start = self.result.chunks.len();
+            for (bytes, pending_offset) in std::mem::take(&mut self.pending) {
+                if let Some(verified) = &self.reuse
+                    && let Some(cached) = verified.cached(
+                        &compute_data_hash(&bytes).hex(),
+                        bytes.len(),
+                        pending_offset,
+                    )?
+                {
+                    self.pending_bytes = self
+                        .pending_bytes
+                        .checked_sub(bytes.len())
+                        .ok_or(ServerError::Overflow)?;
+                    self.record_result(&bytes, pending_offset, false)?;
+                    self.result.records.push(cached);
+                } else {
+                    self.pending.push((bytes, pending_offset));
+                }
+            }
             self.flush().await?;
+            // Cache hits and newly packed members can interleave in the file.
+            // Restore only this bounded batch to its original stream order.
+            self.result
+                .records
+                .get_mut(record_start..)
+                .ok_or(ServerError::Overflow)?
+                .sort_unstable_by_key(|entry| entry.offset);
+            self.result
+                .chunks
+                .get_mut(chunk_start..)
+                .ok_or(ServerError::Overflow)?
+                .sort_unstable_by_key(|entry| entry.offset);
             self.record_result(chunk, offset, false)?;
             self.result.records.push(record);
             return Ok(());
@@ -100,6 +135,7 @@ impl PackedProtocolUpload {
         // Keep the shared upload future bounded across frontend/backend callers.
         Box::pin(async move {
             if self.pending.is_empty() {
+                self.batch_permit = None;
                 return Ok(());
             }
             let chunks = std::mem::take(&mut self.pending);
