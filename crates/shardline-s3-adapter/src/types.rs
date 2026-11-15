@@ -687,16 +687,15 @@ enum XmlEvent<'value> {
 /// It scans for `<`/`>` tags, classifies element names through
 /// [`CompleteXmlElement::parse`], and yields text between tags. Processing
 /// instructions (`<?…?>`) and comments (`<!…>`) are skipped as non-matching
-/// elements; self-closing tags yield an open event only. Malformed input is
-/// tolerated (any tag that never closes terminates the scan).
+/// elements; self-closing tags yield an open event only. Unterminated tags
+/// return an error.
 struct CompleteXmlScanner<'value> {
-    body: &'value str,
-    offset: usize,
+    remaining: &'value str,
 }
 
 impl<'value> CompleteXmlScanner<'value> {
     const fn new(body: &'value str) -> Self {
-        Self { body, offset: 0 }
+        Self { remaining: body }
     }
 
     /// Yields the next XML event.
@@ -706,43 +705,31 @@ impl<'value> CompleteXmlScanner<'value> {
     /// Returns [`crate::S3Error::invalid_part`] when the input contains an
     /// unterminated tag (no closing `>`).
     fn next_event(&mut self) -> Result<XmlEvent<'value>, crate::S3Error> {
-        let rest = self
-            .body
-            .get(self.offset..)
-            .ok_or_else(crate::S3Error::invalid_part)?;
+        let rest = self.remaining;
         let Some(next_tag) = rest.find('<') else {
-            let trailing = rest;
-            self.offset = self.body.len();
-            return if trailing.is_empty() {
+            self.remaining = "";
+            return if rest.is_empty() {
                 Ok(XmlEvent::End)
             } else {
-                Ok(XmlEvent::Text(trailing))
+                Ok(XmlEvent::Text(rest))
             };
         };
         if next_tag > 0 {
-            let text = rest
-                .get(..next_tag)
-                .ok_or_else(crate::S3Error::invalid_part)?;
-            self.offset = self.offset.saturating_add(next_tag);
+            // `find` returns a UTF-8 character boundary within `rest`.
+            let (text, remaining) = rest.split_at(next_tag);
+            self.remaining = remaining;
             return Ok(XmlEvent::Text(text));
         }
-        // At '<': read the tag through its closing '>'.
-        let tagged = self
-            .body
-            .get(self.offset..)
+        // At '<': consume the tag through its closing '>'.
+        let (tag, remaining) = rest
+            .split_once('>')
             .ok_or_else(crate::S3Error::invalid_part)?;
-        let Some(close) = tagged.find('>') else {
-            return Err(crate::S3Error::invalid_part());
-        };
-        let tag = tagged
-            .get(..=close)
-            .ok_or_else(crate::S3Error::invalid_part)?;
-        self.offset = self.offset.saturating_add(tag.len());
+        self.remaining = remaining;
         let is_closing = tag.as_bytes().get(1) == Some(&b'/');
         let name_start = if is_closing { 2 } else { 1 };
         let tag_after_name = tag.get(name_start..).unwrap_or("");
         let name_end = tag_after_name
-            .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
+            .find(|ch: char| ch.is_whitespace() || ch == '/')
             .unwrap_or(tag_after_name.len());
         let name = tag_after_name.get(..name_end).unwrap_or("");
         if !is_closing && (name.starts_with('?') || name.starts_with('!')) {
