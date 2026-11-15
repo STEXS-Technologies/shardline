@@ -3786,8 +3786,8 @@ results. LFS request handlers share OID validation and borrow range headers;
 the range parser also rejects previously ignored trailing fields.
 
 The inventory revision is not a release qualification stamp. The complete local
-distributed gate below passed at `6823c999`; subsequent changes received targeted
-tests and strict Clippy checks. A combined run at `54ab7c5d` passed all 564 selected
+distributed gate below passed again at `c64bc0f8`, after the later LFS/Bazel
+handler and shared protocol-fixture changes. A combined run at `54ab7c5d` passed all 564 selected
 S3, OCI, LFS, Bazel and admin library tests in 68.259 seconds, with PostgreSQL 16
 configured and `SHARDLINE_REQUIRE_POSTGRES_TESTS=1`. The run included ignored tests
 in those modules, including the PostgreSQL/MinIO disconnected-copy recovery test;
@@ -4106,6 +4106,35 @@ local deployment faults include PostgreSQL/MinIO cases, while the multinode
 suite uses in-process roles with local SQLite/filesystem storage. This does not
 establish a multi-host PostgreSQL/S3 deployment, independent hosted CI,
 optimized-release performance, or production capacity.
+
+### Distributed-integrity gate after shared protocol fixtures (2026-11-15)
+
+Repeated the complete local gate at clean commit
+`c64bc0f847cc2081c2ca96bc058af5a068835bab`, after the LFS range-parser fix,
+shared OID validation, shared Bazel/LFS HEAD responses, protocol fixture
+consolidation and test layout changes.
+
+| Stage | Result | Test elapsed time |
+| --- | --- | ---: |
+| Deployment faults and compatibility | 50 passed, 0 skipped | 472.911 s |
+| Split-role traffic and probe contracts | 8 passed, 0 skipped | 22.560 s |
+
+Total driver time was 537.467 seconds. The all-features dev executable was
+frozen before testing; its SHA-256 remained
+`27b7b29690946ba57f78185b0e5d55cd634d1a9cfb6055e386ba3994043221a7`.
+The gate script checksum remained
+`3e417512287358e0a0db9614418de1e265206341aa18b3cbfb758e89fee9d312`.
+The run used Rust 1.99.0, four build jobs, disabled dev/test debug information,
+and no compiler wrapper. Revision metadata, build artifacts, client versions,
+checksums and complete logs were retained. Reproduce with the earlier gate
+command at this pinned revision.
+
+The gate checked exact test counts and rejected runtime skip and panic markers.
+It covers local deployment faults, including PostgreSQL/MinIO recovery and
+released-version rollback. The multinode suite uses in-process roles and local
+SQLite/filesystem storage. This result does not establish a multi-host
+PostgreSQL/S3 topology, independent hosted CI, optimized-release performance or
+production capacity.
 
 ### PostgreSQL/MinIO GC recovery qualification (2026-11-15)
 
