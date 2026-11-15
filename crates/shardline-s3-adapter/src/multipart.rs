@@ -1540,54 +1540,42 @@ pub async fn repair_session_evidence(root: &Path, upload_id: &str) -> Result<(),
     let (evidence, snapshot_evidence) = if let Some(head) = persisted.journal_head {
         let records = read_journal::<SessionEvidenceJournalRecord>(&dir).await?;
         let head = usize::try_from(head).map_err(|_error| S3SessionError::Overflow)?;
-        let committed = records.get(..head).ok_or_else(|| {
+        records.get(..head).ok_or_else(|| {
             S3SessionError::Reliability("session evidence journal head is missing".into())
         })?;
+        let mut evidence = Vec::new();
+        let mut snapshot_evidence = Vec::new();
+        for record in records.into_iter().take(head) {
+            evidence.extend(record.evidence);
+            snapshot_evidence.extend(record.snapshot_evidence);
+        }
         (
-            SessionEvidenceLog::from_events(
-                committed
-                    .iter()
-                    .flat_map(|record| record.evidence.iter().cloned())
-                    .collect(),
-            )
-            .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
-            SnapshotEvidenceLog::from_events(
-                committed
-                    .iter()
-                    .flat_map(|record| record.snapshot_evidence.iter().cloned())
-                    .collect(),
-            )
-            .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
+            SessionEvidenceLog::from_events(evidence)
+                .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
+            SnapshotEvidenceLog::from_events(snapshot_evidence)
+                .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
         )
     } else {
-        (
-            persisted.evidence.clone(),
-            persisted.snapshot_evidence.clone(),
-        )
+        (persisted.evidence, persisted.snapshot_evidence)
     };
     let _ignored = fs::remove_file(dir.join(SESSION_MERKLE_JOURNAL)).await;
-    let reset = serde_json::to_vec(&PersistedMultipartUploadSession {
-        session: persisted.session.clone(),
+    let reset = PersistedMultipartUploadSession {
         evidence: SessionEvidenceLog::default(),
         snapshot_evidence: SnapshotEvidenceLog::default(),
-        journal_head: persisted.journal_head,
-        journal_bytes: persisted.journal_bytes,
-        journal_evidence_sequence: persisted.journal_evidence_sequence,
-        journal_evidence_head: persisted.journal_evidence_head,
-        journal_snapshot_sequence: persisted.journal_snapshot_sequence,
-        journal_snapshot_head: persisted.journal_snapshot_head,
         merkle_head: None,
         merkle_bytes: None,
         merkle_evidence_sequence: None,
         merkle_snapshot_sequence: None,
         merkle_evidence_commit: None,
         merkle_snapshot_commit: None,
-    })?;
-    write_file_atomically(&metadata_path, &reset).await?;
+        ..persisted
+    };
+    let reset_bytes = serde_json::to_vec(&reset)?;
+    write_file_atomically(&metadata_path, &reset_bytes).await?;
     persist_session_with_evidence(
         root,
         upload_id,
-        &persisted.session,
+        &reset.session,
         &evidence,
         snapshot_evidence,
     )
