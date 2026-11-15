@@ -3750,18 +3750,18 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`9d0f366d68d4a051907ad3fab837ea30980143b1`. It counts all tracked `.rs`
+`1e4d39583dbc20d46a2459f47a25aee8d7b81534`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 580,756 | 22,893 (3.79%) |
-| Server | 220,570 | 211,068 | 9,502 (4.31%) |
+| Entire repository | 603,649 | 580,554 | 23,095 (3.83%) |
+| Server | 220,570 | 211,055 | 9,515 (4.31%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
-| Storage | 20,373 | 19,410 | 963 (4.73%) |
+| Storage | 20,373 | 19,391 | 982 (4.82%) |
 | S3 adapter | 10,954 | 10,272 | 682 (6.23%) |
 | Xet adapter | 17,801 | 15,986 | 1,815 (10.20%) |
 | OCI adapter | 7,700 | 7,049 | 651 (8.45%) |
@@ -3771,9 +3771,9 @@ or the amount of additional code that can safely be removed.
 | GC | 10,954 | 10,634 | 320 (2.92%) |
 | Fsck | 8,989 | 8,501 | 488 (5.43%) |
 | Rebuild | 4,326 | 4,081 | 245 (5.66%) |
-| CLI | 37,677 | 37,284 | 393 (1.04%) |
+| CLI | 37,677 | 37,264 | 413 (1.10%) |
 | Protocol | 4,076 | 3,715 | 361 (8.86%) |
-| Protocol adapters | 1,670 | 1,372 | 298 (17.84%) |
+| Protocol adapters | 1,670 | 1,240 | 430 (25.75%) |
 | Provider events | 5,283 | 5,117 | 166 (3.14%) |
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
@@ -3784,6 +3784,16 @@ identical response structs; Xorb packing reuses the core footer writer and
 already-computed chunk hashes. Shared shard field readers also fix legacy v2
 imports. Real-server SDK tests moved to the E2E workspace rather than being
 removed; standalone SDK tests no longer pull in the full server.
+
+At `1e4d3958`, the complete local CLI library suite passed all 597 tests
+with Rust 1.99 and strict CLI library/test Clippy passed with Rust 1.100. This
+covers the combined command-dispatch, report-writer, migration-root, atomic-output
+and retained-evidence scanner simplifications. The scanner retains each candidate
+in one bounded queue without separate filename strings. Existing cleanup tests
+also check first-page selection, continuation and wraparound. External PostgreSQL
+and native-client prerequisites were not required in this run; tests with optional
+fixture guards do not establish those integration guarantees. This is not a
+production or hosted-CI qualification.
 
 At `9d0f366d`, the complete SDK test run passed all 357 tests, including
 12 public-API conformance tests against the independent mock frontend. Recent
@@ -3847,8 +3857,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 9d0f366d68d4a051907ad3fab837ea30980143b1 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 9d0f366d68d4a051907ad3fab837ea30980143b1 -- '*.rs' | wc -l
+git grep -I -n '^' 1e4d39583dbc20d46a2459f47a25aee8d7b81534 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 1e4d39583dbc20d46a2459f47a25aee8d7b81534 -- '*.rs' | wc -l
 ```
 
 The cleanup reuses Cargo build artifacts, narrows ordinary binary and
