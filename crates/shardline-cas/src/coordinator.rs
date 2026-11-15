@@ -227,7 +227,7 @@ where
         if current.state() == shardline_index::UploadIntentState::Failed {
             return Err(E::from(CasError::InvalidUploadTransition));
         }
-        self.transition_upload_in_scope(
+        self.transition_upload_scoped(
             &tenant,
             &repository,
             intent.intent_id(),
@@ -238,42 +238,23 @@ where
         upload_lifecycle_failpoint(intent.intent_id(), UploadLifecycleBoundary::AfterStoring)
             .map_err(E::from)?;
 
-        match work().await {
-            Ok(result) => {
-                upload_lifecycle_failpoint(
-                    intent.intent_id(),
-                    UploadLifecycleBoundary::AfterObjectWork,
-                )
-                .map_err(E::from)?;
-                self.complete_upload_in_scope(&tenant, &repository, intent.intent_id())
-                    .await
-                    .map_err(E::from)?;
-                upload_lifecycle_failpoint(
-                    intent.intent_id(),
-                    UploadLifecycleBoundary::AfterStored,
-                )
-                .map_err(E::from)?;
-                upload_lifecycle_failpoint(
-                    intent.intent_id(),
-                    UploadLifecycleBoundary::AfterMetadataCommitted,
-                )
-                .map_err(E::from)?;
-                upload_lifecycle_failpoint(
-                    intent.intent_id(),
-                    UploadLifecycleBoundary::AfterVisible,
-                )
-                .map_err(E::from)?;
-                Ok(result)
-            }
-            // A returned error does not establish whether an object-store or
-            // metadata commit happened before its acknowledgement was lost.
-            // Keep the intent at its last durable in-flight boundary so an
-            // idempotent retry or startup reconciliation can inspect reality.
-            // Marking it terminal here would make an ambiguous success
-            // unrecoverable and could let one failed duplicate poison a
-            // concurrent winner.
-            Err(error) => Err(error),
+        // A returned error does not establish whether an external commit
+        // succeeded before its acknowledgement was lost. Preserve the in-flight
+        // intent so retry or reconciliation can inspect durable state.
+        let result = work().await?;
+        upload_lifecycle_failpoint(intent.intent_id(), UploadLifecycleBoundary::AfterObjectWork)
+            .map_err(E::from)?;
+        self.complete_upload_in_scope(&tenant, &repository, intent.intent_id())
+            .await
+            .map_err(E::from)?;
+        for boundary in [
+            UploadLifecycleBoundary::AfterStored,
+            UploadLifecycleBoundary::AfterMetadataCommitted,
+            UploadLifecycleBoundary::AfterVisible,
+        ] {
+            upload_lifecycle_failpoint(intent.intent_id(), boundary).map_err(E::from)?;
         }
+        Ok(result)
     }
 
     /// Creates a durable upload intent before any object-store mutation.
@@ -330,7 +311,7 @@ where
         intent_id: &str,
         next: shardline_index::UploadIntentState,
     ) -> Result<(), CasError> {
-        self.transition_upload_in_scope("shardline", "default", intent_id, next)
+        self.transition_upload_scoped("shardline", "default", intent_id, next)
             .await
     }
 
@@ -341,17 +322,6 @@ where
     /// Returns [`CasError`] when the intent is missing, the transition is
     /// invalid, or the durable index cannot persist the boundary.
     pub async fn transition_upload_scoped(
-        &self,
-        tenant: &str,
-        repository: &str,
-        intent_id: &str,
-        next: shardline_index::UploadIntentState,
-    ) -> Result<(), CasError> {
-        self.transition_upload_in_scope(tenant, repository, intent_id, next)
-            .await
-    }
-
-    async fn transition_upload_in_scope(
         &self,
         tenant: &str,
         repository: &str,
@@ -427,7 +397,6 @@ where
 }
 
 fn map_upload_intent_store_error(error: impl std::error::Error + 'static) -> CasError {
-    let message = error.to_string();
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
     while let Some(current) = source {
         if current
@@ -438,7 +407,7 @@ fn map_upload_intent_store_error(error: impl std::error::Error + 'static) -> Cas
         }
         source = current.source();
     }
-    CasError::Record(message)
+    CasError::Record(error.to_string())
 }
 
 #[async_trait::async_trait]
