@@ -765,9 +765,7 @@ impl<'value> CompleteXmlScanner<'value> {
 pub struct CompleteParts {
     part_numbers: BTreeSet<u32>,
     etags: BTreeMap<u32, Option<String>>,
-    checksums_crc32: BTreeMap<u32, Option<String>>,
-    checksums_crc32c: BTreeMap<u32, Option<String>>,
-    checksums: BTreeMap<(u32, String), Option<String>>,
+    checksums: BTreeMap<u32, (String, String)>,
 }
 
 impl CompleteParts {
@@ -786,25 +784,22 @@ impl CompleteParts {
     /// Returns the echoed CRC32 checksum for a part, if supplied.
     #[must_use]
     pub fn checksum_crc32(&self, part_number: u32) -> Option<&str> {
-        self.checksums_crc32
-            .get(&part_number)
-            .and_then(Option::as_deref)
+        self.checksum(part_number, "CRC32")
     }
 
     /// Returns the echoed CRC32C checksum for a part, if supplied.
     #[must_use]
     pub fn checksum_crc32c(&self, part_number: u32) -> Option<&str> {
-        self.checksums_crc32c
-            .get(&part_number)
-            .and_then(Option::as_deref)
+        self.checksum(part_number, "CRC32C")
     }
 
     /// Returns the echoed checksum for the named algorithm.
     #[must_use]
     pub fn checksum(&self, part_number: u32, algorithm: &str) -> Option<&str> {
         self.checksums
-            .get(&(part_number, algorithm.to_owned()))
-            .and_then(Option::as_deref)
+            .get(&part_number)
+            .filter(|(name, _value)| name == algorithm)
+            .map(|(_name, value)| value.as_str())
     }
 
     /// The number of distinct parts.
@@ -845,9 +840,7 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
     let mut root_closed = false;
     let mut number = None;
     let mut etag = None;
-    let mut checksum_crc32 = None;
-    let mut checksum_crc32c = None;
-    let mut checksums = BTreeMap::new();
+    let mut checksum = None;
     let mut field: Option<(CompleteXmlElement, String)> = None;
     loop {
         match scanner.next_event()? {
@@ -863,9 +856,7 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
                 in_part = true;
                 number = None;
                 etag = None;
-                checksum_crc32 = None;
-                checksum_crc32c = None;
-                checksums.clear();
+                checksum = None;
             }
             XmlEvent::Open(
                 element @ (CompleteXmlElement::PartNumber
@@ -878,7 +869,7 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
             ) if in_part && field.is_none() => {
                 if (element == CompleteXmlElement::PartNumber && number.is_some())
                     || (element == CompleteXmlElement::ETag && etag.is_some())
-                    || (element.checksum_details().is_some() && !checksums.is_empty())
+                    || (element.checksum_details().is_some() && checksum.is_some())
                 {
                     return Err(crate::S3Error::invalid_part());
                 }
@@ -926,12 +917,7 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
                     {
                         return Err(crate::S3Error::invalid_part());
                     }
-                    if algorithm == "CRC32" {
-                        checksum_crc32 = Some(value.clone());
-                    } else if algorithm == "CRC32C" {
-                        checksum_crc32c = Some(value.clone());
-                    }
-                    checksums.insert(algorithm.to_owned(), Some(value));
+                    checksum = Some((algorithm.to_owned(), value));
                 }
             }
             XmlEvent::Close(CompleteXmlElement::Part) if in_part && field.is_none() => {
@@ -941,12 +927,8 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
                 }
                 parts.part_numbers.insert(number);
                 parts.etags.insert(number, etag.take());
-                parts.checksums_crc32.insert(number, checksum_crc32.take());
-                parts
-                    .checksums_crc32c
-                    .insert(number, checksum_crc32c.take());
-                for (algorithm, value) in std::mem::take(&mut checksums) {
-                    parts.checksums.insert((number, algorithm), value);
+                if let Some(checksum) = checksum.take() {
+                    parts.checksums.insert(number, checksum);
                 }
                 in_part = false;
             }
@@ -1457,9 +1439,18 @@ mod tests {
     #[test]
     fn completion_parts_parse_crc32c_and_reject_mixed_algorithms() {
         let body = "<Part><PartNumber>1</PartNumber><ETag>\"etag\"</ETag><ChecksumCRC32C>EjRWeA==</ChecksumCRC32C></Part>";
-        let parts = super::parse_complete_multipart_parts(body).unwrap();
+        let body = format!(
+            "{body}<Part><PartNumber>2</PartNumber><ChecksumCRC32>AAAAAA==</ChecksumCRC32></Part><Part><PartNumber>3</PartNumber></Part>"
+        );
+        let parts = super::parse_complete_multipart_parts(&body).unwrap();
         assert_eq!(parts.checksum_crc32c(1), Some("EjRWeA=="));
+        assert_eq!(parts.checksum(1, "CRC32C"), Some("EjRWeA=="));
         assert_eq!(parts.checksum_crc32(1), None);
+        assert_eq!(parts.checksum_crc32(2), Some("AAAAAA=="));
+        assert_eq!(parts.checksum_crc32c(2), None);
+        assert_eq!(parts.checksum(3, "CRC32"), None);
+        assert_eq!(parts.checksum(4, "CRC32C"), None);
+        assert_eq!(parts.checksum(1, "unknown"), None);
 
         let mixed = "<Part><PartNumber>1</PartNumber><ChecksumCRC32>AAAAAA==</ChecksumCRC32><ChecksumCRC32C>AAAAAA==</ChecksumCRC32C></Part>";
         assert!(super::parse_complete_multipart_parts(mixed).is_err());
