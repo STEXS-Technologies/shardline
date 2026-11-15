@@ -109,17 +109,6 @@ impl BoundedObjectSink {
         })
     }
 
-    fn spill_to_temporary(&mut self) -> Result<(), IoError> {
-        let mut temporary = NamedTempFile::new()?;
-        temporary.write_all(&self.memory)?;
-        // The scratch file now owns these bytes. Release the allocation too:
-        // retaining capacity keeps the full memory budget charged throughout
-        // the remaining remote transfer even though it is no longer used.
-        self.memory = Vec::new();
-        self.temporary = Some(temporary);
-        Ok(())
-    }
-
     fn into_object(self) -> Result<MaterializedObject, IoError> {
         match self.temporary {
             Some(mut temporary) => {
@@ -157,12 +146,11 @@ impl Write for BoundedObjectSink {
             self.memory.extend_from_slice(buffer);
             return Ok(buffer.len());
         }
-        self.spill_to_temporary()?;
-        self.temporary
-            .as_mut()
-            .ok_or_else(|| IoError::other("bounded object spill was not created"))?
-            .as_file_mut()
-            .write(buffer)
+        let mut temporary = NamedTempFile::new()?;
+        temporary.write_all(&self.memory)?;
+        // Release the memory allocation once the scratch file owns its bytes.
+        self.memory = Vec::new();
+        self.temporary.insert(temporary).as_file_mut().write(buffer)
     }
 
     fn flush(&mut self) -> Result<(), IoError> {
