@@ -160,6 +160,14 @@ fn base64_decode_url(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     URL_SAFE_NO_PAD.decode(input)
 }
 
+pub(super) fn split_jwt(token: &str) -> Result<(&str, &str, &str), AuthError> {
+    let mut parts = token.split('.');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(header), Some(payload), Some(signature), None) => Ok((header, payload, signature)),
+        _ => Err(AuthError::InvalidToken),
+    }
+}
+
 /// Verify key purpose, signature, issuer and optional audience before exposing claims.
 pub(super) fn verify_jwt_payload(
     header_b64: &str,

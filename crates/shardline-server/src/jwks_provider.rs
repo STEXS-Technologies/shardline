@@ -1,6 +1,6 @@
 use crate::jwt_keys::{
     Jwk, JwksResponse, RefreshTask, is_secure_url as is_secure_jwks_url, read_auth_json_bounded,
-    verify_jwt_payload,
+    split_jwt, verify_jwt_payload,
 };
 #[cfg(test)]
 use jsonwebtoken::Algorithm;
@@ -283,13 +283,7 @@ impl JwksProvider {
 
 impl AuthProvider for JwksProvider {
     fn verify_token(&self, token: &str) -> Result<TokenClaims, AuthError> {
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 3 {
-            return Err(AuthError::InvalidToken);
-        }
-        let header = parts.first().ok_or(AuthError::InvalidToken)?;
-        let payload = parts.get(1).ok_or(AuthError::InvalidToken)?;
-        let signature = parts.get(2).ok_or(AuthError::InvalidToken)?;
+        let (header, payload, signature) = split_jwt(token)?;
         self.verify_jwt_claims(header, payload, signature)
     }
 

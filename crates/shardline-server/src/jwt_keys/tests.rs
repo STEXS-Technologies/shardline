@@ -435,3 +435,31 @@ fn jwt_payload_rejects_unsigned_and_symmetric_algorithms_before_key_lookup() {
         }
     }
 }
+
+#[test]
+fn jwt_partitioning_requires_exactly_three_parts_without_decoding_them() {
+    for (token, expected) in [
+        (
+            "header.payload.signature",
+            ("header", "payload", "signature"),
+        ),
+        ("..", ("", "", "")),
+        (".payload.signature", ("", "payload", "signature")),
+        ("header..signature", ("header", "", "signature")),
+        ("header.payload.", ("header", "payload", "")),
+    ] {
+        assert_eq!(super::split_jwt(token).unwrap(), expected);
+    }
+    for token in [
+        "",
+        "header",
+        "header.payload",
+        "header.payload.signature.extra",
+        "...",
+    ] {
+        assert!(matches!(
+            super::split_jwt(token),
+            Err(shardline_server_core::AuthError::InvalidToken)
+        ));
+    }
+}
