@@ -879,13 +879,29 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn store_uploaded_xorb_rejects_invalid_hash_format() {
+    #[tokio::test]
+    async fn store_uploaded_xorb_rejects_malformed_uploads() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let result = async_store_xorb(&object_store, "not-a-hash", b"data");
-        assert!(result.is_err());
+        let hash = "ab".repeat(32);
+        let garbage = vec![0xFFu8; 4096];
+        for (case, expected_hash, body) in [
+            ("invalid hash", "not-a-hash", b"data".as_slice()),
+            ("empty hash", "", b"data".as_slice()),
+            (
+                "invalid body",
+                hash.as_str(),
+                b"\x00\x01\x02\x03".as_slice(),
+            ),
+            ("tiny body", hash.as_str(), b"\x00".as_slice()),
+            ("large garbage", hash.as_str(), garbage.as_slice()),
+        ] {
+            let result = super::store_uploaded_xorb(&object_store, expected_hash, body).await;
+            assert!(
+                result.is_err(),
+                "{case}: expected rejection, got {result:?}"
+            );
+        }
     }
 
     // ── store_uploaded_xorb_with_metrics error propagation ─────────────
@@ -1106,19 +1122,6 @@ mod tests {
                 "msg '{msg}' missing 'hash' for {err:?}"
             );
         }
-    }
-
-    // ── store_uploaded_xorb store_uploaded_xorb_with_metrics propagation ─
-
-    #[test]
-    fn store_uploaded_xorb_handles_invalid_bytes_gracefully() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let hash = "ab".repeat(32);
-
-        // Completely invalid xorb bytes - should fail validation
-        let result = async_store_xorb(&object_store, &hash, b"\x00\x01\x02\x03");
-        assert!(result.is_err(), "expected error for invalid xorb bytes");
     }
 
     // ── visit_stored_xorb_chunk_hashes with stored xorb ────────────────
@@ -1441,14 +1444,6 @@ mod tests {
     // ── store_uploaded_xorb with edge cases ───────────────────────────
 
     #[test]
-    fn store_uploaded_xorb_rejects_empty_expected_hash() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let result = async_store_xorb(&object_store, "", b"data");
-        assert!(result.is_err(), "expected error for empty hash");
-    }
-
-    #[test]
     fn store_uploaded_xorb_unpacked_length_check() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
@@ -1566,29 +1561,6 @@ mod tests {
         let result = xorb_hash_from_object_key_if_present(&key);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
-    }
-
-    // ── store_uploaded_xorb errors with various invalid inputs ──────────
-
-    #[test]
-    fn store_uploaded_xorb_rejects_tiny_invalid_body_with_valid_hash() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let hash = "ab".repeat(32);
-        let result = async_store_xorb(&object_store, &hash, b"\x00");
-        assert!(result.is_err(), "expected error for tiny body");
-    }
-
-    #[test]
-    fn store_uploaded_xorb_rejects_large_garbage_body() {
-        let temp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-
-        let hash = "ab".repeat(32);
-        let garbage = vec![0xFFu8; 4096];
-        let result = async_store_xorb(&object_store, &hash, &garbage);
-        assert!(result.is_err(), "expected error for garbage body");
     }
 
     // ── normalize_serialized_xorb edge cases ────────────────────────────
