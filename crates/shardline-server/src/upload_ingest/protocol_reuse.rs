@@ -36,94 +36,87 @@ impl ProtocolChunkReuse {
                 .any(|members| members.contains_key(&hash))
             {
                 let wanted = hash.clone();
-                let found = self
-                    .backend
-                    .with_scoped_dedup_sources(
-                        &hash,
-                        self.scope.as_ref(),
-                        ShardMetadataLimits::default(),
-                        move |sources| {
-                            for (descriptor, _, visible) in sources {
-                                if !descriptor
-                                    .chunks
-                                    .iter()
-                                    .zip(&visible)
-                                    .any(|(member, allowed)| *allowed && member.hash == wanted)
-                                {
-                                    continue;
-                                }
-                                return Ok(Some((descriptor, visible)));
-                            }
-                            Ok(None)
-                        },
-                    )
-                    .await;
-                match found {
-                    Ok(Some((descriptor, visible))) => {
-                        // Candidate admission has committed. Full container reads must
-                        // not retain its database connection or deletion locks.
-                        // Final publication rechecks availability under reference locks.
-                        let objects = self.backend.object_store();
-                        let container_hash = descriptor.hash.clone();
-                        let verified =
-                            match blocking_work(self.backend.stream_work_pool(), move || {
-                                Ok(shardline_xet_adapter::recover_xorb_descriptor(
-                                    &objects,
-                                    &container_hash,
-                                )?)
-                            })
-                            .await
-                            {
-                                Ok(verified) => verified,
-                                Err(ServerError::NotFound) => return Ok(None),
-                                Err(error) => return Err(error),
-                            };
-                        if verified != descriptor {
-                            return Err(ServerError::InvalidContentHash);
-                        }
-                        let mut members = HashMap::new();
-                        for (index, (member, allowed)) in
-                            descriptor.chunks.iter().zip(visible).enumerate()
-                        {
-                            if allowed {
-                                members.insert(
-                                    member.hash.clone(),
-                                    FileChunkRecord {
-                                        hash: descriptor.hash.clone(),
-                                        offset: 0,
-                                        length: member
-                                            .unpacked_end
-                                            .checked_sub(member.unpacked_start)
-                                            .ok_or(ServerError::Overflow)?,
-                                        range_start: u64::try_from(index)?,
-                                        range_end: u64::try_from(index)?
-                                            .checked_add(1)
-                                            .ok_or(ServerError::Overflow)?,
-                                        packed_start: member.packed_start,
-                                        packed_end: member.packed_end,
-                                    },
-                                );
-                            }
-                        }
-                        // Retain alternating sources without increasing the former
-                        // one-descriptor member budget. The container cap also
-                        // bounds small maps and lookup work per chunk.
-                        while self.members.len() >= 8
-                            || self
-                                .members
-                                .iter()
-                                .map(HashMap::len)
-                                .sum::<usize>()
-                                .saturating_add(members.len())
-                                > MAX_XET_DESCRIPTOR_CHUNKS
-                        {
-                            self.members.pop_back();
-                        }
-                        self.members.push_front(members);
-                    }
+                let found =
+                    self.backend
+                        .with_scoped_dedup_sources(
+                            &hash,
+                            self.scope.as_ref(),
+                            ShardMetadataLimits::default(),
+                            move |sources| {
+                                Ok(sources
+                                    .into_iter()
+                                    .find(|(descriptor, _, visible)| {
+                                        descriptor.chunks.iter().zip(visible).any(
+                                            |(member, allowed)| *allowed && member.hash == wanted,
+                                        )
+                                    })
+                                    .map(|(descriptor, _, visible)| (descriptor, visible)))
+                            },
+                        )
+                        .await;
+                let (descriptor, visible) = match found {
+                    Ok(Some(source)) => source,
                     Ok(None) | Err(ServerError::NotFound) => return Ok(None),
                     Err(error) => return Err(error),
+                };
+                // Candidate admission has committed. Full container reads must
+                // not retain its database connection or deletion locks.
+                // Final publication rechecks availability under reference locks.
+                let objects = self.backend.object_store();
+                let container_hash = descriptor.hash.clone();
+                let verified = match blocking_work(self.backend.stream_work_pool(), move || {
+                    Ok(shardline_xet_adapter::recover_xorb_descriptor(
+                        &objects,
+                        &container_hash,
+                    )?)
+                })
+                .await
+                {
+                    Ok(verified) => verified,
+                    Err(ServerError::NotFound) => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                if verified != descriptor {
+                    return Err(ServerError::InvalidContentHash);
                 }
+                let mut members = HashMap::new();
+                for (index, (member, allowed)) in descriptor.chunks.iter().zip(visible).enumerate()
+                {
+                    if allowed {
+                        members.insert(
+                            member.hash.clone(),
+                            FileChunkRecord {
+                                hash: descriptor.hash.clone(),
+                                offset: 0,
+                                length: member
+                                    .unpacked_end
+                                    .checked_sub(member.unpacked_start)
+                                    .ok_or(ServerError::Overflow)?,
+                                range_start: u64::try_from(index)?,
+                                range_end: u64::try_from(index)?
+                                    .checked_add(1)
+                                    .ok_or(ServerError::Overflow)?,
+                                packed_start: member.packed_start,
+                                packed_end: member.packed_end,
+                            },
+                        );
+                    }
+                }
+                // Retain alternating sources without increasing the former
+                // one-descriptor member budget. The container cap also
+                // bounds small maps and lookup work per chunk.
+                while self.members.len() >= 8
+                    || self
+                        .members
+                        .iter()
+                        .map(HashMap::len)
+                        .sum::<usize>()
+                        .saturating_add(members.len())
+                        > MAX_XET_DESCRIPTOR_CHUNKS
+                {
+                    self.members.pop_back();
+                }
+                self.members.push_front(members);
             }
             let Some(mut record) = self
                 .members
@@ -146,20 +139,19 @@ impl ProtocolChunkReuse {
         hash: &str,
         verified: Option<shardline_index::XetXorbDescriptor>,
     ) -> Result<(), ServerError> {
-        if let Some(descriptor) = verified {
-            return self
-                .backend
-                .cache_verified_xorb_descriptor(&descriptor)
-                .await;
-        }
-        let objects = self.backend.object_store();
-        let hash = hash.to_owned();
-        let descriptor = blocking_work(self.backend.stream_work_pool(), move || {
-            Ok(shardline_xet_adapter::recover_xorb_descriptor(
-                &objects, &hash,
-            )?)
-        })
-        .await?;
+        let descriptor = match verified {
+            Some(descriptor) => descriptor,
+            None => {
+                let objects = self.backend.object_store();
+                let hash = hash.to_owned();
+                blocking_work(self.backend.stream_work_pool(), move || {
+                    Ok(shardline_xet_adapter::recover_xorb_descriptor(
+                        &objects, &hash,
+                    )?)
+                })
+                .await?
+            }
+        };
         self.backend
             .cache_verified_xorb_descriptor(&descriptor)
             .await
