@@ -145,43 +145,22 @@ where
             continue;
         }
         let key = &tombstone.key;
+        let object_keys = tombstone_object_keys(key)?;
         // Tombstone reclamation precedes ordinary GC, so it must enforce holds
         // itself. Keep the whole manifest pair if either object is held and
         // retain the tombstone for reclamation after the hold is released.
-        if tombstone_has_active_hold(index_store, key, &held_keys, now).await? {
+        if tombstone_has_active_hold(index_store, &object_keys, &held_keys, now).await? {
             continue;
         }
         report.eligible = shardline_server_core::checked_increment(report.eligible)?;
 
-        match key.kind {
-            OciObjectKind::Blob => {
-                let object_key = oci_blob_key_from_namespace(
-                    &key.repository,
-                    &key.digest_hex,
-                    &key.scope_namespace,
-                )?;
-                crate::remote_delete::delete_gc_object(object_store, &object_key, remote_guard)
-                    .await?;
-                let file_id = protocol_object_file_id(&object_key);
+        for object_key in &object_keys {
+            crate::remote_delete::delete_gc_object(object_store, object_key, remote_guard).await?;
+            if key.kind == OciObjectKind::Blob {
+                let file_id = protocol_object_file_id(object_key);
                 if let Some(record) = latest_records.remove(&file_id) {
                     record_store.delete_protocol_record(&record).await?;
                 }
-            }
-            OciObjectKind::Manifest => {
-                let manifest_key = oci_manifest_key_from_namespace(
-                    &key.repository,
-                    &key.digest_hex,
-                    &key.scope_namespace,
-                )?;
-                crate::remote_delete::delete_gc_object(object_store, &manifest_key, remote_guard)
-                    .await?;
-                let media_type_key = oci_manifest_media_type_key_from_namespace(
-                    &key.repository,
-                    &key.digest_hex,
-                    &key.scope_namespace,
-                )?;
-                crate::remote_delete::delete_gc_object(object_store, &media_type_key, remote_guard)
-                    .await?;
             }
         }
 
@@ -196,17 +175,8 @@ where
     Ok(report)
 }
 
-async fn tombstone_has_active_hold<IndexAdapter>(
-    index_store: &IndexAdapter,
-    key: &OciObjectKey,
-    held_keys: &HashSet<String>,
-    now: u64,
-) -> Result<bool, GcError>
-where
-    IndexAdapter: shardline_index::AsyncIndexStore + Sync,
-    IndexAdapter::Error: Into<GcError>,
-{
-    let keys = match key.kind {
+fn tombstone_object_keys(key: &OciObjectKey) -> Result<Vec<shardline_storage::ObjectKey>, GcError> {
+    Ok(match key.kind {
         OciObjectKind::Blob => vec![oci_blob_key_from_namespace(
             &key.repository,
             &key.digest_hex,
@@ -224,7 +194,19 @@ where
                 &key.scope_namespace,
             )?,
         ],
-    };
+    })
+}
+
+async fn tombstone_has_active_hold<IndexAdapter>(
+    index_store: &IndexAdapter,
+    keys: &[shardline_storage::ObjectKey],
+    held_keys: &HashSet<String>,
+    now: u64,
+) -> Result<bool, GcError>
+where
+    IndexAdapter: shardline_index::AsyncIndexStore + Sync,
+    IndexAdapter::Error: Into<GcError>,
+{
     for object_key in keys {
         // Recheck for callers that supplied equivalent writer exclusion around
         // the low-level GC entrypoint, including the manifest companion.
@@ -232,7 +214,7 @@ where
         // whole operation; this lookup alone cannot synchronize deletion.
         if held_keys.contains(object_key.as_str())
             || index_store
-                .retention_hold(&object_key)
+                .retention_hold(object_key)
                 .await
                 .map_err(Into::into)?
                 .is_some_and(|hold| hold.is_active_at(now))
@@ -389,8 +371,9 @@ mod tests {
                 .await
                 .unwrap();
             assert!(snapshot.is_empty());
+            let object_keys = tombstone_object_keys(&object).unwrap();
             assert!(
-                !tombstone_has_active_hold(&index_store, &object, &snapshot, now)
+                !tombstone_has_active_hold(&index_store, &object_keys, &snapshot, now)
                     .await
                     .unwrap()
             );
@@ -416,7 +399,7 @@ mod tests {
             // This is the exact predicate guarding physical deletion, supplied
             // with the stale run-start snapshot and the updated real index.
             assert!(
-                tombstone_has_active_hold(&index_store, &object, &snapshot, now)
+                tombstone_has_active_hold(&index_store, &object_keys, &snapshot, now)
                     .await
                     .unwrap()
             );
