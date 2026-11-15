@@ -76,28 +76,14 @@ pub async fn reconstruct(
     file_id: &str,
     requested_range: Option<ByteRange>,
 ) -> Result<ReconstructedFile, SdxError> {
-    let plan =
-        fetch_reconstruction(transfer, retry, api_base, token, file_id, requested_range).await?;
-    assemble(transfer, retry, token, plan, requested_range).await
-}
-
-/// Fetches the reconstruction plan, preferring V2 and falling back to V1 on
-/// 404/501 (V2 not served).
-async fn fetch_reconstruction(
-    transfer: &TransferClient,
-    retry: Option<&RetryContext>,
-    api_base: &str,
-    token: &str,
-    file_id: &str,
-    requested_range: Option<ByteRange>,
-) -> Result<Reconstruction, SdxError> {
     let response =
         fetch_reconstruction_response(transfer, retry, api_base, token, file_id, requested_range)
             .await?;
-    match response {
+    let plan = match response {
         ReconstructionResponse::V2(response) => Reconstruction::from_v2(response),
         ReconstructionResponse::V1(response) => Reconstruction::from_v1(response),
-    }
+    }?;
+    assemble(transfer, retry, token, plan, requested_range).await
 }
 
 /// A raw reconstruction response in either supported wire version.
