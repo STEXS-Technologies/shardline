@@ -163,33 +163,27 @@ pub(crate) fn ensure_upload_growth_within_limit(
     Ok(())
 }
 
-pub(crate) fn parse_query_map(
+fn bounded_query_pairs(
     uri: &axum::http::Uri,
-) -> Result<BTreeMap<String, String>, ServerError> {
-    let Some(query) = uri.query() else {
-        return Ok(BTreeMap::new());
-    };
+) -> Result<url::form_urlencoded::Parse<'_>, ServerError> {
+    let query = uri.query().unwrap_or_default();
     if query.len() > super::MAX_PROTOCOL_QUERY_BYTES {
         return Err(ServerError::RequestQueryTooLarge);
     }
+    Ok(url::form_urlencoded::parse(query.as_bytes()))
+}
 
-    Ok(url::form_urlencoded::parse(query.as_bytes())
-        .into_owned()
-        .collect())
+pub(crate) fn parse_query_map(
+    uri: &axum::http::Uri,
+) -> Result<BTreeMap<String, String>, ServerError> {
+    Ok(bounded_query_pairs(uri)?.into_owned().collect())
 }
 
 pub(crate) fn parse_query_values(
     uri: &axum::http::Uri,
     key: &str,
 ) -> Result<Vec<String>, ServerError> {
-    let Some(query) = uri.query() else {
-        return Ok(Vec::new());
-    };
-    if query.len() > super::MAX_PROTOCOL_QUERY_BYTES {
-        return Err(ServerError::RequestQueryTooLarge);
-    }
-
-    Ok(url::form_urlencoded::parse(query.as_bytes())
+    Ok(bounded_query_pairs(uri)?
         .filter_map(|(candidate_key, value)| (candidate_key == key).then(|| value.into_owned()))
         .collect())
 }
@@ -407,40 +401,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_upload_content_range_plain_range() {
-        let range = parse_upload_content_range("0-9").unwrap();
-        assert_eq!(range.start(), 0);
-        assert_eq!(range.end_inclusive(), 9);
-    }
-
-    #[test]
-    fn parse_upload_content_range_with_bytes_prefix_and_total() {
-        let range = parse_upload_content_range("bytes 10-19/20").unwrap();
-        assert_eq!(range.start(), 10);
-        assert_eq!(range.end_inclusive(), 19);
-    }
-
-    #[test]
-    fn parse_upload_content_range_with_unknown_total() {
-        let range = parse_upload_content_range("bytes 20-29/*").unwrap();
-        assert_eq!(range.start(), 20);
-        assert_eq!(range.end_inclusive(), 29);
-    }
-
-    #[test]
     fn parse_upload_content_range_validates_complete_length() {
-        for value in [
-            "0-4",
-            "bytes 0-4",
-            "0-4/5",
-            "bytes 0-4/5",
-            "0-4/*",
-            "bytes 0-4/*",
+        for (value, expected) in [
+            ("0-9", (0, 9)),
+            ("bytes 10-19/20", (10, 19)),
+            ("bytes 20-29/*", (20, 29)),
+            ("0-4", (0, 4)),
+            ("bytes 0-4", (0, 4)),
+            ("0-4/5", (0, 4)),
+            ("bytes 0-4/5", (0, 4)),
+            ("0-4/*", (0, 4)),
+            ("bytes 0-4/*", (0, 4)),
         ] {
             let range = parse_upload_content_range(value).unwrap();
-            assert_eq!((range.start(), range.end_inclusive()), (0, 4), "{value}");
+            assert_eq!((range.start(), range.end_inclusive()), expected, "{value}");
         }
         for value in [
+            "invalid",
+            "",
+            "bytes -1-9",
+            "bytes abc-def",
             "bytes 0-4/0",
             "bytes 0-4/4",
             "bytes 0-4/",
@@ -462,38 +442,6 @@ mod tests {
                 "{value}"
             );
         }
-    }
-
-    #[test]
-    fn parse_upload_content_range_rejects_invalid_input() {
-        assert!(matches!(
-            parse_upload_content_range("invalid"),
-            Err(ServerError::InvalidRangeHeader)
-        ));
-    }
-
-    #[test]
-    fn parse_upload_content_range_rejects_empty_string() {
-        assert!(matches!(
-            parse_upload_content_range(""),
-            Err(ServerError::InvalidRangeHeader)
-        ));
-    }
-
-    #[test]
-    fn parse_upload_content_range_rejects_negative_start() {
-        assert!(matches!(
-            parse_upload_content_range("bytes -1-9"),
-            Err(ServerError::InvalidRangeHeader)
-        ));
-    }
-
-    #[test]
-    fn parse_upload_content_range_rejects_non_numeric() {
-        assert!(matches!(
-            parse_upload_content_range("bytes abc-def"),
-            Err(ServerError::InvalidRangeHeader)
-        ));
     }
 
     #[test]
