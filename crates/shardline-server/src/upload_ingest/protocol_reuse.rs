@@ -30,94 +30,92 @@ impl ProtocolChunkReuse {
     {
         Box::pin(async move {
             let hash = compute_data_hash(bytes).hex();
-            if !self
-                .members
-                .iter()
-                .any(|members| members.contains_key(&hash))
-            {
-                let wanted = hash.clone();
-                let found =
-                    self.backend
-                        .with_scoped_dedup_sources(
-                            &hash,
-                            self.scope.as_ref(),
-                            ShardMetadataLimits::default(),
-                            move |sources| {
-                                Ok(sources
-                                    .into_iter()
-                                    .find(|(descriptor, _, visible)| {
-                                        descriptor.chunks.iter().zip(visible).any(
-                                            |(member, allowed)| *allowed && member.hash == wanted,
-                                        )
-                                    })
-                                    .map(|(descriptor, _, visible)| (descriptor, visible)))
-                            },
-                        )
-                        .await;
-                let (descriptor, visible) = match found {
-                    Ok(Some(source)) => source,
-                    Ok(None) | Err(ServerError::NotFound) => return Ok(None),
-                    Err(error) => return Err(error),
-                };
-                // Candidate admission has committed. Full container reads must
-                // not retain its database connection or deletion locks.
-                // Final publication rechecks availability under reference locks.
-                let objects = self.backend.object_store();
-                let container_hash = descriptor.hash.clone();
-                let verified = match blocking_work(self.backend.stream_work_pool(), move || {
-                    Ok(shardline_xet_adapter::recover_xorb_descriptor(
-                        &objects,
-                        &container_hash,
-                    )?)
-                })
-                .await
-                {
-                    Ok(verified) => verified,
-                    Err(ServerError::NotFound) => return Ok(None),
-                    Err(error) => return Err(error),
-                };
-                if verified != descriptor {
-                    return Err(ServerError::InvalidContentHash);
-                }
-                let mut members = HashMap::new();
-                for (index, (member, allowed)) in descriptor.chunks.iter().zip(visible).enumerate()
-                {
-                    if allowed {
-                        members.insert(
-                            member.hash.clone(),
-                            FileChunkRecord {
-                                hash: descriptor.hash.clone(),
-                                offset: 0,
-                                length: member
-                                    .unpacked_end
-                                    .checked_sub(member.unpacked_start)
-                                    .ok_or(ServerError::Overflow)?,
-                                range_start: u64::try_from(index)?,
-                                range_end: u64::try_from(index)?
-                                    .checked_add(1)
-                                    .ok_or(ServerError::Overflow)?,
-                                packed_start: member.packed_start,
-                                packed_end: member.packed_end,
-                            },
-                        );
-                    }
-                }
-                // Retain alternating sources without increasing the former
-                // one-descriptor member budget. The container cap also
-                // bounds small maps and lookup work per chunk.
-                while self.members.len() >= 8
-                    || self
-                        .members
-                        .iter()
-                        .map(HashMap::len)
-                        .sum::<usize>()
-                        .saturating_add(members.len())
-                        > MAX_XET_DESCRIPTOR_CHUNKS
-                {
-                    self.members.pop_back();
-                }
-                self.members.push_front(members);
+            if let Some(record) = self.cached(&hash, bytes.len(), offset)? {
+                return Ok(Some(record));
             }
+            let wanted = hash.clone();
+            let found = self
+                .backend
+                .with_scoped_dedup_sources(
+                    &hash,
+                    self.scope.as_ref(),
+                    ShardMetadataLimits::default(),
+                    move |sources| {
+                        Ok(sources
+                            .into_iter()
+                            .find(|(descriptor, _, visible)| {
+                                descriptor
+                                    .chunks
+                                    .iter()
+                                    .zip(visible)
+                                    .any(|(member, allowed)| *allowed && member.hash == wanted)
+                            })
+                            .map(|(descriptor, _, visible)| (descriptor, visible)))
+                    },
+                )
+                .await;
+            let (descriptor, visible) = match found {
+                Ok(Some(source)) => source,
+                Ok(None) | Err(ServerError::NotFound) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            // Candidate admission has committed. Full container reads must
+            // not retain its database connection or deletion locks.
+            // Final publication rechecks availability under reference locks.
+            let objects = self.backend.object_store();
+            let container_hash = descriptor.hash.clone();
+            let verified = match blocking_work(self.backend.stream_work_pool(), move || {
+                Ok(shardline_xet_adapter::recover_xorb_descriptor(
+                    &objects,
+                    &container_hash,
+                )?)
+            })
+            .await
+            {
+                Ok(verified) => verified,
+                Err(ServerError::NotFound) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            if verified != descriptor {
+                return Err(ServerError::InvalidContentHash);
+            }
+            let mut members = HashMap::new();
+            for (index, (member, allowed)) in descriptor.chunks.iter().zip(visible).enumerate() {
+                if allowed {
+                    members.insert(
+                        member.hash.clone(),
+                        FileChunkRecord {
+                            hash: descriptor.hash.clone(),
+                            offset: 0,
+                            length: member
+                                .unpacked_end
+                                .checked_sub(member.unpacked_start)
+                                .ok_or(ServerError::Overflow)?,
+                            range_start: u64::try_from(index)?,
+                            range_end: u64::try_from(index)?
+                                .checked_add(1)
+                                .ok_or(ServerError::Overflow)?,
+                            packed_start: member.packed_start,
+                            packed_end: member.packed_end,
+                        },
+                    );
+                }
+            }
+            // Retain alternating sources without increasing the former
+            // one-descriptor member budget. The container cap also
+            // bounds small maps and lookup work per chunk.
+            while self.members.len() >= 8
+                || self
+                    .members
+                    .iter()
+                    .map(HashMap::len)
+                    .sum::<usize>()
+                    .saturating_add(members.len())
+                    > MAX_XET_DESCRIPTOR_CHUNKS
+            {
+                self.members.pop_back();
+            }
+            self.members.push_front(members);
             self.cached(&hash, bytes.len(), offset)
         })
     }
