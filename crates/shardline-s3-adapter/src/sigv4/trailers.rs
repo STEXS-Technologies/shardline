@@ -156,21 +156,23 @@ impl TrailerVerifier {
             if !self.signature_required || value.len() != 64 {
                 return Err(denied());
             }
-            let mut canonical = String::new();
+            let mut canonical = Sha256::new();
             for (algorithm, _, actual) in &self.checksums {
-                canonical.push_str(algorithm.name());
-                canonical.push(':');
-                canonical.push_str(actual.as_deref().ok_or_else(denied)?);
-                canonical.push('\n');
+                canonical.update(algorithm.name());
+                canonical.update(b":");
+                canonical.update(actual.as_deref().ok_or_else(denied)?);
+                canonical.update(b"\n");
             }
             let to_sign = format!(
                 "AWS4-HMAC-SHA256-TRAILER\n{timestamp}\n{scope}\n{}\n{}",
                 hex::encode(previous),
-                hex::encode(Sha256::digest(canonical.as_bytes()))
+                hex::encode(canonical.finalize())
             );
             let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_invalid_key| denied())?;
             mac.update(to_sign.as_bytes());
-            mac.verify_slice(&hex::decode(value).map_err(|_invalid_hex| denied())?)
+            let mut signature = [0; 32];
+            hex::decode_to_slice(value, &mut signature).map_err(|_invalid_hex| denied())?;
+            mac.verify_slice(&signature)
                 .map_err(|_invalid_signature| denied())?;
             self.signed = true;
             return Ok(false);
