@@ -3750,23 +3750,23 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`46fe23217b7d80ec08f0769fd9709b2539af663e`. It counts all tracked `.rs`
+`9d0f366d68d4a051907ad3fab837ea30980143b1`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 581,221 | 22,428 (3.72%) |
-| Server | 220,570 | 211,273 | 9,297 (4.21%) |
+| Entire repository | 603,649 | 580,756 | 22,893 (3.79%) |
+| Server | 220,570 | 211,068 | 9,502 (4.31%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
-| Storage | 20,373 | 19,433 | 940 (4.61%) |
+| Storage | 20,373 | 19,410 | 963 (4.73%) |
 | S3 adapter | 10,954 | 10,272 | 682 (6.23%) |
 | Xet adapter | 17,801 | 15,986 | 1,815 (10.20%) |
 | OCI adapter | 7,700 | 7,049 | 651 (8.45%) |
 | Cache | 6,573 | 5,856 | 717 (10.91%) |
-| Index | 71,472 | 68,615 | 2,857 (4.00%) |
+| Index | 71,472 | 68,525 | 2,947 (4.12%) |
 | CAS | 3,447 | 2,977 | 470 (13.64%) |
 | GC | 10,954 | 10,634 | 320 (2.92%) |
 | Fsck | 8,989 | 8,501 | 488 (5.43%) |
@@ -3778,12 +3778,19 @@ or the amount of additional code that can safely be removed.
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
 
-This refresh includes 1,123 fewer Rust lines since `c78b7e1e`. The client and
+The inventory at `46fe2321` included 1,123 fewer Rust lines since `c78b7e1e`. The client and
 server share one CDC boundary engine; SDK metadata decoding no longer copies
 identical response structs; Xorb packing reuses the core footer writer and
 already-computed chunk hashes. Shared shard field readers also fix legacy v2
 imports. Real-server SDK tests moved to the E2E workspace rather than being
 removed; standalone SDK tests no longer pull in the full server.
+
+At `9d0f366d`, the complete SDK test run passed all 357 tests, including
+12 public-API conformance tests against the independent mock frontend. Recent
+SDK simplifications remove redundant upload counters and grouped-stream state,
+borrow immutable retry inputs and metadata clients, and move completed session
+metadata into finalization. Strict SDK Clippy also passed. The mock frontend
+does not qualify the production server or its tree/revision routes.
 
 At `46fe2321`, raw-Xorb construction shares one implementation and server
 packing omits an unused boundary vector. Thirty-two duplicated compression/raw
@@ -3840,8 +3847,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' ee7f7d0fdfbdb5174b22e67b921d9c7465ccb749 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' ee7f7d0fdfbdb5174b22e67b921d9c7465ccb749 -- '*.rs' | wc -l
+git grep -I -n '^' 9d0f366d68d4a051907ad3fab837ea30980143b1 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 9d0f366d68d4a051907ad3fab837ea30980143b1 -- '*.rs' | wc -l
 ```
 
 The cleanup reuses Cargo build artifacts, narrows ordinary binary and
