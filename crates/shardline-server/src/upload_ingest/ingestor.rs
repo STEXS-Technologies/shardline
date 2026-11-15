@@ -11,8 +11,8 @@ use tracing::{debug, instrument, warn};
 use super::body_reader::ChunkBuffer;
 use super::cdc::CdcChunker;
 use super::chunk_store::{
-    SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome,
-    put_if_absent_pooled_chunk_buffer, put_if_absent_with_verified_cache,
+    CompletedChunk, StoredChunkTaskOutcome, put_if_absent_pooled_chunk_buffer,
+    put_if_absent_with_verified_cache,
 };
 use super::durable_chunks::{DurableUploadChunks, ReadCache, SharedReadCache};
 use super::xorb_packer::{pack_owned_chunks_into_xorb, store_xorb};
@@ -42,10 +42,10 @@ pub(crate) struct FileUploadIngestor {
     pub(super) chunk_size: usize,
     pub(super) max_in_flight_chunks: usize,
     pub(super) pending: BytesMut,
-    pub(super) next_sequence: u64,
+    pub(super) submitted_chunks: u64,
     pub(super) next_offset: u64,
-    pub(super) completed_chunks: Vec<SequencedStoredChunkOutcome>,
-    pub(super) in_flight_chunks: JoinSet<Result<SequencedStoredChunkTaskOutcome, ServerError>>,
+    pub(super) completed_chunks: Vec<CompletedChunk>,
+    pub(super) in_flight_chunks: JoinSet<Result<StoredChunkTaskOutcome, ServerError>>,
     pub(super) reusable_pending_buffers: Vec<BytesMut>,
     pub(super) inserted_chunks: u64,
     pub(super) reused_chunks: u64,
@@ -85,7 +85,7 @@ impl FileUploadIngestor {
             chunk_size,
             max_in_flight_chunks: max_in_flight_chunks.get(),
             pending: BytesMut::new(),
-            next_sequence: 0,
+            submitted_chunks: 0,
             next_offset: 0,
             completed_chunks: Vec::new(),
             in_flight_chunks: JoinSet::new(),
@@ -209,7 +209,7 @@ impl FileUploadIngestor {
         // cannot be packed or stored.
         if let Some(packed) = self.packed_protocol.take() {
             let result = packed.finish().await?;
-            if result.records.len() != usize::try_from(self.next_sequence)? {
+            if result.records.len() != usize::try_from(self.submitted_chunks)? {
                 return Err(ServerError::Overflow);
             }
             let mut offset = 0;
@@ -322,8 +322,7 @@ impl FileUploadIngestor {
         chunk: BytesMut,
     ) -> Result<(), ServerError> {
         self.pack_local_chunk(object_store, &chunk).await?;
-        let sequence = self.next_sequence;
-        self.next_sequence = checked_increment(self.next_sequence)?;
+        self.submitted_chunks = checked_increment(self.submitted_chunks)?;
         let offset = self.next_offset;
         let chunk_length = u64::try_from(chunk.len())?;
         self.next_offset = checked_add(self.next_offset, chunk_length)?;
@@ -341,8 +340,7 @@ impl FileUploadIngestor {
             if let Some(reusable_buffer) = reusable_buffer {
                 self.recycle_pending_buffer(reusable_buffer);
             }
-            self.completed_chunks.push(SequencedStoredChunkOutcome {
-                sequence,
+            self.completed_chunks.push(CompletedChunk {
                 offset,
                 stored: outcome,
             });
@@ -360,8 +358,7 @@ impl FileUploadIngestor {
             if outcome.inserted {
                 record_chunk_inserted(outcome.chunk_length);
             }
-            Ok(SequencedStoredChunkTaskOutcome {
-                sequence,
+            Ok(StoredChunkTaskOutcome {
                 offset,
                 stored: outcome,
                 reusable_buffer,
@@ -395,8 +392,7 @@ impl FileUploadIngestor {
         if let Some(buffer) = outcome.reusable_buffer {
             self.recycle_pending_buffer(buffer);
         }
-        self.completed_chunks.push(SequencedStoredChunkOutcome {
-            sequence: outcome.sequence,
+        self.completed_chunks.push(CompletedChunk {
             offset: outcome.offset,
             stored: outcome.stored,
         });
@@ -438,17 +434,17 @@ impl FileUploadIngestor {
     }
 
     fn record_completed_chunks(&mut self) -> Result<(), ServerError> {
-        let expected_chunks = usize::try_from(self.next_sequence)?;
+        let expected_chunks = usize::try_from(self.submitted_chunks)?;
         if self.completed_chunks.len() != expected_chunks {
             return Err(ServerError::Overflow);
         }
 
         if !self
             .completed_chunks
-            .is_sorted_by_key(|outcome| outcome.sequence)
+            .is_sorted_by_key(|outcome| outcome.offset)
         {
             self.completed_chunks
-                .sort_unstable_by_key(|outcome| outcome.sequence);
+                .sort_unstable_by_key(|outcome| outcome.offset);
         }
         let mut expected_offset = 0_u64;
         let completed_chunks = mem::take(&mut self.completed_chunks);
@@ -465,10 +461,7 @@ impl FileUploadIngestor {
         Ok(())
     }
 
-    fn record_chunk_outcome(
-        &mut self,
-        outcome: SequencedStoredChunkOutcome,
-    ) -> Result<(), ServerError> {
+    fn record_chunk_outcome(&mut self, outcome: CompletedChunk) -> Result<(), ServerError> {
         let super::chunk_store::StoredChunkOutcome {
             hash_hex,
             chunk_length,
@@ -653,7 +646,7 @@ mod tests {
         assert_eq!(ingestor.chunk_size, 128);
         assert_eq!(ingestor.max_in_flight_chunks, 128);
         assert!(ingestor.pending.is_empty());
-        assert_eq!(ingestor.next_sequence, 0);
+        assert_eq!(ingestor.submitted_chunks, 0);
         assert_eq!(ingestor.next_offset, 0);
         assert!(ingestor.completed_chunks.is_empty());
         assert!(ingestor.in_flight_chunks.is_empty());
@@ -1017,20 +1010,26 @@ mod tests {
     }
 
     #[test]
-    fn completed_chunks_preserve_file_order_regardless_of_completion_order() {
-        use super::super::chunk_store::{SequencedStoredChunkOutcome, StoredChunkOutcome};
+    fn completed_chunks_restore_order_and_reject_missing_or_discontinuous_results() {
+        use super::super::chunk_store::{CompletedChunk, StoredChunkOutcome};
 
-        for order in [vec![], vec![0, 1, 2], vec![2, 0, 1]] {
+        for (order, submitted, valid) in [
+            (vec![], 0, true),
+            (vec![0, 1, 2], 3, true),
+            (vec![2, 0, 1], 3, true),
+            (vec![0, 0, 2], 3, false),
+            (vec![0, 2, 3], 3, false),
+            (vec![0, 1], 3, false),
+        ] {
             let mut ingestor = FileUploadIngestor::new(NonZeroUsize::new(128).unwrap(), false);
-            ingestor.next_sequence = u64::try_from(order.len()).unwrap();
-            ingestor.next_offset = ingestor.next_sequence * 4;
+            ingestor.submitted_chunks = submitted;
+            ingestor.next_offset = ingestor.submitted_chunks * 4;
             ingestor.completed_chunks = order
                 .into_iter()
-                .map(|sequence| SequencedStoredChunkOutcome {
-                    sequence,
-                    offset: sequence * 4,
+                .map(|index| CompletedChunk {
+                    offset: index * 4,
                     stored: StoredChunkOutcome {
-                        hash_hex: sequence.to_string(),
+                        hash_hex: index.to_string(),
                         chunk_length: 4,
                         compressed_length: 4,
                         inserted: true,
@@ -1038,15 +1037,20 @@ mod tests {
                 })
                 .collect();
 
-            ingestor.record_completed_chunks().unwrap();
+            let result = ingestor.record_completed_chunks();
+            if !valid {
+                assert!(matches!(result, Err(ServerError::Overflow)));
+                continue;
+            }
+            result.unwrap();
 
             let actual: Vec<_> = ingestor
                 .records
                 .iter()
                 .map(|record| (record.hash.clone(), record.offset))
                 .collect();
-            let expected: Vec<_> = (0..ingestor.next_sequence)
-                .map(|sequence| (sequence.to_string(), sequence * 4))
+            let expected: Vec<_> = (0..ingestor.submitted_chunks)
+                .map(|index| (index.to_string(), index * 4))
                 .collect();
             assert_eq!(actual, expected);
             assert_eq!(ingestor.stored_bytes, ingestor.next_offset);

@@ -12,14 +12,12 @@ use crate::{
     object_store::ServerObjectStore,
 };
 
-pub(super) struct SequencedStoredChunkOutcome {
-    pub(super) sequence: u64,
+pub(super) struct CompletedChunk {
     pub(super) offset: u64,
     pub(super) stored: StoredChunkOutcome,
 }
 
-pub(super) struct SequencedStoredChunkTaskOutcome {
-    pub(super) sequence: u64,
+pub(super) struct StoredChunkTaskOutcome {
     pub(super) offset: u64,
     pub(super) stored: StoredChunkOutcome,
     pub(super) reusable_buffer: Option<BytesMut>,

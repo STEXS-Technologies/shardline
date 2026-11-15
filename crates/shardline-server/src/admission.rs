@@ -169,17 +169,10 @@ impl BoundedPool {
             max_concurrent,
             maximum_counted_capacity(),
         )?;
-        let cap = u32::try_from(max_concurrent.get()).map_err(|_overflow| {
-            ServerConfigError::ResourceCapacityOutOfRange {
-                name: "execution_pool_size",
-                capacity: max_concurrent.get(),
-                maximum: maximum_counted_capacity(),
-            }
-        })?;
         Ok(Self {
             inner: Arc::new(Semaphore::new(max_concurrent.get())),
             retained_buffers: Arc::new(Semaphore::new(max_concurrent.get())),
-            capacity: cap,
+            capacity: max_concurrent.get() as u32,
         })
     }
 
