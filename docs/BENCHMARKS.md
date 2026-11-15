@@ -4126,6 +4126,58 @@ ratio. GC overlap measures process lifetime, including startup and ownership
 waits; it does not prove every request overlapped an active scan. No historical
 before/after speedup is claimed.
 
+### Reusing validated upload descriptors (2026-11-15)
+
+Candidate `128f7c5eea9d2807b97ef3299d333c9ddae05f72` removes the second full
+object-store read during fresh packed-protocol registration. The existing Xorb
+validator derives member metadata from the bounded packed input. Registration
+uses it only after the existing storage integrity/read-back check succeeds.
+Native source discovery still fully verifies retained containers; an encoding
+conflict still recovers the installed encoding's descriptor and offsets.
+Descriptor conversion is shared with native recovery rather than reimplemented.
+
+Repeated the twelve-lane concurrent S3/GC matrix above with the same arguments
+and toolchain, using a frozen all-features dev binary with SHA-256
+`f037e781827085069d6887a98849d7f413d9d0110b6b67f704ef30ba7c2079b4`.
+All twelve lanes passed, including 1,728 post-GC byte comparisons and independent
+MinIO trace/counter validation. Every unique-data lane (both replica counts,
+all three repetitions) showed:
+
+| Initial ingestion of 32 unique 1 MiB objects | Baseline `45fd33b4` | Candidate `128f7c5e` |
+| --- | ---: | ---: |
+| Successful backend GETs | 64 | 32 |
+| Total backend requests | 160 | 128 |
+| Median traced response bytes / logical bytes | 2.002 | 1.001 |
+
+This halves backend GETs and traced response bytes on this workload and reduces
+initial backend request count by 20%. Read-back and complete decoded-content
+validation remain mandatory. The existing PostgreSQL concurrency regression
+now asserts one fresh-container GET before checking discovery lock release and
+publication fencing against a competing deletion; it passed with PostgreSQL
+required.
+
+Candidate median MiB/s across three repetitions:
+
+| Data | Replicas | Initial ingest | Mixed PUT/GET | Mixed PUT/GET with GC |
+| --- | ---: | ---: | ---: | ---: |
+| Unique | 1 | 16.49 | 41.36 | 37.50 |
+| Unique | 2 | 29.61 | 79.11 | 57.56 |
+| Repeated | 1 | 17.38 | 39.74 | 36.53 |
+| Repeated | 2 | 30.96 | 73.02 | 62.83 |
+
+Throughput varies in both directions relative to the earlier run; no general
+speedup or production-capacity improvement is established. The same short-burst,
+shared-host, debug-build and retention limitations described above apply.
+Reproduce with the previous matrix command, supplying the frozen candidate
+binary, a new output directory, and `--binary-source-revision 128f7c5e`.
+
+The separate 32-version, 4 MiB physical-reuse benchmark was also rerun with
+`hf_xet==1.7.0`. It reproduced the original table exactly: 6,984,571 native Xet
+Xorb bytes and 6,984,691 bytes each for S3/basic LFS. All 96 post-GC downloads
+passed, as did final S3/LFS reads after deleting source versions and running GC.
+These local-storage results establish preserved partial-file physical reuse on
+that workload; they are separate from the PostgreSQL/MinIO throughput matrix.
+
 ### Standalone index checks without inherited S3 dependencies (2026-11-15)
 
 Compared `b38e851f` with `e83bdc5a`. Workspace storage dependencies no longer
