@@ -236,8 +236,6 @@ mod tests {
         merklehash::{compute_data_hash, file_hash, xorb_hash},
         metadata_shard::{
             file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
-            shard_format::MDBShardInfo,
-            shard_in_memory::MDBInMemoryShard,
             xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
         },
         xorb_object::{
@@ -248,21 +246,7 @@ mod tests {
 
     use super::*;
     use crate::error::XetAdapterError;
-
-    // ---- helpers ----
-
-    fn serialize_test_shard(file_infos: Vec<MDBFileInfo>, xorb_infos: Vec<MDBXorbInfo>) -> Vec<u8> {
-        let mut shard = MDBInMemoryShard::default();
-        for file_info in file_infos {
-            assert!(shard.add_file_reconstruction_info(file_info).is_ok());
-        }
-        for xorb_info in xorb_infos {
-            assert!(shard.add_xorb_block(xorb_info).is_ok());
-        }
-        let mut serialized = Vec::new();
-        assert!(MDBShardInfo::serialize_from(&mut serialized, &shard, None).is_ok());
-        serialized
-    }
+    use crate::shard_store::test_support::{serialize_test_shard, single_chunk_shard};
 
     #[tokio::test]
     async fn member_aware_byte_and_file_registration_preserve_legacy_metadata() {
@@ -460,22 +444,9 @@ mod tests {
             .unwrap();
 
         // 2. Build a shard referencing that xorb
-        let chunk_hash = compute_data_hash(&[0_u8; 256]);
-        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
-        let shard = serialize_test_shard(
-            vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
-                verification: Vec::new(),
-                metadata_ext: None,
-            }],
-            vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
-            }],
-        );
+        let shard = single_chunk_shard(xorb_hash, Vec::new());
 
-        // 3. Register with a commit closure
+        // Register with a commit closure.
         let mut committed_records = None;
         let mut committed_mappings = None;
 
@@ -643,20 +614,7 @@ mod tests {
             .unwrap();
 
         // 2. Build a shard referencing that xorb
-        let chunk_hash = compute_data_hash(&[0_u8; 256]);
-        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
-        let shard = serialize_test_shard(
-            vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
-                verification: Vec::new(),
-                metadata_ext: None,
-            }],
-            vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
-            }],
-        );
+        let shard = single_chunk_shard(xorb_hash, Vec::new());
 
         let result = register_uploaded_shard_bytes(
             &object_store,
@@ -706,20 +664,7 @@ mod tests {
             .await
             .unwrap();
 
-        let chunk_hash = compute_data_hash(&[0_u8; 256]);
-        let file_hash = file_hash(&[(chunk_hash, 256_u64)]);
-        let shard = serialize_test_shard(
-            vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 256_u64, 0_u64, 1_u64)],
-                verification: Vec::new(),
-                metadata_ext: None,
-            }],
-            vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 256_u64),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 256_u64, 0_u64)],
-            }],
-        );
+        let shard = single_chunk_shard(xorb_hash, Vec::new());
 
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", None);
