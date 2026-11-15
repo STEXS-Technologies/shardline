@@ -3750,15 +3750,15 @@ metadata.
 
 The November 15, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`00527e3ad9d3c799b8432406b9a77e7b7efc3864`. It counts all tracked `.rs`
+`38f35a530aae4124d56794614c638d4b2c9b4357`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 580,503 | 23,146 (3.83%) |
-| Server | 220,570 | 211,055 | 9,515 (4.31%) |
+| Entire repository | 603,649 | 580,337 | 23,312 (3.86%) |
+| Server | 220,570 | 211,072 | 9,498 (4.31%) |
 | Server core | 6,454 | 5,628 | 826 (12.80%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
 | Storage | 20,373 | 19,391 | 982 (4.82%) |
@@ -3772,11 +3772,15 @@ or the amount of additional code that can safely be removed.
 | Fsck | 8,989 | 8,501 | 488 (5.43%) |
 | Rebuild | 4,326 | 4,081 | 245 (5.66%) |
 | CLI | 37,677 | 37,264 | 413 (1.10%) |
+| SDK | 26,965 | 24,479 | 2,486 (9.22%) |
 | Protocol | 4,076 | 3,715 | 361 (8.86%) |
 | Protocol adapters | 1,670 | 1,240 | 430 (25.75%) |
 | Provider events | 5,283 | 5,117 | 166 (3.14%) |
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 789 | 188 (19.24%) |
+
+The SDK component decrease includes tests relocated to the E2E workspace. Those
+lines remain in the repository total and are not counted as repository deletions.
 
 The inventory at `46fe2321` included 1,123 fewer Rust lines since `c78b7e1e`. The client and
 server share one CDC boundary engine; SDK metadata decoding no longer copies
@@ -3795,15 +3799,27 @@ and native-client prerequisites were not required in this run; tests with option
 fixture guards do not establish those integration guarantees. This is not a
 production or hosted-CI qualification.
 
-At `00527e3a`, the complete SDK test run passed all 358 tests, including
+At `38f35a53`, the complete SDK test run passed all 353 tests, including
 12 public-API conformance tests against the independent mock frontend. Strict
 SDK library/test Clippy passed with Rust 1.100; tests used Rust 1.99. Recent
-simplifications remove redundant cache and upload-group state, retain only byte
-offsets in decoded blocks, and stream Xorb upload bytes directly without a boxed
-stream or separate length counter. Tests check frame boundaries and exact remaining
-lengths, persisted cache eviction order, cancellation and permit lifetimes. These
-runs do not measure a throughput or build-time improvement. The mock frontend
-does not qualify the production server or its tree/revision routes.
+simplifications remove duplicate retry markers, unused channel error wrappers,
+unreachable writer-state checks and temporary reconstruction buffers. The public
+429 retry policy now controls requests; a regression test failed against the
+previous implementation, which sent six requests when retries were disabled.
+Deduplication queries still fail fast. Tests also check token-refresh opt-in and
+loop bounds, missing chunk-location rejection before metadata publication,
+reader failures and panics, cancellation, memory limits and permit lifetimes.
+Repeated Xorb round-trip and retry fixtures were combined while retaining payload
+cases and jittered/plain retry coverage. These runs do not measure a throughput or build-time
+improvement. The mock frontend does not qualify the production server or its
+tree/revision routes.
+
+At `40665b6d`, all 314 selected non-PostgreSQL helper, LFS, Bazel and OCI
+tests passed, with strict server library/test Clippy. Bazel flat GET and HEAD
+share the same Action Cache lookup and fall back to CAS only on a missing object;
+storage failures propagate. The regression fixture checks both methods against
+healthy CAS content and a broken Action Cache object path. This run does not
+establish PostgreSQL or production qualification.
 
 At `46fe2321`, raw-Xorb construction shares one implementation and server
 packing omits an unused boundary vector. Thirty-two duplicated compression/raw
@@ -3860,8 +3876,8 @@ using the corresponding commit and path; use `'*.rs'` for the total:
 
 ```bash
 set -o pipefail
-git grep -I -n '^' 00527e3ad9d3c799b8432406b9a77e7b7efc3864 -- 'crates/shardline-server/*.rs' | wc -l
-git grep -I -n '^' 00527e3ad9d3c799b8432406b9a77e7b7efc3864 -- '*.rs' | wc -l
+git grep -I -n '^' 38f35a530aae4124d56794614c638d4b2c9b4357 -- 'crates/shardline-server/*.rs' | wc -l
+git grep -I -n '^' 38f35a530aae4124d56794614c638d4b2c9b4357 -- '*.rs' | wc -l
 ```
 
 The cleanup reuses Cargo build artifacts, narrows ordinary binary and
