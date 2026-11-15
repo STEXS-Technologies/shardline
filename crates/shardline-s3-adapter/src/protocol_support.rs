@@ -226,11 +226,10 @@ impl EntityTagSet {
                 remaining = rest.trim_start_matches([' ', '\t']);
                 continue;
             }
-            let weak = remaining.starts_with("W/");
-            if weak {
-                remaining = remaining.strip_prefix("W/").ok_or(InvalidS3HeaderValue)?;
-            }
-            remaining = remaining.strip_prefix('"').ok_or(InvalidS3HeaderValue)?;
+            let (weak, tag) = remaining
+                .strip_prefix("W/")
+                .map_or((false, remaining), |tag| (true, tag));
+            remaining = tag.strip_prefix('"').ok_or(InvalidS3HeaderValue)?;
             let (value, rest) = remaining.split_once('"').ok_or(InvalidS3HeaderValue)?;
             if !value
                 .bytes()
@@ -279,17 +278,13 @@ impl ConditionalHeader {
     #[must_use]
     pub fn satisfied(&self, stored_etag: Option<&str>) -> bool {
         match self {
-            Self::IfMatch(tags) => match tags {
-                EntityTagSet::Any => stored_etag.is_some(),
-                EntityTagSet::Tags(tags) => stored_etag
-                    .is_some_and(|etag| tags.iter().any(|tag| !tag.weak && tag.value == etag)),
-            },
-            Self::IfNoneMatch(tags) => match tags {
-                EntityTagSet::Any => stored_etag.is_none(),
-                EntityTagSet::Tags(tags) => {
-                    stored_etag.is_none_or(|etag| !tags.iter().any(|tag| tag.value == etag))
-                }
-            },
+            Self::IfMatch(EntityTagSet::Any) => stored_etag.is_some(),
+            Self::IfMatch(EntityTagSet::Tags(tags)) => stored_etag
+                .is_some_and(|etag| tags.iter().any(|tag| !tag.weak && tag.value == etag)),
+            Self::IfNoneMatch(EntityTagSet::Any) => stored_etag.is_none(),
+            Self::IfNoneMatch(EntityTagSet::Tags(tags)) => {
+                stored_etag.is_none_or(|etag| !tags.iter().any(|tag| tag.value == etag))
+            }
         }
     }
 }
