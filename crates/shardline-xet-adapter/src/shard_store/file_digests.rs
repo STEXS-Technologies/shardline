@@ -159,14 +159,13 @@ impl FileDigest {
     }
 
     pub(super) fn finish_terms(&mut self) {
-        if !self.reusing_prefix
-            && let Some(worker) = &mut self.worker
-        {
+        if self.reusing_prefix {
+            return;
+        }
+        if let Some(worker) = &mut self.worker {
             self.digest = worker.snapshot();
         }
-        if !self.reusing_prefix
-            && let (Some(prefixes), Some(digest)) = (&mut self.prefixes, &self.digest)
-        {
+        if let (Some(prefixes), Some(digest)) = (&mut self.prefixes, &self.digest) {
             prefixes.retain(digest);
         }
     }
