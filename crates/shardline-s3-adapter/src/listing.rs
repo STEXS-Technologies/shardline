@@ -15,46 +15,6 @@ use crate::{S3Error, types::Contents};
 /// The S3 `ListObjectsV2` maximum page size.
 pub const MAX_LIST_KEYS: usize = 1000;
 
-/// A typed `ListObjectsV2` query-parameter name.
-///
-/// [`ListParam::parse`] owns the literal name table; the params parser matches
-/// the enum only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ListParam {
-    /// `prefix`.
-    Prefix,
-    /// `delimiter`.
-    Delimiter,
-    /// `max-keys`.
-    MaxKeys,
-    /// `continuation-token`.
-    ContinuationToken,
-    /// `start-after`.
-    StartAfter,
-    /// `marker` (ListObjects v1).
-    Marker,
-    /// `encoding-type`.
-    EncodingType,
-}
-
-impl ListParam {
-    /// Parses a raw query-parameter name into the typed set. Unknown names
-    /// (for example `fetch-owner` which real S3 clients
-    /// send) return `None` and are ignored.
-    fn parse(name: &str) -> Option<Self> {
-        match name {
-            "prefix" => Some(Self::Prefix),
-            "delimiter" => Some(Self::Delimiter),
-            "max-keys" => Some(Self::MaxKeys),
-            "continuation-token" => Some(Self::ContinuationToken),
-            "start-after" => Some(Self::StartAfter),
-            "marker" => Some(Self::Marker),
-            "encoding-type" => Some(Self::EncodingType),
-            _ => None,
-        }
-    }
-}
-
 /// A validated `ListObjectsV2` grouping delimiter (exactly one character).
 ///
 /// [`Delimiter::parse`] rejects empty (treated as "no delimiter") and
@@ -97,7 +57,7 @@ impl Delimiter {
 pub fn parse_list_objects_url_encoding(query: &[(String, String)]) -> Result<bool, S3Error> {
     let mut requested = false;
     for (name, value) in query {
-        if matches!(ListParam::parse(name), Some(ListParam::EncodingType)) {
+        if name == "encoding-type" {
             if value != "url" {
                 return Err(S3Error::invalid_argument("encoding-type must be url"));
             }
@@ -171,20 +131,20 @@ pub fn parse_list_objects_v1_params(
         marker: None,
     };
     for (name, value) in query {
-        match ListParam::parse(name) {
-            Some(ListParam::Prefix) => params.prefix = value.clone(),
-            Some(ListParam::Delimiter) => params.delimiter = Delimiter::parse(value)?,
-            Some(ListParam::MaxKeys) => {
+        match name.as_str() {
+            "prefix" => params.prefix = value.clone(),
+            "delimiter" => params.delimiter = Delimiter::parse(value)?,
+            "max-keys" => {
                 let parsed = value
                     .parse::<usize>()
                     .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?;
                 params.max_keys = parsed.min(MAX_LIST_KEYS);
             }
-            Some(ListParam::Marker) => params.marker = Some(value.clone()),
-            Some(ListParam::ContinuationToken) => {} // v2-only; ignored by v1
-            Some(ListParam::StartAfter) => {}        // v2-only; ignored by v1
-            Some(ListParam::EncodingType) => {}      // validated separately
-            None => {}
+            "marker" => params.marker = Some(value.clone()),
+            "continuation-token" => {} // v2-only; ignored by v1
+            "start-after" => {}        // v2-only; ignored by v1
+            "encoding-type" => {}      // validated separately
+            _ => {}
         }
     }
     Ok(params)
@@ -229,22 +189,22 @@ pub fn parse_list_objects_v2_params(
         start_after: None,
     };
     for (name, value) in query {
-        match ListParam::parse(name) {
-            Some(ListParam::Prefix) => params.prefix = value.clone(),
-            Some(ListParam::Delimiter) => params.delimiter = Delimiter::parse(value)?,
-            Some(ListParam::MaxKeys) => {
+        match name.as_str() {
+            "prefix" => params.prefix = value.clone(),
+            "delimiter" => params.delimiter = Delimiter::parse(value)?,
+            "max-keys" => {
                 let parsed = value
                     .parse::<usize>()
                     .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?;
                 params.max_keys = parsed.min(MAX_LIST_KEYS);
             }
-            Some(ListParam::ContinuationToken) => {
+            "continuation-token" => {
                 params.continuation_token = Some(decode_continuation_token(value)?);
             }
-            Some(ListParam::StartAfter) => params.start_after = Some(value.clone()),
-            Some(ListParam::Marker) => {} // v1-only; ignored by ListObjectsV2
-            Some(ListParam::EncodingType) => {} // validated separately
-            None => {}
+            "start-after" => params.start_after = Some(value.clone()),
+            "marker" => {}        // v1-only; ignored by ListObjectsV2
+            "encoding-type" => {} // validated separately
+            _ => {}
         }
     }
     Ok(params)
