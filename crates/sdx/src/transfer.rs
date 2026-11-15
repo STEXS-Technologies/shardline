@@ -587,17 +587,10 @@ impl TransferClient {
         range: Option<ByteRange>,
         api_version: &str,
     ) -> Result<Response, TransferError> {
-        let capacity = base_url
-            .len()
-            .saturating_add(api_version.len())
-            .saturating_add(file_id.len())
-            .saturating_add(32);
-        let mut url = String::with_capacity(capacity);
-        url.push_str(base_url.trim_end_matches('/'));
-        url.push('/');
-        url.push_str(api_version);
-        url.push_str("/reconstructions/");
-        url.push_str(file_id);
+        let url = format!(
+            "{}/{api_version}/reconstructions/{file_id}",
+            base_url.trim_end_matches('/'),
+        );
         let mut request = self
             .with_session(self.client.get(&url).bearer_auth(token))
             .header(header::ACCEPT, "application/json");
@@ -1128,12 +1121,12 @@ fn multipart_slices<'body>(
     Ok(parts)
 }
 
-fn extract_boundary(content_type: &str) -> Option<String> {
+fn extract_boundary(content_type: &str) -> Option<&str> {
     content_type
         .split(';')
         .map(str::trim)
         .find_map(|part| part.strip_prefix("boundary="))
-        .map(|value| value.trim_matches('"').to_owned())
+        .map(|value| value.trim_matches('"'))
 }
 
 fn parse_part_content_range(headers: &[u8]) -> Result<ByteRange, TransferError> {
