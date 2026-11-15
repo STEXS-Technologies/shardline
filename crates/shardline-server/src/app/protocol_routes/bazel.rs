@@ -300,8 +300,8 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        BazelCacheKind, ProtocolMetrics, ReconstructionCacheService, ServerBackend, ServerConfig,
-        ServerFrontend, ServerRole, TransferLimiter, app::AppState, bazel_cache_object_key,
+        BazelCacheKind, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter,
+        app::AppState, bazel_cache_object_key,
     };
     use shardline_server_core::AuthorizedRepository;
     use shardline_server_core::protocol_support::protocol_object_file_id;
@@ -330,21 +330,7 @@ mod tests {
 
         let transfer_limiter = TransferLimiter::new(chunk_size, chunk_size);
 
-        let state = Arc::new(AppState {
-            config,
-            role: ServerRole::All,
-            backend,
-            auth: None,
-            provider_tokens: None,
-            reconstruction_cache: ReconstructionCacheService::disabled(),
-            transfer_limiter,
-            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            admission: crate::admission::WeightedAdmission::new(
-                std::num::NonZeroUsize::new(256).unwrap(),
-            ),
-            pools: crate::admission::ExecutionPools::default_sizes(),
-            protocol_metrics: ProtocolMetrics::default(),
-        });
+        let state = crate::test_support::protocol_state(config, backend, None, transfer_limiter);
 
         (state, tmp)
     }
@@ -377,21 +363,12 @@ mod tests {
         crate::apply_database_migrations(&backend.gc_barrier_pool)
             .await
             .expect("migrate PostgreSQL Bazel fixture");
-        let state = Arc::new(AppState {
+        let state = crate::test_support::protocol_state(
             config,
-            role: ServerRole::All,
-            backend: ServerBackend::Postgres(backend),
-            auth: None,
-            provider_tokens: None,
-            reconstruction_cache: ReconstructionCacheService::disabled(),
-            transfer_limiter: TransferLimiter::new(chunk_size, chunk_size),
-            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            admission: crate::admission::WeightedAdmission::new(
-                std::num::NonZeroUsize::new(256).expect("nonzero admission size"),
-            ),
-            pools: crate::admission::ExecutionPools::default_sizes(),
-            protocol_metrics: ProtocolMetrics::default(),
-        });
+            ServerBackend::Postgres(backend),
+            None,
+            TransferLimiter::new(chunk_size, chunk_size),
+        );
         Some((state, tmp))
     }
 

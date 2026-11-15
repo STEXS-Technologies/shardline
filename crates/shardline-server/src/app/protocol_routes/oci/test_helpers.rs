@@ -6,12 +6,10 @@ use axum::{
     http::{Method, header},
     routing,
 };
-use tokio::sync::Semaphore;
 
 use crate::{
-    AppState, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter, app::ProtocolMetrics,
-    app::protocol_routes::oci_dispatch, reconstruction_cache::ReconstructionCacheService,
-    server_role::ServerRole,
+    AppState, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter,
+    app::protocol_routes::oci_dispatch,
 };
 
 /// A guard that holds a `tempfile::TempDir` and an `Arc<AppState>` backed by a
@@ -106,24 +104,15 @@ fn oci_test_config(root: std::path::PathBuf) -> ServerConfig {
 }
 
 fn oci_test_state(config: ServerConfig, backend: ServerBackend) -> Arc<AppState> {
-    Arc::new(AppState {
+    crate::test_support::protocol_state(
         config,
-        role: ServerRole::All,
         backend,
-        auth: None,
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(
+        None,
+        TransferLimiter::new(
             NonZeroUsize::new(4096).unwrap(),
             NonZeroUsize::new(16).unwrap(),
         ),
-        oci_registry_token_limiter: Arc::new(Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(
-            std::num::NonZeroUsize::new(256).unwrap(),
-        ),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    })
+    )
 }
 
 /// Builds an Axum [`Router`] with the OCI dispatch routes wired up for the

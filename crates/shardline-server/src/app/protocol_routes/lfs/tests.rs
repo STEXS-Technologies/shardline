@@ -24,8 +24,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::{
-    ServerBackend, ServerConfig, ServerError, ServerFrontend, ServerRole, app::AppState,
-    lfs_object_key,
+    ServerBackend, ServerConfig, ServerError, ServerFrontend, app::AppState, lfs_object_key,
 };
 use shardline_server_core::AuthorizedRepository;
 
@@ -95,21 +94,12 @@ fn lfs_test_state(
     auth: Option<crate::auth::ServerAuth>,
 ) -> Arc<AppState> {
     let chunk_size = config.chunk_size();
-    Arc::new(AppState {
+    crate::test_support::protocol_state(
         config,
-        role: ServerRole::All,
         backend,
         auth,
-        provider_tokens: None,
-        reconstruction_cache: crate::ReconstructionCacheService::disabled(),
-        transfer_limiter: crate::TransferLimiter::new(chunk_size, chunk_size),
-        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(
-            NonZeroUsize::new(256).expect("nonzero"),
-        ),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: crate::ProtocolMetrics::default(),
-    })
+        crate::TransferLimiter::new(chunk_size, chunk_size),
+    )
 }
 
 /// Builds a minimal [`AppState`] backed by a fresh temp directory.

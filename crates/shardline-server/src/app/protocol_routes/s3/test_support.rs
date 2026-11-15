@@ -3,12 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use crate::{
-    ServerConfig, ServerFrontend, ServerRole,
-    app::{AppState, ProtocolMetrics},
-    reconstruction_cache::ReconstructionCacheService,
-    transfer_limiter::TransferLimiter,
-};
+use crate::{ServerConfig, ServerFrontend, app::AppState, transfer_limiter::TransferLimiter};
 use axum::{
     body::Body,
     http::{Request, header},
@@ -113,21 +108,12 @@ pub(super) fn build_state_with_backend(
     let chunk_size = config.chunk_size();
     let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
 
-    Arc::new(AppState {
+    crate::test_support::protocol_state(
         config,
-        role: ServerRole::All,
         backend,
-        auth: Some(auth),
-        provider_tokens: None,
-        reconstruction_cache: ReconstructionCacheService::disabled(),
-        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
-        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-        admission: crate::admission::WeightedAdmission::new(
-            std::num::NonZeroUsize::new(256).unwrap(),
-        ),
-        pools: crate::admission::ExecutionPools::default_sizes(),
-        protocol_metrics: ProtocolMetrics::default(),
-    })
+        Some(auth),
+        TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+    )
 }
 
 /// Extract the text content of the first fixture XML tag.
