@@ -1368,9 +1368,7 @@ async fn shared_chunk_mappings_choose_the_smallest_retained_shard() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
-    // Exercise the Err(error) => return Err(error.into()) path (line 517).
-    // We write a valid shard but use ShardMetadataLimits with max_files=1
-    // while the shard contains 2 file records, triggering TooManyShardTerms.
+    // A valid shard with two files must propagate the configured one-file limit.
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
     use shardline_xet_core::{
         merklehash::{compute_data_hash, file_hash, xorb_hash},
@@ -1393,40 +1391,25 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
         (chunk_hash1, chunk_data1.len() as u64),
         (chunk_hash2, chunk_data2.len() as u64),
     ]);
-    let file_hash_val = file_hash(&[(chunk_hash1, chunk_data1.len() as u64)]);
-    let file_hash_val2 = file_hash(&[(chunk_hash2, chunk_data2.len() as u64)]);
-
     let mut shard = MDBInMemoryShard::default();
-
-    // File record #1
-    shard
-        .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
-            segments: vec![FileDataSequenceEntry::new(
-                xorb_hash,
-                chunk_data1.len() as u64,
-                0_u64,
-                1_u64,
-            )],
-            verification: Vec::new(),
-            metadata_ext: None,
-        })
-        .unwrap();
-
-    // File record #2
-    shard
-        .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u64, false, false),
-            segments: vec![FileDataSequenceEntry::new(
-                xorb_hash,
-                chunk_data2.len() as u64,
-                1_u64,
-                1_u64,
-            )],
-            verification: Vec::new(),
-            metadata_ext: None,
-        })
-        .unwrap();
+    for (chunk, length, offset) in [
+        (chunk_hash1, chunk_data1.len() as u64, 0_u64),
+        (chunk_hash2, chunk_data2.len() as u64, 1_u64),
+    ] {
+        shard
+            .add_file_reconstruction_info(MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(
+                    file_hash(&[(chunk, length)]),
+                    1,
+                    false,
+                    false,
+                ),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, length, offset, 1)],
+                verification: Vec::new(),
+                metadata_ext: None,
+            })
+            .unwrap();
+    }
     assert_eq!(
         shard.num_file_entries(),
         2,
@@ -1451,24 +1434,21 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
         .unwrap();
     let shard_bytes = shard.to_bytes().unwrap();
 
-    // Verify the shard triggers TooManyShardTerms with max_files=1 directly.
-    {
-        let tight_limits = shardline_server_core::ShardMetadataLimits::new(
-            NonZeroUsize::MIN,
-            shardline_server_core::DEFAULT_MAX_SHARD_XORBS,
-            shardline_server_core::DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS,
-            shardline_server_core::DEFAULT_MAX_SHARD_XORB_CHUNKS,
-        );
-        let result = shardline_xet_adapter::retained_shard_chunk_hashes(&shard_bytes, tight_limits);
-        let err = result.unwrap_err();
-        assert!(
-            matches!(
-                err,
-                shardline_xet_adapter::XetAdapterError::TooManyShardTerms
-            ),
-            "expected TooManyShardTerms, got: {err:?}"
-        );
-    }
+    let tight_limits = shardline_server_core::ShardMetadataLimits::new(
+        NonZeroUsize::MIN,
+        shardline_server_core::DEFAULT_MAX_SHARD_XORBS,
+        shardline_server_core::DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS,
+        shardline_server_core::DEFAULT_MAX_SHARD_XORB_CHUNKS,
+    );
+    let err =
+        shardline_xet_adapter::retained_shard_chunk_hashes(&shard_bytes, tight_limits).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            shardline_xet_adapter::XetAdapterError::TooManyShardTerms
+        ),
+        "expected TooManyShardTerms, got: {err:?}"
+    );
 
     // Use a hash from the shard for the object key
     let chunk_hash_hex = chunk_hash1.hex();
@@ -1490,13 +1470,6 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
         )
         .unwrap();
 
-    let tight_limits = shardline_server_core::ShardMetadataLimits::new(
-        NonZeroUsize::MIN,
-        shardline_server_core::DEFAULT_MAX_SHARD_XORBS,
-        shardline_server_core::DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS,
-        shardline_server_core::DEFAULT_MAX_SHARD_XORB_CHUNKS,
-    );
-
     let mut report = IndexRebuildReport::default();
     let result =
         rebuild_dedupe_shard_mappings(&index_store, &object_store, tight_limits, &mut report).await;
@@ -1514,10 +1487,8 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rebuild_dedupe_shard_mappings_early_return_when_issues_present() {
-    // Test the early return at lines 535-537 of rebuild_dedupe_shard_mappings.
-    // When there are already issues in the report, the function skips
-    // the mapping reconciliation entirely.
+async fn rebuild_dedupe_shard_mappings_preserves_existing_mappings_after_invalid_shard_scan() {
+    // A new scan issue must prevent stale-mapping deletion.
     use shardline_index::DedupeStore;
     use shardline_protocol::ShardlineHash;
 
