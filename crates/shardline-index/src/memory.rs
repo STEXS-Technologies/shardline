@@ -333,21 +333,6 @@ impl DedupeStore for MemoryIndexStore {
         Ok(mappings)
     }
 
-    fn visit_dedupe_shard_mappings<Visitor, VisitorError>(
-        &self,
-        mut visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(DedupeShardMapping) -> Result<(), VisitorError>,
-    {
-        for mapping in DedupeStore::list_dedupe_shard_mappings(self).map_err(Into::into)? {
-            visitor(mapping)?;
-        }
-
-        Ok(())
-    }
-
     fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error> {
         Ok(self
             .lock_state()?
@@ -392,21 +377,6 @@ impl LifecycleStore for MemoryIndexStore {
             verify_memory_quarantine_evidence(&state, candidate)?;
         }
         Ok(candidates)
-    }
-
-    fn visit_quarantine_candidates<Visitor, VisitorError>(
-        &self,
-        mut visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError>,
-    {
-        for candidate in LifecycleStore::list_quarantine_candidates(self).map_err(Into::into)? {
-            visitor(candidate)?;
-        }
-
-        Ok(())
     }
 
     fn upsert_quarantine_candidate(
@@ -474,21 +444,6 @@ impl LifecycleStore for MemoryIndexStore {
             verify_memory_retention_evidence(&state, hold)?;
         }
         Ok(holds)
-    }
-
-    fn visit_retention_holds<Visitor, VisitorError>(
-        &self,
-        mut visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(RetentionHold) -> Result<(), VisitorError>,
-    {
-        for hold in LifecycleStore::list_retention_holds(self).map_err(Into::into)? {
-            visitor(hold)?;
-        }
-
-        Ok(())
     }
 
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
