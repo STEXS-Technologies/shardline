@@ -50,7 +50,8 @@ where
             &mut candidates,
             &mut native_xorbs,
             &mut report,
-        )
+        );
+        Ok::<(), RebuildError>(())
     })
     .await?;
 
@@ -240,7 +241,7 @@ where
                         IndexRebuildIssueKind::InvalidRetainedShard,
                         shard_key.as_str().to_owned(),
                         IndexRebuildIssueDetail::InvalidRetainedShard(detail),
-                    )?;
+                    );
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),

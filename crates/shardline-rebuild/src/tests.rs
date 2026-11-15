@@ -122,8 +122,7 @@ fn push_issue_increments_count() {
         IndexRebuildIssueDetail::InvalidFileId {
             file_id: "x".to_owned(),
         },
-    )
-    .unwrap();
+    );
     assert_eq!(report.issue_count(), 1);
 }
 
@@ -247,8 +246,7 @@ async fn prune_stale_reconstructions_returns_early_when_report_is_dirty() {
         IndexRebuildIssueKind::InvalidVersionRecordJson,
         "corrupt/record".to_owned(),
         IndexRebuildIssueDetail::RecordJsonInvalid,
-    )
-    .unwrap();
+    );
     assert!(!report.is_clean());
 
     prune_stale_reconstructions(&index_store, &desired, &mut report)
@@ -386,8 +384,7 @@ fn push_issue_many_issues_tracks_all() {
             IndexRebuildIssueDetail::InvalidContentHash {
                 content_hash: format!("hash-{i}"),
             },
-        )
-        .unwrap();
+        );
     }
     assert_eq!(report.issue_count(), 100);
     assert!(!report.is_clean());

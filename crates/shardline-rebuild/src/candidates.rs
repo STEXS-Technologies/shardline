@@ -11,7 +11,7 @@ use shardline_server_core::{
 
 use super::{
     IndexRebuildIssueDetail, IndexRebuildIssueKind, IndexRebuildReconstructionPlanDetail,
-    IndexRebuildReport, RebuildError, push_issue,
+    IndexRebuildReport, push_issue,
 };
 use shardline_server_core::parse_stored_file_record_bytes;
 
@@ -67,10 +67,8 @@ pub(super) fn collect_candidate<RecordAdapter>(
     candidates: &mut HashMap<RebuildKey, VersionCandidate<RecordAdapter::Locator>>,
     native_xorbs: &mut HashSet<String>,
     report: &mut IndexRebuildReport,
-) -> Result<(), RebuildError>
-where
+) where
     RecordAdapter: OpsRecordStore,
-    RecordAdapter::Error: Into<RebuildError>,
 {
     let StoredRecord {
         locator: path,
@@ -171,8 +169,6 @@ where
         }
         Entry::Occupied(_) => {}
     }
-
-    Ok(())
 }
 
 // Every rejected version dirties the scan and records why its existing head
@@ -182,12 +178,11 @@ fn reject_version(
     kind: IndexRebuildIssueKind,
     location: String,
     detail: IndexRebuildIssueDetail,
-) -> Result<(), RebuildError> {
-    push_issue(report, kind, location.clone(), detail)?;
+) {
+    push_issue(report, kind, location.clone(), detail);
     report
         .preserved_latest_records_unreadable_version
         .push(location);
-    Ok(())
 }
 
 fn rebuild_key(record: &FileRecord) -> RebuildKey {
@@ -378,7 +373,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -404,7 +400,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -427,7 +424,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -485,7 +483,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -543,7 +542,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -584,7 +584,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -623,7 +624,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -663,7 +665,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -704,7 +707,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();
@@ -758,7 +762,8 @@ mod tests {
         let mut report = IndexRebuildReport::default();
 
         RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report)
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
         })
         .await
         .unwrap();

@@ -1,4 +1,3 @@
-use super::RebuildError;
 use super::types::{IndexRebuildIssue, IndexRebuildIssueDetail, IndexRebuildIssueKind};
 
 /// Index-rebuild report.
@@ -83,12 +82,10 @@ pub(crate) fn push_issue(
     kind: IndexRebuildIssueKind,
     location: String,
     detail: IndexRebuildIssueDetail,
-) -> Result<(), RebuildError> {
-    let _count = u64::try_from(report.issues.len())?;
+) {
     report.issues.push(IndexRebuildIssue {
         kind,
         location,
         detail,
     });
-    Ok(())
 }
