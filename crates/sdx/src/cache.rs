@@ -1050,7 +1050,12 @@ mod tests {
             let path = cache.item_path(&cache_key(&hash(digit), (0, 1))).unwrap();
             let times = std::fs::FileTimes::new()
                 .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds));
-            File::open(path).unwrap().set_times(times).unwrap();
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(times)
+                .unwrap();
         }
         drop(cache);
         let reopened = ChunkCache::new(directory.path(), 1024).unwrap();
