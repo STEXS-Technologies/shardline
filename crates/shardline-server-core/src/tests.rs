@@ -122,6 +122,10 @@ fn chunk_hash_from_chunk_object_key_skips_non_chunk_keys() {
         "aa/bbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
         "onlyprefix".to_owned(),
         format!("aa/aa{}", "z".repeat(62)),
+        format!("aa/{}", "a".repeat(63)),
+        format!("aa/{}", "a".repeat(65)),
+        format!("AA/{}", "A".repeat(64)),
+        format!("é/é{}", "a".repeat(62)),
     ] {
         let key = ObjectKey::parse(&raw_key).unwrap();
         // Malformed or transient keys must be skipped without aborting GC scans.

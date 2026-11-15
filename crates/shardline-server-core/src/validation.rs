@@ -79,26 +79,16 @@ pub fn chunk_object_key(hash_hex: &str) -> Result<ObjectKey, ServerObjectStoreEr
 pub fn chunk_hash_from_chunk_object_key_if_present(
     key: &ObjectKey,
 ) -> Result<Option<&str>, ServerObjectStoreError> {
-    let mut segments = key.as_str().split('/');
-    let Some(prefix) = segments.next() else {
+    let Some((prefix, candidate_hash_hex)) = key.as_str().split_once('/') else {
         return Ok(None);
     };
-    let Some(candidate_hash_hex) = segments.next() else {
-        return Ok(None);
-    };
-    if segments.next().is_some() {
+    if prefix.len() != 2 || !candidate_hash_hex.starts_with(prefix) {
         return Ok(None);
     }
-    if prefix.len() != 2 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Ok(None);
-    }
-    if !candidate_hash_hex.starts_with(prefix) {
-        return Ok(None);
-    }
-    if !shardline_validation::validate_content_hash_with(candidate_hash_hex, || {
+    if shardline_validation::validate_content_hash_with(candidate_hash_hex, || {
         ServerObjectStoreError::InvalidContentHash
     })
-    .is_ok()
+    .is_err()
     {
         // Passes the structural chunk gates but is not a finished chunk key:
         // skip it so a GC orphan scan or fsck never aborts the whole pass over
