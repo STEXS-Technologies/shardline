@@ -334,23 +334,17 @@ where
     let cache = ReconstructionCacheService::for_tests("memory-bench", adapter);
     let key = ReconstructionCacheService::version_key(file_id, content_hash, repository_scope);
     let loader_calls = AtomicUsize::new(0);
+    let counted_load = || {
+        loader_calls.fetch_add(1, Ordering::SeqCst);
+        load()
+    };
 
     let cold_started = Instant::now();
-    let cold = cache
-        .get_or_load(&key, || {
-            loader_calls.fetch_add(1, Ordering::SeqCst);
-            load()
-        })
-        .await?;
+    let cold = cache.get_or_load(&key, &counted_load).await?;
     let cold_load_micros = duration_micros(cold_started.elapsed())?;
 
     let hot_started = Instant::now();
-    let hot = cache
-        .get_or_load(&key, || {
-            loader_calls.fetch_add(1, Ordering::SeqCst);
-            load()
-        })
-        .await?;
+    let hot = cache.get_or_load(&key, &counted_load).await?;
     let hot_load_micros = duration_micros(hot_started.elapsed())?;
 
     debug_assert_eq!(cold, hot);
@@ -877,44 +871,41 @@ mod tests {
     // ── duration_micros ──────────────────────────────────────────────────
 
     #[test]
-    fn duration_micros_returns_micros() {
-        let result = super::duration_micros(Duration::from_micros(42)).unwrap();
-        assert_eq!(result, 42);
-    }
-
-    #[test]
-    fn duration_micros_rejects_overflow() {
-        let huge = Duration::from_secs(u64::MAX);
-        let result = super::duration_micros(huge);
-        assert!(result.is_err());
+    fn duration_micros_preserves_precision_and_rejects_overflow() {
+        for (duration, expected) in [
+            (Duration::ZERO, 0),
+            (Duration::from_nanos(999), 0),
+            (Duration::from_micros(42), 42),
+        ] {
+            assert_eq!(super::duration_micros(duration).unwrap(), expected);
+        }
+        assert!(super::duration_micros(Duration::from_secs(u64::MAX)).is_err());
     }
 
     // ── benchmark_memory_reconstruction_cache_with_loader ───────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn benchmark_memory_reconstruction_cache_with_loader_hits_cache() {
+        let loader_calls = AtomicUsize::new(0);
         let report = benchmark_memory_reconstruction_cache_with_loader(
             "bench-file.bin",
             "aa".repeat(32).as_str(),
             None,
-            || async { Ok(sample_response("bench-chunk")) },
+            || {
+                loader_calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok(sample_response("bench-chunk")) }
+            },
         )
         .await
         .expect("benchmark");
-        // Cold load should be > 0 micros.
-        assert!(
-            report.cold_load_micros > 0,
-            "cold_load_micros should be > 0, got {}",
-            report.cold_load_micros
-        );
-        // Hot load should be > 0 on second access (cached).
-        assert!(
-            report.hot_load_micros > 0,
-            "hot_load_micros should be > 0, got {}",
-            report.hot_load_micros
-        );
+        assert_eq!(loader_calls.load(Ordering::SeqCst), 1);
         assert!(report.cache_hit, "benchmark should report a cache hit");
-        assert!(report.response_bytes > 0, "response_bytes should be > 0");
+        assert_eq!(
+            report.response_bytes,
+            serde_json::to_vec(&sample_response("bench-chunk"))
+                .unwrap()
+                .len() as u64
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
