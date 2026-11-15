@@ -294,13 +294,13 @@ pub fn group_page(
         if rows >= max_keys {
             break;
         }
+        rows = rows.saturating_add(1);
         let key = entry.object_key.clone();
         // The index guarantees every key starts with the prefix; keys that do
         // not (defensive) are surfaced as ordinary Contents rows.
         let Some(remainder) = key.strip_prefix(prefix) else {
             contents.push(contents_row(&entry, &key));
             next_cursor = Some(key);
-            rows = rows.saturating_add(1);
             continue;
         };
         if let Some(delimiter) = delimiter
@@ -310,21 +310,16 @@ pub fn group_page(
             // including the delimiter. Consume every key under it.
             let group_prefix = format!("{prefix}{head}{delimiter}");
             let mut group_last = key;
-            while let Some(peeked) = remaining.peek() {
-                if peeked.object_key.starts_with(&group_prefix) {
-                    group_last = peeked.object_key.clone();
-                    remaining.next();
-                } else {
-                    break;
-                }
+            while let Some(child) =
+                remaining.next_if(|candidate| candidate.object_key.starts_with(&group_prefix))
+            {
+                group_last = child.object_key;
             }
             common_prefixes.push(group_prefix);
             next_cursor = Some(group_last);
-            rows = rows.saturating_add(1);
         } else {
             contents.push(contents_row(&entry, &key));
             next_cursor = Some(key);
-            rows = rows.saturating_add(1);
         }
     }
     ListPage {
