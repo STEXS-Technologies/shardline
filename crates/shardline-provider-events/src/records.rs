@@ -38,7 +38,7 @@ where
 
 pub(super) async fn prepare_renamed_records<RecordAdapter>(
     record_store: &RecordAdapter,
-    version_records: &[FileRecord],
+    version_records: Vec<FileRecord>,
     new_repository: &RepositoryRef,
 ) -> Result<Vec<FileRecord>, ProviderEventsError>
 where
@@ -46,7 +46,7 @@ where
     RecordAdapter::Error: Into<ProviderEventsError>,
 {
     let renamed_records = version_records
-        .iter()
+        .into_iter()
         .map(|record| renamed_file_record(record, new_repository))
         .collect::<Result<Vec<_>, _>>()?;
     for record in &renamed_records {
@@ -146,11 +146,11 @@ pub(super) fn repository_record_scope(repository: &RepositoryRef) -> RepositoryR
 }
 
 pub(super) fn renamed_file_record(
-    record: &FileRecord,
+    mut record: FileRecord,
     new_repository: &RepositoryRef,
 ) -> Result<FileRecord, ProviderEventsError> {
     let Some(existing_scope) = record.repository_scope.as_ref() else {
-        return Ok(record.clone());
+        return Ok(record);
     };
     let renamed_scope = RepositoryScope::new(
         new_repository.provider().repository_provider(),
@@ -159,9 +159,8 @@ pub(super) fn renamed_file_record(
         existing_scope.revision(),
     )
     .map_err(|_error| ProviderEventsError::InvalidProviderWebhookPayload)?;
-    let mut renamed_record = record.clone();
-    renamed_record.repository_scope = Some(renamed_scope);
-    Ok(renamed_record)
+    record.repository_scope = Some(renamed_scope);
+    Ok(record)
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -228,7 +227,7 @@ mod tests {
         let record = test_record();
         let new_repository =
             RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
-        let renamed = renamed_file_record(&record, &new_repository).unwrap();
+        let renamed = renamed_file_record(record, &new_repository).unwrap();
         let scope = renamed.repository_scope.unwrap();
         assert_eq!(scope.owner(), "new-owner");
         assert_eq!(scope.name(), "new-repo");
@@ -236,16 +235,16 @@ mod tests {
     }
 
     #[test]
-    fn renamed_file_record_no_scope_returns_clone() {
+    fn renamed_file_record_without_scope_is_unchanged() {
         let record = super::FileRecord {
             repository_scope: None,
             ..test_record()
         };
         let new_repository =
             RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
-        let renamed = renamed_file_record(&record, &new_repository).unwrap();
-        assert_eq!(renamed.file_id, record.file_id);
-        assert_eq!(renamed.repository_scope, None);
+        let expected = record.clone();
+        let renamed = renamed_file_record(record, &new_repository).unwrap();
+        assert_eq!(renamed, expected);
     }
 
     #[test]
@@ -405,7 +404,7 @@ mod tests {
             ..test_record()
         };
         let new_repo = RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
-        let renamed = renamed_file_record(&record, &new_repo).unwrap();
+        let renamed = renamed_file_record(record, &new_repo).unwrap();
         let scope = renamed.repository_scope.unwrap();
         assert_eq!(scope.revision(), Some("feature-x"));
     }

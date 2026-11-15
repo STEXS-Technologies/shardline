@@ -39,7 +39,7 @@ where
     } = collect_repository_records(record_store, event.repository()).await?;
     let mut chunk_hashes = HashSet::new();
     let renamed_records =
-        prepare_renamed_records(record_store, &version_records, new_repository).await?;
+        prepare_renamed_records(record_store, version_records, new_repository).await?;
     let file_versions = u64::try_from(renamed_records.len())?;
 
     for renamed_record in renamed_records {
@@ -80,7 +80,7 @@ pub(super) async fn plan_postgres_repository_renamed(
     } = collect_repository_records(record_store, event.repository()).await?;
     let mut chunk_hashes = HashSet::new();
     let renamed_records =
-        prepare_renamed_records(record_store, &version_records, new_repository).await?;
+        prepare_renamed_records(record_store, version_records, new_repository).await?;
     let file_versions = u64::try_from(renamed_records.len())?;
     for renamed_record in renamed_records {
         for chunk in &renamed_record.chunks {
