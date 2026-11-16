@@ -171,77 +171,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn git_smart_http_service_accepts_valid() {
-        assert_eq!(
-            "git-upload-pack".parse::<GitSmartHttpService>(),
-            Ok(GitSmartHttpService::UploadPack)
-        );
-        assert_eq!(
-            "git-receive-pack".parse::<GitSmartHttpService>(),
-            Ok(GitSmartHttpService::ReceivePack)
-        );
-    }
-
-    #[test]
-    fn git_smart_http_service_rejects_invalid() {
-        assert!("".parse::<GitSmartHttpService>().is_err());
-        assert!("git-upload".parse::<GitSmartHttpService>().is_err());
-        assert!("Git-Upload-Pack".parse::<GitSmartHttpService>().is_err());
-        assert!("git-http-backend".parse::<GitSmartHttpService>().is_err());
-    }
-
-    #[test]
-    fn git_smart_http_service_as_str_round_trips() {
-        for name in ["git-upload-pack", "git-receive-pack"] {
-            assert_eq!(name.parse::<GitSmartHttpService>().unwrap().as_str(), name);
+    fn git_service_names_preserve_parsing_and_display_contracts() {
+        for (wire, service) in [
+            ("git-upload-pack", GitSmartHttpService::UploadPack),
+            ("git-receive-pack", GitSmartHttpService::ReceivePack),
+        ] {
+            assert_eq!(wire.parse::<GitSmartHttpService>(), Ok(service));
+            assert_eq!(service.as_str(), wire);
+            assert_eq!(service.to_string(), wire);
+        }
+        for wire in ["", "git-upload", "Git-Upload-Pack", "git-http-backend"] {
+            assert_eq!(wire.parse::<GitSmartHttpService>(), Err(()), "{wire:?}");
         }
     }
 
     #[test]
-    fn hub_sort_field_accepts_valid() {
-        assert_eq!(
-            "lastModified".parse::<HubSortField>(),
-            Ok(HubSortField::LastModified)
-        );
-        assert_eq!("likes".parse::<HubSortField>(), Ok(HubSortField::Likes));
-        assert_eq!(
-            "downloads".parse::<HubSortField>(),
-            Ok(HubSortField::Downloads)
-        );
+    fn sort_fields_preserve_parsing_and_display_contracts() {
+        for (wire, field) in [
+            ("lastModified", HubSortField::LastModified),
+            ("likes", HubSortField::Likes),
+            ("downloads", HubSortField::Downloads),
+        ] {
+            assert_eq!(wire.parse::<HubSortField>(), Ok(field));
+            assert_eq!(field.as_str(), wire);
+            assert_eq!(field.to_string(), wire);
+        }
+        for wire in ["", "stars", "LastModified"] {
+            assert_eq!(wire.parse::<HubSortField>(), Err(()), "{wire:?}");
+        }
     }
 
     #[test]
-    fn hub_sort_field_rejects_invalid() {
-        assert!("".parse::<HubSortField>().is_err());
-        assert!("stars".parse::<HubSortField>().is_err());
-        assert!("LastModified".parse::<HubSortField>().is_err());
+    fn sort_directions_preserve_parsing_and_display_contracts() {
+        for (wire, direction) in [("asc", SortDirection::Asc), ("desc", SortDirection::Desc)] {
+            assert_eq!(wire.parse::<SortDirection>(), Ok(direction));
+            assert_eq!(direction.as_str(), wire);
+            assert_eq!(direction.to_string(), wire);
+        }
+        for wire in ["", "Asc", "sideways"] {
+            assert_eq!(wire.parse::<SortDirection>(), Err(()), "{wire:?}");
+        }
     }
 
     #[test]
-    fn sort_direction_accepts_valid() {
-        assert_eq!("asc".parse::<SortDirection>(), Ok(SortDirection::Asc));
-        assert_eq!("desc".parse::<SortDirection>(), Ok(SortDirection::Desc));
-    }
-
-    #[test]
-    fn sort_direction_rejects_invalid() {
-        assert!("".parse::<SortDirection>().is_err());
-        assert!("Asc".parse::<SortDirection>().is_err());
-        assert!("sideways".parse::<SortDirection>().is_err());
-    }
-
-    #[test]
-    fn webhook_scheme_is_case_insensitive() {
-        assert_eq!("http".parse::<WebhookScheme>(), Ok(WebhookScheme::Http));
-        assert_eq!("HTTPS".parse::<WebhookScheme>(), Ok(WebhookScheme::Https));
-        assert_eq!("HtTp".parse::<WebhookScheme>(), Ok(WebhookScheme::Http));
-        assert_eq!("https".parse::<WebhookScheme>(), Ok(WebhookScheme::Https));
-    }
-
-    #[test]
-    fn webhook_scheme_rejects_invalid() {
-        assert!("".parse::<WebhookScheme>().is_err());
-        assert!("ftp".parse::<WebhookScheme>().is_err());
-        assert!("HTTP/2".parse::<WebhookScheme>().is_err());
+    fn webhook_schemes_accept_mixed_case_and_display_lowercase() {
+        for (wire, scheme, canonical) in [
+            ("http", WebhookScheme::Http, "http"),
+            ("HTTPS", WebhookScheme::Https, "https"),
+            ("HtTp", WebhookScheme::Http, "http"),
+            ("https", WebhookScheme::Https, "https"),
+        ] {
+            assert_eq!(wire.parse::<WebhookScheme>(), Ok(scheme));
+            assert_eq!(scheme.as_str(), canonical);
+            assert_eq!(scheme.to_string(), canonical);
+        }
+        for wire in ["", "ftp", "HTTP/2"] {
+            assert_eq!(wire.parse::<WebhookScheme>(), Err(()), "{wire:?}");
+        }
     }
 }
