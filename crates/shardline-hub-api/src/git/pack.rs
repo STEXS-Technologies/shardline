@@ -683,57 +683,40 @@ mod tests {
         }
     }
 
-    // --- PackError Display tests ---
-
     #[test]
-    fn pack_error_display_zlib() {
-        let io_err = std::io::Error::other("compression failed");
-        let err = PackError::Zlib(io_err);
-        let msg = err.to_string();
-        assert!(msg.contains("zlib compression failed"));
-        assert!(msg.contains("compression failed"));
-    }
-
-    #[test]
-    fn pack_error_display_too_many_objects() {
-        let err = PackError::TooManyObjects;
-        assert_eq!(err.to_string(), "too many objects for pack file");
-    }
-
-    #[test]
-    fn pack_error_display_shift_overflow() {
-        let err = PackError::ShiftOverflow;
-        assert_eq!(err.to_string(), "variable-length integer shift overflow");
-    }
-
-    #[test]
-    fn pack_error_display_invalid_delta() {
-        let err = PackError::InvalidDelta;
-        assert_eq!(err.to_string(), "invalid or missing delta base");
-    }
-
-    #[test]
-    fn pack_error_display_excessive_decompressed_size() {
-        let err = PackError::ExcessiveDecompressedSize;
+    fn pack_errors_preserve_messages_and_source_chains() {
+        for (error, expected) in [
+            (
+                PackError::InvalidPack,
+                "invalid pack framing or object size",
+            ),
+            (PackError::InvalidChecksum, "invalid pack checksum"),
+            (PackError::TooManyObjects, "too many objects for pack file"),
+            (
+                PackError::ShiftOverflow,
+                "variable-length integer shift overflow",
+            ),
+            (PackError::InvalidDelta, "invalid or missing delta base"),
+            (
+                PackError::ExcessiveDecompressedSize,
+                "total decompressed size exceeds allowed limit",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+            assert!(error.source().is_none());
+        }
+        let error = PackError::Zlib(std::io::Error::other("compression failed"));
         assert_eq!(
-            err.to_string(),
-            "total decompressed size exceeds allowed limit"
+            error.to_string(),
+            "zlib compression failed: compression failed"
         );
-    }
-
-    #[test]
-    fn pack_error_source_zlib_returns_inner() {
-        let io_err = std::io::Error::other("compress fail");
-        let err = PackError::Zlib(io_err);
-        assert!(err.source().is_some());
-    }
-
-    #[test]
-    fn pack_error_source_non_zlib_returns_none() {
-        assert!(PackError::TooManyObjects.source().is_none());
-        assert!(PackError::ShiftOverflow.source().is_none());
-        assert!(PackError::InvalidDelta.source().is_none());
-        assert!(PackError::ExcessiveDecompressedSize.source().is_none());
+        let source = error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), std::io::ErrorKind::Other);
+        assert_eq!(source.to_string(), "compression failed");
     }
 
     // --- ObjectType tests ---
@@ -767,43 +750,33 @@ mod tests {
         assert_eq!(obj.object_type, ObjectType::Blob);
     }
 
-    // --- parse_delta_varint tests ---
-
     #[test]
-    fn parse_delta_varint_single_byte_zero() {
-        assert_eq!(parse_delta_varint(&[0x00], 0).unwrap(), (0, 1));
+    fn delta_varints_preserve_values_and_stop_at_the_terminator() {
+        for (encoded, start, expected) in [
+            (&[0x00][..], 0, (0, 1)),
+            (&[0x7f][..], 0, (127, 1)),
+            (&[0x81, 0x0a][..], 0, (1281, 2)),
+            (&[0xff, 0x7f][..], 1, (127, 2)),
+            (&[0x01, 0xff][..], 0, (1, 1)),
+        ] {
+            assert_eq!(parse_delta_varint(encoded, start).unwrap(), expected);
+        }
     }
 
     #[test]
-    fn parse_delta_varint_single_byte_max() {
-        assert_eq!(parse_delta_varint(&[0x7f], 0).unwrap(), (127, 1));
-    }
-
-    #[test]
-    fn parse_delta_varint_two_bytes() {
-        // Byte 0: 0x81 (MSB set, value=1)
-        // Byte 1: 0x0a (MSB clear, value=10)
-        // result = 1 | (10 << 7) = 1 + 1280 = 1281
-        assert_eq!(parse_delta_varint(&[0x81, 0x0a], 0).unwrap(), (1281, 2));
-    }
-
-    #[test]
-    fn parse_delta_varint_empty_data() {
-        let result = parse_delta_varint(&[], 0);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_delta_varint_truncated() {
-        // Continuation byte but no more data
-        let result = parse_delta_varint(&[0x80], 0);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_delta_varint_with_offset() {
-        let data = [0xff, 0x7f]; // skip first byte, parse from index 1
-        assert_eq!(parse_delta_varint(&data, 1).unwrap(), (127, 2));
+    fn delta_varints_reject_missing_truncated_and_unterminated_encodings() {
+        for (encoded, start) in [
+            (&[][..], 0),
+            (&[0x80][..], 0),
+            (&[0x00][..], 1),
+            (&[0x00][..], usize::MAX),
+            (&[0x80; MAX_DELTA_VARINT_BYTES][..], 0),
+        ] {
+            assert!(matches!(
+                parse_delta_varint(encoded, start),
+                Err(PackError::InvalidDelta)
+            ));
+        }
     }
 
     // --- Additional edge cases ---
