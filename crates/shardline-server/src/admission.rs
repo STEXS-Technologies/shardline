@@ -399,8 +399,6 @@ mod tests {
     use super::*;
     use std::num::NonZeroUsize;
 
-    // ── AdmissionCounters tests ──────────────────────────────────────────
-
     #[test]
     fn admission_counters_record() {
         let counters = AdmissionCounters::default();
@@ -412,20 +410,70 @@ mod tests {
         assert_eq!(counters.rejected.load(Ordering::Relaxed), 1);
     }
 
-    // ── WeightedAdmission tests ─────────────────────────────────────────
-
-    #[test]
-    fn admission_grants_permit_within_capacity() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
-        let permit = ctrl.try_acquire(5);
-        assert!(permit.is_some());
+    #[tokio::test]
+    async fn weighted_admission_preserves_capacity_counters_and_release() {
+        for (capacity, weight) in [
+            (10, 0),
+            (10, 3),
+            (10, 5),
+            (5, 5),
+            (3, 2),
+            (10, 100),
+            (50, 50),
+        ] {
+            for asynchronous in [false, true] {
+                let controller = WeightedAdmission::new(NonZeroUsize::new(capacity).unwrap());
+                assert_eq!(controller.max_weight(), capacity as u64);
+                let permit = if asynchronous {
+                    controller.acquire(weight).await
+                } else {
+                    controller.try_acquire(weight)
+                };
+                let used = weight.min(capacity as u64) as u32;
+                assert_eq!(permit.is_some(), weight != 0);
+                assert_eq!(controller.available_permits(), capacity as u32 - used);
+                let counters = controller.counters();
+                assert_eq!(
+                    counters.admitted.load(Ordering::Relaxed)
+                        + counters.queued.load(Ordering::Relaxed),
+                    u64::from(weight != 0),
+                );
+                if !asynchronous {
+                    assert_eq!(
+                        counters.admitted.load(Ordering::Relaxed),
+                        u64::from(weight != 0)
+                    );
+                    assert_eq!(counters.queued.load(Ordering::Relaxed), 0);
+                }
+                if weight == 0 {
+                    assert_eq!(counters.rejected.load(Ordering::Relaxed), 1);
+                } else {
+                    assert_eq!(counters.rejected.load(Ordering::Relaxed), 0);
+                    assert!(controller.try_acquire(capacity as u64).is_none());
+                    assert_eq!(counters.rejected.load(Ordering::Relaxed), 1);
+                }
+                drop(permit);
+                assert_eq!(controller.available_permits(), capacity as u32);
+            }
+        }
     }
 
     #[test]
-    fn admission_counters_reflect_try_acquire_admitted() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
-        let _permit = ctrl.try_acquire(5);
-        assert_eq!(ctrl.counters().admitted.load(Ordering::Relaxed), 1);
+    fn bounded_pools_exhaust_and_release_all_capacity() {
+        for capacity in [1, 2, 5] {
+            let pool = BoundedPool::new(NonZeroUsize::new(capacity).unwrap());
+            let permits: Vec<_> = (0..capacity)
+                .map(|index| {
+                    let permit = pool.try_acquire().unwrap();
+                    assert_eq!(pool.available_permits(), (capacity - index - 1) as u32);
+                    permit
+                })
+                .collect();
+            assert_eq!(pool.available_permits(), 0);
+            assert!(pool.try_acquire().is_none());
+            drop(permits);
+            assert_eq!(pool.available_permits(), capacity as u32);
+        }
     }
 
     #[test]
@@ -439,95 +487,6 @@ mod tests {
         assert_eq!(clone.counters().rejected.load(Ordering::Relaxed), 1);
         drop(permit);
         assert_eq!(clone.available_permits(), 2);
-    }
-
-    #[test]
-    fn admission_counters_reflect_zero_weight_rejected() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
-        let _permit = ctrl.try_acquire(0);
-        assert_eq!(ctrl.counters().rejected.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn admission_denies_when_exhausted() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(3).unwrap());
-        let p1 = ctrl.try_acquire(2);
-        let p2 = ctrl.try_acquire(2);
-        assert!(p1.is_some());
-        assert!(p2.is_none());
-    }
-
-    #[test]
-    fn admission_releases_permit() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(5).unwrap());
-        let permit = ctrl.try_acquire(5);
-        assert!(permit.is_some());
-        assert_eq!(ctrl.available_permits(), 0);
-        drop(permit);
-        assert_eq!(ctrl.available_permits(), 5);
-    }
-
-    #[test]
-    fn admission_weight_capped_at_max() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
-        // Weight 100 should be capped to max_weight=10
-        let permit = ctrl.try_acquire(100);
-        assert!(permit.is_some());
-        assert_eq!(ctrl.available_permits(), 0);
-    }
-
-    #[test]
-    fn admission_zero_weight_returns_none() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
-        let permit = ctrl.try_acquire(0);
-        assert!(permit.is_none());
-    }
-
-    #[tokio::test]
-    async fn admission_async_acquire_succeeds() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
-        let permit = ctrl.acquire(3).await;
-        assert!(
-            permit.is_some(),
-            "async acquire should return permit when capacity available"
-        );
-        assert_eq!(ctrl.available_permits(), 7);
-    }
-
-    #[tokio::test]
-    async fn admission_async_acquire_zero_weight_returns_none() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
-        let permit = ctrl.acquire(0).await;
-        assert!(permit.is_none(), "acquire with weight 0 should return None");
-    }
-
-    // ── BoundedPool tests ──────────────────────────────────────────────────
-
-    #[test]
-    fn bounded_pool_acquires_within_capacity() {
-        let pool = BoundedPool::new(NonZeroUsize::new(5).unwrap());
-        let p1 = pool.try_acquire();
-        let p2 = pool.try_acquire();
-        assert!(p1.is_some());
-        assert!(p2.is_some());
-    }
-
-    #[test]
-    fn bounded_pool_rejects_when_full() {
-        let pool = BoundedPool::new(NonZeroUsize::new(1).unwrap());
-        let p1 = pool.try_acquire();
-        let p2 = pool.try_acquire();
-        assert!(p1.is_some());
-        assert!(p2.is_none());
-    }
-
-    #[test]
-    fn bounded_pool_releases_permit_on_drop() {
-        let pool = BoundedPool::new(NonZeroUsize::new(2).unwrap());
-        let p1 = pool.try_acquire();
-        assert_eq!(pool.available_permits(), 1);
-        drop(p1);
-        assert_eq!(pool.available_permits(), 2);
     }
 
     #[test]
@@ -548,21 +507,5 @@ mod tests {
         assert_eq!(pools.hashing.capacity(), 4);
         assert_eq!(pools.parsing.capacity(), 6);
         assert_eq!(pools.blocking_io.capacity(), 8);
-    }
-
-    #[test]
-    fn admission_available_permits_reflects_usage() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
-        assert_eq!(ctrl.available_permits(), 10);
-        let p1 = ctrl.try_acquire(3).unwrap();
-        assert_eq!(ctrl.available_permits(), 7);
-        drop(p1);
-        assert_eq!(ctrl.available_permits(), 10);
-    }
-
-    #[test]
-    fn admission_weighted_max_weight_accessor() {
-        let ctrl = WeightedAdmission::new(NonZeroUsize::new(50).unwrap());
-        assert_eq!(ctrl.max_weight(), 50);
     }
 }
