@@ -296,6 +296,13 @@ struct PersistedMultipartUploadSession {
     merkle_snapshot_commit: Option<serde_json::Value>,
 }
 
+/// Session state together with its verified lifecycle and snapshot evidence.
+type VerifiedUploadSession = (
+    MultipartUploadSession,
+    SessionEvidenceLog,
+    SnapshotEvidenceLog<DigestSnapshot>,
+);
+
 #[derive(Debug, Deserialize, Serialize)]
 struct SessionEvidenceJournalRecord {
     evidence: Vec<StateTransitionEvent>,
@@ -1268,14 +1275,7 @@ async fn load_session_at_with_snapshot(
     dir: &Path,
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
-) -> Result<
-    (
-        MultipartUploadSession,
-        SessionEvidenceLog,
-        SnapshotEvidenceLog<DigestSnapshot>,
-    ),
-    S3SessionError,
-> {
+) -> Result<VerifiedUploadSession, S3SessionError> {
     let (session, evidence, snapshot_evidence) = load_session_head_with_snapshot(dir).await?;
     if is_expired(&session, ttl_seconds, now_unix_seconds) {
         return Err(S3SessionError::NotFound);
@@ -1289,14 +1289,7 @@ async fn load_session_at_with_snapshot(
 /// on every multipart part mutation.
 async fn load_session_head_with_snapshot(
     dir: &Path,
-) -> Result<
-    (
-        MultipartUploadSession,
-        SessionEvidenceLog,
-        SnapshotEvidenceLog<DigestSnapshot>,
-    ),
-    S3SessionError,
-> {
+) -> Result<VerifiedUploadSession, S3SessionError> {
     let path = dir.join("session.json");
     let bytes = match fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -1383,16 +1376,7 @@ async fn load_session(
     Ok((session, evidence))
 }
 
-async fn load_session_with_snapshot(
-    dir: &Path,
-) -> Result<
-    (
-        MultipartUploadSession,
-        SessionEvidenceLog,
-        SnapshotEvidenceLog<DigestSnapshot>,
-    ),
-    S3SessionError,
-> {
+async fn load_session_with_snapshot(dir: &Path) -> Result<VerifiedUploadSession, S3SessionError> {
     let bytes = match fs::read(dir.join("session.json")).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
