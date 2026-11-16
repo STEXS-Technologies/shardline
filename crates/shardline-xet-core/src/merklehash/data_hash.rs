@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::num::ParseIntError;
 use std::ops::{Deref, DerefMut};
@@ -89,16 +88,9 @@ impl core::ops::Rem<u64> for DataHash {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("Invalid hex input for DataHash")]
 pub struct DataHashHexParseError;
-
-impl Error for DataHashHexParseError {}
-
-impl fmt::Display for DataHashHexParseError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Invalid hex input for DataHash")
-    }
-}
 
 impl From<ParseIntError> for DataHashHexParseError {
     fn from(_err: ParseIntError) -> Self {
@@ -194,16 +186,9 @@ impl fmt::Debug for DataHash {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("Invalid bytes input for DataHash")]
 pub struct DataHashBytesParseError;
-
-impl Error for DataHashBytesParseError {}
-
-impl fmt::Display for DataHashBytesParseError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Invalid bytes input for DataHash")
-    }
-}
 
 impl TryFrom<&[u8]> for DataHash {
     type Error = DataHashBytesParseError;

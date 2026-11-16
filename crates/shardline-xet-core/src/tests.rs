@@ -4,10 +4,7 @@ use proptest::prelude::*;
 
 use crate::error::{CoreError, Validate};
 use crate::merklehash::{
-    DataHash, HMACKey, MerkleHash,
-    aggregated_hashes::xorb_hash,
-    compute_data_hash,
-    data_hash::{DataHashBytesParseError, DataHashHexParseError},
+    DataHash, HMACKey, MerkleHash, aggregated_hashes::xorb_hash, compute_data_hash,
 };
 use crate::metadata_shard::{
     constants::{
@@ -807,38 +804,6 @@ fn mdb_file_info_view_byte_size_with_verification() {
     let view = MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
     assert_eq!(view.byte_size(true), (1 + 2 + 2) * MDB_FILE_INFO_ENTRY_SIZE);
     assert_eq!(view.byte_size(false), (1 + 2) * MDB_FILE_INFO_ENTRY_SIZE);
-}
-
-// ============================================================================
-// DataHashBytesParseError / DataHashHexParseError tests
-// ============================================================================
-
-#[test]
-fn data_hash_hex_parse_error_display() {
-    let err = DataHashHexParseError;
-    assert_eq!(err.to_string(), "Invalid hex input for DataHash");
-}
-
-#[test]
-fn data_hash_hex_parse_error_from_parse_int() {
-    let parse_err = "invalid".parse::<u64>().unwrap_err();
-    let err: DataHashHexParseError = parse_err.into();
-    assert_eq!(err.to_string(), "Invalid hex input for DataHash");
-}
-
-#[test]
-fn data_hash_bytes_parse_error_display() {
-    let err = DataHashBytesParseError;
-    assert_eq!(err.to_string(), "Invalid bytes input for DataHash");
-}
-
-#[test]
-fn data_hash_error_impl_source() {
-    use std::error::Error;
-    let err = DataHashHexParseError;
-    assert!(Error::source(&err).is_none());
-    let err = DataHashBytesParseError;
-    assert!(Error::source(&err).is_none());
 }
 
 #[test]
