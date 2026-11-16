@@ -298,18 +298,6 @@ mod tests {
         XorbChunkSequenceEntry::new(compute_data_hash(b"chunk"), unpacked, start)
     }
 
-    fn serialize_header_and_entries(
-        header: &XorbChunkSequenceHeader,
-        entries: &[XorbChunkSequenceEntry],
-    ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        header.serialize(&mut buf).unwrap();
-        for e in entries {
-            e.serialize(&mut buf).unwrap();
-        }
-        buf
-    }
-
     // ======= XorbChunkSequenceHeader =======
 
     #[test]
@@ -472,39 +460,6 @@ mod tests {
     // ======= MDBXorbInfo =======
 
     #[test]
-    fn info_num_bytes() {
-        let info = MDBXorbInfo {
-            metadata: make_header(2, 200),
-            chunks: vec![make_entry(100, 0), make_entry(100, 100)],
-        };
-        assert_eq!(info.num_bytes(), (64 + 2 * 64) as u64);
-    }
-
-    #[test]
-    fn info_num_bytes_zero_chunks() {
-        let info = MDBXorbInfo {
-            metadata: make_header(0, 0),
-            chunks: vec![],
-        };
-        assert_eq!(info.num_bytes(), 64);
-    }
-
-    #[test]
-    fn info_serialize_roundtrip() {
-        let info = MDBXorbInfo {
-            metadata: make_header(1, 200),
-            chunks: vec![make_entry(200, 0)],
-        };
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let info2 = MDBXorbInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert_eq!(info, info2);
-        assert_eq!(buf.len() as u64, info.num_bytes());
-        assert_eq!(r.position(), buf.len() as u64);
-    }
-
-    #[test]
     fn info_deserialize_bookend() {
         let bookend = XorbChunkSequenceHeader::bookend();
         let mut buf = Vec::new();
@@ -531,28 +486,6 @@ mod tests {
     }
 
     #[test]
-    fn info_deserialize_empty_chunks() {
-        let h = make_header(0, 0);
-        let mut buf = Vec::new();
-        h.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let info = MDBXorbInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert!(info.chunks.is_empty());
-    }
-
-    #[test]
-    fn info_chunks_and_boundaries() {
-        let info = MDBXorbInfo {
-            metadata: make_header(2, 300),
-            chunks: vec![make_entry(100, 0), make_entry(200, 100)],
-        };
-        let bounds = info.chunks_and_boundaries();
-        assert_eq!(bounds.len(), 2);
-        assert_eq!(bounds[0].1, 100);
-        assert_eq!(bounds[1].1, 300);
-    }
-
-    #[test]
     fn info_default() {
         let info = MDBXorbInfo::default();
         assert!(info.chunks.is_empty());
@@ -562,7 +495,7 @@ mod tests {
     // ======= MDBXorbInfoView =======
 
     #[test]
-    fn views_preserve_complete_records_and_serialize_only_their_prefix() {
+    fn owned_and_view_records_roundtrip_without_consuming_the_suffix() {
         for count in 0..=3 {
             let chunks: Vec<_> = (0..count)
                 .map(|index| XorbChunkSequenceEntry {
@@ -580,9 +513,30 @@ mod tests {
                 metadata: header.clone(),
                 chunks,
             };
-            let bytes = serialize_header_and_entries(&header, &expected.chunks);
+            let mut bytes = Vec::new();
+            let written = expected.serialize(&mut bytes).unwrap();
+            assert_eq!(written, bytes.len());
+            assert_eq!(written as u64, expected.num_bytes());
+            let boundaries: Vec<_> = expected
+                .chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    (
+                        chunk.chunk_hash,
+                        25 * (index as u64 + 1) * (index as u64 + 2),
+                    )
+                })
+                .collect();
+            assert_eq!(expected.chunks_and_boundaries(), boundaries);
             let mut with_suffix = bytes.clone();
             with_suffix.extend_from_slice(b"next record");
+            let mut reader = Cursor::new(&with_suffix);
+            assert_eq!(
+                MDBXorbInfo::deserialize(&mut reader, 3).unwrap(),
+                Some(expected.clone())
+            );
+            assert_eq!(reader.position() as usize, bytes.len());
             for view in [
                 MDBXorbInfoView::new(Bytes::from(with_suffix.clone())).unwrap(),
                 MDBXorbInfoView::from_data_and_header(header.clone(), Bytes::from(with_suffix))

@@ -1327,23 +1327,6 @@ fn mdb_shard_info_serialize_from_roundtrip() {
 }
 
 // ============================================================================
-// XorbStructs — remaining paths
-// ============================================================================
-
-#[test]
-fn mdb_xorb_info_deserialize_empty_chunks() {
-    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"empty"), 0u64, 0u64);
-    let mut buf = Vec::new();
-    header.serialize(&mut buf).unwrap();
-    let mut cursor = Cursor::new(&buf);
-    let result = MDBXorbInfo::deserialize(&mut cursor, 3).unwrap();
-    assert!(result.is_some());
-    let info = result.unwrap();
-    assert_eq!(info.chunks.len(), 0);
-    assert_eq!(info.metadata.xorb_hash, header.xorb_hash);
-}
-
-// ============================================================================
 // MDBFileInfo — num_bytes and file_size edge cases
 // ============================================================================
 
