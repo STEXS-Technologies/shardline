@@ -450,26 +450,22 @@ impl BufferPermit {
     /// Returns `None` when `n` is zero or exceeds the permits held.
     pub fn split(&mut self, n: u64) -> Option<BufferPermit> {
         let physical_n = n.div_ceil(self.parent.basis);
-        if physical_n > u64::from(self.num_physical_permits) {
+        if physical_n == 0 || physical_n > u64::from(self.num_physical_permits) {
             return None;
         }
         let physical_n = u32::try_from(physical_n).unwrap_or(u32::MAX);
         self.num_physical_permits = self.num_physical_permits.saturating_sub(physical_n);
-        if physical_n > 0 {
-            let permit = self
-                .permit
-                .as_mut()
-                .and_then(|permit| permit.split(usize::try_from(physical_n).unwrap_or(usize::MAX)));
-            Some(BufferPermit {
-                permit,
-                num_physical_permits: physical_n,
-                parent: self.parent.clone(),
-                _term_slot: None,
-                _backing_block: None,
-            })
-        } else {
-            None
-        }
+        let permit = self
+            .permit
+            .as_mut()
+            .and_then(|permit| permit.split(usize::try_from(physical_n).unwrap_or(usize::MAX)));
+        Some(BufferPermit {
+            permit,
+            num_physical_permits: physical_n,
+            parent: self.parent.clone(),
+            _term_slot: None,
+            _backing_block: None,
+        })
     }
 }
 
@@ -3165,11 +3161,19 @@ mod tests {
 
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let p1 = sem.acquire_many(60).await.unwrap();
+            let mut p1 = sem.acquire_many(60).await.unwrap();
+            assert!(p1.split(0).is_none());
+            assert!(p1.split(61).is_none());
+            assert_eq!(p1.num_permits(), 60);
+            let split = p1.split(60).unwrap();
+            assert_eq!(p1.num_permits(), 0);
+            assert_eq!(split.num_permits(), 60);
             assert_eq!(sem.available_permits(), 40);
             let p2 = sem.acquire_many(40).await.unwrap();
             assert_eq!(sem.available_permits(), 0);
             drop(p1);
+            assert_eq!(sem.available_permits(), 0);
+            drop(split);
             assert_eq!(sem.available_permits(), 60);
             drop(p2);
             assert_eq!(sem.available_permits(), 100);
@@ -3191,6 +3195,9 @@ mod tests {
 
         // Splitting the virtual permit gives immediate (queue-bypassing) access.
         let mut seed = seed.unwrap();
+        assert!(seed.split(0).is_none());
+        assert!(seed.split(51).is_none());
+        assert_eq!(seed.num_permits(), 50);
         let term = seed.split(40).unwrap();
         assert_eq!(term.num_permits(), 40);
         assert_eq!(sem.total_permits(), 150);
