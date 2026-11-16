@@ -248,7 +248,7 @@ pub(crate) fn tree_entries_recursive(
     };
 
     let mut entries = Vec::new();
-    let mut directories = std::collections::BTreeSet::new();
+    let mut directories = std::collections::HashSet::new();
 
     for file in files {
         let Some(relative) = file.path.strip_prefix(&prefix) else {
@@ -258,7 +258,8 @@ pub(crate) fn tree_entries_recursive(
             continue;
         }
         for (index, _) in relative.match_indices('/') {
-            directories.insert(format!("{prefix}{}", &relative[..index]));
+            let directory_end = prefix.len().saturating_add(index);
+            directories.insert(&file.path[..directory_end]);
             if directories.len() > shardline_index::hub::HUB_TREE_READ_CEILING {
                 return Err(HubApiError::CasError(
                     "recursive directory metadata exceeds tree limit".to_owned(),
@@ -271,7 +272,7 @@ pub(crate) fn tree_entries_recursive(
 
     entries.extend(directories.into_iter().map(|directory| TreeEntry {
         entry_type: "directory".to_owned(),
-        path: directory,
+        path: directory.to_owned(),
         size: None,
         oid: None,
         lfs: None,

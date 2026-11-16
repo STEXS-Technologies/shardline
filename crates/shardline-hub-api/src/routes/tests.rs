@@ -498,22 +498,35 @@ fn tree_entries_recursive_root() {
 #[test]
 fn tree_entries_recursive_nested() {
     use shardline_index::hub::HubFileEntry;
-    let files = vec![
-        HubFileEntry {
-            path: "src/main.rs".into(),
-            size: 200,
-            sha: "b".into(),
-            is_lfs: false,
-        },
-        HubFileEntry {
-            path: "src/lib.rs".into(),
-            size: 300,
-            sha: "c".into(),
-            is_lfs: true,
-        },
-    ];
+    let files: Vec<_> = [
+        ("src/main.rs", 200, "b", false),
+        ("src/lib.rs", 300, "c", true),
+        ("src/目录/z.txt", 10, "d", false),
+        ("src/目录/a.txt", 20, "e", false),
+    ]
+    .into_iter()
+    .map(|(path, size, sha, is_lfs)| HubFileEntry {
+        path: path.into(),
+        size,
+        sha: sha.into(),
+        is_lfs,
+    })
+    .collect();
     let entries = tree_entries_recursive(&files, "src").unwrap();
-    assert_eq!(entries.len(), 2);
+    let paths: Vec<_> = entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.entry_type.as_str()))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ("src/lib.rs", "file"),
+            ("src/main.rs", "file"),
+            ("src/目录", "directory"),
+            ("src/目录/a.txt", "file"),
+            ("src/目录/z.txt", "file"),
+        ]
+    );
 }
 
 #[test]
