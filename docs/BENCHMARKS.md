@@ -4291,6 +4291,31 @@ server suite, production PostgreSQL/object-store topology and hosted memory
 qualification remain outside this checkpoint. The historical hosted RSS failure
 is still unexplained by these local passes.
 
+### SDK and cache follow-up checkpoint (2026-11-16)
+
+Source `c7f478d0ec12a01a4428dcc12ca0e84442d0c9b3` was held fixed while
+repeating the four-crate, server-cache and SDK/server E2E commands above after
+the async storage bridge, range-copy, frontend-test and SDK cleanup. The same
+shared Linux host, toolchains, build configuration and required Docker fixtures
+were used. The four-crate selection passed 1,047 tests with three default-ignored
+storage tests skipped. All 31 selected server cache tests passed (3,197 other
+library tests filtered out), and strict Clippy passed for the four crates.
+
+All 35 SDK/server E2E and Xorb interoperability tests passed with none skipped
+in 283.931 s, including the ignored 1 GiB workload. Both isolated clients checked
+byte identity and length and met the unchanged 65,536 KiB additional-RSS gate:
+
+| Isolated client workload | Baseline RSS (KiB) | Peak VmHWM (KiB) | Additional RSS (KiB) | Client transfer (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 256 MiB | 24,640 | 76,432 | 51,792 | 1,244 |
+| 1 GiB | 24,624 | 83,236 | 58,612 | 8,071 |
+
+The parent tests took 22.320 s and 209.425 s, including fixture ingestion.
+These shared-host samples establish a local regression checkpoint; they do not
+isolate individual changes or establish production throughput. The full server
+suite, production PostgreSQL/object-store qualification and historical hosted
+RSS failure remain outside these passing checks.
+
 ## Shared protocol chunk reuse qualification
 
 The shared ingestion path now consults the existing scoped native chunk index,
