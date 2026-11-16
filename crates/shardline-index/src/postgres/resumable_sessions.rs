@@ -164,6 +164,22 @@ async fn verify_resumable_session_page(
     Ok(())
 }
 
+async fn verified_sessions_from_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    rows: &[sqlx::postgres::PgRow],
+) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
+    let sessions = rows
+        .iter()
+        .map(session_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let stored_digests = rows
+        .iter()
+        .map(|row| row.try_get("state_digest"))
+        .collect::<Result<Vec<Option<String>>, sqlx::Error>>()?;
+    verify_resumable_session_page(transaction, &sessions, &stored_digests).await?;
+    Ok(sessions)
+}
+
 pub(crate) async fn refresh_resumable_state_digest(
     transaction: &mut Transaction<'_, Postgres>,
     session_id: &str,
@@ -346,20 +362,8 @@ impl PostgresIndexStore {
             .bind(&candidate_ids)
             .fetch_all(&mut *validation_transaction)
             .await?;
-            let authoritative = rows
-                .iter()
-                .map(session_from_row)
-                .collect::<Result<Vec<_>, _>>()?;
-            let stored_digests = rows
-                .iter()
-                .map(|row| row.try_get("state_digest"))
-                .collect::<Result<Vec<Option<String>>, sqlx::Error>>()?;
-            verify_resumable_session_page(
-                &mut validation_transaction,
-                &authoritative,
-                &stored_digests,
-            )
-            .await?;
+            let authoritative =
+                verified_sessions_from_rows(&mut validation_transaction, &rows).await?;
             for candidate in candidates {
                 if let Some(current) = authoritative
                     .iter()
@@ -1606,15 +1610,7 @@ impl PostgresIndexStore {
         .bind(limit)
         .fetch_all(&mut *transaction)
         .await?;
-        let sessions = rows
-            .iter()
-            .map(session_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        let stored_digests = rows
-            .iter()
-            .map(|row| row.try_get("state_digest"))
-            .collect::<Result<Vec<Option<String>>, sqlx::Error>>()?;
-        verify_resumable_session_page(&mut transaction, &sessions, &stored_digests).await?;
+        let sessions = verified_sessions_from_rows(&mut transaction, &rows).await?;
         transaction.commit().await?;
         Ok(sessions)
     }
@@ -1692,15 +1688,7 @@ impl PostgresIndexStore {
         .bind(protocol.map(ResumableSessionProtocol::as_str))
         .fetch_all(&mut *transaction)
         .await?;
-        let sessions = rows
-            .iter()
-            .map(session_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        let stored_digests = rows
-            .iter()
-            .map(|row| row.try_get("state_digest"))
-            .collect::<Result<Vec<Option<String>>, sqlx::Error>>()?;
-        verify_resumable_session_page(&mut transaction, &sessions, &stored_digests).await?;
+        let sessions = verified_sessions_from_rows(&mut transaction, &rows).await?;
         transaction.commit().await?;
         Ok(sessions)
     }
