@@ -4372,7 +4372,7 @@ and remote-object-storage qualification are separate from this local SDK check.
 
 This source contains 571,137 tracked Rust lines, down 32,512 (5.39%) from the
 603,649-line baseline, counting comments, tests and blank lines. The remaining
-closeout work is to assess the boxed future in protocol chunk reuse, qualify one
+closeout work is to finish the focused review of complex modules, qualify one
 final source snapshot across the database and object-store gates, investigate
 the hosted RSS failure, and measure optimized production-topology performance
 and retained storage after retention expiry and GC. These remain open; the SDK
