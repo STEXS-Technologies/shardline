@@ -592,6 +592,7 @@ mod tests {
     #[test]
     fn entry_new_basic() {
         let e = FileDataSequenceEntry::new(compute_data_hash(b"seg"), 1024, 0, 512);
+        assert_eq!(e.xorb_hash, compute_data_hash(b"seg"));
         assert_eq!(e.unpacked_segment_bytes, 1024);
         assert_eq!(e.chunk_index_start, 0);
         assert_eq!(e.chunk_index_end, 512);
@@ -600,17 +601,20 @@ mod tests {
 
     #[test]
     fn entry_serialize_roundtrip() {
-        let e = FileDataSequenceEntry::new(
-            compute_data_hash(b"e"),
-            u64::from(u32::MAX) + 200,
-            u64::from(u32::MAX) + 10,
-            u64::from(u32::MAX) + 20,
-        );
-        let mut buf = Vec::new();
-        e.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let e2 = FileDataSequenceEntry::deserialize(&mut r, 3).unwrap();
-        assert_eq!(e, e2);
+        for base in [0, u64::from(u32::MAX)] {
+            let e = FileDataSequenceEntry::new(
+                compute_data_hash(b"e"),
+                base + 200,
+                base + 10,
+                base + 20,
+            );
+            let mut buf = Vec::new();
+            e.serialize(&mut buf).unwrap();
+            assert_eq!(buf.len(), MDB_FILE_INFO_ENTRY_SIZE);
+            let mut r = Cursor::new(&buf);
+            assert_eq!(e, FileDataSequenceEntry::deserialize(&mut r, 3).unwrap());
+            assert_eq!(r.position(), buf.len() as u64);
+        }
     }
 
     #[test]
@@ -657,7 +661,9 @@ mod tests {
         v.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let v2 = FileVerificationEntry::deserialize(&mut r, 3).unwrap();
-        assert_eq!(v.range_hash, v2.range_hash);
+        assert_eq!(v, v2);
+        assert_eq!(buf.len(), MDB_FILE_INFO_ENTRY_SIZE);
+        assert_eq!(r.position(), buf.len() as u64);
     }
 
     #[test]
@@ -731,7 +737,9 @@ mod tests {
         m.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let m2 = FileMetadataExt::deserialize(&mut r, 3).unwrap();
-        assert_eq!(m.sha256, m2.sha256);
+        assert_eq!(m, m2);
+        assert_eq!(buf.len(), MDB_FILE_INFO_ENTRY_SIZE);
+        assert_eq!(r.position(), buf.len() as u64);
     }
 
     #[test]
