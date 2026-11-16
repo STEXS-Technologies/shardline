@@ -20,19 +20,23 @@ pub fn entity_tag_fields_match<'field>(
     current: &[u8],
     weak: bool,
 ) -> bool {
+    combine_fields(values).is_some_and(|value| entity_tag_list_matches(&value, current, weak))
+}
+
+fn combine_fields<'field>(
+    values: impl IntoIterator<Item = &'field [u8]>,
+) -> Option<std::borrow::Cow<'field, [u8]>> {
     let mut values = values.into_iter();
-    let Some(first) = values.next() else {
-        return false;
-    };
+    let first = values.next()?;
     let Some(second) = values.next() else {
-        return entity_tag_list_matches(first, current, weak);
+        return Some(std::borrow::Cow::Borrowed(first));
     };
     let mut combined = first.to_vec();
     for value in std::iter::once(second).chain(values) {
         combined.push(b',');
         combined.extend_from_slice(value);
     }
-    entity_tag_list_matches(&combined, current, weak)
+    Some(std::borrow::Cow::Owned(combined))
 }
 
 /// Validated conditional entity-tag field, preserving every opaque wire byte.
@@ -43,8 +47,16 @@ impl EntityTagList {
     /// Parses a complete field value, rejecting malformed or empty lists.
     #[must_use]
     pub fn parse(value: &[u8]) -> Option<Self> {
-        compare_list(value, b"", false)?;
-        Some(Self(value.to_vec()))
+        Self::parse_fields([value])
+    }
+
+    /// Parses repeated field lines as one ordered list, retaining the combined buffer.
+    /// Rejects malformed later fields and wildcard/list mixtures.
+    #[must_use]
+    pub fn parse_fields<'field>(values: impl IntoIterator<Item = &'field [u8]>) -> Option<Self> {
+        let value = combine_fields(values)?;
+        compare_list(&value, b"", false)?;
+        Some(Self(value.into_owned()))
     }
 
     /// Whether the field is the wildcard for an existing representation.
@@ -120,26 +132,36 @@ mod tests {
 
     #[test]
     fn repeated_fields_validate_the_entire_ordered_list() {
-        let cases: &[(&[&[u8]], bool, bool)] = &[
-            (&[], false, false),
-            (&[b"\"hash\""], true, true),
-            (&[b"\"other\"", b"\"hash\""], true, true),
-            (&[b"\"\x80,opaque\"", b"W/\"hash\""], false, true),
-            (&[b"", b"\"hash\"", b""], true, true),
-            (&[b"*"], true, true),
-            (&[b"*", b"\"hash\""], false, false),
-            (&[b"\"hash\"", b"broken"], false, false),
-            (&[b"\"hash\"", b"\"unfinished"], false, false),
+        let cases: &[(&[&[u8]], bool, bool, bool)] = &[
+            (&[], false, false, false),
+            (&[b""], false, false, false),
+            (&[b"\"other\""], true, false, false),
+            (&[b"\"hash\""], true, true, true),
+            (&[b"\"other\"", b"\"hash\""], true, true, true),
+            (&[b"\"\x80,opaque\"", b"W/\"hash\""], true, false, true),
+            (&[b"", b"\"hash\"", b""], true, true, true),
+            (&[b"*"], true, true, true),
+            (&[b"*", b"\"hash\""], false, false, false),
+            (&[b"\"hash\"", b"broken"], false, false, false),
+            (&[b"\"hash\"", b"\"unfinished"], false, false, false),
         ];
-        for (fields, strong, weak) in cases {
-            assert_eq!(
-                entity_tag_fields_match(fields.iter().copied(), b"\"hash\"", false),
-                *strong
-            );
-            assert_eq!(
-                entity_tag_fields_match(fields.iter().copied(), b"\"hash\"", true),
-                *weak
-            );
+        for (fields, valid, strong, weak) in cases {
+            let parsed = EntityTagList::parse_fields(fields.iter().copied());
+            assert_eq!(parsed.is_some(), *valid, "{fields:?}");
+            for (allow_weak, expected) in [(false, *strong), (true, *weak)] {
+                assert_eq!(
+                    entity_tag_fields_match(fields.iter().copied(), b"\"hash\"", allow_weak),
+                    expected,
+                    "{fields:?}"
+                );
+                assert_eq!(
+                    parsed
+                        .as_ref()
+                        .is_some_and(|tags| tags.matches(b"\"hash\"", allow_weak)),
+                    expected,
+                    "{fields:?}"
+                );
+            }
         }
     }
 

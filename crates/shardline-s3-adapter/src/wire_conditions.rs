@@ -46,16 +46,12 @@ pub fn read_wire_conditional_headers(
 ) -> Result<Vec<WireConditionalHeader>, InvalidS3HeaderValue> {
     let mut result = Vec::new();
     for (name, is_match) in [(header::IF_MATCH, true), (header::IF_NONE_MATCH, false)] {
-        let mut values = headers.get_all(name).iter();
-        let Some(first) = values.next() else {
+        let values = headers.get_all(name);
+        if values.iter().next().is_none() {
             continue;
-        };
-        let mut combined = first.as_bytes().to_vec();
-        for value in values {
-            combined.push(b',');
-            combined.extend_from_slice(value.as_bytes());
         }
-        let tags = EntityTagList::parse(&combined).ok_or(InvalidS3HeaderValue)?;
+        let tags = EntityTagList::parse_fields(values.iter().map(|value| value.as_bytes()))
+            .ok_or(InvalidS3HeaderValue)?;
         result.push(WireConditionalHeader { is_match, tags });
     }
     Ok(result)
