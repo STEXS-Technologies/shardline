@@ -67,6 +67,33 @@ const MAX_DATASET_TEXT_SCAN_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_DATASET_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DATASET_TEXT_RESULT_BYTES: usize = 16 * 1024 * 1024;
 
+async fn default_dataset_files(
+    state: &HubState,
+    name: &str,
+    auth: &AuthorizedRepository,
+) -> Result<Vec<HubFileEntry>, HubApiError> {
+    let entry = state
+        .store
+        .get_repo(name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RepoNotFound)?;
+    if entry.repo_type != HubRepoType::Dataset {
+        return Err(HubApiError::PathValidation(
+            "not a dataset repository".to_owned(),
+        ));
+    }
+    let commit_sha = state
+        .store
+        .resolve_revision(name, &entry.default_branch)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RevisionNotFound)?;
+    crate::revision_access::authorize_read(state, name, "main", &commit_sha, auth).await?;
+    state
+        .store
+        .get_files(&commit_sha)
+        .map_err(|error| HubApiError::CasError(error.to_string()))
+}
+
 // ---- Dataset viewer endpoints ----
 
 /// Lists parquet/data files in a dataset repository.
@@ -77,27 +104,7 @@ pub(crate) async fn dataset_parquet(
 ) -> Result<Json<DatasetParquetResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("dataset_parquet", "GET", 200);
     let name = format!("{ns}/{repo_name}");
-    let entry = state
-        .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RepoNotFound)?;
-    if entry.repo_type != HubRepoType::Dataset {
-        return Err(HubApiError::PathValidation(
-            "not a dataset repository".to_owned(),
-        ));
-    }
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &entry.default_branch)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
-    crate::revision_access::authorize_read(&state, &name, "main", &commit_sha, _repo.capability())
-        .await?;
-    let files = state
-        .store
-        .get_files(&commit_sha)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let files = default_dataset_files(&state, &name, _repo.capability()).await?;
     let parquet_files: Vec<DatasetParquetFile> = files
         .into_iter()
         .filter(|f| {
@@ -123,27 +130,7 @@ pub(crate) async fn dataset_first_rows(
 ) -> Result<Json<DatasetFirstRowsResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("dataset_first_rows", "GET", 200);
     let name = format!("{ns}/{repo_name}");
-    let entry = state
-        .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RepoNotFound)?;
-    if entry.repo_type != HubRepoType::Dataset {
-        return Err(HubApiError::PathValidation(
-            "not a dataset repository".to_owned(),
-        ));
-    }
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &entry.default_branch)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
-    crate::revision_access::authorize_read(&state, &name, "main", &commit_sha, repo.capability())
-        .await?;
-    let files = state
-        .store
-        .get_files(&commit_sha)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let files = default_dataset_files(&state, &name, repo.capability()).await?;
     let data_file = match find_dataset_file(&files, &query.config, &query.split) {
         Some(f) => f,
         None => {
@@ -169,27 +156,7 @@ pub(crate) async fn dataset_viewer(
 ) -> Result<Json<DatasetViewerResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("dataset_viewer", "GET", 200);
     let name = format!("{ns}/{repo_name}");
-    let entry = state
-        .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RepoNotFound)?;
-    if entry.repo_type != HubRepoType::Dataset {
-        return Err(HubApiError::PathValidation(
-            "not a dataset repository".to_owned(),
-        ));
-    }
-    let commit_sha = state
-        .store
-        .resolve_revision(&name, &entry.default_branch)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .ok_or(HubApiError::RevisionNotFound)?;
-    crate::revision_access::authorize_read(&state, &name, "main", &commit_sha, repo.capability())
-        .await?;
-    let files = state
-        .store
-        .get_files(&commit_sha)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let files = default_dataset_files(&state, &name, repo.capability()).await?;
     let data_file = find_dataset_file(&files, &query.config, &split).ok_or_else(|| {
         HubApiError::PathValidation("no data file found for config/split".to_owned())
     })?;
