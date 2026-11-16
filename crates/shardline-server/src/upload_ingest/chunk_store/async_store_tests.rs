@@ -9,7 +9,7 @@ use shardline_protocol::SecretString;
 use shardline_storage::S3ObjectStoreConfig;
 use tokio::sync::{Notify, mpsc};
 
-use super::{ChunkBuffer, put_if_absent_pooled_chunk_buffer};
+use super::{ChunkBuffer, put_chunk_if_absent};
 use crate::object_store::ServerObjectStore;
 
 #[tokio::test]
@@ -90,7 +90,7 @@ async fn only_fully_verified_existing_s3_chunks_can_skip_packing_read_back() {
         packed_end: compressed.len() as u64,
     }];
     let cache = SharedReadCache::default();
-    let (fresh, _) =
+    let fresh =
         super::put_if_absent_with_verified_cache(&store, ChunkBuffer(raw.clone()), Some(&cache))
             .await
             .unwrap();
@@ -103,7 +103,7 @@ async fn only_fully_verified_existing_s3_chunks_can_skip_packing_read_back() {
     mode.store(1, Ordering::SeqCst);
     // A second server starts without the first server's existence hints.
     let store = ServerObjectStore::s3(config).unwrap();
-    let (existing, _) =
+    let existing =
         super::put_if_absent_with_verified_cache(&store, ChunkBuffer(raw.clone()), Some(&cache))
             .await
             .unwrap();
@@ -173,10 +173,7 @@ async fn cancelled_s3_chunk_write_does_not_continue_existing_object_validation()
             ),
     )
     .unwrap();
-    let upload =
-        tokio::spawn(
-            async move { put_if_absent_pooled_chunk_buffer(&store, ChunkBuffer(raw)).await },
-        );
+    let upload = tokio::spawn(async move { put_chunk_if_absent(&store, ChunkBuffer(raw)).await });
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), received.recv())
             .await

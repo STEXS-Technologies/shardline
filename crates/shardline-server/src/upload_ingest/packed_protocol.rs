@@ -5,7 +5,7 @@ use shardline_xet_core::merklehash::compute_data_hash;
 
 use super::{
     body_reader::ChunkBuffer,
-    chunk_store::put_if_absent_pooled_chunk_buffer,
+    chunk_store::put_chunk_if_absent,
     durable_chunks::read_chunk,
     ingestor::{MAX_SERVER_XORB_RAW_BYTES, MAX_XORB_CHUNKS},
     xorb_packer::RecoverableXorbBatch,
@@ -309,8 +309,7 @@ impl PackedProtocolUpload {
             // The batch already owns this allocation. Share it with chunk
             // persistence and accounting instead of copying the raw member.
             let bytes = super::buffer_admission::into_bytes(bytes, permit.clone());
-            let (outcome, _) =
-                put_if_absent_pooled_chunk_buffer(&objects, ChunkBuffer(bytes.clone())).await?;
+            let outcome = put_chunk_if_absent(&objects, ChunkBuffer(bytes.clone())).await?;
             let record = FileChunkRecord {
                 hash: outcome.hash_hex,
                 offset,

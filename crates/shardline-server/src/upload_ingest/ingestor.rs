@@ -10,10 +10,7 @@ use tracing::{debug, instrument, warn};
 
 use super::body_reader::ChunkBuffer;
 use super::cdc::CdcChunker;
-use super::chunk_store::{
-    CompletedChunk, StoredChunkTaskOutcome, put_if_absent_pooled_chunk_buffer,
-    put_if_absent_with_verified_cache,
-};
+use super::chunk_store::{CompletedChunk, put_chunk_if_absent, put_if_absent_with_verified_cache};
 use super::durable_chunks::{DurableUploadChunks, ReadCache, SharedReadCache};
 use super::xorb_packer::{pack_owned_chunks_into_xorb, store_xorb};
 
@@ -45,8 +42,7 @@ pub(crate) struct FileUploadIngestor {
     pub(super) submitted_chunks: u64,
     pub(super) next_offset: u64,
     pub(super) completed_chunks: Vec<CompletedChunk>,
-    pub(super) in_flight_chunks: JoinSet<Result<StoredChunkTaskOutcome, ServerError>>,
-    pub(super) reusable_pending_buffers: Vec<BytesMut>,
+    pub(super) in_flight_chunks: JoinSet<Result<CompletedChunk, ServerError>>,
     pub(super) inserted_chunks: u64,
     pub(super) reused_chunks: u64,
     pub(super) stored_bytes: u64,
@@ -89,7 +85,6 @@ impl FileUploadIngestor {
             next_offset: 0,
             completed_chunks: Vec::new(),
             in_flight_chunks: JoinSet::new(),
-            reusable_pending_buffers: Vec::new(),
             inserted_chunks: 0,
             reused_chunks: 0,
             stored_bytes: 0,
@@ -299,8 +294,7 @@ impl FileUploadIngestor {
         &mut self,
         object_store: &ServerObjectStore,
     ) -> Result<(), ServerError> {
-        let replacement = self.take_pending_buffer();
-        let chunk = mem::replace(&mut self.pending, replacement);
+        let chunk = mem::take(&mut self.pending);
         self.submit_chunk(object_store, chunk).await
     }
 
@@ -332,13 +326,9 @@ impl FileUploadIngestor {
         }
         if matches!(object_store, ServerObjectStore::Blackhole) {
             let chunk = ChunkBuffer(chunk.freeze());
-            let (outcome, reusable_buffer) =
-                put_if_absent_pooled_chunk_buffer(object_store, chunk).await?;
+            let outcome = put_chunk_if_absent(object_store, chunk).await?;
             if outcome.inserted {
                 record_chunk_inserted(outcome.chunk_length);
-            }
-            if let Some(reusable_buffer) = reusable_buffer {
-                self.recycle_pending_buffer(reusable_buffer);
             }
             self.completed_chunks.push(CompletedChunk {
                 offset,
@@ -352,16 +342,15 @@ impl FileUploadIngestor {
         let verified_chunks = self.verified_chunks.clone();
         self.in_flight_chunks.spawn(async move {
             let chunk = ChunkBuffer(chunk.freeze());
-            let (outcome, reusable_buffer) =
+            let outcome =
                 put_if_absent_with_verified_cache(&object_store, chunk, Some(&verified_chunks))
                     .await?;
             if outcome.inserted {
                 record_chunk_inserted(outcome.chunk_length);
             }
-            Ok(StoredChunkTaskOutcome {
+            Ok(CompletedChunk {
                 offset,
                 stored: outcome,
-                reusable_buffer,
             })
         });
         Ok(())
@@ -389,31 +378,8 @@ impl FileUploadIngestor {
             warn!(error = %e, "chunk storage task panicked");
             ServerError::BlockingTask(e)
         })??;
-        if let Some(buffer) = outcome.reusable_buffer {
-            self.recycle_pending_buffer(buffer);
-        }
-        self.completed_chunks.push(CompletedChunk {
-            offset: outcome.offset,
-            stored: outcome.stored,
-        });
+        self.completed_chunks.push(outcome);
         Ok(())
-    }
-
-    fn take_pending_buffer(&mut self) -> BytesMut {
-        self.reusable_pending_buffers
-            .pop()
-            .unwrap_or_else(|| BytesMut::with_capacity(self.chunk_size))
-    }
-
-    fn recycle_pending_buffer(&mut self, mut buffer: BytesMut) {
-        if buffer.capacity() < self.chunk_size
-            || self.reusable_pending_buffers.len() >= self.max_in_flight_chunks
-        {
-            return;
-        }
-
-        buffer.clear();
-        self.reusable_pending_buffers.push(buffer);
     }
 
     async fn pack_local_chunk(
@@ -650,7 +616,6 @@ mod tests {
         assert_eq!(ingestor.next_offset, 0);
         assert!(ingestor.completed_chunks.is_empty());
         assert!(ingestor.in_flight_chunks.is_empty());
-        assert!(ingestor.reusable_pending_buffers.is_empty());
         assert_eq!(ingestor.inserted_chunks, 0);
         assert_eq!(ingestor.reused_chunks, 0);
         assert_eq!(ingestor.stored_bytes, 0);
@@ -684,35 +649,6 @@ mod tests {
     fn ingestor_new_without_sha256_disables_hasher() {
         let ingestor = FileUploadIngestor::new(NonZeroUsize::new(128).unwrap(), false);
         assert!(ingestor.sha256.is_none());
-    }
-
-    #[test]
-    fn pending_buffer_pool_reuses_cleared_buffers_with_a_bounded_capacity() {
-        let mut ingestor = FileUploadIngestor::new_with_parallelism(
-            NonZeroUsize::new(128).unwrap(),
-            false,
-            NonZeroUsize::new(2).unwrap(),
-            &crate::admission::ExecutionPools::default_sizes().hashing,
-        );
-        let fresh = ingestor.take_pending_buffer();
-        assert!(fresh.is_empty());
-        assert_eq!(fresh.capacity(), 128);
-        ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(100));
-        assert!(ingestor.reusable_pending_buffers.is_empty());
-
-        let mut buffer = bytes::BytesMut::with_capacity(128);
-        buffer.extend_from_slice(b"some data");
-        let allocation = buffer.as_ptr();
-        ingestor.recycle_pending_buffer(buffer);
-        let reused = ingestor.take_pending_buffer();
-        assert!(reused.is_empty());
-        assert_eq!(reused.as_ptr(), allocation);
-        assert!(ingestor.reusable_pending_buffers.is_empty());
-
-        for _ in 0..3 {
-            ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(128));
-        }
-        assert_eq!(ingestor.reusable_pending_buffers.len(), 2);
     }
 
     #[test]

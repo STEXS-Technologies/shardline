@@ -1,5 +1,4 @@
 use axum::body::Bytes;
-use bytes::BytesMut;
 use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, PutOutcome};
 use tracing::{debug, trace};
 
@@ -15,12 +14,6 @@ use crate::{
 pub(super) struct CompletedChunk {
     pub(super) offset: u64,
     pub(super) stored: StoredChunkOutcome,
-}
-
-pub(super) struct StoredChunkTaskOutcome {
-    pub(super) offset: u64,
-    pub(super) stored: StoredChunkOutcome,
-    pub(super) reusable_buffer: Option<BytesMut>,
 }
 
 pub(super) struct StoredChunkOutcome {
@@ -78,10 +71,10 @@ fn record_dedup_on_already_exists(outcome: PutOutcome, chunk_length: u64) {
     }
 }
 
-pub(super) async fn put_if_absent_pooled_chunk_buffer(
+pub(super) async fn put_chunk_if_absent(
     object_store: &ServerObjectStore,
     chunk: ChunkBuffer,
-) -> Result<(StoredChunkOutcome, Option<BytesMut>), ServerError> {
+) -> Result<StoredChunkOutcome, ServerError> {
     put_if_absent_with_verified_cache(object_store, chunk, None).await
 }
 
@@ -89,7 +82,7 @@ pub(super) async fn put_if_absent_with_verified_cache(
     object_store: &ServerObjectStore,
     chunk: ChunkBuffer,
     cache: Option<&super::durable_chunks::SharedReadCache>,
-) -> Result<(StoredChunkOutcome, Option<BytesMut>), ServerError> {
+) -> Result<StoredChunkOutcome, ServerError> {
     let request = chunk_object_key_and_integrity(&chunk)?;
     let ChunkBuffer(bytes) = chunk;
     let outcome = AsyncObjectStore::put_if_absent(
@@ -109,27 +102,12 @@ pub(super) async fn put_if_absent_with_verified_cache(
             .unwrap_or_else(|error| error.into_inner())
             .remember_verified_existing(&request.hash_hex, &bytes, request.integrity.length())?;
     }
-    let ChunkStorageRequest {
-        hash_hex,
-        chunk_length,
-        integrity,
-        compressed,
-        ..
-    } = request;
-    // Release the encoded owner before attempting raw buffer reuse. Any
-    // outstanding storage clone continues to retain its raw admission owner.
-    drop(compressed);
-    // Return the original (uncompressed) bytes for reuse as a pending buffer
-    let reusable_buffer = bytes.try_into_mut().ok();
-    Ok((
-        StoredChunkOutcome {
-            hash_hex,
-            chunk_length,
-            compressed_length: integrity.length(),
-            inserted: matches!(outcome, PutOutcome::Inserted),
-        },
-        reusable_buffer,
-    ))
+    Ok(StoredChunkOutcome {
+        hash_hex: request.hash_hex,
+        chunk_length: request.chunk_length,
+        compressed_length: request.integrity.length(),
+        inserted: matches!(outcome, PutOutcome::Inserted),
+    })
 }
 
 #[cfg(test)]
@@ -139,7 +117,7 @@ mod async_store_tests;
 mod tests {
     use axum::body::Bytes;
 
-    use super::{ChunkBuffer, chunk_object_key_and_integrity, put_if_absent_pooled_chunk_buffer};
+    use super::{ChunkBuffer, chunk_object_key_and_integrity, put_chunk_if_absent};
     use crate::local_backend::chunk_hash;
     use crate::object_store::ServerObjectStore;
     use shardline_index::xet_hash_hex_string;
@@ -238,16 +216,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // put_if_absent_pooled_chunk_buffer with Blackhole store
+    // put_chunk_if_absent with Blackhole store
     // ------------------------------------------------------------------
 
     #[tokio::test]
     async fn blackhole_store_inserted_returns_true() {
         let store = ServerObjectStore::blackhole();
         let chunk = ChunkBuffer(Bytes::from_static(b"test data"));
-        let (outcome, _reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 9);
     }
@@ -256,13 +232,9 @@ mod tests {
     async fn blackhole_store_same_hash_inserted_returns_true() {
         let store = ServerObjectStore::blackhole();
         let chunk1 = ChunkBuffer(Bytes::from_static(b"same data"));
-        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
-            .await
-            .unwrap();
+        let outcome1 = put_chunk_if_absent(&store, chunk1).await.unwrap();
         let chunk2 = ChunkBuffer(Bytes::from_static(b"same data"));
-        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
-            .await
-            .unwrap();
+        let outcome2 = put_chunk_if_absent(&store, chunk2).await.unwrap();
         // Blackhole always returns Inserted
         assert!(outcome1.inserted);
         assert!(outcome2.inserted);
@@ -270,7 +242,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // put_if_absent_pooled_chunk_buffer with Local store
+    // put_chunk_if_absent with Local store
     // ------------------------------------------------------------------
 
     #[tokio::test]
@@ -278,9 +250,7 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk = ChunkBuffer(Bytes::from_static(b"local test"));
-        let (outcome, _reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 10);
     }
@@ -290,15 +260,11 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk1 = ChunkBuffer(Bytes::from_static(b"dedup test"));
-        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
-            .await
-            .unwrap();
+        let outcome1 = put_chunk_if_absent(&store, chunk1).await.unwrap();
         assert!(outcome1.inserted);
 
         let chunk2 = ChunkBuffer(Bytes::from_static(b"dedup test"));
-        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
-            .await
-            .unwrap();
+        let outcome2 = put_chunk_if_absent(&store, chunk2).await.unwrap();
         assert!(!outcome2.inserted);
         assert_eq!(outcome1.hash_hex, outcome2.hash_hex);
     }
@@ -309,9 +275,7 @@ mod tests {
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let data = b"verify stored content matches";
         let chunk = ChunkBuffer(Bytes::from_static(data));
-        let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
 
         // The hash is computed on raw bytes (content-addressed on raw content)
@@ -330,19 +294,15 @@ mod tests {
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk1 = ChunkBuffer(Bytes::from_static(b"chunk one"));
         let chunk2 = ChunkBuffer(Bytes::from_static(b"chunk two"));
-        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
-            .await
-            .unwrap();
-        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
-            .await
-            .unwrap();
+        let outcome1 = put_chunk_if_absent(&store, chunk1).await.unwrap();
+        let outcome2 = put_chunk_if_absent(&store, chunk2).await.unwrap();
         assert!(outcome1.inserted);
         assert!(outcome2.inserted);
         assert_ne!(outcome1.hash_hex, outcome2.hash_hex);
     }
 
     // ------------------------------------------------------------------
-    // put_if_absent_pooled_chunk_buffer with Local store — dedup
+    // put_chunk_if_absent with Local store — dedup
     // ------------------------------------------------------------------
 
     #[tokio::test]
@@ -350,9 +310,7 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk = ChunkBuffer(Bytes::from_static(b"pooled test"));
-        let (outcome, _reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
     }
 
@@ -361,15 +319,11 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk1 = ChunkBuffer(Bytes::from_static(b"pooled dedup"));
-        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
-            .await
-            .unwrap();
+        let outcome1 = put_chunk_if_absent(&store, chunk1).await.unwrap();
         assert!(outcome1.inserted);
 
         let chunk2 = ChunkBuffer(Bytes::from_static(b"pooled dedup"));
-        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
-            .await
-            .unwrap();
+        let outcome2 = put_chunk_if_absent(&store, chunk2).await.unwrap();
         assert!(!outcome2.inserted);
     }
 
@@ -385,9 +339,7 @@ mod tests {
 
         // First insert — should be stored as new
         let chunk1 = ChunkBuffer(Bytes::from_static(data));
-        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
-            .await
-            .unwrap();
+        let outcome1 = put_chunk_if_absent(&store, chunk1).await.unwrap();
         assert!(outcome1.inserted);
 
         // Second insert with same content — should trigger dedup and record savings
@@ -396,9 +348,7 @@ mod tests {
             .dedup_saves_bytes_total
             .get();
         let chunk2 = ChunkBuffer(Bytes::from_static(data));
-        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
-            .await
-            .unwrap();
+        let outcome2 = put_chunk_if_absent(&store, chunk2).await.unwrap();
         assert!(!outcome2.inserted);
         let after_dedup = shardline_metrics::metrics()
             .storage
@@ -411,22 +361,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn pooled_local_store_returns_reusable_buffer_for_pooled_bytes() {
-        let tmp = shardline_test_support::TempStorage::new();
-        let store = ServerObjectStore::local(tmp.path()).unwrap();
-        // Use Bytes::from(Vec) so the buffer is Arc-backed and convertible
-        // back to BytesMut via try_into_mut().
-        let chunk = ChunkBuffer(Bytes::from(vec![0u8; 8]));
-        let (_outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
-        // When Bytes has a single reference, try_into_mut() succeeds
-        assert!(reusable.is_some());
-        let buf = reusable.unwrap();
-        assert_eq!(&*buf, &[0u8; 8]);
-    }
-
     // ------------------------------------------------------------------
     // Edge cases
     // ------------------------------------------------------------------
@@ -436,9 +370,7 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk = ChunkBuffer(Bytes::new());
-        let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 0);
     }
@@ -447,9 +379,7 @@ mod tests {
     async fn empty_chunk_blackhole_round_trip() {
         let store = ServerObjectStore::blackhole();
         let chunk = ChunkBuffer(Bytes::new());
-        let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 0);
     }
@@ -467,37 +397,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blackhole_store_pooled_chunk_buffer_returns_inserted_with_reusable() {
+    async fn blackhole_store_chunk_buffer_returns_inserted() {
         let store = ServerObjectStore::blackhole();
         let chunk = ChunkBuffer(Bytes::from(vec![0u8; 16]));
-        let (outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
-        // Blackhole's put_if_absent returns true (Inserted)
-        // and the Bytes may be reusable if it has a single ref
         assert_eq!(outcome.chunk_length, 16);
-        // reusable is Some if try_into_mut succeeds, which depends on ref count
-        // at minimum verify the function doesn't panic
-        let _ = reusable;
     }
 
     #[tokio::test]
-    async fn local_store_pooled_chunk_buffer_inserts_and_returns_reusable() {
+    async fn local_store_chunk_buffer_inserts() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk = ChunkBuffer(Bytes::from(vec![0xABu8; 32]));
-        let (outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 32);
-        // Buffer should be reusable since we have unique ownership
-        assert!(reusable.is_some());
-        if let Some(buf) = reusable {
-            assert_eq!(buf.len(), 32);
-            assert_eq!(&*buf, &[0xABu8; 32]);
-        }
     }
 
     // ------------------------------------------------------------------
@@ -510,29 +425,23 @@ mod tests {
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let data = vec![0x42u8; 65536]; // 64KB chunk
         let chunk = ChunkBuffer(Bytes::from(data));
-        let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 65536);
     }
 
     // ------------------------------------------------------------------
-    // put_if_absent_pooled_chunk_buffer with Blackhole — all store types
+    // put_chunk_if_absent with Blackhole — all store types
     // ------------------------------------------------------------------
 
     #[tokio::test]
     async fn blackhole_put_if_absent_pooled_same_content_inserted() {
         let store = ServerObjectStore::blackhole();
         let chunk = ChunkBuffer(Bytes::from_static(b"dedup pool blackhole"));
-        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome1 = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome1.inserted);
         let chunk2 = ChunkBuffer(Bytes::from_static(b"dedup pool blackhole"));
-        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
-            .await
-            .unwrap();
+        let outcome2 = put_chunk_if_absent(&store, chunk2).await.unwrap();
         assert!(outcome2.inserted);
         assert_eq!(outcome1.hash_hex, outcome2.hash_hex);
     }
@@ -588,9 +497,7 @@ mod tests {
         // Store compressible content
         let data = vec![0x42u8; 8192];
         let chunk = ChunkBuffer(Bytes::from(data.clone()));
-        let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 8192);
         assert!(outcome.compressed_length < outcome.chunk_length);
@@ -620,15 +527,11 @@ mod tests {
 
         let data = b"compressible dedup test data";
         let chunk1 = ChunkBuffer(Bytes::from_static(data));
-        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
-            .await
-            .unwrap();
+        let outcome1 = put_chunk_if_absent(&store, chunk1).await.unwrap();
         assert!(outcome1.inserted);
 
         let chunk2 = ChunkBuffer(Bytes::from_static(data));
-        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
-            .await
-            .unwrap();
+        let outcome2 = put_chunk_if_absent(&store, chunk2).await.unwrap();
         assert!(!outcome2.inserted);
         assert_eq!(outcome1.hash_hex, outcome2.hash_hex);
         assert_eq!(outcome1.compressed_length, outcome2.compressed_length);
@@ -642,9 +545,7 @@ mod tests {
 
         let data = vec![0x42u8; 1024];
         let chunk = ChunkBuffer(Bytes::from(data));
-        let (outcome, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
-            .await
-            .unwrap();
+        let outcome = put_chunk_if_absent(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
 
         let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
