@@ -77,6 +77,22 @@ impl XorbChunkSequenceHeader {
             num_bytes_on_disk: read_info_integer(reader, version)?,
         })
     }
+
+    fn checked_num_entries(&self) -> std::io::Result<usize> {
+        let num_entries = usize::try_from(self.num_entries).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("xorb num_entries does not fit in usize: {e}"),
+            )
+        })?;
+        if num_entries > MAX_XORB_CHUNK_ENTRIES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "xorb chunk entry count exceeds maximum",
+            ));
+        }
+        Ok(num_entries)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -170,18 +186,7 @@ impl MDBXorbInfo {
         if metadata.is_bookend() {
             return Ok(None);
         }
-        let num_entries = usize::try_from(metadata.num_entries).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("xorb num_entries does not fit in usize: {e}"),
-            )
-        })?;
-        if num_entries > MAX_XORB_CHUNK_ENTRIES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "xorb chunk entry count exceeds maximum",
-            ));
-        }
+        let num_entries = metadata.checked_num_entries()?;
         let mut chunks = Vec::with_capacity(num_entries);
         for _ in 0..num_entries {
             chunks.push(XorbChunkSequenceEntry::deserialize(reader, version)?);
@@ -228,20 +233,10 @@ impl MDBXorbInfoView {
         header: XorbChunkSequenceHeader,
         data: Bytes,
     ) -> std::io::Result<Self> {
-        let n = header.num_entries as usize;
-        let n_bytes = size_of::<XorbChunkSequenceHeader>()
-            .checked_add(
-                n.checked_mul(size_of::<XorbChunkSequenceEntry>())
-                    .ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "xorb entry count overflow",
-                        )
-                    })?,
-            )
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "xorb entry count overflow")
-            })?;
+        let n = header.checked_num_entries()?;
+        // The shared count cap bounds the v3 table to 64 MiB plus its header.
+        let n_bytes =
+            size_of::<XorbChunkSequenceHeader>() + n * size_of::<XorbChunkSequenceEntry>();
         if data.len() < n_bytes {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -510,14 +505,20 @@ mod tests {
     }
 
     #[test]
-    fn info_deserialize_rejects_too_many_entries() {
-        // A shard header declaring more than the allocation cap must error
-        // instead of attempting a huge `Vec::with_capacity`.
-        let header = make_header(MAX_XORB_CHUNK_ENTRIES as u64 + 1, 0);
-        let mut buf = Vec::new();
-        header.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        assert!(MDBXorbInfo::deserialize(&mut r, 3).is_err());
+    fn owned_and_view_decoders_reject_oversized_entry_counts() {
+        for count in [MAX_XORB_CHUNK_ENTRIES as u64 + 1, 1 << 32, u64::MAX] {
+            let header = make_header(count, 0);
+            let mut bytes = Vec::new();
+            header.serialize(&mut bytes).unwrap();
+            let bytes = Bytes::from(bytes);
+            for result in [
+                MDBXorbInfo::deserialize(&mut Cursor::new(&bytes), 3).map(|_| ()),
+                MDBXorbInfoView::new(bytes.clone()).map(|_| ()),
+                MDBXorbInfoView::from_data_and_header(header, bytes).map(|_| ()),
+            ] {
+                assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+            }
+        }
     }
 
     #[test]
