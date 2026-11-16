@@ -315,15 +315,11 @@ fn read_s3_credential_file(
                 name: name.clone(),
                 source,
             })?;
-    ensure_s3_credential_size_within_limit(name.clone(), metadata.len())?;
+    ensure_s3_credential_size_within_limit(&name, metadata.len())?;
 
     run_before_s3_credential_read_hook_for_tests(path);
 
     let bytes = read_bounded_s3_credential_file(&name, &mut file, metadata.len())?;
-    ensure_s3_credential_size_within_limit(
-        name.clone(),
-        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-    )?;
 
     let s = String::from_utf8(bytes)
         .map_err(|_error| StorageMigrationRuntimeError::S3CredentialUtf8 { name })?;
@@ -419,12 +415,12 @@ fn read_bounded_s3_credential_file(
 }
 
 fn ensure_s3_credential_size_within_limit(
-    name: String,
+    name: &str,
     observed_bytes: u64,
 ) -> Result<(), StorageMigrationRuntimeError> {
     if observed_bytes > MAX_S3_CREDENTIAL_BYTES {
         return Err(StorageMigrationRuntimeError::S3CredentialTooLarge {
-            name,
+            name: name.to_owned(),
             observed_bytes,
             maximum_bytes: MAX_S3_CREDENTIAL_BYTES,
         });
@@ -774,13 +770,12 @@ mod tests {
 
     #[test]
     fn s3_credential_size_within_limit_accepts_small_value() {
-        assert!(super::ensure_s3_credential_size_within_limit("test".to_owned(), 100).is_ok());
+        assert!(super::ensure_s3_credential_size_within_limit("test", 100).is_ok());
     }
 
     #[test]
     fn s3_credential_size_within_limit_rejects_too_large_value() {
-        let result =
-            super::ensure_s3_credential_size_within_limit("ACCESS_KEY_ID".to_owned(), 5000);
+        let result = super::ensure_s3_credential_size_within_limit("ACCESS_KEY_ID", 5000);
         assert!(matches!(
             result,
             Err(StorageMigrationRuntimeError::S3CredentialTooLarge {
@@ -793,7 +788,7 @@ mod tests {
 
     #[test]
     fn s3_credential_size_within_limit_accepts_exact_maximum() {
-        assert!(super::ensure_s3_credential_size_within_limit("test".to_owned(), 4096).is_ok());
+        assert!(super::ensure_s3_credential_size_within_limit("test", 4096).is_ok());
     }
 
     // ── StorageMigrationRuntimeError Display ───────────────────────────────
@@ -1260,13 +1255,6 @@ mod tests {
             "NONEXISTENT_SECRET",
         );
         assert!(result.unwrap().is_none());
-    }
-
-    // ── ensure_s3_credential_size_within_limit with exact boundary ────────
-
-    #[test]
-    fn ensure_s3_credential_size_within_limit_at_boundary() {
-        assert!(super::ensure_s3_credential_size_within_limit("test".to_owned(), 4096).is_ok());
     }
 
     // ── env_key with prefix and name ──────────────────────────────────────
