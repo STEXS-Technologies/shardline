@@ -21,6 +21,16 @@ pub struct ReliabilityMerkleCommit {
 }
 
 impl ReliabilityMerkleCommit {
+    /// Checks the supported schema version and exact expected body and event.
+    ///
+    /// Legacy schema versions remain accepted when their commitment matches.
+    #[must_use]
+    pub fn matches_expected(&self, expected: &Self) -> bool {
+        self.schema_version <= RELIABILITY_MERKLE_SCHEMA_VERSION
+            && self.body == expected.body
+            && self.event == expected.event
+    }
+
     /// Signs with the current engine while preserving the released key and result types.
     ///
     /// # Errors

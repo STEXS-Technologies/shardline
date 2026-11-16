@@ -606,10 +606,7 @@ fn verify_oci_merkle_heads(
         serde_json::from_value::<shardline_reliability::ReliabilityMerkleCommit>(observed)?;
     let expected =
         serde_json::from_value::<shardline_reliability::ReliabilityMerkleCommit>(expected)?;
-    if observed.schema_version > shardline_reliability::RELIABILITY_MERKLE_SCHEMA_VERSION
-        || observed.body != expected.body
-        || observed.event != expected.event
-    {
+    if !observed.matches_expected(&expected) {
         return Err(OciAdapterError::Reliability(
             "OCI snapshot Merkle commitment mismatch".into(),
         ));

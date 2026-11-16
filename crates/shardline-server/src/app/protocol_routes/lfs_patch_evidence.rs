@@ -584,10 +584,7 @@ fn verify_lfs_merkle_journal_head(
                 .ok_or_else(|| invalid_evidence("LFS snapshot Merkle commitment is missing"))?,
         )
         .map_err(invalid_evidence)?;
-        if observed.schema_version > shardline_reliability::RELIABILITY_MERKLE_SCHEMA_VERSION
-            || observed.body != expected.body
-            || observed.event != expected.event
-        {
+        if !observed.matches_expected(&expected) {
             return Err(invalid_evidence(
                 "persisted Merkle commitment mismatch for LFS snapshot",
             ));

@@ -200,10 +200,7 @@ pub fn verify_typed_merkle_chain<T: DeserializeOwned + EvidenceEventMetadata>(
     for (observed, expected_json) in merkle_commits.iter().zip(expected) {
         let observed = serde_json::from_value::<ReliabilityMerkleCommit>(observed.clone())?;
         let expected_commit = serde_json::from_value::<ReliabilityMerkleCommit>(expected_json)?;
-        if observed.schema_version > crate::RELIABILITY_MERKLE_SCHEMA_VERSION
-            || observed.body != expected_commit.body
-            || observed.event != expected_commit.event
-        {
+        if !observed.matches_expected(&expected_commit) {
             return Err(ReliabilityError::Merkle(
                 "persisted Merkle commitment mismatch".into(),
             ));

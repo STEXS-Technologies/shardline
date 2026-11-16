@@ -217,10 +217,7 @@ pub fn verify_persisted_merkle_commit_with_previous(
     })?;
     let expected_commit = build_persisted_commit(operation_kind, event_json, previous_json)?;
     let observed_commit = serde_json::from_value::<ReliabilityMerkleCommit>(observed)?;
-    if observed_commit.schema_version > crate::RELIABILITY_MERKLE_SCHEMA_VERSION
-        || observed_commit.body != expected_commit.body
-        || observed_commit.event != expected_commit.event
-    {
+    if !observed_commit.matches_expected(&expected_commit) {
         return Err(ReliabilityError::Merkle(format!(
             "persisted Merkle commitment mismatch for {}",
             operation_kind.as_str()
@@ -480,6 +477,19 @@ mod tests {
                 OperationKind::Upload,
                 second_json,
                 Some(second_commit.clone())
+            )
+            .is_err()
+        );
+
+        let mut future_commit = second_commit.clone();
+        future_commit["schema_version"] =
+            serde_json::json!(crate::RELIABILITY_MERKLE_SCHEMA_VERSION + 1);
+        assert!(
+            verify_persisted_merkle_commit_with_previous(
+                OperationKind::Upload,
+                serde_json::to_value(&second).unwrap(),
+                Some(future_commit),
+                Some(first_commit.clone()),
             )
             .is_err()
         );
