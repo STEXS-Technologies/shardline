@@ -77,9 +77,11 @@ pub struct DirListing {
 }
 
 /// Result of registering a path (mirrors the server's `RegisterResponse`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct RegisterResult {
     /// The registered path entry.
+    #[serde(flatten)]
     pub entry: PathEntry,
     /// Whether this path was newly created (`false` on a re-registration that
     /// repointed an existing path).
@@ -97,15 +99,6 @@ fn tree_page_response_limit(limit: Option<usize>) -> usize {
     entries
         .saturating_mul(PATH_RESPONSE_LIMIT)
         .saturating_add(8_450)
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize))]
-#[serde(rename_all = "camelCase")]
-struct RegisterResponse {
-    #[serde(flatten)]
-    entry: PathEntry,
-    created: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,21 +267,15 @@ impl<'session> MetadataClient<'session> {
         // Substitute the `{*path}` wildcard with the remote path (axum decodes
         // the captured value; encode each segment so special characters survive).
         let url = url.replace("{*path}", &encode_path_segments(remote));
-        let response: RegisterResponse = self
-            .send_json(
-                &retry,
-                token.token,
-                Method::PUT,
-                url,
-                Some(serde_json::json!({ "fileId": file_id })),
-                ("register_path", PATH_RESPONSE_LIMIT),
-            )
-            .await?;
-
-        Ok(RegisterResult {
-            entry: response.entry,
-            created: response.created,
-        })
+        self.send_json(
+            &retry,
+            token.token,
+            Method::PUT,
+            url,
+            Some(serde_json::json!({ "fileId": file_id })),
+            ("register_path", PATH_RESPONSE_LIMIT),
+        )
+        .await
     }
 
     async fn delete_path(&self, remote: &str, recursive: bool) -> Result<u64, SdxError> {
@@ -534,7 +521,7 @@ mod tests {
             size: u64::MAX,
             updated_at: u64::MAX,
         };
-        let register = super::RegisterResponse {
+        let register = super::RegisterResult {
             entry: resolve.clone(),
             created: false,
         };
