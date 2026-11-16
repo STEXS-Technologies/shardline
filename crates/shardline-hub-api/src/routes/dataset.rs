@@ -455,7 +455,6 @@ struct RangeLineReader {
     key: ObjectKey,
     length: u64,
     position: u64,
-    scanned: u64,
     chunk: Vec<u8>,
     chunk_position: usize,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -473,7 +472,6 @@ impl RangeLineReader {
             key,
             length,
             position: 0,
-            scanned: 0,
             chunk: Vec::new(),
             chunk_position: 0,
             cancelled,
@@ -489,7 +487,7 @@ impl RangeLineReader {
         if self.position >= self.length {
             return Ok(false);
         }
-        if self.scanned >= MAX_DATASET_TEXT_SCAN_BYTES {
+        if self.position >= MAX_DATASET_TEXT_SCAN_BYTES {
             return Err(HubApiError::PathValidation(
                 "dataset text scan limit exceeded".to_owned(),
             ));
@@ -498,10 +496,7 @@ impl RangeLineReader {
             .position
             .saturating_add(super::object_io::OBJECT_STREAM_CHUNK_BYTES)
             .min(self.length)
-            .min(
-                self.position
-                    .saturating_add(MAX_DATASET_TEXT_SCAN_BYTES.saturating_sub(self.scanned)),
-            );
+            .min(MAX_DATASET_TEXT_SCAN_BYTES);
         let end = end_exclusive
             .checked_sub(1)
             .ok_or_else(|| HubApiError::PathValidation("dataset text range overflow".to_owned()))?;
@@ -516,14 +511,13 @@ impl RangeLineReader {
             usize::try_from(end_exclusive.saturating_sub(self.position)).map_err(|_error| {
                 HubApiError::PathValidation("dataset text range overflow".to_owned())
             })?;
-        if bytes.len() != expected || bytes.is_empty() {
+        if bytes.len() != expected {
             return Err(HubApiError::CasError(
                 shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch
                     .to_string(),
             ));
         }
         self.position = end_exclusive;
-        self.scanned = self.scanned.saturating_add(bytes.len() as u64);
         self.chunk = bytes;
         self.chunk_position = 0;
         Ok(true)
@@ -800,6 +794,41 @@ mod tests {
         );
         assert!(reader.next_line().is_err());
     }
+    #[test]
+    fn text_reader_distinguishes_scan_limit_from_exact_eof() {
+        let mut reader = RangeLineReader::new(
+            &ServerObjectStore::Blackhole,
+            ObjectKey::parse("preview").unwrap(),
+            super::MAX_DATASET_TEXT_SCAN_BYTES + 1,
+            Arc::new(AtomicBool::new(false)),
+        );
+        reader.position = super::MAX_DATASET_TEXT_SCAN_BYTES;
+        assert!(matches!(
+            reader.next_line(),
+            Err(HubApiError::PathValidation(message)) if message == "dataset text scan limit exceeded"
+        ));
+        reader.length = reader.position;
+        assert!(reader.next_line().unwrap().is_none());
+    }
+
+    #[test]
+    fn text_reader_handles_crlf_split_across_storage_ranges_and_final_line() {
+        let mut content =
+            vec![b'a'; super::super::object_io::OBJECT_STREAM_CHUNK_BYTES as usize - 1];
+        content.extend_from_slice(b"\r\nlast");
+        let (_directory, store, key) = preview_store(&content);
+        let mut reader = RangeLineReader::new(
+            &store,
+            key,
+            content.len() as u64,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let first = reader.next_line().unwrap().unwrap();
+        assert_eq!(first, content[..content.len() - 6]);
+        assert_eq!(reader.next_line().unwrap().unwrap(), b"last");
+        assert!(reader.next_line().unwrap().is_none());
+    }
+
     fn preview_store(content: &[u8]) -> (tempfile::TempDir, ServerObjectStore, ObjectKey) {
         use shardline_protocol::ShardlineHash;
         use shardline_storage::{ObjectBody, ObjectIntegrity};
