@@ -414,22 +414,49 @@ mod tests {
     }
 
     #[test]
-    fn footer_serialize_roundtrip() {
-        let f = MDBShardFileFooter {
+    fn footer_wire_format_roundtrip_and_truncation() {
+        let footer = MDBShardFileFooter {
+            version: 2,
             file_info_offset: 100,
             xorb_info_offset: 200,
+            file_lookup_offset: 3,
+            file_lookup_num_entry: 4,
+            xorb_lookup_offset: 5,
+            xorb_lookup_num_entry: 6,
+            chunk_lookup_offset: 7,
+            chunk_lookup_num_entry: 8,
+            chunk_hash_hmac_key: [9, 10, 11, 12].into(),
+            shard_creation_timestamp: 13,
+            shard_key_expiry: 14,
+            _buffer: [15, 16, 17, 18, 19, 20],
+            stored_bytes_on_disk: 21,
+            materialized_bytes: 22,
             stored_bytes: 1024,
-            ..Default::default()
+            footer_offset: 24,
         };
-        let mut buf = Vec::new();
-        f.serialize(&mut buf).unwrap();
-        assert_eq!(buf.len(), size_of::<MDBShardFileFooter>());
-        let mut r = Cursor::new(&buf);
-        let f2 = MDBShardFileFooter::deserialize(&mut r).unwrap();
-        assert_eq!(f.version, f2.version);
-        assert_eq!(f.file_info_offset, f2.file_info_offset);
-        assert_eq!(f.xorb_info_offset, f2.xorb_info_offset);
-        assert_eq!(f.stored_bytes, f2.stored_bytes);
+        let mut bytes = Vec::new();
+        assert_eq!(footer.serialize(&mut bytes).unwrap(), 200);
+        let expected: Vec<u8> = [
+            2_u64, 100, 200, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+            22, 1024, 24,
+        ]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect();
+        assert_eq!(bytes, expected);
+        let mut reader = Cursor::new(&bytes);
+        assert_eq!(
+            MDBShardFileFooter::deserialize(&mut reader).unwrap(),
+            footer
+        );
+        assert_eq!(reader.position(), 200);
+        for length in 0..bytes.len() {
+            let error =
+                MDBShardFileFooter::deserialize(&mut Cursor::new(&bytes[..length])).unwrap_err();
+            assert!(
+                matches!(error, CoreError::Io(error) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+            );
+        }
     }
 
     #[test]
