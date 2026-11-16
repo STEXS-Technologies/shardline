@@ -1629,32 +1629,26 @@ impl XorbDescriptorSource {
         match self {
             XorbDescriptorSource::V2(xorbs) => xorbs
                 .remove(hash)
-                .map(|entries| {
-                    entries
-                        .into_iter()
-                        .flat_map(|entry| {
-                            entry.ranges.into_iter().map(move |range| XorbDescriptor {
-                                url: entry.url.clone(),
-                                bytes: ByteRange::new(range.bytes.start, range.bytes.end),
-                                chunks: (range.chunks.start, range.chunks.end),
-                            })
-                        })
-                        .collect()
+                .into_iter()
+                .flatten()
+                .flat_map(|entry| {
+                    entry.ranges.into_iter().map(move |range| XorbDescriptor {
+                        url: entry.url.clone(),
+                        bytes: ByteRange::new(range.bytes.start, range.bytes.end),
+                        chunks: (range.chunks.start, range.chunks.end),
+                    })
                 })
-                .unwrap_or_default(),
+                .collect(),
             XorbDescriptorSource::V1(fetch_info) => fetch_info
                 .remove(hash)
-                .map(|entries| {
-                    entries
-                        .into_iter()
-                        .map(|entry| XorbDescriptor {
-                            url: entry.url,
-                            bytes: ByteRange::new(entry.url_range.start, entry.url_range.end),
-                            chunks: (entry.range.start, entry.range.end),
-                        })
-                        .collect()
+                .into_iter()
+                .flatten()
+                .map(|entry| XorbDescriptor {
+                    url: entry.url,
+                    bytes: ByteRange::new(entry.url_range.start, entry.url_range.end),
+                    chunks: (entry.range.start, entry.range.end),
                 })
-                .unwrap_or_default(),
+                .collect(),
         }
     }
 }
