@@ -4111,6 +4111,58 @@ percentage. Reproduce from each revision with an initially absent target path:
   cargo +1.99.0 test --offline --locked --no-run -p sdx --tests
 ```
 
+### SDK streaming RSS qualification remains open (2026-11-16)
+
+The earlier local passes above do not explain the failure in
+[hosted E2E run 43704721020](https://github.com/STEXS-Technologies/shardline/actions/runs/43704721020).
+Its checkout was PR merge `74444f2`, merging candidate `a0c995f27545a5fdfd277433fc5d238fd7379bc7`
+into baseline `e53a33e00a3c2feae4ee8e2417927763663421c7`.
+The 256 MiB transfer passed byte identity and length checks but failed its
+unchanged 65,536 KiB additional-RSS gate: baseline 27,168 KiB, peak VmHWM
+93,260 KiB, delta 66,092 KiB (556 KiB over the gate). The child transfer took
+2,971 ms; the parent test, including upload/setup, took 41.837 s. The 1 GiB
+test passed in 305.857 s, but its successful diagnostic output was suppressed.
+Later qualification steps were skipped after this failure.
+
+The workflow now retains successful memory-test output and runs both selected
+tests despite a failure. Neither memory threshold nor byte-identity checking
+has been relaxed. A decoded-payload semaphore is not a process-RSS limit:
+encoded responses, metadata, offsets, allocator retention and runtime overhead
+also contribute. These are possible contributors, not an established cause of
+the hosted failure. A small overshoot alone does not prove an environment issue
+or justify increasing the gate.
+
+Reproduction on the cleanup branch uses the existing E2E workspace and both
+original workload sizes:
+
+```bash
+cargo nextest run --locked --manifest-path e2e/Cargo.toml --all-features \
+  --test sdk_client_e2e --run-ignored all --no-fail-fast --success-output final \
+  -E 'test(stream_large_file_memory_bounded_cat) or test(stream_gib_file_memory_bounded_cat)'
+```
+
+A local run at `4e835206a8a79a2a068416a30a62c96848429182` passed both tests on
+November 16, 2026. It used Linux x86_64, Rust/Cargo 1.99.0, four build jobs,
+disabled dev/test debug information, no compiler wrapper, warm dependency
+artifacts and the normal shared development host. The two tests were selected
+together, with the original 64 MiB extra-RSS threshold and decoded buffer cap.
+
+| Workload | Baseline RSS | Peak VmHWM | Additional RSS | Client transfer | Parent test including setup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 256 MiB | 25,044 KiB | 69,804 KiB | 44,760 KiB | 1,180 ms | 22.576 s |
+| 1 GiB | 25,040 KiB | 79,672 KiB | 54,632 KiB | 8,426 ms | 208.100 s |
+
+Both passed streamed byte identity and length verification. These are single
+local samples, not hosted reproductions or production throughput measurements.
+The local command additionally used `--offline`, explicit `+1.99.0`,
+`CARGO_BUILD_JOBS=4`, `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_TEST_DEBUG=0`, `RUSTC_WRAPPER=` and an existing
+`CARGO_TARGET_DIR`. No allocator setting or memory bound was changed.
+
+This gate remains unqualified on hosted CI until a current-branch run passes;
+local results do not establish a cause for the historical failure or qualify
+the remaining PostgreSQL/object-store and real-client matrix.
+
 ## Shared protocol chunk reuse qualification
 
 The shared ingestion path now consults the existing scoped native chunk index,

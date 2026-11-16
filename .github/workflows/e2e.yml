@@ -240,7 +240,7 @@ jobs:
       - name: Qualify bounded SDK memory and byte identity at 256 MiB and 1 GiB
         run: >-
           cargo nextest run --locked --manifest-path e2e/Cargo.toml --all-features --test sdk_client_e2e
-          --run-ignored all
+          --run-ignored all --no-fail-fast --success-output final
           -E 'test(stream_large_file_memory_bounded_cat) or test(stream_gib_file_memory_bounded_cat)'
 
       - name: Qualify large native Xet transfers and process recovery
