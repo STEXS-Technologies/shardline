@@ -95,19 +95,22 @@ fn copy_three_byte_num(buf: &mut [u8; 3], num: u32) {
 
 #[inline]
 fn convert_three_byte_num(buf: &[u8; 3]) -> u32 {
-    let mut bytes = [0u8; 4];
-    bytes[0..3].copy_from_slice(buf);
-    u32::from_le_bytes(bytes)
+    u32::from_le_bytes([buf[0], buf[1], buf[2], 0])
 }
 
-pub fn write_chunk_header<W: Write>(
-    w: &mut W,
-    chunk_header: &XorbChunkHeader,
-) -> std::io::Result<()> {
-    w.write_all(&[chunk_header.version])?;
-    w.write_all(&chunk_header.compressed_length)?;
-    w.write_all(&[chunk_header.compression_scheme])?;
-    w.write_all(&chunk_header.uncompressed_length)
+pub fn write_chunk_header<W: Write>(w: &mut W, header: &XorbChunkHeader) -> std::io::Result<()> {
+    let [c0, c1, c2] = header.compressed_length;
+    let [u0, u1, u2] = header.uncompressed_length;
+    w.write_all(&[
+        header.version,
+        c0,
+        c1,
+        c2,
+        header.compression_scheme,
+        u0,
+        u1,
+        u2,
+    ])
 }
 
 pub fn serialize_chunk<W: Write>(
@@ -141,17 +144,13 @@ pub fn parse_chunk_header(
     if chunk_header_bytes[..XORB_OBJECT_FORMAT_IDENT.len()] == XORB_OBJECT_FORMAT_IDENT {
         return Err(CoreError::ChunkHeaderParse);
     }
-    let mut header = XorbChunkHeader {
-        version: chunk_header_bytes[0],
-        ..Default::default()
+    let [version, c0, c1, c2, compression_scheme, u0, u1, u2] = chunk_header_bytes;
+    let header = XorbChunkHeader {
+        version,
+        compressed_length: [c0, c1, c2],
+        compression_scheme,
+        uncompressed_length: [u0, u1, u2],
     };
-    header
-        .compressed_length
-        .copy_from_slice(&chunk_header_bytes[1..4]);
-    header.compression_scheme = chunk_header_bytes[4];
-    header
-        .uncompressed_length
-        .copy_from_slice(&chunk_header_bytes[5..8]);
     header.validate()?;
     Ok(header)
 }
@@ -298,31 +297,36 @@ mod tests {
     }
 
     #[test]
-    fn write_and_read_chunk_header() {
-        let h = XorbChunkHeader::new(CompressionScheme::LZ4, 100, 200);
-        let mut buf = Vec::new();
-        write_chunk_header(&mut buf, &h).unwrap();
-        assert_eq!(buf.len(), XORB_CHUNK_HEADER_LENGTH);
-        let mut r = Cursor::new(&buf);
-        let h2 = deserialize_chunk_header(&mut r).unwrap();
-        assert_eq!(h.get_compressed_length(), h2.get_compressed_length());
-        assert_eq!(h.get_uncompressed_length(), h2.get_uncompressed_length());
-        assert_eq!(
-            h.get_compression_scheme().unwrap(),
-            h2.get_compression_scheme().unwrap()
-        );
-    }
-
-    #[test]
-    fn parse_chunk_header_roundtrip() {
-        let h = XorbChunkHeader::new(CompressionScheme::None, 42, 84);
-        let mut bytes = [0u8; XORB_CHUNK_HEADER_LENGTH];
-        bytes[0] = h.version;
-        bytes[1..4].copy_from_slice(&h.get_compressed_length().to_le_bytes()[..3]);
-        bytes[4] = h.get_compression_scheme().unwrap() as u8;
-        bytes[5..8].copy_from_slice(&h.get_uncompressed_length().to_le_bytes()[..3]);
-        let parsed = parse_chunk_header(bytes).unwrap();
-        assert_eq!(parsed, h);
+    fn chunk_header_wire_format() {
+        for (header, expected) in [
+            (
+                XorbChunkHeader::new(CompressionScheme::LZ4, 100, 200),
+                [0, 100, 0, 0, 1, 200, 0, 0],
+            ),
+            (
+                XorbChunkHeader::new(CompressionScheme::None, 42, 84),
+                [0, 42, 0, 0, 0, 84, 0, 0],
+            ),
+            (
+                XorbChunkHeader::new(CompressionScheme::None, 0x010203, 0x020304),
+                [0, 3, 2, 1, 0, 4, 3, 2],
+            ),
+        ] {
+            let mut bytes = Vec::new();
+            write_chunk_header(&mut bytes, &header).unwrap();
+            assert_eq!(bytes, expected);
+            for len in 0..expected.len() {
+                let mut short = [0; XORB_CHUNK_HEADER_LENGTH];
+                let error = write_chunk_header(&mut &mut short[..len], &header).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+                assert_eq!(short[..len], expected[..len]);
+            }
+            assert_eq!(parse_chunk_header(expected).unwrap(), header);
+            assert_eq!(
+                deserialize_chunk_header(&mut Cursor::new(bytes)).unwrap(),
+                header
+            );
+        }
     }
 
     #[test]
