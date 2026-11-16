@@ -135,7 +135,7 @@ impl MemoryReconstructionCache {
         }
 
         // Try to become the exclusive loader for this key.
-        let (should_load, notify, last_seen_alive) = {
+        let (notify, last_seen_alive) = {
             let mut inner = self.inner.write().await;
             let now = Instant::now();
 
@@ -157,11 +157,7 @@ impl MemoryReconstructionCache {
             match loading.entry(key.clone()) {
                 std::collections::hash_map::Entry::Occupied(entry) => {
                     let existing = entry.get();
-                    (
-                        false,
-                        Arc::clone(&existing.notify),
-                        Arc::clone(&existing.last_seen_alive),
-                    )
+                    (Arc::clone(&existing.notify), None)
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
                     let new = LoadingEntry::new(Arc::new(Notify::new()));
@@ -170,12 +166,12 @@ impl MemoryReconstructionCache {
                     slot.insert(new);
                     // Clean up any expired entry so the loader can store fresh data.
                     inner.remove(key);
-                    (true, notify, last_seen_alive)
+                    (notify, Some(last_seen_alive))
                 }
             }
         };
 
-        if should_load {
+        if let Some(last_seen_alive) = last_seen_alive {
             // F-112: if the caller's future is dropped mid-load (client
             // disconnect, request timeout, shutdown), the loading latch must
             // be released. The Drop guard removes it synchronously on
