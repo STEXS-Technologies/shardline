@@ -473,7 +473,10 @@ pub(crate) async fn webhook_list(
         .list_webhooks(&name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     let response = WebhookListResponse {
-        webhooks: webhooks.into_iter().map(webhook_response_from_hub).collect(),
+        webhooks: webhooks
+            .into_iter()
+            .map(webhook_response_from_hub)
+            .collect(),
     };
     Ok(Json(response))
 }

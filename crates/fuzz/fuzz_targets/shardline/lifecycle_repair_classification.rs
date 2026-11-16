@@ -32,22 +32,18 @@ fuzz_target!(|data: (
     }
 
     // --- Retention classification ---
-    let r1 = fuzz_classify_retention(r_release, r_now).expect("valid retention fixture");
-    let r2 = fuzz_classify_retention(r_release, r_now).expect("valid retention fixture");
-    assert_eq!(r1, r2, "retention classification must be deterministic");
-
-    // Verify state consistency
-    if r_release.is_some_and(|ra| ra <= r_now) {
-        assert_eq!(
-            r1,
-            FuzzRetentionAction::DeleteExpired,
-            "release_after={ra:?} <= now={r_now} should expire",
-            ra = r_release
-        );
+    // Missing bytes do not end a finite or permanent hold; only its expiry does.
+    let expected_retention = if r_release.is_some_and(|release| release <= r_now) {
+        FuzzRetentionAction::DeleteExpired
     } else {
-        // An absent object may arrive later; neither finite nor permanent
-        // protection ends merely because its bytes are currently missing.
-        assert_eq!(r1, FuzzRetentionAction::Keep);
+        FuzzRetentionAction::Keep
+    };
+    for _ in 0..2 {
+        let result = fuzz_classify_retention(r_release, r_now);
+        assert!(
+            matches!(&result, Ok(action) if *action == expected_retention),
+            "release_after={r_release:?}, now={r_now}: {result:?}"
+        );
     }
 
     // --- Webhook classification ---
