@@ -54,108 +54,106 @@ enum LfsUploadStagedContent {
     File(NamedTempFile),
 }
 
+enum LfsUploadSink {
+    Memory {
+        bytes: Vec<u8>,
+        permit: SemaphorePermit<'static>,
+    },
+    File {
+        temporary: NamedTempFile,
+        output: tokio::fs::File,
+    },
+}
+
 struct LfsUploadStaging {
-    memory: Option<Vec<u8>>,
-    permit: Option<SemaphorePermit<'static>>,
-    temporary: Option<NamedTempFile>,
-    output: Option<tokio::fs::File>,
+    sink: LfsUploadSink,
     local_root: Option<PathBuf>,
 }
 
 impl LfsUploadStaging {
     fn new(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
-        let permit = LFS_UPLOAD_MEMORY_ADMISSION.try_acquire().ok();
-        Self::with_permit(permit, local_root)
+        Self::with_permit(LFS_UPLOAD_MEMORY_ADMISSION.try_acquire().ok(), local_root)
     }
 
     fn with_permit(
         permit: Option<SemaphorePermit<'static>>,
         local_root: Option<&FsPath>,
     ) -> Result<Self, HubApiError> {
-        if permit.is_some() {
-            return Ok(Self {
-                memory: Some(Vec::new()),
+        let sink = if let Some(permit) = permit {
+            LfsUploadSink::Memory {
+                bytes: Vec::new(),
                 permit,
-                temporary: None,
-                output: None,
-                local_root: local_root.map(FsPath::to_path_buf),
-            });
-        }
-
-        Self::file_backed(local_root)
-    }
-
-    fn file_backed(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
-        let temporary = new_lfs_temporary_file(local_root)
-            .map_err(|error| HubApiError::CasError(error.to_string()))?;
-        let output = staging_output(&temporary)?;
+            }
+        } else {
+            let (temporary, output) = Self::file_sink(local_root)?;
+            LfsUploadSink::File { temporary, output }
+        };
         Ok(Self {
-            memory: None,
-            permit: None,
-            temporary: Some(temporary),
-            output: Some(output),
+            sink,
             local_root: local_root.map(FsPath::to_path_buf),
         })
     }
 
-    async fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), HubApiError> {
-        if let Some(memory) = &mut self.memory {
-            let next_length = memory
-                .len()
-                .checked_add(bytes.len())
-                .ok_or_else(|| HubApiError::BadRequest("upload too large".to_owned()))?;
-            if next_length <= LFS_UPLOAD_MEMORY_THRESHOLD {
-                memory.try_reserve_exact(bytes.len()).map_err(|error| {
-                    HubApiError::CasError(format!("unable to stage small LFS upload: {error}"))
-                })?;
-                memory.extend_from_slice(bytes);
-                return Ok(());
-            }
-
-            let temporary = new_lfs_temporary_file(self.local_root.as_deref())
-                .map_err(|error| HubApiError::CasError(error.to_string()))?;
-            let mut output = staging_output(&temporary)?;
-            output
-                .write_all(memory)
-                .await
-                .map_err(|error| HubApiError::CasError(error.to_string()))?;
-            output
-                .write_all(bytes)
-                .await
-                .map_err(|error| HubApiError::CasError(error.to_string()))?;
-            self.memory = None;
-            self.permit = None;
-            self.temporary = Some(temporary);
-            self.output = Some(output);
-            return Ok(());
-        }
-
-        self.output
-            .as_mut()
-            .ok_or_else(|| HubApiError::CasError("LFS staging sink is unavailable".to_owned()))?
-            .write_all(bytes)
-            .await
-            .map_err(|error| HubApiError::CasError(error.to_string()))
+    fn file_sink(
+        local_root: Option<&FsPath>,
+    ) -> Result<(NamedTempFile, tokio::fs::File), HubApiError> {
+        let temporary = new_lfs_temporary_file(local_root)
+            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        let output = staging_output(&temporary)?;
+        Ok((temporary, output))
     }
 
-    async fn finish(mut self) -> Result<LfsUploadStagedContent, HubApiError> {
-        if let Some(output) = &mut self.output {
-            output
-                .flush()
+    async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), HubApiError> {
+        match &mut self.sink {
+            LfsUploadSink::Memory { bytes, .. } => {
+                let next_length = bytes
+                    .len()
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| HubApiError::BadRequest("upload too large".to_owned()))?;
+                if next_length <= LFS_UPLOAD_MEMORY_THRESHOLD {
+                    bytes.try_reserve_exact(chunk.len()).map_err(|error| {
+                        HubApiError::CasError(format!("unable to stage small LFS upload: {error}"))
+                    })?;
+                    bytes.extend_from_slice(chunk);
+                    return Ok(());
+                }
+                let (temporary, mut output) = Self::file_sink(self.local_root.as_deref())?;
+                output
+                    .write_all(bytes)
+                    .await
+                    .map_err(|error| HubApiError::CasError(error.to_string()))?;
+                output
+                    .write_all(chunk)
+                    .await
+                    .map_err(|error| HubApiError::CasError(error.to_string()))?;
+                self.sink = LfsUploadSink::File { temporary, output };
+                Ok(())
+            }
+            LfsUploadSink::File { output, .. } => output
+                .write_all(chunk)
                 .await
-                .map_err(|error| HubApiError::CasError(error.to_string()))?;
+                .map_err(|error| HubApiError::CasError(error.to_string())),
         }
-        drop(self.output.take());
-        if let (Some(bytes), Some(permit)) = (self.memory.take(), self.permit.take()) {
-            return Ok(LfsUploadStagedContent::Memory {
+    }
+
+    async fn finish(self) -> Result<LfsUploadStagedContent, HubApiError> {
+        match self.sink {
+            LfsUploadSink::Memory { bytes, permit } => Ok(LfsUploadStagedContent::Memory {
                 bytes,
                 _permit: permit,
-            });
+            }),
+            LfsUploadSink::File {
+                temporary,
+                mut output,
+            } => {
+                output
+                    .flush()
+                    .await
+                    .map_err(|error| HubApiError::CasError(error.to_string()))?;
+                drop(output);
+                Ok(LfsUploadStagedContent::File(temporary))
+            }
         }
-        self.temporary
-            .take()
-            .map(LfsUploadStagedContent::File)
-            .ok_or_else(|| HubApiError::CasError("LFS staging sink is unavailable".to_owned()))
     }
 }
 
@@ -1233,7 +1231,7 @@ fn retryable_xet_read_response(status: StatusCode) -> Option<Response> {
 mod upload_staging_tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{LFS_UPLOAD_MEMORY_THRESHOLD, LfsUploadStaging};
+    use super::{LFS_UPLOAD_MEMORY_THRESHOLD, LfsUploadSink, LfsUploadStaging};
     use tokio::io::AsyncWriteExt;
 
     #[test]
@@ -1259,8 +1257,9 @@ mod upload_staging_tests {
     async fn small_upload_stays_in_memory() {
         let mut staging = LfsUploadStaging::new(None).unwrap();
         staging.write_chunk(b"small content").await.unwrap();
-        assert_eq!(staging.memory.as_deref(), Some(b"small content".as_slice()));
-        assert!(staging.temporary.is_none());
+        assert!(
+            matches!(&staging.sink, LfsUploadSink::Memory { bytes, .. } if bytes == b"small content")
+        );
     }
 
     #[tokio::test]
@@ -1269,11 +1268,12 @@ mod upload_staging_tests {
         let prefix = vec![b'a'; LFS_UPLOAD_MEMORY_THRESHOLD];
         staging.write_chunk(&prefix).await.unwrap();
         staging.write_chunk(b"b").await.unwrap();
-        assert!(staging.memory.is_none());
-        assert!(staging.permit.is_none());
-
-        let temporary = staging.temporary.as_ref().unwrap();
-        staging.output.as_mut().unwrap().flush().await.unwrap();
+        let (temporary, output) = match &mut staging.sink {
+            LfsUploadSink::File { temporary, output } => Some((temporary, output)),
+            LfsUploadSink::Memory { .. } => None,
+        }
+        .unwrap();
+        output.flush().await.unwrap();
         let stored = std::fs::read(temporary.path()).unwrap();
         assert_eq!(stored.len(), LFS_UPLOAD_MEMORY_THRESHOLD + 1);
         assert!(
@@ -1287,15 +1287,21 @@ mod upload_staging_tests {
     #[test]
     fn unavailable_memory_admission_uses_tempfile_staging() {
         let staging = LfsUploadStaging::with_permit(None, None).unwrap();
-        assert!(staging.memory.is_none());
-        assert!(staging.temporary.as_ref().unwrap().path().exists());
+        assert!(
+            matches!(&staging.sink, LfsUploadSink::File { temporary, .. } if temporary.path().exists())
+        );
     }
 
     #[tokio::test]
     async fn dropping_cancelled_file_backed_upload_removes_partial_staging_file() {
         let mut staging = LfsUploadStaging::with_permit(None, None).unwrap();
         staging.write_chunk(b"partial upload").await.unwrap();
-        let temporary_path = staging.temporary.as_ref().unwrap().path().to_owned();
+        let temporary_path = match &staging.sink {
+            LfsUploadSink::File { temporary, .. } => Some(temporary.path()),
+            LfsUploadSink::Memory { .. } => None,
+        }
+        .unwrap()
+        .to_owned();
         assert!(temporary_path.exists());
 
         // The request future owns this staging guard. Dropping it after client
@@ -1314,7 +1320,11 @@ mod upload_staging_tests {
         let mut staging = LfsUploadStaging::with_permit(None, Some(&local_root)).unwrap();
         staging.write_chunk(b"local LFS payload").await.unwrap();
 
-        let temporary_path = staging.temporary.as_ref().unwrap().path();
+        let temporary_path = match &staging.sink {
+            LfsUploadSink::File { temporary, .. } => Some(temporary.path()),
+            LfsUploadSink::Memory { .. } => None,
+        }
+        .unwrap();
         assert_eq!(temporary_path.parent(), Some(parent.path()));
         assert_ne!(temporary_path.parent(), Some(local_root.as_path()));
     }
