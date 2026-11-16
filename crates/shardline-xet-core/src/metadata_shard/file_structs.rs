@@ -756,7 +756,7 @@ mod tests {
             verification: vec![],
             metadata_ext: None,
         };
-        assert!(info.num_bytes() > 0);
+        assert_eq!(info.num_bytes(), 3 * MDB_FILE_INFO_ENTRY_SIZE as u64);
     }
 
     #[test]
@@ -788,8 +788,9 @@ mod tests {
         info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let info2 = MDBFileInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert_eq!(info.metadata.file_hash, info2.metadata.file_hash);
-        assert_eq!(info.segments.len(), info2.segments.len());
+        assert_eq!(info, info2);
+        assert_eq!(buf.len() as u64, info.num_bytes());
+        assert_eq!(r.position(), buf.len() as u64);
     }
 
     #[test]
@@ -804,8 +805,9 @@ mod tests {
         info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let info2 = MDBFileInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert!(info2.contains_verification());
-        assert_eq!(info2.verification.len(), 1);
+        assert_eq!(info, info2);
+        assert_eq!(buf.len() as u64, info.num_bytes());
+        assert_eq!(r.position(), buf.len() as u64);
     }
 
     #[test]
@@ -820,8 +822,9 @@ mod tests {
         info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let info2 = MDBFileInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert!(info2.contains_metadata_ext());
-        assert!(info2.metadata_ext.is_some());
+        assert_eq!(info, info2);
+        assert_eq!(buf.len() as u64, info.num_bytes());
+        assert_eq!(r.position(), buf.len() as u64);
     }
 
     #[test]
@@ -836,8 +839,9 @@ mod tests {
         info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let info2 = MDBFileInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert!(info2.contains_verification());
-        assert!(info2.contains_metadata_ext());
+        assert_eq!(info, info2);
+        assert_eq!(buf.len() as u64, info.num_bytes());
+        assert_eq!(r.position(), buf.len() as u64);
     }
 
     #[test]
