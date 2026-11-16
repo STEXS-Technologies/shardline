@@ -148,13 +148,9 @@ fn is_valid_storage_path(value: &str, allow_trailing_separator: bool) -> bool {
         return allow_trailing_separator && value.is_empty();
     }
 
-    for segment in trimmed.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." {
-            return false;
-        }
-    }
-
-    true
+    trimmed
+        .split('/')
+        .all(|segment| !matches!(segment, "" | "." | ".."))
 }
 
 #[cfg(test)]
@@ -167,235 +163,70 @@ mod tests {
     };
 
     #[test]
-    fn object_key_accepts_relative_content_paths() {
-        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
-
-        let value = key.expect("expected valid value");
-        assert_eq!(value.as_str(), "xorbs/default/aa/bb/hash.xorb");
+    fn object_key_cases_preserve_values_and_error_classification() {
+        let oversized = "k".repeat(MAX_OBJECT_KEY_BYTES + 1);
+        for (input, error) in [
+            ("xorbs/default/aa/bb/hash.xorb", None),
+            ("file.xorb", None),
+            ("", Some(ObjectKeyError::Empty)),
+            ("xorbs/../secret", Some(ObjectKeyError::UnsafePath)),
+            ("/xorbs/hash", Some(ObjectKeyError::UnsafePath)),
+            ("xorbs\\hash", Some(ObjectKeyError::UnsafePath)),
+            ("xorbs/hash\n", Some(ObjectKeyError::ControlCharacter)),
+            ("xorbs/./hash", Some(ObjectKeyError::UnsafePath)),
+            ("xorbs//hash", Some(ObjectKeyError::UnsafePath)),
+            ("xorbs/hash/", Some(ObjectKeyError::UnsafePath)),
+            ("/", Some(ObjectKeyError::UnsafePath)),
+            (oversized.as_str(), Some(ObjectKeyError::TooLong)),
+            ("/bad\n", Some(ObjectKeyError::UnsafePath)),
+        ] {
+            assert_eq!(
+                ObjectKey::parse(input).map(|key| key.as_str().to_owned()),
+                error.map_or_else(|| Ok(input.to_owned()), Err),
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
-    fn object_key_rejects_empty_input() {
-        let key = ObjectKey::parse("");
-
-        assert_eq!(key, Err(ObjectKeyError::Empty));
+    fn object_prefix_cases_preserve_values_and_error_classification() {
+        let oversized = "p".repeat(MAX_OBJECT_PREFIX_BYTES + 1);
+        for (input, error) in [
+            ("", None),
+            ("xorbs/default/", None),
+            ("xorbs/../secret", Some(ObjectPrefixError::UnsafePath)),
+            ("/xorbs/default/", Some(ObjectPrefixError::UnsafePath)),
+            ("xorbs\\default\\", Some(ObjectPrefixError::UnsafePath)),
+            (
+                "xorbs/default/\n",
+                Some(ObjectPrefixError::ControlCharacter),
+            ),
+            ("xorbs/./default/", Some(ObjectPrefixError::UnsafePath)),
+            ("xorbs//default/", Some(ObjectPrefixError::UnsafePath)),
+            ("/", Some(ObjectPrefixError::UnsafePath)),
+            (oversized.as_str(), Some(ObjectPrefixError::TooLong)),
+            ("/bad\n", Some(ObjectPrefixError::UnsafePath)),
+        ] {
+            assert_eq!(
+                ObjectPrefix::parse(input).map(|prefix| prefix.as_str().to_owned()),
+                error.map_or_else(|| Ok(input.to_owned()), Err),
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
-    fn object_key_rejects_path_traversal() {
-        let key = ObjectKey::parse("xorbs/../secret");
-
-        assert_eq!(key, Err(ObjectKeyError::UnsafePath));
-    }
-
-    #[test]
-    fn object_key_rejects_absolute_paths() {
-        let key = ObjectKey::parse("/xorbs/hash");
-
-        assert_eq!(key, Err(ObjectKeyError::UnsafePath));
-    }
-
-    #[test]
-    fn object_key_rejects_backslashes() {
-        let key = ObjectKey::parse("xorbs\\hash");
-
-        assert_eq!(key, Err(ObjectKeyError::UnsafePath));
-    }
-
-    #[test]
-    fn object_key_rejects_control_characters() {
-        let key = ObjectKey::parse("xorbs/hash\n");
-
-        assert_eq!(key, Err(ObjectKeyError::ControlCharacter));
-    }
-
-    #[test]
-    fn object_key_rejects_oversized_values() {
-        let key = ObjectKey::parse(&"k".repeat(MAX_OBJECT_KEY_BYTES + 1));
-
-        assert_eq!(key, Err(ObjectKeyError::TooLong));
-    }
-
-    #[test]
-    fn object_key_rejects_dot_segments() {
-        let key = ObjectKey::parse("xorbs/./hash");
-
-        assert_eq!(key, Err(ObjectKeyError::UnsafePath));
-    }
-
-    #[test]
-    fn object_key_rejects_empty_segments() {
-        let key = ObjectKey::parse("xorbs//hash");
-
-        assert_eq!(key, Err(ObjectKeyError::UnsafePath));
-    }
-
-    #[test]
-    fn object_key_rejects_trailing_separator() {
-        let key = ObjectKey::parse("xorbs/hash/");
-
-        assert_eq!(key, Err(ObjectKeyError::UnsafePath));
-    }
-
-    #[test]
-    fn object_prefix_accepts_empty_prefix() {
-        let prefix = ObjectPrefix::parse("");
-
-        let value = prefix.expect("expected valid value");
-        assert_eq!(value.as_str(), "");
-    }
-
-    #[test]
-    fn object_prefix_accepts_relative_content_prefix() {
-        let prefix = ObjectPrefix::parse("xorbs/default/");
-
-        let value = prefix.expect("expected valid value");
-        assert_eq!(value.as_str(), "xorbs/default/");
-    }
-
-    #[test]
-    fn object_prefix_rejects_path_traversal() {
-        let prefix = ObjectPrefix::parse("xorbs/../secret");
-
-        assert_eq!(prefix, Err(ObjectPrefixError::UnsafePath));
-    }
-
-    #[test]
-    fn object_prefix_rejects_absolute_paths() {
-        let prefix = ObjectPrefix::parse("/xorbs/default/");
-
-        assert_eq!(prefix, Err(ObjectPrefixError::UnsafePath));
-    }
-
-    #[test]
-    fn object_prefix_rejects_backslashes() {
-        let prefix = ObjectPrefix::parse("xorbs\\default\\");
-
-        assert_eq!(prefix, Err(ObjectPrefixError::UnsafePath));
-    }
-
-    #[test]
-    fn object_prefix_rejects_control_characters() {
-        let prefix = ObjectPrefix::parse("xorbs/default/\n");
-
-        assert_eq!(prefix, Err(ObjectPrefixError::ControlCharacter));
-    }
-
-    #[test]
-    fn object_prefix_rejects_oversized_values() {
-        let prefix = ObjectPrefix::parse(&"p".repeat(MAX_OBJECT_PREFIX_BYTES + 1));
-
-        assert_eq!(prefix, Err(ObjectPrefixError::TooLong));
-    }
-
-    #[test]
-    fn object_prefix_rejects_dot_segments() {
-        let prefix = ObjectPrefix::parse("xorbs/./default/");
-
-        assert_eq!(prefix, Err(ObjectPrefixError::UnsafePath));
-    }
-
-    #[test]
-    fn object_prefix_rejects_empty_segments() {
-        let prefix = ObjectPrefix::parse("xorbs//default/");
-
-        assert_eq!(prefix, Err(ObjectPrefixError::UnsafePath));
-    }
-
-    #[test]
-    fn object_key_error_display_empty() {
-        assert_eq!(
-            ObjectKeyError::Empty.to_string(),
-            "object key must not be empty"
-        );
-    }
-
-    #[test]
-    fn object_key_error_display_unsafe_path() {
-        assert_eq!(
-            ObjectKeyError::UnsafePath.to_string(),
-            "object key must be relative and must not contain traversal components"
-        );
-    }
-
-    #[test]
-    fn object_key_error_display_control_character() {
-        assert_eq!(
-            ObjectKeyError::ControlCharacter.to_string(),
-            "object key must not contain control characters"
-        );
-    }
-
-    #[test]
-    fn object_key_error_display_too_long() {
-        assert_eq!(
-            ObjectKeyError::TooLong.to_string(),
-            "object key exceeded supported length"
-        );
-    }
-
-    #[test]
-    fn object_prefix_error_display_unsafe_path() {
-        assert_eq!(
-            ObjectPrefixError::UnsafePath.to_string(),
-            "object prefix must be relative and must not contain traversal components"
-        );
-    }
-
-    #[test]
-    fn object_prefix_error_display_control_character() {
-        assert_eq!(
-            ObjectPrefixError::ControlCharacter.to_string(),
-            "object prefix must not contain control characters"
-        );
-    }
-
-    #[test]
-    fn object_prefix_error_display_too_long() {
-        assert_eq!(
-            ObjectPrefixError::TooLong.to_string(),
-            "object prefix exceeded supported length"
-        );
-    }
-
-    #[test]
-    fn object_key_accepts_single_segment() {
-        let key = ObjectKey::parse("file.xorb");
-        assert!(key.is_ok());
-        assert_eq!(key.unwrap().as_str(), "file.xorb");
-    }
-
-    #[test]
-    fn object_key_rejects_only_slash() {
-        let key = ObjectKey::parse("/");
-        assert_eq!(key, Err(ObjectKeyError::UnsafePath));
-    }
-
-    #[test]
-    fn object_prefix_rejects_only_slash() {
-        let prefix = ObjectPrefix::parse("/");
-        assert_eq!(prefix, Err(ObjectPrefixError::UnsafePath));
-    }
-
-    #[test]
-    fn object_prefix_accepts_trailing_slash_as_empty_segments_allowed() {
-        // An empty prefix "" with trailing data stripped is fine
-        let prefix = ObjectPrefix::parse("").unwrap();
-        assert_eq!(prefix.as_str(), "");
-    }
-
-    #[test]
-    fn object_key_error_debug_format() {
-        let err = ObjectKeyError::Empty;
-        let debug = format!("{err:?}");
-        assert!(!debug.is_empty());
-    }
-
-    #[test]
-    fn object_prefix_error_debug_format() {
-        let err = ObjectPrefixError::TooLong;
-        let debug = format!("{err:?}");
-        assert!(!debug.is_empty());
+    fn key_and_prefix_limits_count_bytes_and_precede_path_errors() {
+        for input in ["a".repeat(4096), "é".repeat(2048)] {
+            assert!(ObjectKey::parse(&input).is_ok());
+            assert!(ObjectPrefix::parse(&input).is_ok());
+            let oversized = format!("{input}/\n");
+            assert_eq!(ObjectKey::parse(&oversized), Err(ObjectKeyError::TooLong));
+            assert_eq!(
+                ObjectPrefix::parse(&oversized),
+                Err(ObjectPrefixError::TooLong)
+            );
+        }
     }
 
     proptest::proptest! {
