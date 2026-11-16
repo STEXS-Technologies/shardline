@@ -321,6 +321,7 @@ mod tests {
     #[test]
     fn header_new() {
         let h = make_header(3, 500);
+        assert_eq!(h.xorb_hash, compute_data_hash(b"xorb"));
         assert_eq!(h.xorb_flags, 0);
         assert_eq!(h.num_entries, 3);
         assert_eq!(h.num_bytes_in_xorb, 500);
@@ -336,15 +337,17 @@ mod tests {
 
     #[test]
     fn header_serialize_roundtrip() {
-        let mut h = make_header(u64::from(u32::MAX) + 2, u64::from(u32::MAX) + 300);
-        h.xorb_flags = 17;
-        h.num_bytes_on_disk = u64::MAX;
-        let mut buf = Vec::new();
-        h.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let h2 = XorbChunkSequenceHeader::deserialize(&mut r, 3).unwrap();
-        assert_eq!(h, h2);
-        assert_eq!(r.position() as usize, buf.len());
+        for (base, flags, on_disk) in [(0, 0, 0), (u64::from(u32::MAX), 17, u64::MAX)] {
+            let mut h = make_header(base + 2, base + 300);
+            h.xorb_flags = flags;
+            h.num_bytes_on_disk = on_disk;
+            let mut buf = Vec::new();
+            h.serialize(&mut buf).unwrap();
+            let mut r = Cursor::new(&buf);
+            let h2 = XorbChunkSequenceHeader::deserialize(&mut r, 3).unwrap();
+            assert_eq!(h, h2);
+            assert_eq!(r.position() as usize, buf.len());
+        }
     }
 
     #[test]
@@ -396,6 +399,7 @@ mod tests {
     #[test]
     fn entry_new() {
         let e = make_entry(512, 100);
+        assert_eq!(e.chunk_hash, compute_data_hash(b"chunk"));
         assert_eq!(e.unpacked_segment_bytes, 512);
         assert_eq!(e.chunk_byte_range_start, 100);
         assert_eq!(e.flags, 0);
@@ -444,15 +448,24 @@ mod tests {
 
     #[test]
     fn entry_serialize_roundtrip() {
-        let mut e = make_entry(u64::from(u32::MAX) + 256, u64::from(u32::MAX) + 64);
-        e.flags = MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
-        e._unused = u64::MAX;
-        let mut buf = Vec::new();
-        e.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let e2 = XorbChunkSequenceEntry::deserialize(&mut r, 3).unwrap();
-        assert_eq!(e, e2);
-        assert_eq!(r.position() as usize, buf.len());
+        for (base, flags, unused) in [
+            (0, 0, 0),
+            (
+                u64::from(u32::MAX),
+                MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG,
+                u64::MAX,
+            ),
+        ] {
+            let mut e = make_entry(base + 256, base + 64);
+            e.flags = flags;
+            e._unused = unused;
+            let mut buf = Vec::new();
+            e.serialize(&mut buf).unwrap();
+            let mut r = Cursor::new(&buf);
+            let e2 = XorbChunkSequenceEntry::deserialize(&mut r, 3).unwrap();
+            assert_eq!(e, e2);
+            assert_eq!(r.position() as usize, buf.len());
+        }
     }
 
     #[test]
@@ -492,9 +505,9 @@ mod tests {
         info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let info2 = MDBXorbInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert_eq!(info.metadata.xorb_hash, info2.metadata.xorb_hash);
-        assert_eq!(info.chunks.len(), info2.chunks.len());
-        assert_eq!(info.chunks[0].chunk_hash, info2.chunks[0].chunk_hash);
+        assert_eq!(info, info2);
+        assert_eq!(buf.len() as u64, info.num_bytes());
+        assert_eq!(r.position(), buf.len() as u64);
     }
 
     #[test]
@@ -549,6 +562,7 @@ mod tests {
     fn info_default() {
         let info = MDBXorbInfo::default();
         assert!(info.chunks.is_empty());
+        assert_eq!(info.metadata, XorbChunkSequenceHeader::default());
     }
 
     // ======= MDBXorbInfoView =======
@@ -558,7 +572,8 @@ mod tests {
         let data = serialize_header_and_entries(&make_header(1, 100), &[make_entry(100, 0)]);
         let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
         assert_eq!(view.num_entries(), 1);
-        assert_ne!(view.xorb_hash(), MerkleHash::default());
+        assert_eq!(view.xorb_hash(), compute_data_hash(b"xorb"));
+        assert_eq!(view.chunk(0), make_entry(100, 0));
     }
 
     #[test]
@@ -573,19 +588,20 @@ mod tests {
             ],
         );
         let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
-        assert_eq!(view.header().xorb_hash, header.xorb_hash);
+        assert_eq!(view.header(), &header);
         assert_eq!(view.num_entries(), 3);
     }
 
     #[test]
     fn view_chunk_accessor() {
-        let entries = vec![make_entry(100, 0), make_entry(200, 100)];
+        let entries = vec![
+            XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100, 0),
+            XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 200, 100),
+        ];
         let data = serialize_header_and_entries(&make_header(2, 300), &entries);
         let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
-        let c0 = view.chunk(0);
-        assert_eq!(c0.unpacked_segment_bytes, 100);
-        let c1 = view.chunk(1);
-        assert_eq!(c1.unpacked_segment_bytes, 200);
+        assert_eq!(view.chunk(0), entries[0]);
+        assert_eq!(view.chunk(1), entries[1]);
     }
 
     #[test]
@@ -613,7 +629,10 @@ mod tests {
     fn view_from_data_too_small() {
         let header = make_header(2, 100);
         let result = MDBXorbInfoView::from_data_and_header(header, Bytes::from(vec![0u8; 10]));
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]
