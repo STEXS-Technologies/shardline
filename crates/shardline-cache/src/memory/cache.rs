@@ -311,20 +311,7 @@ impl MemoryReconstructionCache {
                     // its stamp fresh but never completes, F-100). Release the
                     // latch so later callers can retry promptly, and wake
                     // sibling waiters so they observe the release too.
-                    let released = {
-                        let mut loading = self
-                            .loading
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if loading.get(key).is_some_and(|entry| Arc::ptr_eq(&entry.notify, &notify)) {
-                            loading.remove(key).map(|entry| entry.notify)
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(released) = released {
-                        released.notify_waiters();
-                    }
+                    release_owned_loading(&self.loading, key, &notify);
                     return None;
                 }
             }
@@ -370,6 +357,30 @@ impl MemoryReconstructionCache {
             released.notify.notify_waiters();
         }
         removed
+    }
+}
+
+/// Releases only this loading generation, then wakes waiters after unlocking.
+fn release_owned_loading(
+    loading: &Mutex<HashMap<ReconstructionCacheKey, LoadingEntry>>,
+    key: &ReconstructionCacheKey,
+    owner: &Arc<Notify>,
+) {
+    let released = {
+        let mut loading = loading
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if loading
+            .get(key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.notify, owner))
+        {
+            loading.remove(key)
+        } else {
+            None
+        }
+    };
+    if let Some(released) = released {
+        released.notify.notify_waiters();
     }
 }
 
@@ -421,22 +432,7 @@ struct LoadingLatchGuard {
 
 impl Drop for LoadingLatchGuard {
     fn drop(&mut self) {
-        let mut loading = self
-            .loading
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(entry) = loading.get(&self.key) else {
-            // The latch was already released by put()/delete()/a waiter steal.
-            return;
-        };
-        if !Arc::ptr_eq(&entry.notify, &self.notify) {
-            // A newer loading generation holds the latch; leave it intact so
-            // its callers keep coalescing on it.
-            return;
-        }
-        loading.remove(&self.key);
-        drop(loading);
-        self.notify.notify_waiters();
+        release_owned_loading(&self.loading, &self.key, &self.notify);
     }
 }
 
@@ -549,23 +545,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
         let Some(owner) = reservation.local_owner() else {
             return;
         };
-        let released = {
-            let mut loading = self
-                .loading
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if loading
-                .get(key)
-                .is_some_and(|entry| Arc::ptr_eq(&entry.notify, owner))
-            {
-                loading.remove(key)
-            } else {
-                None
-            }
-        };
-        if let Some(released) = released {
-            released.notify.notify_waiters();
-        }
+        release_owned_loading(&self.loading, key, owner);
     }
 
     fn get<'operation>(
