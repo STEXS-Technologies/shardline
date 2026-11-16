@@ -451,22 +451,12 @@ impl S3ObjectStore {
     ) -> Result<(), S3ObjectStoreError> {
         let expected = range.len().ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
         self.block_on_result(async {
-            let mut stream = self.stream_range(key, range).await?;
-            let mut written = 0_u64;
-            while let Some(bytes) = stream.next().await {
-                let bytes = bytes?;
-                let length = u64::try_from(bytes.len())
-                    .map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?;
-                written = written
-                    .checked_add(length)
-                    .filter(|total| *total <= expected)
-                    .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
-                std::io::Write::write_all(output, &bytes)?;
-            }
-            if written != expected {
-                return Err(S3ObjectStoreError::RangeOutOfBounds);
-            }
-            Ok(())
+            let stream = self.stream_range(key, range).await?;
+            copy_stream_to_writer(stream, expected, output, || {
+                S3ObjectStoreError::RangeOutOfBounds
+            })
+            .await
+            .map(|_written| ())
         })
     }
 
@@ -1235,8 +1225,17 @@ async fn copy_snapshot_to_writer(
     length_error: fn() -> S3ObjectStoreError,
 ) -> Result<u64, S3ObjectStoreError> {
     let expected_length = result.meta.size;
+    let stream = stream_payload_for_range(result, 0..expected_length)?;
+    copy_stream_to_writer(stream, expected_length, output, length_error).await
+}
+
+async fn copy_stream_to_writer(
+    mut stream: S3ByteStream,
+    expected_length: u64,
+    output: &mut impl Write,
+    length_error: fn() -> S3ObjectStoreError,
+) -> Result<u64, S3ObjectStoreError> {
     let mut written = 0_u64;
-    let mut stream = stream_payload_for_range(result, 0..expected_length)?;
     while let Some(bytes) = stream.next().await {
         let bytes = bytes?;
         written = written
