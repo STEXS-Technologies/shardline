@@ -3,7 +3,7 @@
 //! The storage adapters expose range reads, not whole-object reads.  Keep that
 //! boundary visible here: previews consume a bounded prefix and downloads emit
 //! fixed-size ranges as an HTTP body stream.
-use std::{io, sync::Arc};
+use std::io;
 
 use axum::body::Body;
 use bytes::Bytes;
@@ -150,7 +150,7 @@ pub(crate) fn stream_object_range(
     if length == 0 {
         return Ok(Body::empty());
     }
-    let initial = (Arc::new(store.clone()), key, start, limit_exclusive);
+    let initial = (store.clone(), key, start, limit_exclusive);
     let stream = stream::try_unfold(
         initial,
         move |(store_state, key_state, offset, end_exclusive)| async move {
@@ -175,12 +175,11 @@ pub(crate) fn stream_object_range(
             let expected = usize::try_from(expected_u64).map_err(|_error| {
                 io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
             })?;
-            let store_for_read = Arc::clone(&store_state);
-            let key_for_read = key_state.clone();
-            let chunk = tokio::task::spawn_blocking(move || {
-                store_for_read
-                    .read_range(&key_for_read, range)
-                    .map_err(|error| io::Error::other(error.to_string()))
+            let (chunk, store_state, key_state) = tokio::task::spawn_blocking(move || {
+                let chunk = store_state
+                    .read_range(&key_state, range)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                Ok::<_, io::Error>((chunk, store_state, key_state))
             })
             .await
             .map_err(|error| io::Error::other(error.to_string()))??;
