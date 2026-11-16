@@ -30,7 +30,6 @@ const MAX_README_FRONT_MATTER_BYTES: usize = super::yaml_validation::MAX_CARD_BY
 
 pub(crate) async fn repo_create(
     State(state): State<HubState>,
-    _headers: HeaderMap,
     repo: HubRepository<true>,
     Json(request): Json<RepoCreateRequest>,
 ) -> Result<Response, HubApiError> {
@@ -60,7 +59,6 @@ pub(crate) async fn repo_create(
 
 pub(crate) async fn repo_create_type(
     State(state): State<HubState>,
-    _headers: HeaderMap,
     repo: HubRepository<true, false>,
     Path((repo_type, _ns, _repo_name)): Path<(String, String, String)>,
     Json(body): Json<serde_json::Value>,

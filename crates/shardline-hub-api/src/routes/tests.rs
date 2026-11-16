@@ -1523,7 +1523,6 @@ async fn handler_repo_create_model() {
     let (status, json) = decode_creation_response(
         repo_create(
             State(state.clone()),
-            default_headers(),
             test_repo(&state, &default_headers()),
             Json(req),
         )
@@ -1544,7 +1543,6 @@ async fn handler_repo_create_type_invalid_type() {
     let (_td, state) = make_test_state();
     let result = repo_create_type(
         State(state.clone()),
-        default_headers(),
         test_repo(&state, &default_headers()),
         Path(("invalid".into(), "ns".into(), "repo".into())),
         Json(serde_json::json!({})),
@@ -1563,7 +1561,6 @@ async fn handler_repo_create_type_success() {
     let (status, json) = decode_creation_response(
         repo_create_type(
             State(state.clone()),
-            default_headers(),
             test_repo(&state, &default_headers()),
             Path(("models".into(), "ns".into(), "my-repo".into())),
             Json(serde_json::json!({})),
@@ -1583,7 +1580,6 @@ async fn handler_repo_create_type_private() {
     let (_, json) = decode_creation_response(
         repo_create_type(
             State(state.clone()),
-            default_headers(),
             test_repo(&state, &default_headers()),
             Path(("datasets".into(), "ns".into(), "secret-data".into())),
             Json(serde_json::json!({"private": true})),
@@ -4306,7 +4302,6 @@ async fn handler_repo_create_with_organization() {
     let (status, json) = decode_creation_response(
         repo_create(
             State(state.clone()),
-            default_headers(),
             test_repo(&state, &default_headers()),
             Json(req),
         )
@@ -4331,7 +4326,6 @@ async fn handler_repo_create_conflict() {
     };
     let result = repo_create(
         State(state.clone()),
-        default_headers(),
         test_repo(&state, &default_headers()),
         Json(req),
     )
@@ -4365,7 +4359,6 @@ async fn repo_create_conflict_other_tenant_returns_forbidden_without_metadata() 
     };
     let result = repo_create(
         State(state.clone()),
-        alice_headers(),
         test_repo(&state, &alice_headers()),
         Json(req),
     )
@@ -4388,7 +4381,6 @@ async fn repo_create_conflict_own_repo_keeps_full_body() {
     let (status, json) = decode_creation_response(
         repo_create(
             State(state.clone()),
-            alice_headers(),
             test_repo(&state, &alice_headers()),
             Json(req),
         )
@@ -4425,7 +4417,6 @@ async fn repo_creation_requires_exact_scope_or_explicit_namespace_grant() {
     for name in ["bob/new-private", "alice/new-sibling"] {
         let result = repo_create(
             State(state.clone()),
-            alice_headers(),
             test_repo(&state, &alice_headers()),
             Json(write_repo(name)),
         )
@@ -4443,7 +4434,6 @@ async fn repo_creation_requires_exact_scope_or_explicit_namespace_grant() {
         make_scoped_alice_auth_state_with_creation(TokenScope::Write, true);
     let created = repo_create(
         State(granted.clone()),
-        alice_headers(),
         test_repo(&granted, &alice_headers()),
         Json(write_repo("alice/new-sibling")),
     )
@@ -4455,7 +4445,6 @@ async fn repo_creation_requires_exact_scope_or_explicit_namespace_grant() {
 
     let cross_namespace = repo_create(
         State(granted.clone()),
-        alice_headers(),
         test_repo(&granted, &alice_headers()),
         Json(write_repo("bob/still-forbidden")),
     )
@@ -4478,7 +4467,6 @@ async fn type_specific_repo_creation_uses_the_same_namespace_boundary() {
     for namespace in ["bob", "alice"] {
         let result = repo_create_type(
             State(state.clone()),
-            default_headers(),
             test_repo(&state, &alice_headers()),
             Path(("models".into(), namespace.into(), "new-repo".into())),
             Json(serde_json::json!({"private": true})),
@@ -4501,7 +4489,6 @@ async fn type_specific_repo_creation_uses_the_same_namespace_boundary() {
         make_scoped_alice_auth_state_with_creation(TokenScope::Write, true);
     let created = repo_create_type(
         State(granted.clone()),
-        default_headers(),
         test_repo(&granted, &alice_headers()),
         Path(("models".into(), "alice".into(), "new-repo".into())),
         Json(serde_json::json!({"private": true})),
@@ -4514,7 +4501,6 @@ async fn type_specific_repo_creation_uses_the_same_namespace_boundary() {
 
     let cross_namespace = repo_create_type(
         State(granted.clone()),
-        default_headers(),
         test_repo(&granted, &alice_headers()),
         Path(("models".into(), "bob".into(), "new-repo".into())),
         Json(serde_json::json!({"private": true})),
