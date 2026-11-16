@@ -618,38 +618,22 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
 /// invalid syntax, or capacities above the batch-count/Tokio representable limit.
 pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroUsize {
     let fallback = NonZeroUsize::new(default).unwrap_or(NonZeroUsize::MIN);
-    var(name).map_or_else(
-        |_| fallback,
-        |v| {
-            v.parse::<NonZeroUsize>()
-                .ok()
-                .filter(|capacity| capacity.get() <= crate::admission::maximum_counted_capacity())
-                .unwrap_or_else(|| {
-                    tracing::warn!("invalid {name} value '{v}', using default {default}");
-                    fallback
-                })
-        },
-    )
+    let Ok(value) = var(name) else {
+        return fallback;
+    };
+    match value.parse::<NonZeroUsize>() {
+        Ok(capacity) if capacity.get() <= crate::admission::maximum_counted_capacity() => capacity,
+        _ => {
+            tracing::warn!("invalid {name} value '{value}', using default {default}");
+            fallback
+        }
+    }
 }
 
 /// Parses `SHARDLINE_ADMISSION_MAX_WEIGHT`, warning and falling back to 256 for
 /// invalid syntax, zero, or capacities above the batch-count/Tokio limit.
 pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
-    let fallback = NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
-    var("SHARDLINE_ADMISSION_MAX_WEIGHT").map_or_else(
-        |_| fallback,
-        |v| {
-            v.parse::<NonZeroUsize>()
-                .ok()
-                .filter(|capacity| capacity.get() <= crate::admission::maximum_counted_capacity())
-                .unwrap_or_else(|| {
-                    tracing::warn!(
-                        "invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256"
-                    );
-                    fallback
-                })
-        },
-    )
+    bounded_pool_size_from_env("SHARDLINE_ADMISSION_MAX_WEIGHT", 256)
 }
 
 /// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.
