@@ -253,13 +253,7 @@ fn repo_visible_to_owner(
     repo: &shardline_index::hub::HubRepo,
     caller_repo_id: Option<&str>,
 ) -> bool {
-    let Some(caller_repo_id) = caller_repo_id else {
-        return true;
-    };
-    if !repo.private {
-        return true;
-    }
-    repo.repo_id == caller_repo_id
+    caller_repo_id.is_none_or(|caller| !repo.private || repo.repo_id == caller)
 }
 
 // ---- Stateless, bounded card validation ----
@@ -627,10 +621,7 @@ async fn read_file_prefix_from_object_store(
 /// separator is present, the owner is treated as empty (which can never match a
 /// scoped token's non-empty owner, so repo-scoped binding will deny it).
 fn split_repo_name(full_name: &str) -> (&str, &str) {
-    match full_name.split_once('/') {
-        Some((owner, name)) => (owner, name),
-        None => ("", full_name),
-    }
+    full_name.split_once('/').unwrap_or(("", full_name))
 }
 
 fn delete_repository(
