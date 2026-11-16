@@ -1178,12 +1178,9 @@ impl AsyncObjectStore for S3ObjectStore {
 }
 
 pub(crate) fn validated_external_range(range: ByteRange) -> Result<Range<u64>, S3ObjectStoreError> {
-    let Some(length) = range.len() else {
-        return Err(S3ObjectStoreError::RangeOutOfBounds);
-    };
     let end_exclusive = range
-        .start()
-        .checked_add(length)
+        .end_inclusive()
+        .checked_add(1)
         .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
 
     Ok(range.start()..end_exclusive)

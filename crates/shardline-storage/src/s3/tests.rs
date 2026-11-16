@@ -457,13 +457,24 @@ fn s3_store_debug_redacts_credentials() {
 }
 
 #[test]
-fn validated_external_range_converts_inclusive_byte_range() {
-    let range = ByteRange::new(3, 8).unwrap();
-
-    let external = validated_external_range(range);
-
-    assert!(external.is_ok());
-    assert_eq!(external.ok(), Some(3..9));
+fn external_ranges_preserve_endpoints_and_reject_exclusive_end_overflow() {
+    for (start, end, expected) in [
+        (3, 8, 3..9),
+        (5, 5, 5..6),
+        (0, 0, 0..1),
+        (0, u64::MAX - 1, 0..u64::MAX),
+        (u64::MAX - 1, u64::MAX - 1, u64::MAX - 1..u64::MAX),
+    ] {
+        let range = ByteRange::new(start, end).unwrap();
+        assert_eq!(validated_external_range(range).unwrap(), expected);
+    }
+    for start in [0, 5, u64::MAX] {
+        let range = ByteRange::new(start, u64::MAX).unwrap();
+        assert!(matches!(
+            validated_external_range(range),
+            Err(S3ObjectStoreError::RangeOutOfBounds)
+        ));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -641,13 +652,6 @@ fn temporary_key_detection_rejects_malformed_reserved_keys() {
     ] {
         assert!(!is_temp_upload_key(key), "{key}");
     }
-}
-
-#[test]
-fn validated_external_range_zero_length_rejected() {
-    // ByteRange(5, 3) has start > end, which is invalid
-    let result = shardline_protocol::ByteRange::new(5, 3);
-    assert!(result.is_err());
 }
 
 #[test]
@@ -966,36 +970,7 @@ fn s3_byte_stream_type_is_send() {
     assert_send::<super::S3ByteStream>();
 }
 
-#[test]
-fn validated_external_range_rejects_len_overflow() {
-    // ByteRange(0, u64::MAX) is valid (start <= end) but len()
-    // returns None because (MAX - 0) + 1 overflows u64.
-    let range = ByteRange::new(0, u64::MAX).expect("valid range");
-    let result = validated_external_range(range);
-    assert!(matches!(result, Err(S3ObjectStoreError::RangeOutOfBounds)));
-}
-
 // ── verified_external_range edge cases ────────────────────────────
-
-#[test]
-fn validated_external_range_single_byte() {
-    let range = ByteRange::new(5, 5).unwrap();
-
-    let external = validated_external_range(range);
-
-    assert!(external.is_ok());
-    assert_eq!(external.ok(), Some(5..6));
-}
-
-#[test]
-fn validated_external_range_large_range() {
-    // A large valid range
-    let range = ByteRange::new(0, u64::MAX - 1).expect("valid large range");
-    let external = validated_external_range(range);
-    // Should succeed
-    assert!(external.is_ok());
-    assert_eq!(external.ok(), Some(0..u64::MAX));
-}
 
 // ── S3MultipartUploadWriter via InMemory ──────────────────────────────
 
@@ -1775,14 +1750,6 @@ fn s3_store_debug_shows_runtime_status() {
     let rendered = format!("{store:?}");
     // Should mention runtime status
     assert!(rendered.contains("runtime"));
-}
-
-#[test]
-fn validated_external_range_start_at_u64_max_rejected() {
-    // Range starting at u64::MAX with length 1 would overflow
-    let range = ByteRange::new(u64::MAX, u64::MAX).expect("valid range with single byte at MAX");
-    let result = validated_external_range(range);
-    assert!(matches!(result, Err(S3ObjectStoreError::RangeOutOfBounds)));
 }
 
 #[test]
