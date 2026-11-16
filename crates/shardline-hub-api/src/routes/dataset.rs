@@ -722,12 +722,10 @@ pub(crate) fn parse_csv_line(line: &str) -> Vec<&str> {
             }
         } else {
             // Unquoted field — split on comma.
-            match current.find(',') {
-                Some(pos) => {
-                    fields.push(&current[..pos]);
-                    current = pos
-                        .checked_add(1)
-                        .map_or("", |n| current.get(n..).unwrap_or(""));
+            match current.split_once(',') {
+                Some((field, rest)) => {
+                    fields.push(field);
+                    current = rest;
                 }
                 None => {
                     fields.push(current);

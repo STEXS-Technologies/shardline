@@ -26,6 +26,8 @@ async fn decode_creation_response(
 #[test]
 fn csv_fields_preserve_quoting_separators_and_unterminated_input() {
     let cases: &[(&str, &[&str])] = &[
+        ("", &[]),
+        ("目录,é,🦀", &["目录", "é", "🦀"]),
         ("a,b,c", &["a", "b", "c"]),
         (r#""hello, world",b"#, &["hello, world", "b"]),
         (r#""say ""hello""",done"#, &[r#"say ""hello"""#, "done"]),
