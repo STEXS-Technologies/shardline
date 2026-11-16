@@ -1,4 +1,3 @@
-use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::num::ParseIntError;
@@ -25,7 +24,7 @@ use serde::{Deserialize, Serialize};
 /// assert_eq!(bytes.len(), 32);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DataHash([u64; 4]);
 
 impl Deref for DataHash {
@@ -79,29 +78,6 @@ impl From<DataHash> for [u8; 32] {
 impl AsRef<DataHash> for DataHash {
     fn as_ref(&self) -> &DataHash {
         self
-    }
-}
-
-impl PartialEq for DataHash {
-    fn eq(&self, other: &Self) -> bool {
-        self.0[0] == other.0[0]
-            && self.0[1] == other.0[1]
-            && self.0[2] == other.0[2]
-            && self.0[3] == other.0[3]
-    }
-}
-
-impl Eq for DataHash {}
-
-impl Ord for DataHash {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.cmp(&other.0)
-    }
-}
-
-impl PartialOrd for DataHash {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 

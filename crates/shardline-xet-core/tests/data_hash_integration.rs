@@ -377,14 +377,22 @@ fn data_hash_default_is_zero() {
 /// DataHash ordering
 #[test]
 fn data_hash_ordering() {
-    let small = DataHash::from([1u64, 0, 0, 0]);
-    let medium = DataHash::from([2u64, 0, 0, 0]);
-    let large = DataHash::from([3u64, 0, 0, 0]);
-
-    assert!(small < medium);
-    assert!(medium < large);
-    assert!(large > small);
-    assert_eq!(small, small);
+    let ordered = [
+        [0, 0, 0, 0],
+        [0, 0, 0, 1],
+        [0, 0, 1, 0],
+        [0, 1, 0, 0],
+        [1, 0, 0, 0],
+        [u64::MAX; 4],
+    ]
+    .map(DataHash::from);
+    for (left_index, left) in ordered.iter().enumerate() {
+        for (right_index, right) in ordered.iter().enumerate() {
+            assert_eq!(left == right, left_index == right_index);
+            assert_eq!(left.cmp(right), left_index.cmp(&right_index));
+            assert_eq!(left.partial_cmp(right), Some(left_index.cmp(&right_index)));
+        }
+    }
 }
 
 /// DataHash Display produces hex
