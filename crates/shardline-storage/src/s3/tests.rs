@@ -1909,43 +1909,34 @@ async fn s3_multipart_upload_writer_finish() {
 // ── complete_resumable_upload validation ────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_complete_resumable_empty_parts_rejected() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18978".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
+async fn resumable_completion_rejects_invalid_parts_before_contacting_storage() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let store = synchronous_runtime_fixture(format!("http://{}", listener.local_addr().unwrap()));
     let key = ObjectKey::parse("test/key").unwrap();
-
-    let result = store
-        .complete_resumable_upload(&key, "upload-id", vec![])
-        .await;
-
-    assert!(matches!(
-        result,
-        Err(S3ObjectStoreError::InvalidUploadParts)
-    ));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_complete_resumable_non_consecutive_parts_rejected() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18977".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-
-    let result = store
-        .complete_resumable_upload(&key, "upload-id", vec![(0, "e0".into()), (2, "e2".into())])
-        .await;
-
-    assert!(matches!(
-        result,
-        Err(S3ObjectStoreError::InvalidUploadParts)
-    ));
+    for numbers in [
+        vec![],
+        vec![0, 2],
+        vec![0, 0],
+        vec![1],
+        vec![1, 2],
+        vec![0, usize::MAX],
+    ] {
+        let parts = numbers
+            .into_iter()
+            .map(|number| (number, format!("etag-{number}")))
+            .collect();
+        assert!(matches!(
+            store
+                .complete_resumable_upload(&key, "upload-id", parts)
+                .await,
+            Err(S3ObjectStoreError::InvalidUploadParts)
+        ));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
