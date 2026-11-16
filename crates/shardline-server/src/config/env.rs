@@ -1209,7 +1209,7 @@ mod tests {
     use crate::ServerFrontend;
 
     use super::{
-        load_non_zero_usize_env, load_server_config_from_env_with_toml, parse_server_frontends_env,
+        ServerConfigError, load_server_config_from_env_with_toml, parse_server_frontends_env,
     };
 
     fn set_env_var(key: &str, value: &str) {
@@ -2242,70 +2242,65 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         )
     }
 
-    // ── load_non_zero_usize_env ────────────────────────────────────────────
-
-    // ── load_non_zero_usize_env ────────────────────────────────────────────
-
     #[test]
-    fn load_non_zero_usize_env_uses_default_when_env_unset() {
-        let key = "SHARDLINE_TEST_NON_ZERO_UNSET";
-        remove_env_var(key);
-        let default = std::num::NonZeroUsize::new(42).unwrap();
-        let result = load_non_zero_usize_env(
-            key,
-            default,
-            super::ServerConfigError::MaxShardFiles,
-            || super::ServerConfigError::ZeroMaxShardFiles,
-        );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().get(), 42);
-        remove_env_var(key);
-    }
-
-    #[test]
-    fn load_non_zero_usize_env_reads_env_value() {
-        let key = "SHARDLINE_TEST_NON_ZERO_VALID";
-        set_env_var(key, "99");
-        let default = std::num::NonZeroUsize::new(1).unwrap();
-        let result = load_non_zero_usize_env(
-            key,
-            default,
-            super::ServerConfigError::MaxShardFiles,
-            || super::ServerConfigError::ZeroMaxShardFiles,
-        );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().get(), 99);
+    fn non_zero_usize_environment_values_preserve_defaults_and_errors() {
+        let key = "SHARDLINE_TEST_NON_ZERO_USIZE";
+        for value in [
+            None,
+            Some("99"),
+            Some("0"),
+            Some("not-a-number"),
+            Some("-1"),
+            Some("18446744073709551616"),
+        ] {
+            remove_env_var(key);
+            if let Some(value) = value {
+                set_env_var(key, value);
+            }
+            let result = super::load_non_zero_usize_env(
+                key,
+                std::num::NonZeroUsize::new(42).unwrap(),
+                ServerConfigError::MaxShardFiles,
+                || ServerConfigError::ZeroMaxShardFiles,
+            );
+            match value {
+                None => assert_eq!(result.unwrap().get(), 42),
+                Some("99") => assert_eq!(result.unwrap().get(), 99),
+                Some("0") => assert!(matches!(result, Err(ServerConfigError::ZeroMaxShardFiles))),
+                Some(_) => assert!(matches!(result, Err(ServerConfigError::MaxShardFiles(_)))),
+            }
+        }
         remove_env_var(key);
     }
 
     #[test]
-    fn load_non_zero_usize_env_rejects_non_numeric() {
-        let key = "SHARDLINE_TEST_NON_ZERO_INVALID";
-        set_env_var(key, "not-a-number");
-        let default = std::num::NonZeroUsize::new(5).unwrap();
-        let result = load_non_zero_usize_env(
-            key,
-            default,
-            super::ServerConfigError::MaxShardFiles,
-            || super::ServerConfigError::ZeroMaxShardFiles,
-        );
-        assert!(result.is_err());
-        remove_env_var(key);
-    }
-
-    #[test]
-    fn load_non_zero_usize_env_rejects_zero_value() {
-        let key = "SHARDLINE_TEST_NON_ZERO_ZERO";
-        set_env_var(key, "0");
-        let default = std::num::NonZeroUsize::new(5).unwrap();
-        let result = load_non_zero_usize_env(
-            key,
-            default,
-            super::ServerConfigError::MaxShardFiles,
-            || super::ServerConfigError::ZeroMaxShardFiles,
-        );
-        assert!(result.is_err());
-        // Test-local environment cleanup.
+    fn non_zero_u64_environment_values_preserve_defaults_and_errors() {
+        let key = "SHARDLINE_TEST_NON_ZERO_U64";
+        for value in [
+            None,
+            Some("99"),
+            Some("0"),
+            Some("not-a-number"),
+            Some("-1"),
+            Some("18446744073709551616"),
+        ] {
+            remove_env_var(key);
+            if let Some(value) = value {
+                set_env_var(key, value);
+            }
+            let result = super::load_non_zero_u64_env(
+                key,
+                std::num::NonZeroU64::new(42).unwrap(),
+                ServerConfigError::S3MaxPartBytes,
+                || ServerConfigError::ZeroS3MaxPartBytes,
+            );
+            match value {
+                None => assert_eq!(result.unwrap().get(), 42),
+                Some("99") => assert_eq!(result.unwrap().get(), 99),
+                Some("0") => assert!(matches!(result, Err(ServerConfigError::ZeroS3MaxPartBytes))),
+                Some(_) => assert!(matches!(result, Err(ServerConfigError::S3MaxPartBytes(_)))),
+            }
+        }
         remove_env_var(key);
     }
 
@@ -2313,283 +2308,201 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
 
     #[test]
     fn load_server_config_invalid_public_base_url() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "not-a-valid-url");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::InvalidPublicBaseUrl(_))
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
     }
 
     #[test]
     fn load_server_config_zero_max_request_body_bytes() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "0");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroMaxRequestBodyBytes)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_invalid_max_request_body_bytes() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "not-a-number");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(result.is_err());
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_zero_chunk_size() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_CHUNK_SIZE_BYTES", "0");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroChunkSize)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_CHUNK_SIZE_BYTES");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_chunk_size_too_large() {
         // 2 GB exceeds MAX_CHUNK_SIZE (1 GB)
-        // Test-local environment override.
         set_env_var("SHARDLINE_CHUNK_SIZE_BYTES", "2147483648");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ChunkSizeTooLarge)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_CHUNK_SIZE_BYTES");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_invalid_chunk_size() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_CHUNK_SIZE_BYTES", "not-a-size");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(result.is_err());
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_CHUNK_SIZE_BYTES");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_invalid_server_role() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_SERVER_ROLE", "invalid-role");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::InvalidServerRole)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_SERVER_ROLE");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_bind_addr_parse_error() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_BIND_ADDR", "not-a-valid-addr");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(result.is_err());
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_BIND_ADDR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_upload_max_in_flight_zero() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS", "0");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroUploadMaxInFlightChunks)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_transfer_max_in_flight_zero() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS", "0");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroTransferMaxInFlightChunks)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_missing_server_frontends() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_SERVER_FRONTENDS", "");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::MissingServerFrontends)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_SERVER_FRONTENDS");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_invalid_server_frontends() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_SERVER_FRONTENDS", "invalid-frontend");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::InvalidServerFrontend)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_SERVER_FRONTENDS");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_zero_reconstruction_cache_ttl() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS", "0");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroReconstructionCacheTtlSeconds)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn load_server_config_zero_oci_upload_session_ttl() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS", "0");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroOciUploadSessionTtlSeconds)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
@@ -2657,26 +2570,18 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
 
     #[test]
     fn load_server_config_missing_reconstruction_cache_redis_url() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER", "redis");
-        // Test-local environment override.
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL", "");
-        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::MissingReconstructionCacheRedisUrl)
         ));
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
@@ -3182,7 +3087,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
 
     #[test]
     fn load_server_config_empty_index_postgres_url() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_INDEX_POSTGRES_URL", "");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
@@ -3191,7 +3095,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             matches!(result, Err(super::ServerConfigError::EmptyIndexPostgresUrl)),
             "expected EmptyIndexPostgresUrl, got {result:?}"
         );
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_INDEX_POSTGRES_URL");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
@@ -3201,7 +3104,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
 
     #[test]
     fn load_server_config_whitespace_reconstruction_cache_redis_url() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER", "redis");
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL", "   ");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -3214,7 +3116,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             ),
             "expected MissingReconstructionCacheRedisUrl, got {result:?}"
         );
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER");
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL");
         remove_env_var("SHARDLINE_ROOT_DIR");
@@ -3261,7 +3162,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             ),
             "expected EmptyProviderTokenIssuer, got {result:?}"
         );
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PROVIDER_TOKEN_ISSUER");
         remove_env_var("SHARDLINE_PROVIDER_CONFIG_FILE");
         remove_env_var("SHARDLINE_PROVIDER_API_KEY_FILE");
@@ -3385,7 +3285,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
 
     #[test]
     fn load_server_config_integration_end_to_end() {
-        // Test-local environment override.
         set_env_var("SHARDLINE_BIND_ADDR", "127.0.0.1:9090");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "https://example.com:9090");
         set_env_var("SHARDLINE_SERVER_ROLE", "all");
@@ -3452,8 +3351,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             Some("https://accounts.example.com")
         );
         assert!(config.token_signing_key().is_some());
-
-        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_BIND_ADDR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
         remove_env_var("SHARDLINE_SERVER_ROLE");
