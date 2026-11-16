@@ -1581,27 +1581,6 @@ fn deserialize_chunk_rejects_uncompressed_length_mismatch_using_function() {
 // ============================================================================
 
 #[test]
-fn mdb_shard_info_load_from_reader_bad_header() {
-    let buf = vec![0u8; 48]; // all zeros, wrong magic
-    let mut cursor = Cursor::new(buf);
-    let result = MDBShardInfo::load_from_reader(&mut cursor);
-    assert!(result.is_err());
-}
-
-#[test]
-fn mdb_shard_info_load_from_reader_file_info_error_when_empty() {
-    // Valid header, then garbage (so file info read fails with empty)
-    let mut buf = Vec::new();
-    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
-    buf.extend_from_slice(b"GARBAGE DATA THAT IS NOT A VALID FILE INFO");
-    let mut cursor = Cursor::new(buf);
-    let result = MDBShardInfo::load_from_reader(&mut cursor);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.to_string().contains("Failed to read file info"));
-}
-
-#[test]
 fn mdb_shard_info_load_from_reader_file_info_break_on_error_with_data() {
     // File loop gets 2 valid files, then hit EOF (simulate truncated data).
     // The loop breaks (file_infos not empty). Then xorb loop gets EOF and also
@@ -1632,94 +1611,6 @@ fn mdb_shard_info_load_from_reader_file_info_break_on_error_with_data() {
     let result = MDBShardInfo::load_from_reader(&mut cursor);
     // xorb_infos is empty and header read fails -> returns error
     assert!(result.is_err());
-}
-
-#[test]
-fn mdb_shard_info_load_from_reader_xorb_info_error_when_empty() {
-    let mut buf = Vec::new();
-    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
-    // Write a valid file bookend
-    FileDataSequenceHeader::bookend()
-        .serialize(&mut buf)
-        .unwrap();
-    // Then garbage for xorb info section
-    buf.extend_from_slice(b"GARBAGE XORB DATA");
-    let mut cursor = Cursor::new(buf);
-    let result = MDBShardInfo::load_from_reader(&mut cursor);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.to_string().contains("Failed to read xorb info"));
-}
-
-#[test]
-fn mdb_shard_info_load_from_reader_xorb_info_error_when_non_empty() {
-    let mut buf = Vec::new();
-    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
-    // Valid file bookend
-    FileDataSequenceHeader::bookend()
-        .serialize(&mut buf)
-        .unwrap();
-    // Valid xorb info
-    let xorb = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u64, 100u64),
-        chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c"),
-            100u64,
-            0u64,
-        )],
-    };
-    xorb.serialize(&mut buf).unwrap();
-    // Garbage after valid xorb
-    buf.extend_from_slice(b"GARBAGE");
-    let mut cursor = Cursor::new(buf);
-    let result = MDBShardInfo::load_from_reader(&mut cursor);
-    assert!(result.is_ok());
-    let info = result.unwrap();
-    assert_eq!(info.num_xorb_entries(), 1);
-}
-
-#[test]
-fn mdb_shard_info_load_from_reader_full_roundtrip() {
-    let mut buf = Vec::new();
-    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
-
-    let file = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, false),
-        segments: vec![FileDataSequenceEntry::new(
-            MerkleHash::default(),
-            100u64,
-            0u64,
-            50u64,
-        )],
-        verification: vec![],
-        metadata_ext: None,
-    };
-    file.serialize(&mut buf).unwrap();
-    FileDataSequenceHeader::bookend()
-        .serialize(&mut buf)
-        .unwrap();
-
-    let xorb = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u64, 100u64),
-        chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c"),
-            100u64,
-            0u64,
-        )],
-    };
-    xorb.serialize(&mut buf).unwrap();
-    XorbChunkSequenceHeader::bookend()
-        .serialize(&mut buf)
-        .unwrap();
-
-    // Footer (for roundtrip we don't need real footer values)
-    MDBShardFileFooter::default().serialize(&mut buf).unwrap();
-
-    let mut cursor = Cursor::new(&buf);
-    let info = MDBShardInfo::load_from_reader(&mut cursor).unwrap();
-    assert_eq!(info.num_file_entries(), 1);
-    assert_eq!(info.num_xorb_entries(), 1);
-    assert_eq!(info.file_infos[0].segments[0].unpacked_segment_bytes, 100);
 }
 
 // ============================================================================
