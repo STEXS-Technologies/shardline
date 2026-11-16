@@ -418,7 +418,7 @@ pub fn parse_ofs_delta_offset(data: &[u8], pos: &mut usize) -> Result<usize, Pac
     *pos = (*pos).wrapping_add(1);
     let mut offset = (byte & 0x7f) as usize;
     // The offset accumulator is bounds-checked with checked arithmetic; the
-    // iteration budget uses a saturating counter (wrapping is unreachable —
+    // iteration budget uses a bounded counter (wrapping is unreachable —
     // the loop exits after at most MAX_DELTA_VARINT_BYTES iterations).
     let mut iterations = 0usize;
     while byte & 0x80 != 0 {
@@ -643,119 +643,44 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- parse_ofs_delta_offset tests ---
-
     #[test]
-    fn parse_ofs_delta_offset_single_byte() {
-        // Single byte, MSB clear: offset = byte & 0x7f
-        let data = [0x05];
-        let mut pos = 0;
-        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
-        assert_eq!(offset, 5);
-        assert_eq!(pos, 1);
+    fn ofs_delta_offsets_preserve_values_and_consume_only_the_encoding() {
+        for (encoded, expected) in [
+            (&[0x05][..], 5),
+            (&[0x7f][..], 127),
+            (&[0x00][..], 0),
+            (&[0x82, 0x00][..], 384),
+            (&[0x81, 0x00][..], 256),
+            (&[0x81, 0x7f][..], 383),
+            (&[0x81, 0x81, 0x01][..], 33025),
+            (&[0x80, 0x01][..], 129),
+        ] {
+            for start in [0, 2] {
+                let mut data = vec![0xff; start];
+                data.extend_from_slice(encoded);
+                data.extend_from_slice(b"trailing pack data");
+                let mut pos = start;
+                assert_eq!(parse_ofs_delta_offset(&data, &mut pos).unwrap(), expected);
+                assert_eq!(pos, start.checked_add(encoded.len()).unwrap());
+            }
+        }
     }
 
     #[test]
-    fn parse_ofs_delta_offset_single_byte_max() {
-        // Single byte with max 7-bit value (MSB clear = no continuation)
-        let data = [0x7f];
-        let mut pos = 0;
-        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
-        assert_eq!(offset, 127);
-        assert_eq!(pos, 1);
-    }
-
-    #[test]
-    fn parse_ofs_delta_offset_single_byte_zero() {
-        let data = [0x00];
-        let mut pos = 0;
-        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
-        assert_eq!(offset, 0);
-        assert_eq!(pos, 1);
-    }
-
-    #[test]
-    fn parse_ofs_delta_offset_two_bytes() {
-        // Two bytes: first has MSB set (continuation), second does not.
-        // Byte 0: 0x82 → low 7 bits = 2, continuation
-        // Byte 1: 0x00 → low 7 bits = 0, no continuation
-        // offset = ((2 + 1) << 7) | 0 = 384
-        let data = [0x82, 0x00];
-        let mut pos = 0;
-        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
-        assert_eq!(offset, 384);
-        assert_eq!(pos, 2);
-    }
-
-    #[test]
-    fn parse_ofs_delta_offset_two_bytes_small() {
-        // Two bytes encoding 128:
-        // Byte 0: 0x81 → low 7 bits = 1, continuation
-        // Byte 1: 0x00 → low 7 bits = 0, no continuation
-        // offset = ((1 + 1) << 7) | 0 = 256
-        let data = [0x81, 0x00];
-        let mut pos = 0;
-        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
-        assert_eq!(offset, 256);
-        assert_eq!(pos, 2);
-    }
-
-    #[test]
-    fn parse_ofs_delta_offset_two_bytes_with_payload() {
-        // Two bytes with payload in second byte:
-        // Byte 0: 0x81 → low 7 bits = 1, continuation
-        // Byte 1: 0x7f → low 7 bits = 127, no continuation
-        // offset = ((1 + 1) << 7) | 127 = 256 + 127 = 383
-        let data = [0x81, 0x7f];
-        let mut pos = 0;
-        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
-        assert_eq!(offset, 383);
-        assert_eq!(pos, 2);
-    }
-
-    #[test]
-    fn parse_ofs_delta_offset_three_bytes() {
-        // Three bytes:
-        // Byte 0: 0x81 → low 7 bits = 1, continuation
-        // Byte 1: 0x81 → low 7 bits = 1, continuation
-        // Byte 2: 0x01 → low 7 bits = 1, no continuation
-        // Step 1: offset = 1
-        // Step 2: offset = ((1+1) << 7) | 1 = 256 + 1 = 257
-        // Step 3: offset = ((257+1) << 7) | 1 = 258*128 + 1 = 33024 + 1 = 33025
-        let data = [0x81, 0x81, 0x01];
-        let mut pos = 0;
-        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
-        assert_eq!(offset, 33025);
-        assert_eq!(pos, 3);
-    }
-
-    #[test]
-    fn parse_ofs_delta_offset_trailing_continuation_is_error() {
-        // A byte with MSB set as the last byte means the parser expects
-        // another byte but there isn't one.
-        let data = [0x80];
-        let mut pos = 0;
-        let result = parse_ofs_delta_offset(&data, &mut pos);
-        assert!(
-            result.is_err(),
-            "trailing continuation byte should be an error"
-        );
-    }
-
-    #[test]
-    fn parse_ofs_delta_offset_empty_data() {
-        let data: [u8; 0] = [];
-        let mut pos = 0;
-        let result = parse_ofs_delta_offset(&data, &mut pos);
-        assert!(result.is_err(), "empty data should be an error");
-    }
-
-    #[test]
-    fn parse_ofs_delta_offset_pos_past_end() {
-        let data = [0x05];
-        let mut pos = 1; // already past end
-        let result = parse_ofs_delta_offset(&data, &mut pos);
-        assert!(result.is_err(), "pos past end should be an error");
+    fn ofs_delta_offsets_reject_incomplete_encodings_without_skipping_bytes() {
+        for (data, start, consumed) in [
+            (&[][..], 0, 0),
+            (&[0x80][..], 0, 1),
+            (&[0x05][..], 1, 1),
+            (&[0x05][..], usize::MAX, usize::MAX),
+        ] {
+            let mut pos = start;
+            assert!(matches!(
+                parse_ofs_delta_offset(data, &mut pos),
+                Err(PackError::InvalidDelta)
+            ));
+            assert_eq!(pos, consumed);
+        }
     }
 
     // --- PackError Display tests ---
@@ -1044,19 +969,6 @@ mod tests {
         assert!(content.starts_with(b"100644 readme.txt\x00"));
     }
 
-    #[test]
-    fn parse_ofs_delta_offset_shift_wrapping() {
-        // A single byte offset with MSB set should complete normally
-        // when followed by a byte with MSB clear.
-        let data = [0x80, 0x01]; // continuation then final byte
-        let mut pos = 0;
-        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
-        // Step 1: byte 0x80 → low 7 bits = 0, continuation
-        // Step 2: byte 0x01 → low 7 bits = 1, no continuation
-        // offset = ((0 + 1) << 7) | 1 = 128 + 1 = 129
-        assert_eq!(offset, 129);
-        assert_eq!(pos, 2);
-    }
     #[test]
     fn delta_varint_value_overflow_rejected() {
         let mut delta = vec![0x80; 9];
