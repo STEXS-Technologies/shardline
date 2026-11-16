@@ -70,7 +70,13 @@ async fn create_ref(
     }
 }
 
-fn remove_ref(state: &HubState, repo_id: &str, name: &str) -> Result<StatusCode, HubApiError> {
+fn remove_ref(
+    state: &HubState,
+    auth: &shardline_server_core::AuthorizedRepository,
+    repo_id: &str,
+    name: &str,
+) -> Result<StatusCode, HubApiError> {
+    crate::revision_access::authorize_write(repo_id, name, auth)?;
     state
         .store
         .get_repo(repo_id)
@@ -120,8 +126,7 @@ pub(crate) async fn branch_delete(
     Path((_kind, ns, repo, name)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
     let name = checked_ref(&name, false)?;
-    crate::revision_access::authorize_write(&format!("{ns}/{repo}"), &name, _repo.capability())?;
-    remove_ref(&state, &format!("{ns}/{repo}"), &name)
+    remove_ref(&state, _repo.capability(), &format!("{ns}/{repo}"), &name)
 }
 
 pub(crate) async fn tag_create(
@@ -148,6 +153,5 @@ pub(crate) async fn tag_delete(
     Path((_kind, ns, repo, name)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
     let name = checked_ref(&name, true)?;
-    crate::revision_access::authorize_write(&format!("{ns}/{repo}"), &name, _repo.capability())?;
-    remove_ref(&state, &format!("{ns}/{repo}"), &name)
+    remove_ref(&state, _repo.capability(), &format!("{ns}/{repo}"), &name)
 }
