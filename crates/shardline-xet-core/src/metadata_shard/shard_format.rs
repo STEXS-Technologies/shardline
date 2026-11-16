@@ -189,6 +189,30 @@ pub struct MDBShardInfo {
     pub xorb_infos: Vec<MDBXorbInfo>,
 }
 
+// Legacy loaders salvage a valid prefix, but reject a section whose first
+// record cannot be read. Keep that compatibility rule identical for both tables.
+fn read_record_prefix<T>(
+    mut next: impl FnMut() -> std::io::Result<Option<T>>,
+    section: &str,
+) -> Result<Vec<T>> {
+    let mut records = Vec::new();
+    loop {
+        match next() {
+            Ok(Some(record)) => records.push(record),
+            Ok(None) => break,
+            Err(error) => {
+                if records.is_empty() {
+                    return Err(CoreError::MalformedData(format!(
+                        "Failed to read {section}: {error}"
+                    )));
+                }
+                break;
+            }
+        }
+    }
+    Ok(records)
+}
+
 impl MDBShardInfo {
     pub fn non_content_byte_size() -> u64 {
         (size_of::<MDBShardFileHeader>() + size_of::<MDBShardFileFooter>()) as u64
@@ -229,37 +253,10 @@ impl MDBShardInfo {
             .map_err(|e| CoreError::MalformedData(format!("Failed to read header: {e}")))?;
         let version = header.version;
 
-        let mut file_infos = Vec::new();
-        loop {
-            match MDBFileInfo::deserialize(reader, version) {
-                Ok(Some(file_info)) => file_infos.push(file_info),
-                Ok(None) => break,
-                Err(e) => {
-                    if file_infos.is_empty() {
-                        return Err(CoreError::MalformedData(format!(
-                            "Failed to read file info: {e}"
-                        )));
-                    }
-                    break;
-                }
-            }
-        }
-
-        let mut xorb_infos = Vec::new();
-        loop {
-            match MDBXorbInfo::deserialize(reader, version) {
-                Ok(Some(xorb_info)) => xorb_infos.push(xorb_info),
-                Ok(None) => break,
-                Err(e) => {
-                    if xorb_infos.is_empty() {
-                        return Err(CoreError::MalformedData(format!(
-                            "Failed to read xorb info: {e}"
-                        )));
-                    }
-                    break;
-                }
-            }
-        }
+        let file_infos =
+            read_record_prefix(|| MDBFileInfo::deserialize(reader, version), "file info")?;
+        let xorb_infos =
+            read_record_prefix(|| MDBXorbInfo::deserialize(reader, version), "xorb info")?;
 
         Ok(Self {
             header,
