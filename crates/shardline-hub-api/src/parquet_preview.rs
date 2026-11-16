@@ -354,6 +354,10 @@ pub fn read_rows(
     let batches = builder.build().map_err(|_error| {
         QueryFailure::new(invalid_parquet_error(), QueryFailureClass::InvalidInput)
     })?;
+    let predicates: Vec<_> = predicates
+        .iter()
+        .map(|predicate| (predicate, scalar_to_json(&predicate.value)))
+        .collect();
     let mut rows = Vec::new();
     let mut scanned_rows = 0usize;
     let mut result_bytes = 0usize;
@@ -405,10 +409,9 @@ pub fn read_rows(
                     QueryFailureClass::ScanLimit,
                 ));
             }
-            if predicates
-                .iter()
-                .all(|predicate| predicate_matches(&row, predicate))
-            {
+            if predicates.iter().all(|(predicate, expected)| {
+                predicate_matches(&row, &predicate.column, &predicate.op, expected)
+            }) {
                 result_bytes = result_bytes.saturating_add(value.len());
                 if result_bytes > MAX_RESULT_BYTES {
                     shardline_metrics::metrics()
@@ -492,39 +495,32 @@ pub fn read_rows(
 
 fn predicate_matches(
     row: &std::collections::BTreeMap<String, serde_json::Value>,
-    predicate: &Predicate,
+    column: &str,
+    op: &PredicateOp,
+    expected: &serde_json::Value,
 ) -> bool {
-    let value = row.get(&predicate.column);
-    match predicate.op {
+    let value = row.get(column);
+    match op {
         PredicateOp::IsNull => value.is_none_or(serde_json::Value::is_null),
         PredicateOp::IsNotNull => value.is_some_and(|v| !v.is_null()),
-        PredicateOp::Eq => value_matches(value, &predicate.value, |a, b| a == b),
-        PredicateOp::NotEq => value_matches(value, &predicate.value, |a, b| a != b),
-        PredicateOp::Lt => ordered_matches(value, &predicate.value, std::cmp::Ordering::is_lt),
-        PredicateOp::Lte => ordered_matches(value, &predicate.value, std::cmp::Ordering::is_le),
-        PredicateOp::Gt => ordered_matches(value, &predicate.value, std::cmp::Ordering::is_gt),
-        PredicateOp::Gte => ordered_matches(value, &predicate.value, std::cmp::Ordering::is_ge),
+        PredicateOp::Eq => value.is_some_and(|value| value == expected),
+        PredicateOp::NotEq => value.is_some_and(|value| value != expected),
+        PredicateOp::Lt => ordered_matches(value, expected, std::cmp::Ordering::is_lt),
+        PredicateOp::Lte => ordered_matches(value, expected, std::cmp::Ordering::is_le),
+        PredicateOp::Gt => ordered_matches(value, expected, std::cmp::Ordering::is_gt),
+        PredicateOp::Gte => ordered_matches(value, expected, std::cmp::Ordering::is_ge),
     }
-}
-
-fn value_matches<F: FnOnce(&serde_json::Value, &serde_json::Value) -> bool>(
-    value: Option<&serde_json::Value>,
-    scalar: &Scalar,
-    compare: F,
-) -> bool {
-    value.is_some_and(|value| compare(value, &scalar_to_json(scalar)))
 }
 
 fn ordered_matches<F: FnOnce(std::cmp::Ordering) -> bool>(
     value: Option<&serde_json::Value>,
-    scalar: &Scalar,
+    other: &serde_json::Value,
     compare: F,
 ) -> bool {
     let Some(value) = value else {
         return false;
     };
-    let other = scalar_to_json(scalar);
-    let ordering = match (value, &other) {
+    let ordering = match (value, other) {
         (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
             match (a.as_f64(), b.as_f64()) {
                 (Some(a), Some(b)) => a.partial_cmp(&b),
@@ -678,58 +674,30 @@ mod tests {
             ("label".to_owned(), serde_json::json!("ok")),
             ("empty".to_owned(), serde_json::Value::Null),
         ]);
-        for (op, value, expected) in [
-            (PredicateOp::Eq, Scalar::Integer(3), true),
-            (PredicateOp::NotEq, Scalar::Integer(4), true),
-            (PredicateOp::Lt, Scalar::Integer(4), true),
-            (PredicateOp::Lte, Scalar::Integer(3), true),
-            (PredicateOp::Gt, Scalar::Integer(2), true),
-            (PredicateOp::Gte, Scalar::Integer(3), true),
+        for (column, op, scalar, expected) in [
+            ("id", PredicateOp::Eq, Scalar::Integer(3), true),
+            ("id", PredicateOp::NotEq, Scalar::Integer(4), true),
+            ("id", PredicateOp::Lt, Scalar::Integer(4), true),
+            ("id", PredicateOp::Lte, Scalar::Integer(3), true),
+            ("id", PredicateOp::Gt, Scalar::Integer(2), true),
+            ("id", PredicateOp::Gte, Scalar::Integer(3), true),
+            ("empty", PredicateOp::IsNull, Scalar::Null, true),
+            ("label", PredicateOp::IsNotNull, Scalar::Null, true),
+            ("missing", PredicateOp::IsNull, Scalar::Null, true),
+            ("missing", PredicateOp::Gt, Scalar::Integer(1), false),
+            ("missing", PredicateOp::NotEq, Scalar::Null, false),
+            ("label", PredicateOp::Eq, Scalar::Text("ok".into()), true),
+            ("label", PredicateOp::Gt, Scalar::Text("no".into()), true),
+            ("label", PredicateOp::Gt, Scalar::Integer(1), false),
+            ("id", PredicateOp::Gt, Scalar::Float("2.5".into()), true),
         ] {
+            let value = scalar_to_json(&scalar);
             assert_eq!(
-                predicate_matches(
-                    &row,
-                    &Predicate {
-                        column: "id".into(),
-                        op,
-                        value
-                    }
-                ),
-                expected
+                predicate_matches(&row, column, &op, &value),
+                expected,
+                "{column} {op:?} {scalar:?}"
             );
         }
-        assert!(predicate_matches(
-            &row,
-            &Predicate {
-                column: "empty".into(),
-                op: PredicateOp::IsNull,
-                value: Scalar::Null
-            }
-        ));
-        assert!(predicate_matches(
-            &row,
-            &Predicate {
-                column: "label".into(),
-                op: PredicateOp::IsNotNull,
-                value: Scalar::Null
-            }
-        ));
-        assert!(predicate_matches(
-            &row,
-            &Predicate {
-                column: "missing".into(),
-                op: PredicateOp::IsNull,
-                value: Scalar::Null
-            }
-        ));
-        assert!(!predicate_matches(
-            &row,
-            &Predicate {
-                column: "missing".into(),
-                op: PredicateOp::Gt,
-                value: Scalar::Integer(1)
-            }
-        ));
     }
 
     #[test]
