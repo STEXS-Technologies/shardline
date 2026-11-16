@@ -1100,10 +1100,12 @@ mod tests {
     fn v1_serialize_zero_chunks() {
         let info = XorbObjectInfoV1::default();
         let mut buf = Vec::new();
-        let _written = info.serialize(&mut buf).unwrap();
+        let written = info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
-        let (info2, _) = XorbObjectInfoV1::deserialize(&mut r).unwrap();
-        assert_eq!(info2.num_chunks, 0);
+        let (info2, read) = XorbObjectInfoV1::deserialize(&mut r).unwrap();
+        assert_eq!(info2, info);
+        assert_eq!(written, buf.len());
+        assert_eq!(read as usize, written);
     }
 
     #[test]
@@ -1129,45 +1131,54 @@ mod tests {
 
     #[test]
     fn metadata_corruption_reports_the_rejected_field() {
-        let mut valid = Vec::new();
-        make_v1_info(1, b"test").serialize(&mut valid).unwrap();
-        // Version 2 with one chunk: 40-byte header, 48-byte hash section,
-        // 32-byte boundary section, then three u64 values and 16 reserved bytes.
-        assert_eq!(valid.len(), 160);
-        for (offset, expected) in [
-            (0, "Xorb Invalid Ident"),
-            (7, "Xorb Invalid Format Version"),
-            (40, "Xorb Invalid Ident for Hash Metadata Section"),
-            (47, "Xorb Invalid Format Version for Hash Metadata Section"),
-            (88, "Xorb Invalid Ident for Boundary Metadata Section"),
-            (
-                95,
-                "Xorb Invalid Format Version for Boundaries Metadata Section",
-            ),
-            (
-                96,
-                "Xorb Invalid: inconsistent num_chunks between hashes and boundaries section.",
-            ),
-            (
-                120,
-                "Xorb Invalid: inconsistent num_chunks between metadata and hashes section.",
-            ),
-            (
-                128,
-                "Xorb Invalid: incorrect hashes_section_offset_from_end.",
-            ),
-            (
-                136,
-                "Xorb Invalid: incorrect boundary_section_offset_from_end.",
-            ),
-        ] {
-            let mut corrupted = valid.clone();
-            corrupted[offset] ^= 0xFF;
-            let error = XorbObjectInfoV1::deserialize(&mut Cursor::new(corrupted)).unwrap_err();
-            let CoreError::MalformedData(message) = error else {
-                panic!("offset {offset}: {error}");
-            };
-            assert_eq!(message, expected, "offset {offset}");
+        for count in [0, 1, 2] {
+            let mut valid = Vec::new();
+            make_v1_info(count as u64, b"test")
+                .serialize(&mut valid)
+                .unwrap();
+            // Version 2: 40-byte header, two section headers, chunk tables,
+            // three trailing u64 values and 16 reserved bytes.
+            let boundaries_start = 56 + 32 * count;
+            let trailer_start = 72 + 48 * count;
+            assert_eq!(valid.len(), trailer_start + 40);
+            for (offset, expected) in [
+                (0, "Xorb Invalid Ident"),
+                (7, "Xorb Invalid Format Version"),
+                (40, "Xorb Invalid Ident for Hash Metadata Section"),
+                (47, "Xorb Invalid Format Version for Hash Metadata Section"),
+                (
+                    boundaries_start,
+                    "Xorb Invalid Ident for Boundary Metadata Section",
+                ),
+                (
+                    boundaries_start + 7,
+                    "Xorb Invalid Format Version for Boundaries Metadata Section",
+                ),
+                (
+                    boundaries_start + 8,
+                    "Xorb Invalid: inconsistent num_chunks between hashes and boundaries section.",
+                ),
+                (
+                    trailer_start,
+                    "Xorb Invalid: inconsistent num_chunks between metadata and hashes section.",
+                ),
+                (
+                    trailer_start + 8,
+                    "Xorb Invalid: incorrect hashes_section_offset_from_end.",
+                ),
+                (
+                    trailer_start + 16,
+                    "Xorb Invalid: incorrect boundary_section_offset_from_end.",
+                ),
+            ] {
+                let mut corrupted = valid.clone();
+                corrupted[offset] ^= 0xFF;
+                let error = XorbObjectInfoV1::deserialize(&mut Cursor::new(corrupted)).unwrap_err();
+                let CoreError::MalformedData(message) = error else {
+                    panic!("offset {offset}: {error}");
+                };
+                assert_eq!(message, expected, "offset {offset}");
+            }
         }
     }
 
