@@ -267,7 +267,7 @@ impl PostgresIndexStore {
         )
         .fetch_all(&mut *transaction)
         .await?;
-        let live_sessions = live_rows
+        let mut inventory = live_rows
             .iter()
             .map(|row| {
                 Ok::<_, PostgresMetadataStoreError>((
@@ -286,25 +286,15 @@ impl PostgresIndexStore {
         )
         .fetch_all(&mut *transaction)
         .await?;
-        let reclaimable_sessions = candidate_rows
-            .iter()
-            .map(|row| {
-                Ok::<_, PostgresMetadataStoreError>((
-                    session_from_row(row)?,
-                    row.try_get::<Option<String>, _>("state_digest")?,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let inventory_sessions = live_sessions
-            .iter()
-            .chain(reclaimable_sessions.iter())
-            .map(|(session, _)| session.clone())
-            .collect::<Vec<_>>();
-        let inventory_digests = live_sessions
-            .iter()
-            .chain(reclaimable_sessions.iter())
-            .map(|(_, stored_digest)| stored_digest.clone())
-            .collect::<Vec<_>>();
+        let reclaimable_start = inventory.len();
+        for row in &candidate_rows {
+            inventory.push((
+                session_from_row(row)?,
+                row.try_get::<Option<String>, _>("state_digest")?,
+            ));
+        }
+        let (mut inventory_sessions, inventory_digests): (Vec<_>, Vec<_>) =
+            inventory.into_iter().unzip();
         verify_resumable_session_page(&mut transaction, &inventory_sessions, &inventory_digests)
             .await?;
         transaction.commit().await?;
@@ -317,10 +307,7 @@ impl PostgresIndexStore {
             .await?;
         Ok(ResumableSessionGcInventory::new(
             protected_staging_keys,
-            reclaimable_sessions
-                .into_iter()
-                .map(|(session, _)| session)
-                .collect(),
+            inventory_sessions.split_off(reclaimable_start),
         ))
     }
 
