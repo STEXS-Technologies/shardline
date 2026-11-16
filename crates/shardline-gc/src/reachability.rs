@@ -139,7 +139,7 @@ fn collect_record_object_references<Locator>(
     let record = parse_stored_file_record_bytes(&entry.bytes)?;
     let storage_layout = record.storage_layout();
     reachability.scanned_records = checked_increment(reachability.scanned_records)?;
-    for chunk in &record.chunks {
+    for chunk in record.chunks {
         match storage_layout {
             FileRecordStorageLayout::ReferencedObjectTerms => {
                 let object_key = referenced_term_object_key(frontends, &chunk.hash)?;
@@ -158,10 +158,6 @@ fn collect_record_object_references<Locator>(
                 reachability
                     .referenced_object_keys
                     .insert(chunk_object_key.as_str().to_owned());
-                reachability
-                    .live_dedupe_chunk_hashes
-                    .insert(chunk.hash.clone());
-
                 for object_key in optional_chunk_container_keys(frontends, &chunk.hash)? {
                     if record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
                         && shardline_xet_adapter::xorb_hash_from_object_key_if_present(&object_key)?
@@ -193,6 +189,7 @@ fn collect_record_object_references<Locator>(
                         &mut reachability.missing_optional_object_keys,
                     )?;
                 }
+                reachability.live_dedupe_chunk_hashes.insert(chunk.hash);
             }
         }
     }
