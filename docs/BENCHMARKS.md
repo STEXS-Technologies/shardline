@@ -5691,3 +5691,35 @@ The historical hosted SDK RSS failure remains unexplained. This checkpoint does
 not establish hosted-CI success, production-scale capacity, cloud costs or unit
 economics. Existing versioned performance and cross-protocol deduplication
 measurements retain their original source and workload limitations.
+
+### Contributor CI qualification checkpoint (2026-11-17)
+
+Source `75b73dcf73bca0a7d981de252ed4ddf562247c99` completed the documented
+`cargo make ci` pipeline locally with Rust 1.99.0, four build jobs, cached
+dependencies, no compiler wrapper, and dev/test debug information disabled.
+Release tests retained the repository's optimized release profile. The isolated
+checkout excluded uncommitted main-worktree changes.
+
+The first attempt stopped at a Hub webhook formatting discrepancy. The next
+attempt found two forbidden `expect()` calls in the lifecycle classification
+fuzz target. Formatting was corrected; the fuzz oracle now checks both calls
+against the expected action without discarding errors or weakening assertions.
+The complete pipeline then passed, including workspace formatting and strict
+Clippy, dependency exceptions, both workspace dependency policies, release CLI
+help/manpage/completion smoke checks, and parity across 44 database migrations.
+Formatting was also checked independently with Rust 1.100.0.
+
+| Test stage | Passed | Normally ignored tests excluded |
+| --- | ---: | ---: |
+| Workspace library tests | 8,153 | 45 |
+| Reliability contracts | 39 | 0 |
+| Release-mode CLI API and maintenance contracts | 41 | 5 |
+| Separate Python script contracts | 55 | 0 |
+
+The release executable was frozen with SHA-256
+`ddf875ff19e01148bd2742d9493dfe3d887887df51295baf5976028c9b091443`.
+This contributor gate does not qualify excluded tests or external-fixture tests
+that return early without their infrastructure. PostgreSQL, MinIO, distributed
+faults and real-client qualification retain their separately recorded source
+revisions. This is local evidence, not hosted-CI success, a controlled build-speed
+comparison, or resolution of the historical hosted SDK RSS failure.
