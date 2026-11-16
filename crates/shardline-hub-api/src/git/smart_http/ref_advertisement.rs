@@ -133,36 +133,37 @@ fn collect_refs_sync(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, Hub
             HubApiError::RepoNotFound
         })?;
 
+    let fallback_head = store_refs
+        .iter()
+        .find(|r| r.ref_name == "main")
+        .map(|r| r.sha.clone());
     let mut refs = Vec::new();
     let mut seen_refs = std::collections::HashSet::new();
 
-    for store_ref in &store_refs {
+    for store_ref in store_refs {
         let name = if store_ref.ref_name == "HEAD" || store_ref.ref_name.is_empty() {
             "HEAD".to_owned()
         } else if store_ref.ref_name.starts_with("refs/") {
-            store_ref.ref_name.clone()
+            store_ref.ref_name
         } else {
             format!("refs/heads/{}", store_ref.ref_name)
         };
         if seen_refs.insert(name.clone()) {
             refs.push(GitRef {
                 name,
-                sha1: store_ref.sha.clone(),
+                sha1: store_ref.sha,
             });
         }
     }
 
     // If no HEAD was explicitly set, point HEAD at the active default branch.
     if !seen_refs.contains("HEAD")
-        && let Some(main_ref) = store_refs.iter().find(|r| r.ref_name == "main")
+        && let Some(sha1) = fallback_head
     {
-        refs.insert(
-            0,
-            GitRef {
-                name: "HEAD".to_owned(),
-                sha1: main_ref.sha.clone(),
-            },
-        );
+        refs.push(GitRef {
+            name: "HEAD".to_owned(),
+            sha1,
+        });
     }
 
     // Normalized names are HEAD or refs/*, so this also places HEAD first.

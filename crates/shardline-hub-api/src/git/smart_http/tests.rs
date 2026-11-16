@@ -475,7 +475,7 @@ pub(super) fn make_hub_state() -> (tempfile::TempDir, HubState) {
 }
 
 #[tokio::test]
-async fn collect_refs_dedup_identical_shas() {
+async fn collect_refs_preserve_sorted_names_and_commit_identities() {
     let (_tmp, state) = make_hub_state();
     use shardline_index::hub::HubRepoType;
 
@@ -485,9 +485,6 @@ async fn collect_refs_dedup_identical_shas() {
         .unwrap();
     let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
 
-    // Insert two revisions with different SHAs but pointing to the same
-    // final SHA via a chain. The key dedup test: same ref_name ("main")
-    // should only appear once.
     state
         .store
         .create_revision("org/dedup", Some(initial_sha), "sha_a", "main", "first")
@@ -510,26 +507,17 @@ async fn collect_refs_dedup_identical_shas() {
 
     let refs = collect_refs(&state, "org/dedup").await.unwrap();
 
-    // Each unique (name, sha) pair should only appear once.
-    let mut seen = std::collections::HashSet::new();
-    for r in &refs {
-        let key = (&r.name, &r.sha1);
-        assert!(
-            seen.insert(key),
-            "duplicate ref entry: {key:?} in refs: {refs:?}"
-        );
-    }
-
-    // Verify all expected ref names are present.
-    let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"HEAD"), "should contain HEAD: {refs:?}");
-    assert!(
-        names.contains(&"refs/heads/main"),
-        "should contain main: {refs:?}"
-    );
-    assert!(
-        names.contains(&"refs/heads/dev"),
-        "should contain dev: {refs:?}"
+    let advertised: Vec<_> = refs
+        .iter()
+        .map(|r| (r.name.as_str(), r.sha1.as_str()))
+        .collect();
+    assert_eq!(
+        advertised,
+        [
+            ("HEAD", "sha_head"),
+            ("refs/heads/dev", "sha_b"),
+            ("refs/heads/main", "sha_a"),
+        ]
     );
 }
 
