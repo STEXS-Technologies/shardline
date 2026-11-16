@@ -689,18 +689,12 @@ where
                 );
             }
 
-            let observed_length = listed_orphans
-                .get(candidate.object_key().as_str())
-                .map_or_else(
-                    || {
-                        object_store
-                            .metadata(candidate.object_key())
-                            .ok()
-                            .flatten()
-                            .map(|metadata| metadata.length())
-                    },
-                    |orphan| Some(orphan.bytes),
-                );
+            let observed_length = match listed_orphans.get(candidate.object_key().as_str()) {
+                Some(orphan) => Some(orphan.bytes),
+                None => object_store
+                    .metadata(candidate.object_key())?
+                    .map(|metadata| metadata.length()),
+            };
             let Some(observed_length) = observed_length else {
                 tracing::warn!(
                     "quarantine candidate {} references a missing object — will auto-release",
@@ -942,6 +936,51 @@ mod tests {
             .await
             .unwrap();
         assert!(index.list_quarantine_candidates().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn quarantine_lookup_errors_preserve_candidates_in_dry_and_mutating_runs() {
+        use shardline_index::{AsyncIndexStore, MemoryIndexStore, QuarantineCandidate};
+        use shardline_server_core::{ServerObjectStore, ServerObjectStoreError};
+        use shardline_storage::{LocalObjectStoreError, ObjectKey, ObjectStore};
+
+        let root = tempfile::tempdir().unwrap();
+        let key = ObjectKey::parse(&format!("aa/{}", "a".repeat(64))).unwrap();
+        // A directory at an object key is a storage error, not a missing file.
+        std::fs::create_dir_all(root.path().join(key.as_str())).unwrap();
+        let objects = ServerObjectStore::local(root.path()).unwrap();
+        assert!(matches!(
+            objects.metadata(&key),
+            Err(ServerObjectStoreError::Local(
+                LocalObjectStoreError::InvalidObjectPath
+            ))
+        ));
+        for auto_release in [false, true] {
+            let index = MemoryIndexStore::new();
+            let candidate = QuarantineCandidate::new(key.clone(), 10, 100, 200).unwrap();
+            index.upsert_quarantine_candidate(&candidate).await.unwrap();
+            let result = super::validate_gc_index_integrity(
+                &index,
+                &objects,
+                &std::collections::HashMap::new(),
+                150,
+                auto_release,
+            )
+            .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(super::GcError::ObjectStore(ServerObjectStoreError::Local(
+                        LocalObjectStoreError::InvalidObjectPath
+                    )))
+                ),
+                "{result:?}"
+            );
+            assert_eq!(
+                index.list_quarantine_candidates().await.unwrap(),
+                vec![candidate]
+            );
+        }
     }
 
     fn boot(uptime: u64, id: &str) -> crate::quarantine::GcBootObservation {
