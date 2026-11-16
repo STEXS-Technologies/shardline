@@ -120,6 +120,7 @@ async fn snapshot_copy_preserves_range_and_integrity_errors() {
         let result = super::super::copy_snapshot_to_writer(
             response(size, range, vec![Ok(Bytes::from(body))]),
             &mut output,
+            || crate::S3ObjectStoreError::IntegrityLengthMismatch,
         )
         .await;
         if partial {

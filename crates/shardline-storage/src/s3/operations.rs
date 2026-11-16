@@ -507,7 +507,11 @@ impl S3ObjectStore {
                 Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
                 Err(error) => return Err(S3ObjectStoreError::External(error)),
             };
-            copy_snapshot_to_writer(result, output).await.map(Some)
+            copy_snapshot_to_writer(result, output, || {
+                S3ObjectStoreError::IntegrityLengthMismatch
+            })
+            .await
+            .map(Some)
         })
     }
 
@@ -540,7 +544,10 @@ impl S3ObjectStore {
             let capacity = usize::try_from(expected_length)
                 .map_err(|_error| S3ObjectReadError::ObjectTooLarge)?;
             let mut output = Vec::with_capacity(capacity);
-            copy_snapshot_to_writer(result, &mut output).await?;
+            copy_snapshot_to_writer(result, &mut output, || {
+                S3ObjectStoreError::IntegrityLengthMismatch
+            })
+            .await?;
             Ok(Some((output, expected_length)))
         })
     }
@@ -1225,6 +1232,7 @@ async fn read_range_payload(
 async fn copy_snapshot_to_writer(
     result: GetResult,
     output: &mut impl Write,
+    length_error: fn() -> S3ObjectStoreError,
 ) -> Result<u64, S3ObjectStoreError> {
     let expected_length = result.meta.size;
     let mut written = 0_u64;
@@ -1232,16 +1240,13 @@ async fn copy_snapshot_to_writer(
     while let Some(bytes) = stream.next().await {
         let bytes = bytes?;
         written = written
-            .checked_add(
-                u64::try_from(bytes.len())
-                    .map_err(|_error| S3ObjectStoreError::IntegrityLengthMismatch)?,
-            )
+            .checked_add(u64::try_from(bytes.len()).map_err(|_error| length_error())?)
             .filter(|length| *length <= expected_length)
-            .ok_or(S3ObjectStoreError::IntegrityLengthMismatch)?;
+            .ok_or_else(length_error)?;
         output.write_all(&bytes).map_err(S3ObjectStoreError::Io)?;
     }
     if written != expected_length {
-        return Err(S3ObjectStoreError::IntegrityLengthMismatch);
+        return Err(length_error());
     }
     Ok(expected_length)
 }
