@@ -373,8 +373,7 @@ impl TransferClient {
     /// HTTP 404 is reported as `Ok(None)` — the global dedup query
     /// (`/v1/chunks/default-merkledb/{hash}`) treats 404 as a cache miss, not
     /// an error. Every other non-success status is mapped to a typed
-    /// [`TransferError`] (including 429, which is surfaced without retry; M4
-    /// adds retry policies).
+    /// [`TransferError`]. Retry policy belongs to the caller.
     ///
     /// # Errors
     ///
@@ -513,19 +512,8 @@ impl TransferClient {
             .map_err(|error| transfer_error_from_json(&error))
     }
 
-    /// Issues an arbitrary CAS/API request (with the `X-Xet-Session-Id` and
-    /// bearer headers) and returns `(status, body)` for any status.
-    ///
-    /// This is the low-level primitive used by the path-namespace and revision
-    /// metadata layers (M5b). Non-2xx statuses are mapped to typed
-    /// [`TransferError`]s so the M4 [`RetryContext`] can classify them; the
-    /// caller matches specific statuses (e.g. 409 → `RevisionExists`) from the
-    /// error.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransferError`] for transport failures and every non-2xx
-    /// status.
+    /// Test helper returning a bounded body after the normal request/status checks.
+    /// Transport failures and non-2xx statuses retain their typed errors.
     #[cfg(test)]
     pub(crate) async fn request_raw(
         &self,
@@ -572,9 +560,7 @@ impl TransferClient {
                 ),
             );
         if let Some(body) = body {
-            request = request
-                .header(header::CONTENT_TYPE, "application/json")
-                .json(body);
+            request = request.json(body);
         }
         ensure_success(request.send().await?).await
     }
