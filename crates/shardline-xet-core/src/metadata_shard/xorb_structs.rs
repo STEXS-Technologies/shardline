@@ -119,18 +119,13 @@ impl XorbChunkSequenceEntry {
         }
     }
 
-    pub fn with_global_dedup_flag(self, is_global_dedup_chunk: bool) -> Self {
+    pub fn with_global_dedup_flag(mut self, is_global_dedup_chunk: bool) -> Self {
         if is_global_dedup_chunk {
-            Self {
-                flags: self.flags | MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG,
-                ..self
-            }
+            self.flags |= MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
         } else {
-            Self {
-                flags: self.flags & !MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG,
-                ..self
-            }
+            self.flags &= !MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
         }
+        self
     }
 
     pub fn is_global_dedup_eligible(&self) -> bool {
@@ -408,35 +403,42 @@ mod tests {
     }
 
     #[test]
-    fn entry_with_global_dedup_flag() {
-        let e = make_entry(100, 0);
-        let flagged = e.with_global_dedup_flag(true);
-        assert_ne!(flagged.flags, 0);
-        let unflagged = flagged.with_global_dedup_flag(false);
-        assert_eq!(unflagged.flags, 0);
-    }
-
-    #[test]
-    fn entry_is_global_dedup_eligible_by_flag() {
-        let h = compute_data_hash(b"test");
-        let e = XorbChunkSequenceEntry::new(h, 100, 0);
-        let e = e.with_global_dedup_flag(true);
-        assert!(e.is_global_dedup_eligible());
-    }
-
-    #[test]
-    fn entry_is_global_dedup_eligible_by_hash() {
-        // Default hash (all zeros) => 0 % 1024 == 0 => eligible
-        let e = XorbChunkSequenceEntry::new(MerkleHash::default(), 100, 0);
-        assert!(e.is_global_dedup_eligible());
-    }
-
-    #[test]
-    fn entry_is_global_dedup_eligible_false() {
-        let h = compute_data_hash(b"non_eligible");
-        if !h[3].to_le().is_multiple_of(1024) {
-            let e = XorbChunkSequenceEntry::new(h, 100, 0);
-            assert!(!e.is_global_dedup_eligible());
+    fn dedup_flag_toggles_preserve_other_bits_and_entry_data() {
+        for (hash, hash_eligible) in [
+            (MerkleHash::default(), true),
+            (MerkleHash::from([0, 0, 0, 5_u64.to_le()]), false),
+        ] {
+            for (initial, unrelated) in [
+                (0, 0),
+                (0x123, 0x123),
+                (0x80000123, 0x123),
+                (u32::MAX, 0x7FFFFFFF),
+            ] {
+                let original = XorbChunkSequenceEntry {
+                    chunk_hash: hash,
+                    flags: initial,
+                    unpacked_segment_bytes: 100,
+                    chunk_byte_range_start: 17,
+                    _unused: 29,
+                };
+                let mut entry = original.clone();
+                for enabled in [false, true, true, false, false] {
+                    entry = entry.with_global_dedup_flag(enabled);
+                    let flags = if enabled {
+                        unrelated | MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG
+                    } else {
+                        unrelated
+                    };
+                    assert_eq!(
+                        entry,
+                        XorbChunkSequenceEntry {
+                            flags,
+                            ..original.clone()
+                        }
+                    );
+                    assert_eq!(entry.is_global_dedup_eligible(), enabled || hash_eligible);
+                }
+            }
         }
     }
 

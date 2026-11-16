@@ -1140,29 +1140,6 @@ fn xorb_chunk_sequence_entry_new() {
 }
 
 #[test]
-fn xorb_chunk_sequence_entry_with_global_dedup_flag() {
-    let entry = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u64, 0u64);
-    let flagged = entry.with_global_dedup_flag(true);
-    assert_ne!(flagged.flags, 0);
-
-    let unflagged = flagged.with_global_dedup_flag(false);
-    assert_eq!(unflagged.flags, 0);
-}
-
-#[test]
-fn xorb_chunk_sequence_entry_is_global_dedup_eligible() {
-    let entry = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u64, 0u64);
-    // default hash (all zeros) has modulus 0, so it IS eligible
-    assert!(entry.is_global_dedup_eligible());
-
-    let entry = entry.with_global_dedup_flag(true);
-    assert!(entry.is_global_dedup_eligible());
-
-    let _entry = entry.with_global_dedup_flag(false);
-    // depends on the hash - if hash % 1024 == 0, still eligible
-}
-
-#[test]
 fn xorb_chunk_sequence_entry_serialize_roundtrip() {
     let entry = XorbChunkSequenceEntry::new(compute_data_hash(b"e"), 256u64, 64u64);
     let mut buf = Vec::new();
@@ -3459,24 +3436,6 @@ fn mdb_xorb_info_deserialize_empty_chunks() {
     let info = result.unwrap();
     assert_eq!(info.chunks.len(), 0);
     assert_eq!(info.metadata.xorb_hash, header.xorb_hash);
-}
-
-#[test]
-fn xorb_chunk_sequence_entry_is_global_dedup_eligible_flag_clear_hash_mod_nonzero() {
-    // Create entry with flag cleared and hash where [3] % 1024 != 0
-    let h = DataHash::from([0, 0, 0, 5]); // 5 % 1024 != 0
-    let entry = XorbChunkSequenceEntry::new(h, 100u64, 0u64);
-    let entry = entry.with_global_dedup_flag(false);
-    assert!(!entry.is_global_dedup_eligible());
-}
-
-#[test]
-fn xorb_chunk_sequence_entry_is_global_dedup_eligible_flag_set_overrides_hash() {
-    // Entry with flag set but hash where [3] % 1024 != 0 → still eligible
-    let h = DataHash::from([0, 0, 0, 5]); // 5 % 1024 != 0
-    let entry = XorbChunkSequenceEntry::new(h, 100u64, 0u64);
-    let entry = entry.with_global_dedup_flag(true);
-    assert!(entry.is_global_dedup_eligible());
 }
 
 // ============================================================================
