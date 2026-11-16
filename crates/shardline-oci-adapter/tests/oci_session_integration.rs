@@ -21,80 +21,16 @@
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 
-use bytes::Bytes;
 use sha2::Digest;
 use shardline_oci_adapter::{
     OciAdapterError, OciBackend, append_upload_bytes, create_upload_session, delete_upload_session,
     read_upload_session, upload_body_integrity, upload_length,
 };
-use shardline_storage::{DeleteOutcome, ObjectKey, PutOutcome};
 use tempfile::TempDir;
 
-// ── Helper: a no-op backend that never creates S3 multipart uploads ────────
-
-struct NoS3Backend;
-
-impl OciBackend for NoS3Backend {
-    async fn create_resumable_object_upload(
-        &self,
-        _object_key: &ObjectKey,
-    ) -> Result<Option<String>, OciAdapterError> {
-        Ok(None)
-    }
-
-    async fn upload_resumable_object_part(
-        &self,
-        _object_key: &ObjectKey,
-        _upload_id: &str,
-        _part_idx: usize,
-        _bytes: Bytes,
-    ) -> Result<String, OciAdapterError> {
-        Err(OciAdapterError::NotFound)
-    }
-
-    async fn complete_resumable_object_upload(
-        &self,
-        _object_key: &ObjectKey,
-        _upload_id: &str,
-        _parts: Vec<(usize, String)>,
-    ) -> Result<(), OciAdapterError> {
-        Err(OciAdapterError::NotFound)
-    }
-
-    async fn abort_resumable_object_upload(
-        &self,
-        _object_key: &ObjectKey,
-        _upload_id: &str,
-    ) -> Result<(), OciAdapterError> {
-        Ok(())
-    }
-
-    fn put_sha256_addressed_object_bytes_if_absent(
-        &self,
-        _object_key: &ObjectKey,
-        _digest_hex: &str,
-        _bytes: Vec<u8>,
-    ) -> Result<PutOutcome, OciAdapterError> {
-        Ok(PutOutcome::Inserted)
-    }
-
-    fn copy_object_if_absent(
-        &self,
-        _source: &ObjectKey,
-        _destination: &ObjectKey,
-    ) -> Result<PutOutcome, OciAdapterError> {
-        Ok(PutOutcome::Inserted)
-    }
-
-    async fn delete_object_if_present(
-        &self,
-        _object_key: &ObjectKey,
-    ) -> Result<DeleteOutcome, OciAdapterError> {
-        Ok(DeleteOutcome::Deleted)
-    }
-}
-
-const NO_BACKEND: Option<&NoS3Backend> = None;
+#[path = "support/backend.rs"]
+mod backend;
+use backend::NO_BACKEND;
 
 // ── Helper functions ──────────────────────────────────────────────────────
 
