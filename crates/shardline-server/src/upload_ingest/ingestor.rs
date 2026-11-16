@@ -506,15 +506,7 @@ async fn pack_and_store_xorb_from_durable_chunks(
     }
 
     if !batch.is_empty() {
-        let batch_to_store = take_xorb_batch(&mut batch);
-        store_xorb_batch(
-            object_store,
-            file_id,
-            batch_to_store,
-            records,
-            batch_record_start,
-        )
-        .await;
+        store_xorb_batch(object_store, file_id, batch, records, batch_record_start).await;
     }
     Ok(())
 }

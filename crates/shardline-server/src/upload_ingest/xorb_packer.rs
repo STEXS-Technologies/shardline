@@ -321,69 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn store_and_read_xorb() {
-        use crate::object_store::ServerObjectStore;
-        use shardline_storage::ObjectStore;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let store = ServerObjectStore::local(tmp.path().join("objects")).unwrap();
-
-        let chunks = vec![(b"xorb store test".to_vec(), 0u64)];
-        let packed = pack_chunks_into_xorb(&chunks).unwrap();
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let was_inserted = rt
-            .block_on(store_xorb(
-                &store,
-                &packed.xorb_hash_hex,
-                &packed.serialized,
-            ))
-            .unwrap();
-        assert!(was_inserted, "first store should insert");
-
-        // Verify the xorb exists in the store.
-        let object_key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
-        assert!(store.contains(&object_key).unwrap());
-
-        // Read back and verify using metadata length.
-        let metadata = store.metadata(&object_key).unwrap().unwrap();
-        let stored_bytes = store
-            .read_full_object(&object_key, metadata.length())
-            .unwrap();
-        assert_eq!(stored_bytes, packed.serialized);
-    }
-
-    #[test]
-    fn store_xorb_idempotent() {
-        use crate::object_store::ServerObjectStore;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let store = ServerObjectStore::local(tmp.path().join("objects")).unwrap();
-
-        let chunks = vec![(b"idempotent test".to_vec(), 0u64)];
-        let packed = pack_chunks_into_xorb(&chunks).unwrap();
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let first = rt
-            .block_on(store_xorb(
-                &store,
-                &packed.xorb_hash_hex,
-                &packed.serialized,
-            ))
-            .unwrap();
-        assert!(first);
-
-        let second = rt
-            .block_on(store_xorb(
-                &store,
-                &packed.xorb_hash_hex,
-                &packed.serialized,
-            ))
-            .unwrap();
-        assert!(!second, "second store should report not inserted");
-    }
-
-    #[test]
     fn validated_round_trips_preserve_payloads_and_noncontiguous_file_offsets() {
         for chunks in [
             vec![(b"single chunk payload".to_vec(), 0)],
@@ -489,45 +426,62 @@ mod tests {
         verify_xorb_roundtrip(&packed, &chunks);
     }
 
-    #[test]
-    fn store_xorb_idempotent_already_exists() {
-        use crate::object_store::ServerObjectStore;
+    #[tokio::test]
+    async fn stored_xorbs_preserve_bytes_and_metadata_across_duplicate_installations() {
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore, PutOutcome};
 
-        let tmp = tempfile::tempdir().unwrap();
-        let store = ServerObjectStore::local(tmp.path().join("objects")).unwrap();
-
-        let chunks = vec![(b"idempotent already exists test".to_vec(), 0u64)];
-        let packed = pack_chunks_into_xorb(&chunks).unwrap();
-
-        let object_key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
-        let integrity = ObjectIntegrity::new(
-            crate::local_backend::chunk_hash(&packed.serialized),
-            packed.serialized.len() as u64,
-        );
-
-        let outcome1 = store
-            .put_if_absent(
-                &object_key,
-                ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
-                &integrity,
-            )
-            .unwrap();
-        assert!(
-            matches!(outcome1, PutOutcome::Inserted),
-            "first store should return Inserted, not AlreadyExists"
-        );
-
-        let outcome2 = store
-            .put_if_absent(
-                &object_key,
-                ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
-                &integrity,
-            )
-            .unwrap();
-        assert!(
-            matches!(outcome2, PutOutcome::AlreadyExists),
-            "second store should return AlreadyExists, not Inserted"
-        );
+        for payload in [
+            "xorb store test",
+            "idempotent test",
+            "idempotent already exists test",
+        ] {
+            for preinstalled in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let store = ServerObjectStore::local(tmp.path().join("objects")).unwrap();
+                let packed = pack_chunks_into_xorb(&[(payload.as_bytes().to_vec(), 0)]).unwrap();
+                let key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
+                let length = packed.serialized.len() as u64;
+                let integrity = ObjectIntegrity::new(
+                    crate::local_backend::chunk_hash(&packed.serialized),
+                    length,
+                );
+                if preinstalled {
+                    assert_eq!(
+                        store
+                            .put_if_absent(
+                                &key,
+                                ObjectBody::from_slice(&packed.serialized),
+                                &integrity
+                            )
+                            .unwrap(),
+                        PutOutcome::Inserted
+                    );
+                }
+                for inserted in [!preinstalled, false] {
+                    assert_eq!(
+                        store_xorb(&store, &packed.xorb_hash_hex, &packed.serialized)
+                            .await
+                            .unwrap(),
+                        inserted
+                    );
+                    assert!(store.contains(&key).unwrap());
+                    assert_eq!(store.metadata(&key).unwrap().unwrap().length(), length);
+                    assert_eq!(
+                        store.read_full_object(&key, length).unwrap(),
+                        packed.serialized
+                    );
+                    assert_eq!(
+                        store
+                            .put_if_absent(
+                                &key,
+                                ObjectBody::from_slice(&packed.serialized),
+                                &integrity
+                            )
+                            .unwrap(),
+                        PutOutcome::AlreadyExists
+                    );
+                }
+            }
+        }
     }
 }
