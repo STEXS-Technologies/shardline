@@ -103,80 +103,44 @@ fn walk_tree_into(
     }
 
     let mut names = HashSet::new();
-    let data = &tree_obj.data;
-    let mut pos = 0;
+    let mut data = tree_obj.data.as_slice();
 
-    while pos < data.len() {
+    while !data.is_empty() {
         *remaining = remaining.checked_sub(1).ok_or_else(|| {
             SmartHttpError::StoreFiles("tree traversal exceeds 100000 entries".to_owned())
         })?;
-        // Parse mode (octal string until space).
-        // SAFETY: While loop ensures pos < data.len(), so data.get(pos..) is Some.
-        // .position() scans from pos for the first space byte. If found, space_pos
-        // is relative to pos, so pos + space_pos < data.len().
-        let tail = data
-            .get(pos..)
-            .ok_or(SmartHttpError::TreePositionOutOfBounds)?;
-        let space_pos = tail
+        // Each entry is mode + space + name + NUL + a 20-byte object ID.
+        let space_pos = data
             .iter()
-            .position(|&b| b == b' ')
+            .position(|&byte| byte == b' ')
             .ok_or(SmartHttpError::TreeMissingSpaceAfterMode)?;
-        // SAFETY: space_pos found within data[pos..], so it fits within bounds.
-        // Using .and_then chaining avoids the addition expression entirely.
-        let mode_slice = data
-            .get(pos..)
-            .and_then(|s| s.get(..space_pos))
+        let (mode_slice, name_tail) = data
+            .split_at_checked(space_pos)
             .ok_or(SmartHttpError::TreeModeRangeOutOfBounds)?;
         let mode_str = std::str::from_utf8(mode_slice)
-            .map_err(|e| SmartHttpError::TreeModeEncoding(e.to_string()))?;
-
-        // Parse name (until null byte).
-        // SAFETY: pos + space_pos < data.len() (proven above), so name_start <= data.len()
-        let name_start = pos
-            .checked_add(space_pos)
-            .and_then(|p| p.checked_add(1))
-            .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
-        // SAFETY: name_start <= data.len() so the slice is valid (empty if equal)
-        let name_tail = data
-            .get(name_start..)
+            .map_err(|error| SmartHttpError::TreeModeEncoding(error.to_string()))?;
+        let name_tail = name_tail
+            .strip_prefix(b" ")
             .ok_or(SmartHttpError::TreeNamePositionOutOfBounds)?;
         let null_pos = name_tail
             .iter()
-            .position(|&b| b == 0)
+            .position(|&byte| byte == 0)
             .ok_or(SmartHttpError::TreeMissingNullAfterName)?;
-        // SAFETY: null_pos found within data[name_start..], so it fits within bounds.
-        let name_slice = data
-            .get(name_start..)
-            .and_then(|s| s.get(..null_pos))
+        let (name_slice, sha_tail) = name_tail
+            .split_at_checked(null_pos)
             .ok_or(SmartHttpError::TreeNameRangeOutOfBounds)?;
         let name = std::str::from_utf8(name_slice)
-            .map_err(|e| SmartHttpError::TreeNameEncoding(e.to_string()))?;
-
-        // Parse SHA (20 bytes after null).
-        // SAFETY: name_start + null_pos < data.len() (proven above), so sha_start <= data.len()
-        let sha_start = name_start
-            .checked_add(null_pos)
-            .and_then(|p| p.checked_add(1))
-            .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
-        // SAFETY: sha_start + 20 <= data.len() checked below with checked_add
-        let sha_end = sha_start
-            .checked_add(20)
-            .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
-        if sha_end > data.len() {
-            return Err(SmartHttpError::TreeTruncatedSha);
-        }
-        let mut entry_sha = [0u8; 20];
-        // SAFETY: sha_start + 20 <= data.len() checked above
-        let sha_slice = data
-            .get(sha_start..)
-            .and_then(|s| s.get(..20))
+            .map_err(|error| SmartHttpError::TreeNameEncoding(error.to_string()))?;
+        let sha_tail = sha_tail
+            .strip_prefix(b"\0")
             .ok_or(SmartHttpError::TreeShaRangeOutOfBounds)?;
-        entry_sha.copy_from_slice(sha_slice);
-
-        // SAFETY: sha_start + 20 <= data.len() (checked above) so next pos is valid or == len
-        pos = sha_start
-            .checked_add(20)
-            .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
+        let (sha_slice, next_entry) = sha_tail
+            .split_at_checked(20)
+            .ok_or(SmartHttpError::TreeTruncatedSha)?;
+        let entry_sha: [u8; 20] = sha_slice
+            .try_into()
+            .map_err(|_error| SmartHttpError::TreeShaRangeOutOfBounds)?;
+        data = next_entry;
 
         if name.is_empty()
             || name.contains('/')

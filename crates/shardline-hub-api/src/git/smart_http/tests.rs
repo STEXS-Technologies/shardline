@@ -1704,28 +1704,18 @@ async fn receive_pack_non_fast_forward_denied_leaves_no_side_effects() {
     );
 }
 
-// --- walk_git_tree with truncated SHA (error path, line ~1163) ---
-
 #[test]
-fn walk_git_tree_truncated_sha_errors() {
-    // Build a tree entry with a truncated SHA (only 10 bytes instead of 20)
+fn walk_git_tree_rejects_every_truncated_entry_prefix() {
     let blob = crate::git::pack::create_blob_object(b"dummy");
-    let mut tree_data = Vec::new();
-    tree_data.extend_from_slice(b"100644 f\0");
-    tree_data.extend_from_slice(&[0xaa; 10]); // only 10 bytes!
-
-    // Need to also include the null byte after the name for proper parsing
-    // Actually the format is: "100644 f\0" + 20 bytes SHA. If SHA is truncated,
-    // the sha_start + 20 > data.len() check should catch it.
-    let tree = crate::git::pack::GitObject::tree(tree_data);
-    let tree_sha = tree.sha1();
-
-    let owned = vec![blob, tree];
-    let objects: std::collections::HashMap<[u8; 20], &crate::git::pack::GitObject> =
-        owned.iter().map(|o| (o.sha1(), o)).collect();
-
-    let result = walk_git_tree(&tree_sha, &objects, "");
-    assert!(result.is_err());
+    let complete = crate::git::pack::create_tree_object(&[(0o100644, "file", &blob.sha1())]);
+    for length in 1..complete.data.len() {
+        let tree = GitObject::tree(complete.data[..length].to_vec());
+        let objects = std::collections::HashMap::from([(blob.sha1(), &blob), (tree.sha1(), &tree)]);
+        assert!(
+            walk_git_tree(&tree.sha1(), &objects, "").is_err(),
+            "accepted entry truncated to {length} bytes"
+        );
+    }
 }
 
 // --- info_refs_upload_pack / info_refs_receive_pack wrappers ---
