@@ -387,51 +387,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn collect_candidate_invalid_file_id_reports_issue() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let store = LocalRecordStore::open(root.clone());
-        // file_id with path traversal fails validate_identifier
-        let record = make_file_record("../etc/passwd", &valid_hex_hash());
-        store.write_version_record(&record).await.unwrap();
+    async fn invalid_candidate_records_report_issues_and_remain_unselected() {
+        use shardline_index::FileChunkRecord;
 
-        let mut candidates = HashMap::new();
-        let mut xorbs = HashSet::new();
-        let mut report = IndexRebuildReport::default();
+        for (record, kind) in [
+            (
+                make_file_record("../etc/passwd", &valid_hex_hash()),
+                IndexRebuildIssueKind::InvalidVersionFileId,
+            ),
+            (
+                make_file_record("test.txt", "not-a-valid-content-hash!!!"),
+                IndexRebuildIssueKind::InvalidVersionContentHash,
+            ),
+            (
+                FileRecord {
+                    deduplication_domain: None,
+                    file_id: "test.txt".to_owned(),
+                    content_hash: valid_hex_hash(),
+                    total_bytes: 100,
+                    chunk_size: 100,
+                    storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+                    repository_scope: None,
+                    chunks: vec![FileChunkRecord {
+                        hash: "b".repeat(64),
+                        offset: 0,
+                        length: 0, // zero-length chunk => EmptyChunk error
+                        range_start: 0,
+                        range_end: 0,
+                        packed_start: 0,
+                        packed_end: 0,
+                    }],
+                },
+                IndexRebuildIssueKind::InvalidVersionReconstructionPlan,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = LocalRecordStore::open(dir.path().to_path_buf());
+            store.write_version_record(&record).await.unwrap();
 
-        RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
-            Ok::<(), crate::RebuildError>(())
-        })
-        .await
-        .unwrap();
+            let mut candidates = HashMap::new();
+            let mut xorbs = HashSet::new();
+            let mut report = IndexRebuildReport::default();
+            RecordTraversal::visit_version_records(&store, |entry| {
+                collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+                Ok::<(), crate::RebuildError>(())
+            })
+            .await
+            .unwrap();
 
-        assert_rejected_version(&report, IndexRebuildIssueKind::InvalidVersionFileId);
-        assert!(candidates.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn collect_candidate_invalid_content_hash_reports_issue() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let store = LocalRecordStore::open(root.clone());
-        // Non-hex content hash fails validate_content_hash
-        let record = make_file_record("test.txt", "not-a-valid-content-hash!!!");
-        store.write_version_record(&record).await.unwrap();
-
-        let mut candidates = HashMap::new();
-        let mut xorbs = HashSet::new();
-        let mut report = IndexRebuildReport::default();
-
-        RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
-            Ok::<(), crate::RebuildError>(())
-        })
-        .await
-        .unwrap();
-
-        assert_rejected_version(&report, IndexRebuildIssueKind::InvalidVersionContentHash);
-        assert!(candidates.is_empty());
+            assert_rejected_version(&report, kind);
+            assert!(candidates.is_empty());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -549,51 +555,6 @@ mod tests {
         .unwrap();
 
         assert_rejected_version(&report, IndexRebuildIssueKind::VersionPathMismatch);
-        assert!(candidates.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn collect_candidate_invalid_reconstruction_plan_reports_issue() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let store = LocalRecordStore::open(root.clone());
-        // EmptyChunk in the plan fails validate_reconstruction_plan
-        use shardline_index::FileChunkRecord;
-        let record = FileRecord {
-            deduplication_domain: None,
-            file_id: "test.txt".to_owned(),
-            content_hash: valid_hex_hash(),
-            total_bytes: 100,
-            chunk_size: 100,
-            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
-            repository_scope: None,
-            chunks: vec![FileChunkRecord {
-                hash: "b".repeat(64),
-                offset: 0,
-                length: 0, // zero-length chunk => EmptyChunk error
-                range_start: 0,
-                range_end: 0,
-                packed_start: 0,
-                packed_end: 0,
-            }],
-        };
-        store.write_version_record(&record).await.unwrap();
-
-        let mut candidates = HashMap::new();
-        let mut xorbs = HashSet::new();
-        let mut report = IndexRebuildReport::default();
-
-        RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
-            Ok::<(), crate::RebuildError>(())
-        })
-        .await
-        .unwrap();
-
-        assert_rejected_version(
-            &report,
-            IndexRebuildIssueKind::InvalidVersionReconstructionPlan,
-        );
         assert!(candidates.is_empty());
     }
 
