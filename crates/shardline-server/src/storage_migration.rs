@@ -167,9 +167,8 @@ pub fn run_storage_migration(
         }
 
         let bytes = read_full_object(&source, metadata.key(), metadata.length())?;
-        let observed_length = u64::try_from(bytes.len())?;
-        validate_source_object_matches_content_addressed_key(metadata.key(), &bytes)?;
-        let integrity = ObjectIntegrity::new(chunk_hash(&bytes), observed_length);
+        let integrity = source_object_integrity(metadata.key(), &bytes)?;
+        let observed_length = integrity.length();
         let outcome =
             destination.put_if_absent(metadata.key(), ObjectBody::from_vec(bytes), &integrity)?;
         match outcome {
@@ -188,17 +187,17 @@ pub fn run_storage_migration(
     Ok(report)
 }
 
-fn validate_source_object_matches_content_addressed_key(
-    key: &ObjectKey,
-    bytes: &[u8],
-) -> Result<(), ServerError> {
-    if let Some(expected_hash) = chunk_hash_from_chunk_object_key_if_present(key)? {
+fn source_object_integrity(key: &ObjectKey, bytes: &[u8]) -> Result<ObjectIntegrity, ServerError> {
+    let length = u64::try_from(bytes.len())?;
+    let expected_chunk_hash = chunk_hash_from_chunk_object_key_if_present(key)?;
+    let physical_hash = chunk_hash(bytes);
+    if let Some(expected_hash) = expected_chunk_hash {
         // XorbCdcV1 chunk objects are stored LZ4-compressed with a 4-byte
         // little-endian uncompressed-size prefix (see download_stream.rs), so
         // their content hash only matches after decompression. FixedChunkV1
         // objects are stored raw. Either verification passing is sufficient;
         // corrupt objects fail both.
-        let observed_hash = xet_hash_hex_string(chunk_hash(bytes));
+        let observed_hash = xet_hash_hex_string(physical_hash);
         let mut matches = observed_hash == expected_hash;
         if !matches {
             let decompressed_size = bytes
@@ -229,7 +228,7 @@ fn validate_source_object_matches_content_addressed_key(
         ensure_observed_hash_matches_key(key, expected_hash, &observed_hash)?;
     }
 
-    Ok(())
+    Ok(ObjectIntegrity::new(physical_hash, length))
 }
 
 fn ensure_observed_hash_matches_key(
@@ -267,8 +266,7 @@ mod tests {
 
     use super::{
         StorageMigrationEndpoint, StorageMigrationOptions, StorageMigrationReport, endpoint_store,
-        ensure_observed_hash_matches_key, run_storage_migration,
-        validate_source_object_matches_content_addressed_key,
+        ensure_observed_hash_matches_key, run_storage_migration, source_object_integrity,
     };
     use crate::{
         ServerError,
@@ -557,7 +555,7 @@ mod tests {
         }
     }
 
-    // ── validate_source_object_matches_content_addressed_key ─────────────
+    // ── source_object_integrity ─────────────
 
     #[test]
     fn migration_preserves_existing_objects_in_new_evidence_namespace() {
@@ -647,7 +645,7 @@ mod tests {
     fn validate_source_ok_for_non_content_addressed_key() {
         // A key that does not match any content-addressed pattern should pass
         let key = ObjectKey::parse("some/arbitrary/key.bin").unwrap();
-        let result = validate_source_object_matches_content_addressed_key(&key, b"any bytes");
+        let result = source_object_integrity(&key, b"any bytes");
         assert!(result.is_ok());
     }
 
@@ -666,7 +664,7 @@ mod tests {
         );
 
         // Call with wrong bytes (should trigger hash mismatch)
-        let result = validate_source_object_matches_content_addressed_key(&key, b"wrong-bytes");
+        let result = source_object_integrity(&key, b"wrong-bytes");
         assert!(result.is_err(), "expected err for hash mismatch, got ok");
         let err = result.unwrap_err();
         assert!(matches!(err, ServerError::ObjectStore(_)));
@@ -682,10 +680,13 @@ mod tests {
         let correct_hash = chunk_hash(body);
         let key = chunk_object_key(&xet_hash_hex_string(correct_hash)).unwrap();
         let compressed = lz4_flex::compress_prepend_size(body);
-        let result = validate_source_object_matches_content_addressed_key(&key, &compressed);
-        assert!(
-            result.is_ok(),
-            "expected ok for compressed chunk, got {result:?}"
+        let result = source_object_integrity(&key, &compressed);
+        assert_eq!(
+            result.unwrap(),
+            ObjectIntegrity::new(
+                chunk_hash(&compressed),
+                u64::try_from(compressed.len()).unwrap()
+            )
         );
     }
 
@@ -700,7 +701,7 @@ mod tests {
         let parsed = shard_hash_from_object_key_if_present(&key).unwrap();
         assert!(parsed.is_some(), "key should parse shard hash: {key_str}");
 
-        let result = validate_source_object_matches_content_addressed_key(&key, b"wrong-bytes");
+        let result = source_object_integrity(&key, b"wrong-bytes");
         assert!(
             result.is_err(),
             "expected err for shard hash mismatch, got ok"
@@ -838,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_source_object_matches_content_addressed_key_xorb_path() {
+    fn source_object_integrity_xorb_path() {
         // Create a valid xorb key pattern: xorbs/default/{prefix}/{hash}.xorb
         let hash_hex = "aa".repeat(32);
         let key_str = format!("xorbs/default/{}/{}.xorb", &hash_hex[..2], hash_hex);
@@ -849,8 +850,7 @@ mod tests {
         assert!(parsed.is_some(), "key should parse xorb hash: {key_str}");
 
         // Call with bytes that are not a valid serialized xorb
-        let result =
-            validate_source_object_matches_content_addressed_key(&key, b"not-a-valid-xorb");
+        let result = source_object_integrity(&key, b"not-a-valid-xorb");
         assert!(
             result.is_err(),
             "expected err for invalid xorb bytes, got ok"
@@ -861,13 +861,13 @@ mod tests {
     fn validate_source_xorb_non_xorb_key_does_not_validate_as_xorb() {
         // A key without the xorb format should skip the xorb check
         let key = ObjectKey::parse("some/random/key.bin").unwrap();
-        let result = validate_source_object_matches_content_addressed_key(&key, b"any-data");
+        let result = source_object_integrity(&key, b"any-data");
         assert!(result.is_ok(), "non-xorb key should pass validation");
         // Also test that a valid xorb key pattern but with invalid xorb data fails
         let hash_hex = "bb".repeat(32);
         let key_str = format!("xorbs/default/{}/{}.xorb", &hash_hex[..2], hash_hex);
         let key = ObjectKey::parse(&key_str).unwrap();
-        let result = validate_source_object_matches_content_addressed_key(&key, b"\0\0\0\0");
+        let result = source_object_integrity(&key, b"\0\0\0\0");
         assert!(result.is_err(), "invalid xorb bytes should fail validation");
     }
 }
