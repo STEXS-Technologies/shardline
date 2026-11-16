@@ -4175,6 +4175,17 @@ reproduce a hosted machine's memory limits or scheduling environment. The
 results do not establish a compiler or debug-profile cause, qualify the 1 GiB
 workload under these settings, or resolve the historical failure.
 
+A subsequent comparison used the exact historical merge checkout
+`74444f209ba0f56fd3db81cfc8d2036330bc8637`. Its Git tree is identical to candidate
+`a0c995f27545a5fdfd277433fc5d238fd7379bc7`. With the same Rust 1.100.0,
+full-debug, nonincremental and two-CPU settings, all three original 256 MiB
+transfers passed in 76.163 seconds, with additional RSS of 54,268, 53,684 and
+54,228 KiB. The historical command uses `-p sdx --test e2e` in place of
+`--manifest-path e2e/Cargo.toml --test sdk_client_e2e`. This source-matched
+comparison still did not reproduce the hosted failure. It also means the
+current local passes cannot be attributed to a cleanup fix; hosted-machine
+differences and the original concurrent-test scheduling remain uncontrolled.
+
 The earlier local passes above do not explain the failure in
 [hosted E2E run 43704721020](https://github.com/STEXS-Technologies/shardline/actions/runs/43704721020).
 Its checkout was PR merge `74444f2`, merging candidate `a0c995f27545a5fdfd277433fc5d238fd7379bc7`
