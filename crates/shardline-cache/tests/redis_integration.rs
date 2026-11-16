@@ -193,7 +193,7 @@ async fn redis_cache_releases_cancelled_load_reservations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn redis_cache_rejects_stale_reservation_publication() {
+async fn redis_cache_fences_stale_reservation_mutations() {
     let Some((stack, cache)) = redis_fixture(3600) else {
         return;
     };
@@ -204,6 +204,13 @@ async fn redis_cache_rejects_stale_reservation_publication() {
         ReconstructionCacheLookup::Reserved(reservation) => reservation,
         ReconstructionCacheLookup::Hit(_) => panic!("test key must start cold"),
     };
+
+    assert!(
+        cache
+            .touch_reservation(&key, &stale_reservation)
+            .await
+            .unwrap()
+    );
 
     let client = redis::Client::open(redis_url).unwrap();
     let mut connection = client.get_multiplexed_async_connection().await.unwrap();
@@ -224,6 +231,18 @@ async fn redis_cache_rejects_stale_reservation_publication() {
         stale_publish,
         Err(ReconstructionCacheError::LostLoadingReservation)
     ));
+    assert!(
+        !cache
+            .touch_reservation(&key, &stale_reservation)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !cache
+            .delete_reserved(&key, &stale_reservation)
+            .await
+            .unwrap()
+    );
     let stored: Option<Vec<u8>> = connection.get(&redis_key).await.unwrap();
     assert!(stored.is_none(), "a fenced stale loader must not publish");
     let owner: Option<String> = connection.get(&loading_key).await.unwrap();

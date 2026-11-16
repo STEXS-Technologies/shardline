@@ -2,7 +2,7 @@ use std::{
     fmt,
     future::Future,
     num::NonZeroU64,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
@@ -248,14 +248,17 @@ impl RedisReconstructionCache {
         loading_key: &str,
         token: &str,
     ) -> Result<bool, ReconstructionCacheError> {
-        let deleted: i64 = redis::Script::new(
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then \
+        static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+            redis::Script::new(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then \
              return redis.call('DEL', KEYS[1]) else return 0 end",
-        )
-        .key(loading_key)
-        .arg(token)
-        .invoke_async(connection)
-        .await?;
+            )
+        });
+        let deleted: i64 = SCRIPT
+            .key(loading_key)
+            .arg(token)
+            .invoke_async(connection)
+            .await?;
         Ok(deleted > 0)
     }
 }
@@ -310,12 +313,15 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
                 loop {
                     let mut connection = self.get_connection().await?;
                     let lease_millis = u64::try_from(REDIS_LOADING_LEASE.as_millis())?;
-                    let (state, payload): (i64, Option<Vec<u8>>) = redis::Script::new(
+                    static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+                        redis::Script::new(
                         "local value = redis.call('GET', KEYS[1]); \
                          if value then return {1, value} end; \
                          local acquired = redis.call('SET', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]); \
                          if acquired then return {2, false} else return {0, false} end",
-                    )
+                        )
+                    });
+                    let (state, payload): (i64, Option<Vec<u8>>) = SCRIPT
                     .key(&redis_key)
                     .key(&loading_key)
                     .arg(&reservation_token)
@@ -374,19 +380,22 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
             self.with_operation_timeout(async {
                 let mut connection = self.get_connection().await?;
                 let ttl_seconds = self.ttl_seconds.get();
-                let published: i64 = redis::Script::new(
-                    "if redis.call('GET', KEYS[2]) == ARGV[1] then \
+                static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+                    redis::Script::new(
+                        "if redis.call('GET', KEYS[2]) == ARGV[1] then \
                      redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3]); \
                      redis.call('DEL', KEYS[2]); return 1 else return 0 end",
-                )
-                .key(&redis_key)
-                .key(&loading_key)
-                .arg(token)
-                .arg(payload)
-                .arg(ttl_seconds)
-                .invoke_async(&mut connection)
-                .await
-                .map_err(expiration_error)?;
+                    )
+                });
+                let published: i64 = SCRIPT
+                    .key(&redis_key)
+                    .key(&loading_key)
+                    .arg(token)
+                    .arg(payload)
+                    .arg(ttl_seconds)
+                    .invoke_async(&mut connection)
+                    .await
+                    .map_err(expiration_error)?;
                 if published == 0 {
                     return Err(ReconstructionCacheError::LostLoadingReservation);
                 }
@@ -423,16 +432,19 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
             let loading_key = Self::loading_key(&redis_key);
             self.with_operation_timeout(async {
                 let mut connection = self.get_connection().await?;
-                let released: i64 = redis::Script::new(
-                    "if redis.call('GET', KEYS[2]) == ARGV[1] then \
+                static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+                    redis::Script::new(
+                        "if redis.call('GET', KEYS[2]) == ARGV[1] then \
                      local deleted = redis.call('DEL', KEYS[1]); \
                      redis.call('DEL', KEYS[2]); return deleted else return 0 end",
-                )
-                .key(&redis_key)
-                .key(&loading_key)
-                .arg(token)
-                .invoke_async(&mut connection)
-                .await?;
+                    )
+                });
+                let released: i64 = SCRIPT
+                    .key(&redis_key)
+                    .key(&loading_key)
+                    .arg(token)
+                    .invoke_async(&mut connection)
+                    .await?;
                 Ok(released > 0)
             })
             .await
@@ -452,15 +464,18 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
             self.with_operation_timeout(async {
                 let mut connection = self.get_connection().await?;
                 let lease_millis = u64::try_from(REDIS_LOADING_LEASE.as_millis())?;
-                let refreshed: i64 = redis::Script::new(
-                    "if redis.call('GET', KEYS[1]) == ARGV[1] then \
+                static SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+                    redis::Script::new(
+                        "if redis.call('GET', KEYS[1]) == ARGV[1] then \
                      return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end",
-                )
-                .key(loading_key)
-                .arg(token)
-                .arg(lease_millis)
-                .invoke_async(&mut connection)
-                .await?;
+                    )
+                });
+                let refreshed: i64 = SCRIPT
+                    .key(loading_key)
+                    .arg(token)
+                    .arg(lease_millis)
+                    .invoke_async(&mut connection)
+                    .await?;
                 Ok(refreshed > 0)
             })
             .await
