@@ -430,15 +430,6 @@ mod tests {
         assert!(with_dry_run.dry_run);
     }
 
-    #[test]
-    fn storage_migration_options_debug_and_clone() {
-        let source = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/src"));
-        let dest = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/dst"));
-        let options = StorageMigrationOptions::new(source, dest);
-        let debug = format!("{options:?}");
-        assert!(debug.contains("dry_run"));
-    }
-
     // ── StorageMigrationReport ────────────────────────────────────────────
 
     #[test]
@@ -521,38 +512,55 @@ mod tests {
     }
 
     #[test]
-    fn storage_migration_copies_local_objects_idempotently() {
+    fn local_migration_preserves_dry_run_prefix_copy_and_idempotency_contracts() {
         let source = tempfile::tempdir().unwrap();
         let destination = tempfile::tempdir().unwrap();
         let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
         let body = b"payload";
         let key = chunk_object_key_for_computed_hash(chunk_hash(body))
-            .map(|(_hash, key)| key)
-            .unwrap();
+            .unwrap()
+            .1;
         let integrity = ObjectIntegrity::new(chunk_hash(body), 7);
-        let put = source_store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
-        assert!(put.is_ok());
-
+        source_store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
         let options = StorageMigrationOptions::new(
             StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
             StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
         );
-        let first = run_storage_migration(&options);
-        assert!(first.is_ok());
-        if let Ok(first) = first {
-            assert_eq!(first.scanned_objects, 1);
-            assert_eq!(first.inserted_objects, 1);
-            assert_eq!(first.already_present_objects, 0);
-            assert_eq!(first.copied_bytes, 7);
-        }
 
-        let second = run_storage_migration(&options);
-        assert!(second.is_ok());
-        if let Ok(second) = second {
-            assert_eq!(second.scanned_objects, 1);
-            assert_eq!(second.inserted_objects, 0);
-            assert_eq!(second.already_present_objects, 1);
-        }
+        let dry = run_storage_migration(&options.clone().with_dry_run(true)).unwrap();
+        assert_eq!(dry.scanned_objects, 1);
+        assert_eq!(dry.scanned_bytes, 7);
+        assert_eq!(dry.inserted_objects, 0);
+        assert_eq!(dry.copied_bytes, 0);
+        assert!(dry.dry_run);
+        let destination_path = destination.path().join("chunks").join(key.as_str());
+        assert!(!destination_path.exists());
+
+        let excluded = run_storage_migration(
+            &options
+                .clone()
+                .with_prefix("nonexistent-prefix/".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(excluded.scanned_objects, 0);
+        assert_eq!(excluded.inserted_objects, 0);
+        assert!(!destination_path.exists());
+
+        let first = run_storage_migration(&options).unwrap();
+        assert_eq!(first.scanned_objects, 1);
+        assert_eq!(first.inserted_objects, 1);
+        assert_eq!(first.already_present_objects, 0);
+        assert_eq!(first.copied_bytes, 7);
+        assert_eq!(fs::read(&destination_path).unwrap(), body);
+
+        let second = run_storage_migration(&options).unwrap();
+        assert_eq!(second.scanned_objects, 1);
+        assert_eq!(second.inserted_objects, 0);
+        assert_eq!(second.already_present_objects, 1);
+        assert_eq!(second.copied_bytes, 0);
+        assert_eq!(fs::read(destination_path).unwrap(), body);
     }
 
     // ── source_object_integrity ─────────────
@@ -777,65 +785,6 @@ mod tests {
                 .exists(),
             "storage migration wrote corrupt source bytes into the destination under the original key"
         );
-    }
-
-    #[test]
-    fn storage_migration_dry_run_does_not_write() {
-        let source = tempfile::tempdir().unwrap();
-        let destination = tempfile::tempdir().unwrap();
-
-        let body = b"dry-run-payload";
-        let key = chunk_object_key_for_computed_hash(chunk_hash(body))
-            .map(|(_hash, key)| key)
-            .unwrap();
-        let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
-        let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
-        source_store
-            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
-            .unwrap();
-
-        let options = StorageMigrationOptions::new(
-            StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
-            StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
-        )
-        .with_dry_run(true);
-        let report = run_storage_migration(&options).unwrap();
-        assert_eq!(report.scanned_objects, 1);
-        assert_eq!(report.scanned_bytes, body.len() as u64);
-        assert_eq!(report.inserted_objects, 0);
-        assert_eq!(report.copied_bytes, 0);
-        assert!(report.dry_run);
-
-        // Verify destination is untouched
-        let dest_path = destination.path().join("chunks").join(key.as_str());
-        assert!(!dest_path.exists());
-    }
-
-    #[test]
-    fn storage_migration_local_to_local_with_different_prefixes() {
-        let source = tempfile::tempdir().unwrap();
-        let destination = tempfile::tempdir().unwrap();
-
-        let body = b"prefix-test-data";
-        let key = chunk_object_key_for_computed_hash(chunk_hash(body))
-            .map(|(_hash, key)| key)
-            .unwrap();
-
-        let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
-        let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
-        source_store
-            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
-            .unwrap();
-
-        // Use a prefix that won't match
-        let options = StorageMigrationOptions::new(
-            StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
-            StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
-        )
-        .with_prefix("nonexistent-prefix/".to_owned());
-        let report = run_storage_migration(&options).unwrap();
-        assert_eq!(report.scanned_objects, 0);
-        assert_eq!(report.inserted_objects, 0);
     }
 
     #[test]
