@@ -101,7 +101,7 @@ def write_summary(output, results, direct):
                      f'{row["maintenance"]["latency"]["put"]["p99_ms"]:.2f} | '
                      f'{row["initial_stored_to_logical_ratio"]:.3f} |')
     if any("retention_expiry" in row for row in results):
-        lines += ["", "## Footprint after real quarantine expiry", "",
+        lines += ["", "## Footprint after retention observation and GC", "",
                   "All three upload phases remain live; logical bytes include all three sets of object names.", "",
                   "| Data | Replicas | Repeat | Before expiry bytes | After expiry GC bytes | Live logical bytes | Quarantine remaining | Verified reads |",
                   "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]

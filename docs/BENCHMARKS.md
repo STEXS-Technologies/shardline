@@ -5505,3 +5505,76 @@ all-features Hub library/test Clippy passed during the changes. This is local fu
 qualification; it does not qualify production throughput, establish
 a measured speedup from these changes, or resolve the historical hosted SDK
 memory failure.
+
+### Release-build cross-protocol reuse checkpoint (2026-11-16)
+
+Frozen all-features release source
+`864d11621d5d97981c25dd3be60e973cc0ce7a6c` repeated the 32-version
+benchmark using `scripts/shardline/benchmark_protocol_dedup.py`, Rust 1.99.0
+and `hf_xet` 1.7.0. The executable SHA-256 was
+`93bd48c1575904f1d87c2afa149bf6d7651a544db975a54ff5c18ac1451454a0`.
+Each version is 4 MiB with a distinct 4 KiB edit; the CDC target is 64 KiB,
+the seed is 20261114, and the logical versioned total is 134,217,728 bytes.
+
+| Frontend | Retained Xorb bytes after GC | Total physical object bytes after GC | Verified downloads |
+| --- | ---: | ---: | ---: |
+| Native Xet | 6,984,571 | 7,025,522 | 32/32 |
+| S3 | 6,984,691 | 6,984,810 | 32/32 |
+| Basic Git LFS | 6,984,691 | 6,984,810 | 32/32 |
+
+Native Xet's total additionally includes 40,832 shard bytes; each lane includes
+119 GC metadata bytes. Database and filesystem overhead are excluded. These
+Xorb counts reproduce the earlier scoped-reuse result. S3 and basic LFS also
+passed the surviving-version read after deleting their first 31 versions and
+running GC. This checks reference safety, not reclamation after retention expiry
+or container repacking. The benchmark uses local storage and does not establish
+PostgreSQL/S3 throughput, concurrent-GC performance, or general customer savings.
+
+### Release PostgreSQL/MinIO retention observation (2026-11-16)
+
+Frozen all-features release source
+`683916e8c4330363f711eaad236af917db0d46ca` completed the performance
+matrix with executable SHA-256
+`b8f1126d02d32063e14c94a6030b51a638518d3d3c493c0ff98fbab1da9704e7`.
+The harness source was `d5d699b08cc104b7c9a8cc04c901a346a121295f`.
+It used disposable PostgreSQL/MinIO, one or two S3 API replicas limited to
+one CPU and 1 GiB each, eight clients, 32 objects of 1 MiB per phase, unique
+and repeated datasets, and three repetitions: 12 lanes in total.
+
+```bash
+python3 -B scripts/shardline/validate_performance.py /path/to/release/shardline \
+  /path/to/results --binary-source-revision 683916e8c4330363f711eaad236af917db0d46ca \
+  --replicas 1 2 --datasets unique repeated --objects 32 \
+  --object-bytes 1048576 --clients 8 --repeats 3 --retention-expiry
+```
+
+Median observed throughput across the three repetitions:
+
+| Data | Replicas | Initial PUT MiB/s | Mixed PUT/GET MiB/s | Mixed PUT/GET with GC MiB/s |
+| --- | ---: | ---: | ---: | ---: |
+| Unique | 1 | 103.67 | 326.57 | 327.05 |
+| Unique | 2 | 112.54 | 452.73 | 436.16 |
+| Repeated | 1 | 126.75 | 348.66 | 330.44 |
+| Repeated | 2 | 133.09 | 445.71 | 456.78 |
+
+Each maintenance phase completed one GC process during the workload; process
+overlap does not prove active collection during every request. All 1,728
+post-workload read checks passed. API writers then stopped for a real one-hour
+retention observation, followed by two GC passes per lane and another 1,728
+successful reads through the resumed replicas. Backend trace validation passed.
+
+After initial GC, stored object bytes were 33,588,967 for every unique-data lane
+and 8,397,247 for every repeated-data lane, independent of replica count. These
+counts include 119 metadata bytes per lane. At that checkpoint, used physical
+member counts equaled distinct used chunk hashes in every lane. After the
+retention observation and final GC, all lanes retained those same byte counts.
+Quarantine was empty both before and after the wait: this demonstrates stable
+footprint and readable references, not reclamation of expired quarantine entries.
+All three upload phases remained logically live. Fixture containers were removed.
+
+These are short bursts on a shared development host, not production-scale
+throughput or cost measurements. The modest initial-ingest increase with two
+replicas does not establish efficient scale-out. Release-profile results cannot
+be compared with the earlier development-profile samples as a cleanup speedup.
+The output retains per-phase latency, backend requests/bytes, database query
+counts, and connection/lock observations for follow-up analysis.
