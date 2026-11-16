@@ -11,8 +11,7 @@
 //! SECURITY VALIDATION PASS 3 — Concrete tests that confirm or refute specific
 //! vulnerabilities found in passes 1 and 2.
 //!
-//! Each test reads actual source code or exercises real code paths to
-//! definitively prove (or disprove) the claimed vulnerability.
+//! These tests exercise request handling, parsing, and storage behavior.
 
 // ============================================================================
 // FINDING 1: JWT Signature Verification — FIXED
@@ -26,27 +25,6 @@
 // ============================================================================
 // FINDING 2: Webhook SSRF — PARTIALLY FIXED (URL validation at creation)
 // ============================================================================
-
-/// Validates that delivery-time URL validation exists in `deliver_one_webhook`.
-///
-/// **[FIXED]**: `deliver_one_webhook` now calls `validate_webhook_url` and
-/// performs DNS resolution to block private/internal IPs at delivery time.
-#[test]
-fn validate_deliver_one_webhook_has_url_validation() {
-    let routes_source = include_str!("../src/routes/webhooks.rs");
-
-    let start = routes_source.find("async fn deliver_one_webhook").unwrap();
-    let fn_body = &routes_source[start..start + 2000];
-
-    assert!(
-        fn_body.contains("validate_webhook_url"),
-        "deliver_one_webhook calls validate_webhook_url"
-    );
-    assert!(
-        fn_body.contains("is_private_ip"),
-        "deliver_one_webhook checks resolved addresses for private IPs"
-    );
-}
 
 /// Validates that webhook URLs accept arbitrary schemes at the store level.
 ///

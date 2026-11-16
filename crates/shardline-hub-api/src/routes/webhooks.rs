@@ -505,6 +505,32 @@ mod tests {
     use crate::routes::test_repo;
     use std::net::IpAddr;
 
+    #[tokio::test]
+    async fn webhook_delivery_rejects_unsafe_urls_before_transport() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/hook",
+            "http://localhost/hook",
+            "http://127.0.0.1/hook",
+            "http://169.254.169.254/hook",
+            "http://10.0.0.1/hook",
+            "http://[::1]/hook",
+            "http://[::ffff:127.0.0.1]/hook",
+        ] {
+            let error = deliver_one_webhook(&client, url, b"private payload", None)
+                .await
+                .expect_err("unsafe destination must fail before sending the payload");
+            assert!(
+                matches!(
+                    error.downcast_ref::<HubApiError>(),
+                    Some(HubApiError::PathValidation(_))
+                ),
+                "{url}: expected URL validation failure, got {error}"
+            );
+        }
+    }
+
     #[test]
     fn webhook_dns_rejects_the_entire_mixed_or_empty_answer() {
         let public = "8.8.8.8:0".parse().unwrap();
@@ -531,49 +557,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_webhook_url_accepts_valid_http() {
+    fn webhook_url_validation_accepts_public_http_and_rejects_unsafe_inputs() {
         assert!(validate_webhook_url("http://example.com/hook").is_ok());
-    }
-
-    #[test]
-    fn validate_webhook_url_rejects_ftp_scheme() {
-        assert!(validate_webhook_url("ftp://example.com/hook").is_err());
-    }
-
-    #[test]
-    fn validate_webhook_url_rejects_javascript_scheme() {
-        assert!(validate_webhook_url("javascript:alert(1)").is_err());
-    }
-
-    #[test]
-    fn validate_webhook_url_rejects_localhost() {
-        assert!(validate_webhook_url("http://localhost/hook").is_err());
-    }
-
-    #[test]
-    fn validate_webhook_url_rejects_private_ip_10() {
-        assert!(validate_webhook_url("http://10.0.0.1/hook").is_err());
-    }
-
-    #[test]
-    fn validate_webhook_url_rejects_private_ip_192_168() {
-        assert!(validate_webhook_url("http://192.168.1.1/hook").is_err());
-    }
-
-    #[test]
-    fn validate_webhook_url_rejects_loopback() {
-        assert!(validate_webhook_url("http://127.0.0.1/hook").is_err());
-    }
-
-    #[test]
-    fn validate_webhook_url_rejects_ipv6_loopback() {
-        assert!(validate_webhook_url("http://[::1]/hook").is_err());
-    }
-
-    #[test]
-    fn validate_webhook_url_rejects_long_url() {
-        let long = format!("http://example.com/{}", "a".repeat(3000));
-        assert!(validate_webhook_url(&long).is_err());
+        let oversized = format!("http://example.com/{}", "a".repeat(3000));
+        for url in [
+            "ftp://example.com/hook",
+            "javascript:alert(1)",
+            "http://localhost/hook",
+            "http://10.0.0.1/hook",
+            "http://192.168.1.1/hook",
+            "http://127.0.0.1/hook",
+            "http://[::1]/hook",
+            oversized.as_str(),
+        ] {
+            assert!(validate_webhook_url(url).is_err(), "{url}");
+        }
     }
 
     #[test]
