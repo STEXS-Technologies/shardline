@@ -55,11 +55,7 @@ where
     })
     .await?;
 
-    let mut desired_latest_paths = HashSet::new();
     for candidate in candidates.values() {
-        let latest_path = RecordTraversal::latest_record_locator(record_store, &candidate.record);
-        desired_latest_paths.insert(latest_path);
-
         let record_bytes = serde_json::to_vec(&candidate.record)?;
         let existing_bytes =
             RecordTraversal::read_latest_record_bytes(record_store, &candidate.record)
@@ -91,7 +87,7 @@ where
     //
     // Gated on run cleanliness (like `prune_stale_reconstructions`): when any
     // version record failed to parse or validate, the candidate set is
-    // incomplete, so a latest record excluded from `desired_latest_paths` may
+    // incomplete, so a latest record excluded from `candidates` may
     // belong to a file whose version record is unreadable rather than to a
     // deleted file. Deleting it then would destroy a valid, authoritative
     // latest record (index loss + GC orphans for a fully intact file). A dirty
@@ -102,7 +98,7 @@ where
     if report.is_clean() {
         let mut stale_latest_paths = Vec::new();
         RecordTraversal::visit_latest_record_locators(record_store, |path| {
-            if !desired_latest_paths.contains(&path) {
+            if !candidates.contains_key(&path) {
                 stale_latest_paths.push(path);
             }
 
@@ -125,7 +121,6 @@ where
     let desired_reconstructions = desired_reconstruction_file_ids(candidates.values());
     // Later phases need only file IDs, not complete records or latest paths.
     drop(candidates);
-    drop(desired_latest_paths);
     prune_stale_reconstructions(index_store, &desired_reconstructions, &mut report).await?;
 
     rebuild_dedupe_shard_mappings(

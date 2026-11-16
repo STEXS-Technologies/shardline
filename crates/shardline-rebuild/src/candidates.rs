@@ -1,28 +1,18 @@
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
+    hash::Hash,
     time::Duration,
 };
 
 use shardline_index::{FileRecord, FileRecordInvariantError, RecordTraversal, StoredRecord};
 use shardline_protocol::RepositoryScope;
-use shardline_server_core::{
-    OpsRecordStore, provider_directory, validate_content_hash, validate_identifier,
-};
+use shardline_server_core::{OpsRecordStore, validate_content_hash, validate_identifier};
 
 use super::{
     IndexRebuildIssueDetail, IndexRebuildIssueKind, IndexRebuildReconstructionPlanDetail,
     IndexRebuildReport, push_issue,
 };
 use shardline_server_core::parse_stored_file_record_bytes;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct RebuildKey {
-    provider: Option<&'static str>,
-    owner: Option<String>,
-    name: Option<String>,
-    revision: Option<String>,
-    file_id: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VersionCandidate<Locator> {
@@ -64,11 +54,12 @@ fn has_invalid_repository_components(bytes: &[u8]) -> bool {
 pub(super) fn collect_candidate<RecordAdapter>(
     record_store: &RecordAdapter,
     entry: StoredRecord<RecordAdapter::Locator>,
-    candidates: &mut HashMap<RebuildKey, VersionCandidate<RecordAdapter::Locator>>,
+    candidates: &mut HashMap<RecordAdapter::Locator, VersionCandidate<RecordAdapter::Locator>>,
     native_xorbs: &mut HashSet<String>,
     report: &mut IndexRebuildReport,
 ) where
     RecordAdapter: OpsRecordStore,
+    RecordAdapter::Locator: Hash,
 {
     let StoredRecord {
         locator: path,
@@ -154,7 +145,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
         );
     }
 
-    let key = rebuild_key(&record);
+    let key = RecordTraversal::latest_record_locator(record_store, &record);
     let candidate = VersionCandidate {
         record,
         locator: path,
@@ -183,17 +174,6 @@ fn reject_version(
     report
         .preserved_latest_records_unreadable_version
         .push(location);
-}
-
-fn rebuild_key(record: &FileRecord) -> RebuildKey {
-    let scope = record.repository_scope.as_ref();
-    RebuildKey {
-        provider: scope.map(|scope| provider_directory(scope.provider())),
-        owner: scope.map(|scope| scope.owner().to_owned()),
-        name: scope.map(|scope| scope.name().to_owned()),
-        revision: scope.and_then(|scope| scope.revision().map(ToOwned::to_owned)),
-        file_id: record.file_id.clone(),
-    }
 }
 
 fn candidate_is_newer<Locator>(
@@ -733,44 +713,54 @@ mod tests {
         assert!(candidates.is_empty());
     }
 
-    // ---- rebuild_key tests ----
-
-    #[test]
-    fn rebuild_keys_preserve_repository_identity_and_revision() {
-        let record = make_file_record("file.txt", &valid_hex_hash());
-        assert_eq!(
-            rebuild_key(&record),
-            RebuildKey {
-                provider: None,
-                owner: None,
-                name: None,
-                revision: None,
-                file_id: "file.txt".to_owned(),
-            }
-        );
-
-        for (provider, directory) in [
-            (RepositoryProvider::GitHub, "github"),
-            (RepositoryProvider::Gitea, "gitea"),
-            (RepositoryProvider::GitLab, "gitlab"),
-            (RepositoryProvider::Codeberg, "codeberg"),
-            (RepositoryProvider::Generic, "generic"),
+    #[tokio::test]
+    async fn candidate_grouping_preserves_repository_identity_revision_and_file_id() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalRecordStore::open(root.path().to_path_buf());
+        let hash = valid_hex_hash();
+        store
+            .write_version_record(&make_file_record("data.bin", &hash))
+            .await
+            .unwrap();
+        for provider in [
+            RepositoryProvider::GitHub,
+            RepositoryProvider::Gitea,
+            RepositoryProvider::GitLab,
+            RepositoryProvider::Codeberg,
+            RepositoryProvider::Generic,
         ] {
             for revision in [None, Some("main")] {
                 let scope = RepositoryScope::new(provider, "team", "repo", revision).unwrap();
-                let record = make_file_record_with_scope("data.bin", &valid_hex_hash(), scope);
-                assert_eq!(
-                    rebuild_key(&record),
-                    RebuildKey {
-                        provider: Some(directory),
-                        owner: Some("team".to_owned()),
-                        name: Some("repo".to_owned()),
-                        revision: revision.map(str::to_owned),
-                        file_id: "data.bin".to_owned(),
-                    }
-                );
+                store
+                    .write_version_record(&make_file_record_with_scope("data.bin", &hash, scope))
+                    .await
+                    .unwrap();
             }
         }
+        for (owner, repo, revision, file_id) in [
+            ("other", "repo", Some("main"), "data.bin"),
+            ("team", "other", Some("main"), "data.bin"),
+            ("team", "repo", Some("other"), "data.bin"),
+            ("team", "repo", Some("main"), "other.bin"),
+        ] {
+            let scope =
+                RepositoryScope::new(RepositoryProvider::GitHub, owner, repo, revision).unwrap();
+            store
+                .write_version_record(&make_file_record_with_scope(file_id, &hash, scope))
+                .await
+                .unwrap();
+        }
+        let mut candidates = HashMap::new();
+        let mut xorbs = HashSet::new();
+        let mut report = IndexRebuildReport::default();
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+            Ok::<(), crate::RebuildError>(())
+        })
+        .await
+        .unwrap();
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(candidates.len(), 15);
     }
 
     // ---- candidate_is_newer tests ----
