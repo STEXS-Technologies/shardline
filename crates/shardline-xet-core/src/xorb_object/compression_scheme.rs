@@ -276,16 +276,11 @@ fn lz4_decompress_from_reader<R: Read, W: Write>(
 }
 
 fn bg4_lz4_compress_from_slice(data: &[u8]) -> Result<Vec<u8>, CoreError> {
-    let grouped = bg4_split(data);
-    let mut enc = FrameEncoder::new(Vec::with_capacity(grouped.len()));
-    enc.write_all(&grouped)?;
-    Ok(enc.finish()?)
+    lz4_compress_from_slice(&bg4_split(data))
 }
 
 fn bg4_lz4_decompress_from_slice(data: &[u8]) -> Result<Vec<u8>, CoreError> {
-    let mut dest = vec![];
-    bg4_lz4_decompress_from_reader(&mut Cursor::new(data), &mut dest)?;
-    Ok(dest)
+    Ok(bg4_regroup(&lz4_decompress_from_slice(data)?))
 }
 
 fn bg4_lz4_decompress_from_reader<R: Read, W: Write>(
