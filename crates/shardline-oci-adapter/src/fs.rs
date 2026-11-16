@@ -261,12 +261,22 @@ pub(crate) async fn persist_upload_session_with_evidence(
     };
     let mut journal_head = existing.as_ref().and_then(|value| value.journal_head);
     let mut journal_bytes = existing.as_ref().and_then(|value| value.journal_bytes);
-    let mut last_evidence_sequence = existing
-        .as_ref()
-        .and_then(|value| value.journal_evidence_sequence);
-    let mut last_snapshot_sequence = existing
-        .as_ref()
-        .and_then(|value| value.journal_snapshot_sequence);
+    let mut last_evidence_sequence = existing.as_ref().and_then(|value| {
+        value.journal_evidence_sequence.or_else(|| {
+            value
+                .journal_evidence_head
+                .as_ref()
+                .map(|event| event.sequence)
+        })
+    });
+    let mut last_snapshot_sequence = existing.as_ref().and_then(|value| {
+        value.journal_snapshot_sequence.or_else(|| {
+            value
+                .journal_snapshot_head
+                .as_ref()
+                .map(|event| event.sequence)
+        })
+    });
     let mut last_merkle_evidence_sequence = existing
         .as_ref()
         .and_then(|value| value.merkle_evidence_sequence);
@@ -285,18 +295,6 @@ pub(crate) async fn persist_upload_session_with_evidence(
     let mut previous_merkle_snapshot_previous = existing
         .as_mut()
         .and_then(|value| value.merkle_snapshot_previous_commit.take());
-    if last_evidence_sequence.is_none() {
-        last_evidence_sequence = existing
-            .as_ref()
-            .and_then(|value| value.journal_evidence_head.as_ref())
-            .map(|event| event.sequence);
-    }
-    if last_snapshot_sequence.is_none() {
-        last_snapshot_sequence = existing
-            .as_ref()
-            .and_then(|value| value.journal_snapshot_head.as_ref())
-            .map(|event| event.sequence);
-    }
 
     if let Some(head) = journal_head
         && (last_evidence_sequence.is_none()
