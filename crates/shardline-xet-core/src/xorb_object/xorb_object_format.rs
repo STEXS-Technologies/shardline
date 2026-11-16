@@ -12,7 +12,7 @@ use super::xorb_chunk_format::{
 use super::{CompressionScheme, XorbChunkHeader};
 use crate::{
     error::{CoreError, Validate},
-    merklehash::{MerkleHash, compute_data_hash, xorb_hash},
+    merklehash::{MerkleHash, aggregated_hashes::xorb_hash_from_owned, compute_data_hash},
     utils::serialization_utils::*,
 };
 
@@ -668,7 +668,7 @@ impl XorbObject {
             return Ok(None);
         }
 
-        let xorb_hash = xorb_hash(&hash_chunks);
+        let xorb_hash = xorb_hash_from_owned(hash_chunks);
         if xorb_hash != *hash || xorb_hash != xorb.info.xorb_hash {
             warn!("XORB Validation: Computed hash does not match provided hash or Info hash.");
             return Ok(None);
@@ -738,28 +738,27 @@ impl SerializedXorbObject {
         compression_scheme: CompressionScheme,
         serialize_footer: bool,
     ) -> Result<Self, CoreError> {
-        let mut xorb_object_info = XorbObjectInfoV1::default();
-
         let (hash, chunk_hashes) = xorb.hash_with_chunk_hashes();
-        xorb_object_info.xorb_hash = hash;
-        let raw_num_bytes = xorb.num_bytes() as u64;
+        let raw_num_bytes = xorb.num_bytes();
         let num_chunks = xorb.data.len();
+        let mut xorb_object_info = XorbObjectInfoV1 {
+            xorb_hash: hash,
+            num_chunks: num_chunks as u64,
+            chunk_boundary_offsets: Vec::with_capacity(num_chunks),
+            chunk_hashes,
+            unpacked_chunk_offsets: xorb
+                .xorb_info
+                .chunk_boundaries
+                .iter()
+                .map(|&b| u64::from(b))
+                .collect(),
+            ..XorbObjectInfoV1::default()
+        };
 
-        xorb_object_info.num_chunks = xorb.data.len() as u64;
-        xorb_object_info.chunk_boundary_offsets =
-            Vec::with_capacity(xorb_object_info.num_chunks as usize);
-        xorb_object_info.chunk_hashes = chunk_hashes;
-        xorb_object_info.unpacked_chunk_offsets = xorb
-            .xorb_info
-            .chunk_boundaries
-            .iter()
-            .map(|&b| b as u64)
-            .collect();
-
-        let size_upper_bound = xorb.num_bytes()
+        let size_upper_bound = raw_num_bytes
             + size_of::<XorbObjectInfoV1>()
             + (32 + 2 * size_of::<u64>() + size_of::<MerkleHash>() + size_of::<XorbChunkHeader>())
-                * xorb.data.len();
+                * num_chunks;
 
         let mut serialized_data = Vec::with_capacity(size_upper_bound);
 
@@ -772,16 +771,18 @@ impl SerializedXorbObject {
 
         xorb_object_info.fill_in_boundary_offsets();
 
-        let mut footer_start = None;
-        if serialize_footer {
-            footer_start = Some(serialized_data.len() as u64);
+        let footer_start = if serialize_footer {
+            let start = serialized_data.len() as u64;
             XorbObject::serialize_given_info(&mut serialized_data, xorb_object_info)?;
-        }
+            Some(start)
+        } else {
+            None
+        };
 
         Ok(Self {
             serialized_data,
             hash,
-            raw_num_bytes,
+            raw_num_bytes: raw_num_bytes as u64,
             num_chunks,
             footer_start,
         })
@@ -930,9 +931,8 @@ fn inspect_footerless_chunks(
         visit(&chunk_header, &compressed_buf)?;
     }
 
-    let computed_hash = xorb_hash(&chunk_hash_and_size);
-    info.xorb_hash = computed_hash;
     info.num_chunks = chunk_hash_and_size.len() as u64;
+    info.xorb_hash = xorb_hash_from_owned(chunk_hash_and_size);
     info.fill_in_boundary_offsets();
 
     Ok(info)
