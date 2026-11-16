@@ -161,12 +161,12 @@ pub(crate) async fn repo_list(
     // Cross-tenant privacy: a caller must never see another tenant's private
     // repositories, even though the list endpoint is global. Public repos and
     // the caller's own private repos (exact `owner/name` match) remain visible.
-    let visible: Vec<_> = repos
-        .into_iter()
-        .filter(|r| repo_visible_to_owner(r, caller_repo_id.as_deref()))
-        .collect();
     let response = RepoListResponse {
-        repos: visible.iter().map(repo_response_from_hub).collect(),
+        repos: repos
+            .iter()
+            .filter(|entry| repo_visible_to_owner(entry, caller_repo_id.as_deref()))
+            .map(repo_response_from_hub)
+            .collect(),
     };
     Ok(Json(response))
 }
@@ -519,16 +519,7 @@ pub(crate) async fn repo_info(
             crate::git::smart_http::public_commit_id(&state, &name, &sha, repo.capability())
                 .await?,
         );
-        response.siblings = Some(
-            files
-                .into_iter()
-                .map(|file| {
-                    serde_json::json!({
-                        "rfilename": file.path, "size": file.size, "blobId": file.sha,
-                    })
-                })
-                .collect(),
-        );
+        response.siblings = Some(file_siblings(files));
     }
 
     Ok(Json(response))
@@ -567,19 +558,21 @@ pub(crate) async fn repo_revision_info(
     {
         response.card_data = parse_yaml_frontmatter(&content);
     }
-    response.siblings = Some(
-        files
-            .into_iter()
-            .map(|file| {
-                serde_json::json!({
-                    "rfilename": file.path,
-                    "size": file.size,
-                    "blobId": file.sha,
-                })
-            })
-            .collect(),
-    );
+    response.siblings = Some(file_siblings(files));
     Ok(Json(response))
+}
+
+fn file_siblings(files: Vec<shardline_index::hub::HubFileEntry>) -> Vec<serde_json::Value> {
+    files
+        .into_iter()
+        .map(|file| {
+            serde_json::json!({
+                "rfilename": file.path,
+                "size": file.size,
+                "blobId": file.sha,
+            })
+        })
+        .collect()
 }
 
 // ---- Repo delete (requires Write) ----
