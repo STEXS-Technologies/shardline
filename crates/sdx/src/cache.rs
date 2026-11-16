@@ -366,17 +366,16 @@ impl ChunkCache {
             let mut state = state.blocking_lock();
             let metadata = serialize_entry_metadata(chunk_range, &offsets, &owned_data);
             write_atomic(&path, &metadata, &owned_data)?;
-            if let Some(existing) = state.entries.get(&key) {
-                state.total_bytes = state.total_bytes.saturating_sub(existing.size);
-            }
-            state.total_bytes = state.total_bytes.saturating_add(size);
-            state.entries.insert(
+            if let Some(existing) = state.entries.insert(
                 key,
                 CacheEntry {
                     size,
                     last_accessed: clock_tick(),
                 },
-            );
+            ) {
+                state.total_bytes = state.total_bytes.saturating_sub(existing.size);
+            }
+            state.total_bytes = state.total_bytes.saturating_add(size);
             while state.total_bytes > budget_bytes {
                 let Some((oldest_key, oldest_size)) = state
                     .entries
@@ -1235,17 +1234,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_returns_identical_data_after_reopen() {
+    async fn replacement_accounting_and_data_survive_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = ChunkCache::new(dir.path().to_path_buf(), 1024).unwrap();
+        let cache = ChunkCache::new(dir.path(), 1024).unwrap();
         let key = hash('b');
-        let data = vec![42u8; 256];
-        put(&cache, &key, &data).await;
+        for length in [256, 512, 64] {
+            let data = vec![42u8; length];
+            put(&cache, &key, &data).await;
+            let expected_size = u64::try_from(HEADER_LEN + 8 + length).unwrap();
+            assert_eq!(cache.entry_count().await.unwrap(), 1);
+            assert_eq!(cache.total_bytes().await.unwrap(), expected_size);
+            assert_eq!(
+                get(&cache, &key).await.unwrap().data.as_ref(),
+                data.as_slice()
+            );
 
-        // A fresh instance rescans the directory and still serves the entry.
-        let reopened = ChunkCache::new(dir.path().to_path_buf(), 1024).unwrap();
-        let cached = get(&reopened, &key).await.unwrap();
-        assert_eq!(cached.data.as_ref(), data.as_slice());
+            let reopened = ChunkCache::new(dir.path(), 1024).unwrap();
+            assert_eq!(reopened.entry_count().await.unwrap(), 1);
+            assert_eq!(reopened.total_bytes().await.unwrap(), expected_size);
+            assert_eq!(
+                get(&reopened, &key).await.unwrap().data.as_ref(),
+                data.as_slice()
+            );
+        }
     }
 
     #[tokio::test]
