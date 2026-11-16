@@ -3997,48 +3997,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_stream_releases_timed_out_pending_data() {
-        let state = RunState::new(CancellationToken::new());
-        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
-        let (tx, rx) = unbounded_channel();
-        let (data_tx, data_rx) = oneshot::channel();
-        tx.send(SequentialRetrievalItem::Data {
-            receiver: data_rx,
-            permit: Some(semaphore.acquire_many(1).await.unwrap()),
-        })
-        .unwrap();
-        let mut stream = queued_download_stream(rx, state);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
-                .await
-                .is_err()
-        );
-        stream.cancel();
-        assert_eq!(semaphore.available_permits(), 1);
-        assert!(data_tx.is_closed());
-        assert!(stream.next().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn dropping_stream_releases_timed_out_pending_data() {
-        let state = RunState::new(CancellationToken::new());
-        let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
-        let (tx, rx) = unbounded_channel();
-        let (data_tx, data_rx) = oneshot::channel();
-        tx.send(SequentialRetrievalItem::Data {
-            receiver: data_rx,
-            permit: Some(semaphore.acquire_many(1).await.unwrap()),
-        })
-        .unwrap();
-        let mut stream = queued_download_stream(rx, state);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
-                .await
-                .is_err()
-        );
-        drop(stream);
-        assert_eq!(semaphore.available_permits(), 1);
-        assert!(data_tx.is_closed());
+    async fn cancel_and_drop_release_timed_out_pending_data() {
+        for cancel in [true, false] {
+            let state = RunState::new(CancellationToken::new());
+            let semaphore = Arc::new(BufferSemaphore::new(1, 1, 1));
+            let (tx, rx) = unbounded_channel();
+            let (data_tx, data_rx) = oneshot::channel();
+            tx.send(SequentialRetrievalItem::Data {
+                receiver: data_rx,
+                permit: Some(semaphore.acquire_many(1).await.unwrap()),
+            })
+            .unwrap();
+            let mut stream = queued_download_stream(rx, state);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(1), stream.next())
+                    .await
+                    .is_err()
+            );
+            if cancel {
+                stream.cancel();
+                // Cancellation releases pending data while the stream is alive.
+                assert_eq!(semaphore.available_permits(), 1);
+                assert!(data_tx.is_closed());
+                assert!(stream.next().await.unwrap().is_none());
+            }
+            drop(stream);
+            assert_eq!(semaphore.available_permits(), 1);
+            assert!(data_tx.is_closed());
+        }
     }
 
     #[tokio::test]
@@ -4759,30 +4745,8 @@ mod tests {
     fn blocking_next_works_from_plain_thread() {
         let rt = Runtime::new().unwrap();
         let (server, mut stream) = rt.block_on(async {
-            let server = MockServer::start().await;
-            let chunk = vec![5u8; 64];
-            let payload = serialize_payload(&[&chunk]);
-            reconstruction_mock(
-                &server,
-                0,
-                4095,
-                0,
-                json!([
-                    {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}}
-                ]),
-                json!({
-                    XORB_HASH: [{
-                        "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
-                        "ranges": [
-                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
-                        ]
-                    }]
-                }),
-            )
-            .await;
-            xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
-            let ctx = test_stream_context(&server, 1_048_576);
-            (server, make_stream(ctx, None))
+            let (server, context) = blocking_stream_fixture().await;
+            (server, make_stream(context, None))
         });
         drop(rt);
 
