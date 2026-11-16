@@ -413,53 +413,41 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn run_hold_list_empty_returns_empty_on_fresh_root() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_hold_lifecycle_preserves_values_filters_expiry_and_reports_release() {
         let sandbox = tempfile::tempdir().unwrap();
-        // Create the expected root structure
-        let root = sandbox.path().join("deployment-root");
-        std::fs::create_dir_all(&root).unwrap();
-
-        let result = run_hold_list(Some(&root), false).await;
-        // This may succeed (empty list) or fail (can't open index) depending on env
-        // We just verify it doesn't panic
-        let _ = result;
-    }
-
-    #[tokio::test]
-    async fn run_hold_set_and_list_and_release_cycle() {
-        let sandbox = tempfile::tempdir().unwrap();
-        let root = sandbox.path().join("deployment-root");
-        std::fs::create_dir_all(&root).unwrap();
-        let object_key = format!("de/{}", "de".repeat(32));
-
-        // Set a hold
-        let set_result = run_hold_set(
-            Some(&root),
-            &object_key,
-            "integration test reason",
-            Some(3600),
-        )
-        .await;
-        let set_was_ok = set_result.is_ok();
-        if let Ok(ref hold) = set_result {
-            assert_eq!(hold.reason(), "integration test reason");
-            assert!(hold.release_after_unix_seconds().is_some());
+        let root = Some(sandbox.path());
+        let key = format!("de/{}", "de".repeat(32));
+        for active_only in [false, true] {
+            assert!(run_hold_list(root, active_only).await.unwrap().is_empty());
         }
+        assert!(!run_hold_release(root, &key).await.unwrap());
 
-        // List holds
-        let list_result = run_hold_list(Some(&root), false).await;
-        if let Ok(holds) = list_result {
-            // If we successfully set a hold, it should appear in the list
-            if set_was_ok {
-                assert!(!holds.is_empty());
+        for ttl in [3600, 0] {
+            let hold = run_hold_set(root, &key, "integration test reason", Some(ttl))
+                .await
+                .unwrap();
+            assert_eq!(hold.object_key().as_str(), key);
+            assert_eq!(hold.reason(), "integration test reason");
+            assert_eq!(
+                hold.release_after_unix_seconds(),
+                hold.held_at_unix_seconds().checked_add(ttl)
+            );
+            for active_only in [false, true] {
+                let holds = run_hold_list(root, active_only).await.unwrap();
+                if active_only && ttl == 0 {
+                    assert!(holds.is_empty());
+                } else {
+                    assert_eq!(holds.len(), 1);
+                    assert_eq!(holds[0], hold);
+                }
+            }
+            assert!(run_hold_release(root, &key).await.unwrap());
+            assert!(!run_hold_release(root, &key).await.unwrap());
+            for active_only in [false, true] {
+                assert!(run_hold_list(root, active_only).await.unwrap().is_empty());
             }
         }
-
-        // Release the hold
-        let release_result = run_hold_release(Some(&root), &object_key).await;
-        // May fail, shouldn't panic
-        let _ = release_result;
     }
 
     // ── From<SqlxError> impl ──────────────────────────────────────────────
@@ -478,33 +466,6 @@ mod tests {
     fn postgres_index_store_rejects_invalid_url() {
         let result = super::postgres_index_store("not-a-valid-postgres-url");
         assert!(result.is_err());
-    }
-
-    // ── run_hold_release releases hold on local store ─────────────────────
-
-    #[tokio::test]
-    async fn run_hold_release_returns_false_for_missing_hold() {
-        let sandbox = tempfile::tempdir().unwrap();
-        let root = sandbox.path().join("deployment-root");
-        std::fs::create_dir_all(&root).unwrap();
-
-        let result = run_hold_release(Some(&root), &format!("de/{}", "de".repeat(32))).await;
-        // May succeed (returning false) or fail depending on state
-        if let Ok(released) = result {
-            assert!(!released);
-        }
-    }
-
-    // ── run_hold_list with active_only filter ─────────────────────────────
-
-    #[tokio::test]
-    async fn run_hold_list_active_only_returns_empty_on_fresh_root() {
-        let sandbox = tempfile::tempdir().unwrap();
-        let root = sandbox.path().join("deployment-root");
-        std::fs::create_dir_all(&root).unwrap();
-
-        let result = run_hold_list(Some(&root), true).await;
-        let _ = result;
     }
 
     // ── HoldRuntimeError Debug for all variants ───────────────────────────
