@@ -389,6 +389,20 @@ fn official_header_vector_and_body_commitment() {
     let verified = verify_official_get(&official_headers(), &credential()).unwrap();
     assert!(verified.matches_payload(&Sha256::digest(b"").into()));
     assert!(!verified.matches_payload(&Sha256::digest(b"changed").into()));
+
+    let mut headers = official_headers();
+    headers.insert("range", HeaderValue::from_static(" \tbytes=0-9\t "));
+    assert!(verify_official_get(&headers, &credential()).is_ok());
+
+    // Fixed HMAC over the same canonical request, with the range line changed
+    // to `range:bytes=0-9,bytes=10-19` (computed independently of this verifier).
+    headers.append("range", HeaderValue::from_static(" bytes=10-19 "));
+    let authorization = headers["authorization"].to_str().unwrap().replace(
+        "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41",
+        "17139d6b46c810350105284d6814d65de5df62fd34fecad463105d373ef40dfc",
+    );
+    headers.insert("authorization", authorization.parse().unwrap());
+    assert!(verify_official_get(&headers, &credential()).is_ok());
 }
 
 #[test]
@@ -412,6 +426,12 @@ fn rejects_tampered_method_path_header_and_region() {
     }
     let mut headers = official_headers();
     headers.insert("range", HeaderValue::from_static("bytes=1-9"));
+    assert!(verify_official_get(&headers, &credential()).is_err());
+    headers = official_headers();
+    headers.append("host", headers["host"].clone());
+    assert!(verify_official_get(&headers, &credential()).is_err());
+    headers = official_headers();
+    headers.remove("range");
     assert!(verify_official_get(&headers, &credential()).is_err());
 }
 

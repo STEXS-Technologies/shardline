@@ -480,22 +480,24 @@ pub fn verify_sigv4(
     };
     let mut canonical_headers = String::new();
     for name in names {
-        let values = headers
-            .get_all(name)
-            .iter()
-            .map(|value| {
-                value
-                    .to_str()
-                    .map(|value| value.split_ascii_whitespace().collect::<Vec<_>>().join(" "))
-                    .map_err(|_invalid_header| denied())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if values.is_empty() || (name == "host" && values.len() != 1) {
+        let values = headers.get_all(name);
+        if values.iter().next().is_none() || (name == "host" && values.iter().nth(1).is_some()) {
             return Err(denied());
         }
         canonical_headers.push_str(name);
         canonical_headers.push(':');
-        canonical_headers.push_str(&values.join(","));
+        for (index, value) in values.iter().enumerate() {
+            if index != 0 {
+                canonical_headers.push(',');
+            }
+            let value = value.to_str().map_err(|_invalid_header| denied())?;
+            for (word_index, word) in value.split_ascii_whitespace().enumerate() {
+                if word_index != 0 {
+                    canonical_headers.push(' ');
+                }
+                canonical_headers.push_str(word);
+            }
+        }
         canonical_headers.push('\n');
     }
     // S3 paths are not normalized: repeated slashes and dot segments identify
