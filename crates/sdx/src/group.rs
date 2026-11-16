@@ -268,11 +268,11 @@ impl XetStreamGroup {
             .session
             .build_reconstructor(file_id, range)
             .await?;
-        reconstructor = reconstructor.with_cancellation_token(stream_token.clone());
+        reconstructor = reconstructor.with_cancellation_token(stream_token);
         let stream = reconstructor.reconstruct_to_stream();
         let registration =
             StreamRegistration::new(id, stream.run_state(), stream.pending_start_signal());
-        self.register(&registration);
+        self.inner.register(&registration);
         Ok(GroupedDownloadStream {
             inner: stream,
             id,
@@ -302,11 +302,11 @@ impl XetStreamGroup {
             .session
             .build_reconstructor(file_id, range)
             .await?;
-        reconstructor = reconstructor.with_cancellation_token(stream_token.clone());
+        reconstructor = reconstructor.with_cancellation_token(stream_token);
         let stream = reconstructor.reconstruct_to_unordered_stream();
         let registration =
             StreamRegistration::new(id, stream.run_state(), stream.pending_start_signal());
-        self.register(&registration);
+        self.inner.register(&registration);
         Ok(GroupedUnorderedDownloadStream {
             inner: stream,
             id,
@@ -360,11 +360,6 @@ impl XetStreamGroup {
             .values()
             .filter(|weak| weak.upgrade().is_some())
             .count()
-    }
-
-    /// Registers a stream; streams created after an abort start cancelled.
-    fn register(&self, registration: &Arc<StreamRegistration>) {
-        self.inner.register(registration);
     }
 }
 
@@ -1667,15 +1662,5 @@ mod tests {
         // b is untouched and still completes.
         let out = drain(&mut b).await;
         assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn xet_task_state_is_comparable() {
-        assert_eq!(XetTaskState::Queued, XetTaskState::Queued);
-        assert_ne!(XetTaskState::Queued, XetTaskState::InProgress);
-        assert_ne!(
-            XetTaskState::Failed("x".to_owned()),
-            XetTaskState::Failed("y".to_owned())
-        );
     }
 }

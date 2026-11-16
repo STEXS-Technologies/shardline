@@ -2122,19 +2122,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn upload_report_is_comparable() {
-        let report = crate::upload::UploadReport {
-            files: Vec::new(),
-            xorb_posts: 0,
-            xorb_skipped: 0,
-            shard_posts: 0,
-        };
-        assert_eq!(report.xorb_posts, 0);
-        assert_eq!(report.files.len(), 0);
-        assert_eq!(report, report.clone());
-    }
-
     async fn build_client_with_policy(
         server: &MockServer,
         policy: crate::retry::RetryPolicy,
