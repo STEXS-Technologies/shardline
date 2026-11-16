@@ -18,35 +18,21 @@ categories = [
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-# CRC32 for on-disk chunk-cache corruption detection (M2b2); already in the
-# workspace lockfile (pulled by flate2 at 1.5.0), so offline resolution is
-# unchanged.
+# Detect corruption in persisted chunk-cache entries.
 crc32fast = "1.5"
 futures-util.workspace = true
 shardline-xet-core.workspace = true
 httpdate.workspace = true
-# http-body 1.x (already in the lockfile as a reqwest/hyper transitive dep) is
-# used to build a streamed request body that advertises an exact Content-Length.
+# Stream upload bodies with an exact Content-Length.
 http-body = "1"
-# percent-encoding for URL-segment decoding in XetUrl (already in the lockfile
-# as a `url` transitive dep).
 percent-encoding = "2.3"
-# `tracing` for debug-level request logging (M4 correlation headers); already in
-# the lockfile (workspace server uses it), so offline resolution is unchanged.
 tracing.workspace = true
-# Token route constants (`XET_READ_TOKEN_ROUTE` / `XET_WRITE_TOKEN_ROUTE`) come
-# from the adapter crate, which is an allowed sdx dependency per SDX_PLAN.md
-# §4.1. It depends on shardline-server-core (not the forbidden shardline-server).
+# Shared Xet wire types and routes; currently also pulls in server-core.
 shardline-xet-adapter.workspace = true
 thiserror.workspace = true
-# Cancellation tokens for the streaming pipeline (M2b1); tokio 1.52 does not
-# re-export CancellationToken in tokio::sync, so use tokio-util (already in the
-# lockfile at 0.7.18 via xet-client). `rt` provides CancellationToken.
+# Cancellation tokens and abort-on-drop task handles for streaming.
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
-# Pinned exact version (Cargo.lock resolves 1.5.2) per SDX_PLAN.md §11 Q6:
-# upstream crates publish without semver promises, so Merkle hash / xorb
-# primitives must not drift. The workspace-level "1.5.1" requirement unifies
-# to the same 1.5.2 in the lockfile.
+# Upstream publishes without semver promises: keep hash/xorb primitives pinned.
 xet-core-structures = { version = "=1.5.2" }
 # Its upstream runtime dependency is a caret requirement despite incompatible
 # API changes in newer releases. Constrain it for consumers without our lockfile.
