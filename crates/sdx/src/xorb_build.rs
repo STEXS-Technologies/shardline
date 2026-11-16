@@ -105,8 +105,10 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
 
     // Serialize the chunk payload stream and collect footer metadata.
     let mut payload = Vec::new();
-    let mut chunk_boundary_offsets = Vec::with_capacity(chunks.len());
-    let mut unpacked_chunk_offsets = Vec::with_capacity(chunks.len());
+    let mut footer = XorbObjectInfoV1::default();
+    footer.chunk_hashes = Vec::with_capacity(chunks.len());
+    footer.chunk_boundary_offsets = Vec::with_capacity(chunks.len());
+    footer.unpacked_chunk_offsets = Vec::with_capacity(chunks.len());
     let mut chunk_entries = Vec::with_capacity(chunks.len());
     let mut unpacked_total: u64 = 0;
 
@@ -130,9 +132,12 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
             hash,
         });
 
-        chunk_boundary_offsets.push(packed_offset.saturating_add(written));
+        footer.chunk_hashes.push(<[u8; 32]>::from(hash).into());
+        footer
+            .chunk_boundary_offsets
+            .push(packed_offset.saturating_add(written));
         unpacked_total = unpacked_total.saturating_add(raw_length);
-        unpacked_chunk_offsets.push(unpacked_total);
+        footer.unpacked_chunk_offsets.push(unpacked_total);
     }
 
     // Reuse the hashes computed while serializing each chunk.
@@ -142,15 +147,8 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
             .map(|entry| (entry.hash, entry.raw_length))
             .collect::<Vec<_>>(),
     );
-    let mut footer = XorbObjectInfoV1::default();
     footer.xorb_hash = <[u8; 32]>::from(xorb_hash).into();
     footer.num_chunks = u64::try_from(chunk_entries.len()).unwrap_or(u64::MAX);
-    footer.chunk_hashes = chunk_entries
-        .iter()
-        .map(|entry| <[u8; 32]>::from(entry.hash).into())
-        .collect();
-    footer.chunk_boundary_offsets = chunk_boundary_offsets;
-    footer.unpacked_chunk_offsets = unpacked_chunk_offsets;
     footer.fill_in_boundary_offsets();
     let footer_start = payload.len();
     XorbObject::serialize_given_info(&mut payload, footer)
