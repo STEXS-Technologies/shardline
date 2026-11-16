@@ -32,89 +32,45 @@ async fn memory_cache_roundtrips_one_payload() {
     assert_eq!(value.ok(), Some(Some(b"payload".to_vec())));
 }
 
-#[tokio::test]
-async fn memory_cache_evicts_oldest_entry_when_capacity_is_full() {
-    let max_entries = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
-    let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
-    let cache = MemoryReconstructionCache::new(ttl_seconds, max_entries);
-    let first = ReconstructionCacheKey::latest("asset-1.bin", None);
-    let second = ReconstructionCacheKey::latest("asset-2.bin", None);
-    let third = ReconstructionCacheKey::latest("asset-3.bin", None);
-
-    assert!(cache.put(&first, b"first").await.is_ok());
-    assert!(cache.put(&second, b"second").await.is_ok());
-    assert!(cache.put(&third, b"third").await.is_ok());
-
-    let first_value = cache.get(&first).await;
-    let second_value = cache.get(&second).await;
-    let third_value = cache.get(&third).await;
-
-    assert!(first_value.is_ok());
-    assert!(second_value.is_ok());
-    assert!(third_value.is_ok());
-    assert_eq!(first_value.ok(), Some(None));
-    assert_eq!(second_value.ok(), Some(Some(b"second".to_vec())));
-    assert_eq!(third_value.ok(), Some(Some(b"third".to_vec())));
+#[tokio::test(start_paused = true)]
+async fn memory_cache_fifo_eviction_handles_equal_timestamps_and_each_capacity() {
+    let keys = ["first", "second", "third", "fourth"]
+        .map(|name| ReconstructionCacheKey::latest(name, None));
+    for capacity in 1..=3 {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(60).unwrap(),
+            NonZeroUsize::new(capacity).unwrap(),
+        );
+        let inserted_at = tokio::time::Instant::now();
+        for key in &keys[..capacity] {
+            cache.put(key, b"data").await.unwrap();
+            assert_eq!(cache.get(key).await.unwrap(), Some(b"data".to_vec()));
+        }
+        cache.put(&keys[capacity], b"replacement").await.unwrap();
+        assert_eq!(tokio::time::Instant::now(), inserted_at);
+        for (index, key) in keys[..capacity].iter().enumerate() {
+            assert_eq!(
+                cache.get(key).await.unwrap(),
+                (index != 0).then(|| b"data".to_vec()),
+                "capacity {capacity}, entry {index}"
+            );
+        }
+        assert_eq!(
+            cache.get(&keys[capacity]).await.unwrap(),
+            Some(b"replacement".to_vec())
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
-async fn memory_cache_expires_entries_after_ttl() {
-    let ttl_seconds = NonZeroU64::new(1).unwrap_or(NonZeroU64::MIN);
-    let cache = MemoryReconstructionCache::new(ttl_seconds, NonZeroUsize::MIN);
+async fn memory_cache_expires_at_the_ttl_boundary() {
+    let cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::MIN);
     let key = ReconstructionCacheKey::latest("asset.bin", None);
-    assert!(cache.put(&key, b"payload").await.is_ok());
-
-    tokio::time::advance(Duration::from_secs(1)).await;
-    let value = cache.get(&key).await;
-
-    assert!(value.is_ok());
-    assert_eq!(value.ok(), Some(None));
-}
-
-// ── TTL expiry (wall-clock) ───────────────────────────────────────────
-
-#[allow(clippy::shadow_unrelated)]
-#[tokio::test]
-async fn memory_cache_expires_entries_after_ttl_wall_clock() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(1).unwrap(),
-        NonZeroUsize::new(100).unwrap(),
-    );
-    let key = ReconstructionCacheKey::latest("test-file", None);
-    cache.put(&key, b"hello").await.unwrap();
-
-    // Immediately readable
-    let result = cache.get(&key).await.unwrap();
-    assert_eq!(result, Some(b"hello".to_vec()));
-
-    // After expiry
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let result = cache.get(&key).await.unwrap();
-    assert_eq!(result, None, "expired entry should return None");
-}
-
-// ── Eviction with max_entries = 1 ─────────────────────────────────────
-
-#[allow(clippy::shadow_unrelated)]
-#[tokio::test]
-async fn memory_cache_evicts_oldest_when_at_capacity_one() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap(),
-        NonZeroUsize::new(1).unwrap(), // only 1 entry
-    );
-    let key_a = ReconstructionCacheKey::latest("file-a", None);
-    let key_b = ReconstructionCacheKey::latest("file-b", None);
-
-    cache.put(&key_a, b"aaa").await.unwrap();
-    cache.put(&key_b, b"bbb").await.unwrap();
-
-    // key_a should be evicted (oldest)
-    let result = cache.get(&key_a).await.unwrap();
-    assert_eq!(result, None, "oldest entry should be evicted");
-
-    // key_b should still be present
-    let result = cache.get(&key_b).await.unwrap();
-    assert_eq!(result, Some(b"bbb".to_vec()));
+    cache.put(&key, b"payload").await.unwrap();
+    tokio::time::advance(Duration::from_millis(999)).await;
+    assert_eq!(cache.get(&key).await.unwrap(), Some(b"payload".to_vec()));
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert_eq!(cache.get(&key).await.unwrap(), None);
 }
 
 // ── Concurrent get_or_load deduplication ──────────────────────────────
@@ -1444,58 +1400,6 @@ async fn put_notifies_waiting_loading_entry() {
     assert!(
         final_val.is_some(),
         "cache should have some value after put notify"
-    );
-}
-
-// ── CacheInner seq ordering ───────────────────────────────────────────
-//
-// Verifies that entries are evicted in FIFO order (oldest first) by
-// using monotonic Insertion-time progression (wall-clock with small
-// sleeps between inserts).
-
-#[tokio::test]
-async fn cache_inner_fifo_eviction_order() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN), // capacity = 3
-    );
-    let keys = [
-        ReconstructionCacheKey::latest("first", None),
-        ReconstructionCacheKey::latest("second", None),
-        ReconstructionCacheKey::latest("third", None),
-        ReconstructionCacheKey::latest("fourth", None),
-    ];
-
-    // Insert 3 entries with distinct insertion times
-    for k in &keys[..3] {
-        cache.put(k, b"data").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-
-    // Fourth insert triggers eviction of the oldest (first)
-    cache.put(&keys[3], b"fourth").await.unwrap();
-
-    // First should be evicted (oldest)
-    assert_eq!(
-        cache.get(&keys[0]).await.unwrap(),
-        None,
-        "first (oldest) should be evicted"
-    );
-    // Second and third should still be present
-    assert_eq!(
-        cache.get(&keys[1]).await.unwrap(),
-        Some(b"data".to_vec()),
-        "second should survive"
-    );
-    assert_eq!(
-        cache.get(&keys[2]).await.unwrap(),
-        Some(b"data".to_vec()),
-        "third should survive"
-    );
-    assert_eq!(
-        cache.get(&keys[3]).await.unwrap(),
-        Some(b"fourth".to_vec()),
-        "fourth should be present"
     );
 }
 
