@@ -8,7 +8,8 @@
 
 use super::receive_pack::{build_report_response, find_lfs_blob, parse_receive_pack_request};
 use super::ref_advertisement::{
-    GitRef, authorize_read, authorize_write, collect_refs, is_valid_refname, resolve_repo_id,
+    GitRef, authorize_read_with_context, authorize_write_with_context, collect_refs,
+    is_valid_refname, resolve_repo_id,
 };
 use super::tree_walk::parse_lfs_pointer_field;
 use super::upload_pack::{build_lfs_pointer_blob, parse_object_ids};
@@ -852,20 +853,45 @@ fn parse_lfs_pointer_field_extra_whitespace() {
     assert!(oid.is_some());
 }
 
-// --- authorize_read / authorize_write tests (no auth configured) ---
-
 #[test]
-fn authorize_read_without_auth_is_permissive() {
-    let (_tmp, state) = make_hub_state();
-    let headers = axum::http::HeaderMap::new();
-    assert!(authorize_read(&state, &headers).is_ok());
-}
+fn authorization_requires_credentials_only_when_configured() {
+    use shardline_protocol::TokenClaims;
+    use shardline_server_core::{AuthError, AuthProvider};
 
-#[test]
-fn authorize_write_without_auth_is_permissive() {
-    let (_tmp, state) = make_hub_state();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    struct UnexpectedAuth(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl AuthProvider for UnexpectedAuth {
+        fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(AuthError::InvalidToken)
+        }
+        fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(AuthError::InvalidToken)
+        }
+    }
+
+    let (_tmp, mut state) = make_hub_state();
     let headers = axum::http::HeaderMap::new();
-    assert!(authorize_write(&state, &headers).is_ok());
+    for configured in [false, true] {
+        if configured {
+            state.auth = Some(crate::auth::HubAuth::new(Box::new(UnexpectedAuth(
+                calls.clone(),
+            ))));
+        }
+        for authorize in [authorize_read_with_context, authorize_write_with_context] {
+            let result = authorize(&state, &headers);
+            if configured {
+                assert!(matches!(
+                    result,
+                    Err(crate::error::HubApiError::Unauthorized)
+                ));
+            } else {
+                assert!(result.unwrap().is_none());
+            }
+        }
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
 // --- parse_commit_object edge cases ---
@@ -1002,38 +1028,6 @@ fn parse_receive_pack_request_rejects_non_utf8_before_pack() {
     assert!(parse_receive_pack_request(&body).is_err());
 }
 
-// --- authorize with auth configured (error paths) ---
-
-#[test]
-fn authorize_read_with_auth_rejects_missing_token() {
-    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as TS};
-    use shardline_server_core::{AuthError, AuthProvider};
-
-    let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
-    let _claims = TokenClaims::new("iss", "sub", TS::Read, repo, u64::MAX).unwrap();
-    struct MockAuth;
-    impl AuthProvider for MockAuth {
-        fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
-            Err(AuthError::InvalidToken)
-        }
-        fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
-            Err(AuthError::ProviderError("nope".into()))
-        }
-    }
-    let (_tmp, hub_state) = make_hub_state();
-    let state = HubState {
-        store: hub_state.store,
-        object_store: hub_state.object_store,
-        auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
-    let headers = axum::http::HeaderMap::new();
-    let result = authorize_read(&state, &headers);
-    assert!(result.is_err());
-}
-
 // --- info_refs with nonexistent repo ---
 
 #[tokio::test]
@@ -1151,38 +1145,6 @@ fn parse_pack_data_ofs_delta_two_objects() {
         objects[1].data, target_content,
         "OFS_DELTA should resolve to produce the target content"
     );
-}
-
-// --- authorize_write with auth configured ---
-
-#[test]
-fn authorize_write_with_auth_rejects_missing_token() {
-    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as TS};
-    use shardline_server_core::{AuthError, AuthProvider};
-
-    let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
-    let _claims = TokenClaims::new("iss", "sub", TS::Read, repo, u64::MAX).unwrap();
-    struct MockAuth;
-    impl AuthProvider for MockAuth {
-        fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
-            Err(AuthError::InvalidToken)
-        }
-        fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
-            Err(AuthError::ProviderError("nope".into()))
-        }
-    }
-    let (_tmp, hub_state) = make_hub_state();
-    let state = HubState {
-        store: hub_state.store,
-        object_store: hub_state.object_store,
-        auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
-    let headers = axum::http::HeaderMap::new();
-    let result = authorize_write(&state, &headers);
-    assert!(result.is_err());
 }
 
 // --- parse_receive_pack_request with valid commands ---

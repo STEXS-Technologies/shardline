@@ -34,18 +34,7 @@ pub(super) fn resolve_repo_id(_repo_type: &str, ns: &str, repo: &str) -> String 
     format!("{ns}/{repo}")
 }
 
-#[cfg(test)]
-pub(super) fn authorize_read(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiError> {
-    authorize_read_with_context(state, headers).map(|_| ())
-}
-
-#[cfg(test)]
-pub(super) fn authorize_write(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiError> {
-    authorize_write_with_context(state, headers).map(|_| ())
-}
-
-/// Like [`authorize_read`] but returns the verified auth context so the caller
-/// can enforce a token→repository binding.
+/// Authorizes reading and returns the verified context for repository binding.
 pub(super) fn authorize_read_with_context(
     state: &HubState,
     headers: &HeaderMap,
@@ -57,8 +46,7 @@ pub(super) fn authorize_read_with_context(
     }
 }
 
-/// Like [`authorize_write`] but returns the verified auth context so the caller
-/// can enforce a token→repository binding.
+/// Authorizes writing and returns the verified context for repository binding.
 pub(super) fn authorize_write_with_context(
     state: &HubState,
     headers: &HeaderMap,
