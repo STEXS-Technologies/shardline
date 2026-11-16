@@ -94,37 +94,33 @@ fn merged_hash_of_sequence(hash: &[(MerkleHash, u64)]) -> (MerkleHash, u64) {
     (compute_internal_node_hash(&buf[..pos]), total_len)
 }
 
+/// Consumes an existing member buffer as scratch space for tree reduction.
 #[inline]
-fn aggregated_node_hash(chunks: &[(MerkleHash, u64)]) -> MerkleHash {
-    if chunks.is_empty() {
+pub(crate) fn xorb_hash_from_owned(mut hashes: Vec<(MerkleHash, u64)>) -> MerkleHash {
+    if hashes.is_empty() {
         return MerkleHash::default();
     }
 
-    let mut hv = chunks.to_vec();
-
-    while hv.len() > 1 {
+    while hashes.len() > 1 {
         let mut write_idx = 0;
         let mut read_idx = 0;
 
-        while read_idx != hv.len() {
-            let next_cut = read_idx + next_merge_cut(&hv[read_idx..]);
-            hv[write_idx] = merged_hash_of_sequence(&hv[read_idx..next_cut]);
+        while read_idx != hashes.len() {
+            let next_cut = read_idx + next_merge_cut(&hashes[read_idx..]);
+            hashes[write_idx] = merged_hash_of_sequence(&hashes[read_idx..next_cut]);
             write_idx += 1;
             read_idx = next_cut;
         }
 
-        hv.resize(write_idx, Default::default());
+        hashes.truncate(write_idx);
     }
 
-    hv[0].0
+    hashes[0].0
 }
 
 #[inline]
 pub fn xorb_hash(chunks: &[(MerkleHash, u64)]) -> MerkleHash {
-    if chunks.is_empty() {
-        return MerkleHash::default();
-    }
-    aggregated_node_hash(chunks)
+    xorb_hash_from_owned(chunks.to_vec())
 }
 
 #[inline]
@@ -133,7 +129,7 @@ pub fn file_hash_with_salt(chunks: &[(MerkleHash, u64)], salt: &[u8; 32]) -> Mer
         return MerkleHash::default();
     }
     let key_bytes: [u8; 32] = *salt;
-    let aggregated = aggregated_node_hash(chunks);
+    let aggregated = xorb_hash(chunks);
     let agg_bytes: [u8; 32] = aggregated.into();
     let digest = blake3::keyed_hash(&key_bytes, &agg_bytes);
     MerkleHash::from(*digest.as_bytes())
@@ -402,8 +398,8 @@ mod tests {
     }
 
     #[test]
-    fn aggregated_node_hash_empty() {
-        assert_eq!(aggregated_node_hash(&[]), MerkleHash::default());
+    fn xorb_hash_from_owned_empty() {
+        assert_eq!(xorb_hash_from_owned(Vec::new()), MerkleHash::default());
     }
 
     #[test]

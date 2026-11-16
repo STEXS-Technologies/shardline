@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use serde::Serialize;
 
-use crate::merklehash::{MerkleHash, compute_data_hash, xorb_hash};
+use crate::merklehash::{MerkleHash, aggregated_hashes::xorb_hash_from_owned, compute_data_hash};
 
 use super::chunk::Chunk;
 
@@ -63,7 +63,7 @@ impl RawXorbData {
             .iter()
             .map(|d| (compute_data_hash(d), d.len() as u64))
             .collect();
-        xorb_hash(&chunks_and_sizes)
+        xorb_hash_from_owned(chunks_and_sizes)
     }
 
     /// Computes the xorb hash and the per-chunk hashes in one pass.
@@ -75,7 +75,7 @@ impl RawXorbData {
             chunks_and_sizes.push((chunk_hash, data.len() as u64));
             chunk_hashes.push(chunk_hash);
         }
-        (xorb_hash(&chunks_and_sizes), chunk_hashes)
+        (xorb_hash_from_owned(chunks_and_sizes), chunk_hashes)
     }
 
     pub fn num_bytes(&self) -> usize {
