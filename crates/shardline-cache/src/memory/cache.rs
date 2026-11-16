@@ -178,9 +178,9 @@ impl MemoryReconstructionCache {
             // the latch persists so concurrent callers still coalesce on this
             // one load (F-90).
             let _latch_guard = LoadingLatchGuard {
-                loading: Arc::clone(&self.loading),
-                key: key.clone(),
-                notify: Arc::clone(&notify),
+                loading: &self.loading,
+                key,
+                notify: &notify,
             };
             // On error, the guard releases the latch and wakes waiters.
             let payload = run_loader_with_heartbeat(last_seen_alive, loader).await?;
@@ -416,15 +416,15 @@ where
 /// the guard's drop is a no-op once the latch is gone. The guard only ever
 /// removes the latch it registered — identified by its [`Notify`] — so a newer
 /// generation of loading for the same key is never torn down.
-struct LoadingLatchGuard {
-    loading: Arc<Mutex<HashMap<ReconstructionCacheKey, LoadingEntry>>>,
-    key: ReconstructionCacheKey,
-    notify: Arc<Notify>,
+struct LoadingLatchGuard<'load> {
+    loading: &'load Mutex<HashMap<ReconstructionCacheKey, LoadingEntry>>,
+    key: &'load ReconstructionCacheKey,
+    notify: &'load Arc<Notify>,
 }
 
-impl Drop for LoadingLatchGuard {
+impl Drop for LoadingLatchGuard<'_> {
     fn drop(&mut self) {
-        release_owned_loading(&self.loading, &self.key, &self.notify);
+        release_owned_loading(self.loading, self.key, self.notify);
     }
 }
 
