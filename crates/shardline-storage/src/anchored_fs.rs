@@ -253,58 +253,21 @@ pub fn write_anchored_temporary_file(
     bytes: &[u8],
     file_mode: Option<u32>,
 ) -> io::Result<PathBuf> {
-    local_publish_failpoint(
-        &anchored.logical_path(),
-        LocalPublishBoundary::BeforeTemporaryWrite,
-    )?;
-    loop {
-        let temporary = fd_child_path(
-            anchored.parent_dir(),
-            &temporary_file_name(anchored.file_name()),
-        );
-        match open_new_file(&temporary, file_mode) {
-            Ok(mut file) => {
-                let logical_path = anchored.logical_path();
-                let write_result = (|| {
-                    if let Some(write_len) =
-                        local_publish_partial_write_len(&logical_path, bytes.len())
-                    {
-                        let prefix = bytes.get(..write_len).ok_or_else(|| {
-                            io::Error::new(
-                                ErrorKind::InvalidInput,
-                                "injected partial-write length exceeds payload",
-                            )
-                        })?;
-                        file.write_all(prefix)?;
-                    } else {
-                        file.write_all(bytes)?;
-                    }
-                    local_publish_failpoint(
-                        &logical_path,
-                        LocalPublishBoundary::DuringTemporaryWrite,
-                    )?;
-                    local_publish_failpoint(
-                        &logical_path,
-                        LocalPublishBoundary::BeforeTemporarySync,
-                    )?;
-                    file.sync_all()?;
-                    local_publish_failpoint(
-                        &logical_path,
-                        LocalPublishBoundary::AfterTemporaryDurable,
-                    )
-                })();
-                match write_result {
-                    Ok(()) => return Ok(temporary),
-                    Err(error) => {
-                        remove_if_present(&temporary).ok();
-                        return Err(error);
-                    }
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+    create_anchored_temporary_file(anchored, file_mode, |file| {
+        if let Some(write_len) =
+            local_publish_partial_write_len(&anchored.logical_path(), bytes.len())
+        {
+            let prefix = bytes.get(..write_len).ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "injected partial-write length exceeds payload",
+                )
+            })?;
+            file.write_all(prefix)
+        } else {
+            file.write_all(bytes)
         }
-    }
+    })
 }
 
 /// Copies an already-open source file to a new temporary file beside the target.
@@ -322,36 +285,45 @@ pub fn copy_anchored_temporary_file(
     source: &File,
     file_mode: Option<u32>,
 ) -> io::Result<PathBuf> {
-    local_publish_failpoint(
-        &anchored.logical_path(),
-        LocalPublishBoundary::BeforeTemporaryWrite,
-    )?;
+    create_anchored_temporary_file(anchored, file_mode, |destination| {
+        let mut source = source.try_clone()?;
+        source.seek(SeekFrom::Start(0))?;
+        io::copy(&mut source, destination)?;
+        Ok(())
+    })
+}
+
+fn create_anchored_temporary_file(
+    anchored: &AnchoredTarget,
+    file_mode: Option<u32>,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    let logical_path = anchored.logical_path();
+    local_publish_failpoint(&logical_path, LocalPublishBoundary::BeforeTemporaryWrite)?;
     loop {
         let temporary = fd_child_path(
             anchored.parent_dir(),
             &temporary_file_name(anchored.file_name()),
         );
         match open_new_file(&temporary, file_mode) {
-            Ok(mut destination) => {
-                let write_result = (|| {
-                    let mut source = source.try_clone()?;
-                    source.seek(SeekFrom::Start(0))?;
-                    io::copy(&mut source, &mut destination)?;
+            Ok(mut file) => {
+                let result = (|| {
+                    write(&mut file)?;
                     local_publish_failpoint(
-                        &anchored.logical_path(),
+                        &logical_path,
                         LocalPublishBoundary::DuringTemporaryWrite,
                     )?;
                     local_publish_failpoint(
-                        &anchored.logical_path(),
+                        &logical_path,
                         LocalPublishBoundary::BeforeTemporarySync,
                     )?;
-                    destination.sync_all()?;
+                    file.sync_all()?;
                     local_publish_failpoint(
-                        &anchored.logical_path(),
+                        &logical_path,
                         LocalPublishBoundary::AfterTemporaryDurable,
                     )
                 })();
-                match write_result {
+                match result {
                     Ok(()) => return Ok(temporary),
                     Err(error) => {
                         remove_if_present(&temporary).ok();
@@ -986,6 +958,36 @@ mod tests {
         // File content should match
         let contents = fs::read(&tmp_path).unwrap();
         assert_eq!(contents, payload);
+    }
+
+    #[test]
+    fn copied_temporary_rewinds_source_and_cleans_failed_publication() {
+        use crate::{LocalPublishFault, fault_injection::arm_fault};
+        let dir = tempdir().unwrap();
+        let target = AnchoredTarget::new(
+            open_directory(dir.path()).unwrap(),
+            dir.path().to_path_buf(),
+            "target".into(),
+        );
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"complete payload").unwrap();
+        for boundary in [
+            LocalPublishBoundary::BeforeTemporaryWrite,
+            LocalPublishBoundary::DuringTemporaryWrite,
+            LocalPublishBoundary::BeforeTemporarySync,
+            LocalPublishBoundary::AfterTemporaryDurable,
+        ] {
+            let guard = arm_fault(
+                target.logical_path(),
+                boundary,
+                LocalPublishFault::SyncFailure,
+            );
+            assert!(copy_anchored_temporary_file(&target, &source, Some(0o600)).is_err());
+            drop(guard);
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+        let temporary = copy_anchored_temporary_file(&target, &source, Some(0o600)).unwrap();
+        assert_eq!(fs::read(temporary).unwrap(), b"complete payload");
     }
 
     #[test]
