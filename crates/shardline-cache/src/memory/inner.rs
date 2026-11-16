@@ -100,11 +100,8 @@ impl CacheInner {
         let inserted_at = entry.inserted_at;
         let seq = entry.seq;
         let payload_len = entry.payload.len();
-        if let Some(old) = self.entries.insert(key.clone(), entry) {
-            self.total_bytes = self.total_bytes.saturating_sub(old.payload.len());
-            self.eviction_order
-                .remove(&EvictionKey(old.inserted_at, old.seq));
-        }
+        self.remove(key);
+        self.entries.insert(key.clone(), entry);
         self.eviction_order
             .insert(EvictionKey(inserted_at, seq), key.clone());
         self.total_bytes = self.total_bytes.saturating_add(payload_len);
