@@ -4380,6 +4380,31 @@ the hosted RSS failure, and measure optimized production-topology performance
 and retained storage after retention expiry and GC. These remain open; the SDK
 checkpoint does not establish whole-branch or production qualification.
 
+### SDK ingestion hash reuse checkpoint (2026-11-16)
+
+Source `32bf52ae7adc55949afb81203e2f1868abd27cb9` passed the complete
+SDK/server E2E and Xorb interoperability command above, including ignored tests,
+required native fixtures and two test threads: **35 passed, none skipped**, in
+287.453 s. The SDK library selection passed 322 tests and the separate mock
+conformance selection passed 12 tests; strict SDK library/test Clippy passed.
+The upload path now retains ingestion hashes for immutable pending chunks and
+uses one shared Xorb serializer for both prehashed and public inputs. Repeated
+reconstruction terms also avoid cloning fetch descriptors before comparison.
+
+Both isolated clients verified exact byte identity and length and passed the
+unchanged 65,536 KiB additional-RSS gate:
+
+| Isolated client workload | Baseline RSS (KiB) | Peak VmHWM (KiB) | Additional RSS (KiB) | Client transfer (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 256 MiB | 25,704 | 79,856 | 54,152 | 1,247 |
+| 1 GiB | 25,692 | 78,328 | 52,636 | 8,261 |
+
+The parent memory tests took 22.656 s and 211.841 s, including fixture ingestion.
+The shared host, toolchains and unoptimized build settings match the preceding
+SDK checkpoint. These are regression samples, not measurements of hash-reuse
+throughput or production capacity, and do not explain the historical hosted RSS
+failure. Database and remote-object-storage qualification remain separate.
+
 ### PostgreSQL cleanup checkpoint (2026-11-16)
 
 Source `bf121d8cfaffa3e8fb0ed3d558d27faeb8cb58e6` passed `scripts/test-postgres.sh`
