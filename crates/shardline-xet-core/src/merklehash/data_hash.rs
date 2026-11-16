@@ -119,13 +119,7 @@ impl DataHash {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn hex(&self) -> String {
-        format!(
-            "{:016x}{:016x}{:016x}{:016x}",
-            self.0[0].to_le(),
-            self.0[1].to_le(),
-            self.0[2].to_le(),
-            self.0[3].to_le()
-        )
+        format!("{self:x}")
     }
 
     /// Parses a 64-character hex string into a hash.
@@ -183,19 +177,26 @@ impl DataHash {
 
 impl fmt::LowerHex for DataHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "{}", self.hex())
+        write!(
+            f,
+            "{:016x}{:016x}{:016x}{:016x}",
+            self.0[0].to_le(),
+            self.0[1].to_le(),
+            self.0[2].to_le(),
+            self.0[3].to_le()
+        )
     }
 }
 
 impl fmt::Display for DataHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "{}", self.hex())
+        fmt::LowerHex::fmt(self, f)
     }
 }
 
 impl fmt::Debug for DataHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "{}", self.hex())
+        fmt::LowerHex::fmt(self, f)
     }
 }
 
@@ -394,19 +395,24 @@ mod tests {
     }
 
     #[test]
-    fn display_and_lower_hex() {
-        let h = DataHash::from([1u64, 2, 3, 4]);
-        assert_eq!(format!("{h}"), format!("{h:x}"));
-        assert_eq!(format!("{h}").len(), 64);
-    }
-
-    #[test]
-    fn debug_output_is_hex() {
-        let h = DataHash::from([0u64; 4]);
-        assert_eq!(
-            format!("{h:?}"),
-            "0000000000000000000000000000000000000000000000000000000000000000"
-        );
+    fn all_formatters_preserve_canonical_hex_and_existing_flag_behavior() {
+        for expected in [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000001000000000000000200000000000000030000000000000004",
+        ] {
+            let hash = DataHash::from_hex(expected).unwrap();
+            for formatted in [
+                hash.hex(),
+                format!("{hash}"),
+                format!("{hash:x}"),
+                format!("{hash:?}"),
+                format!("{hash:>80}"),
+                format!("{hash:#x}"),
+                format!("{hash:.8}"),
+            ] {
+                assert_eq!(formatted, expected);
+            }
+        }
     }
 
     #[test]
