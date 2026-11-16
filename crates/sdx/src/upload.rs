@@ -519,21 +519,44 @@ impl FileUploadPipeline {
         Ok(())
     }
 
-    /// Processes one chunk: session dedup, then eligibility-gated global dedup,
-    /// then staging into the pending xorb buffer.
+    /// Looks up reuse before staging new chunks, then records each placement once.
     async fn process_chunk(&mut self, chunk: Chunk) -> Result<(), SdxError> {
         let hash = chunk.hash();
         let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        let location = self.find_chunk_location(&hash).await?;
+        if location.is_none() {
+            let chunk_len = chunk.len();
+            if needs_xorb_cut(self.pending_bytes, self.pending.len(), chunk_len) {
+                self.cut_xorb().await?;
+            }
+            self.pending.push((chunk.data, self.total_bytes, hash));
+            self.pending_bytes = self.pending_bytes.saturating_add(chunk_len);
+            let mut state = self.session.inner.state.lock().await;
+            state.global_chunk_index = state.global_chunk_index.saturating_add(1);
+        }
+        self.placements.push(Placement {
+            hash,
+            len,
+            location,
+        });
+        self.total_bytes = self.total_bytes.saturating_add(len);
+        Ok(())
+    }
 
+    /// Resolves session reuse first, then an eligibility-gated global lookup.
+    async fn find_chunk_location(
+        &self,
+        hash: &MerkleHash,
+    ) -> Result<Option<ChunkLocation>, SdxError> {
         // Reserve an eligible global query only on a session miss, under
         // the same lock as the reuse lookup. Network work stays outside it.
         let (session_hit, eligible) = {
             let mut state = self.session.inner.state.lock().await;
-            let session_hit = state.chunk_locations.get(&hash).copied();
+            let session_hit = state.chunk_locations.get(hash).copied();
             let eligible = session_hit.is_none()
                 && is_global_dedup_eligible(
                     state.global_chunk_index,
-                    &hash,
+                    hash,
                     state.last_global_query_index,
                 );
             if eligible {
@@ -541,21 +564,14 @@ impl FileUploadPipeline {
             }
             (session_hit, eligible)
         };
-        if let Some(location) = session_hit {
-            self.placements.push(Placement {
-                hash,
-                len,
-                location: Some(location),
-            });
-            self.total_bytes = self.total_bytes.saturating_add(len);
-            return Ok(());
+        if session_hit.is_some() {
+            return Ok(session_hit);
         }
 
-        // 2. Eligibility-gated global dedup query.
         if eligible {
             let session = &self.session;
             let (base, token) = session.inner.cas_credentials().await?;
-            let hash_hex = xet_hash_hex_string(hash);
+            let hash_hex = xet_hash_hex_string(*hash);
             // Dedup queries are 429-fail-fast and treat 404 as a miss.
             let retry = session.inner.dedup_retry_context();
             let dedup = &session.inner.dedup;
@@ -568,7 +584,7 @@ impl FileUploadPipeline {
                 .await?;
             if let DedupOutcome::Present { shard_body } = outcome
                 && let Ok(xorbs) = parse_shard_xorbs(&shard_body)
-                && let Some((xorb, index)) = find_chunk_in_xorbs(&xorbs, &hash)
+                && let Some((xorb, index)) = find_chunk_in_xorbs(&xorbs, hash)
             {
                 let location = ChunkLocation {
                     xorb_hash: xorb.xorb_hash,
@@ -576,7 +592,7 @@ impl FileUploadPipeline {
                 };
                 {
                     let mut state = self.session.inner.state.lock().await;
-                    state.chunk_locations.insert(hash, location);
+                    state.chunk_locations.insert(*hash, location);
                     // Import only absent xorb info, marking the referenced
                     // chunk for server re-indexing after global dedup.
                     state.xorb_infos.entry(xorb.xorb_hash).or_insert_with(|| {
@@ -591,35 +607,11 @@ impl FileUploadPipeline {
                     });
                     state.global_chunk_index = state.global_chunk_index.saturating_add(1);
                 }
-                self.placements.push(Placement {
-                    hash,
-                    len,
-                    location: Some(location),
-                });
-                self.total_bytes = self.total_bytes.saturating_add(len);
-                return Ok(());
+                return Ok(Some(location));
             }
         }
 
-        // 3. Stage as new content; cut a xorb first if the limits bind.
-        let chunk_len = chunk.len();
-        if needs_xorb_cut(self.pending_bytes, self.pending.len(), chunk_len) {
-            self.cut_xorb().await?;
-        }
-        let file_offset = self.total_bytes;
-        self.pending.push((chunk.data, file_offset, hash));
-        self.pending_bytes = self.pending_bytes.saturating_add(chunk_len);
-        self.placements.push(Placement {
-            hash,
-            len,
-            location: None,
-        });
-        self.total_bytes = self.total_bytes.saturating_add(len);
-        {
-            let mut state = self.session.inner.state.lock().await;
-            state.global_chunk_index = state.global_chunk_index.saturating_add(1);
-        }
-        Ok(())
+        Ok(None)
     }
 
     /// Cuts the pending buffer into a xorb: HEAD-probe, streaming POST (or
