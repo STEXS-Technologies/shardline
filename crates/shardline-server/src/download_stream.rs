@@ -148,8 +148,7 @@ pub(crate) struct VerifiedXorb {
     file: XorbReadFile,
     pool: BoundedPool,
     total_length: u64,
-    packed_content_length: u64,
-    chunks: Vec<shardline_xet_adapter::ValidatedXorbChunk>,
+    validated: shardline_xet_adapter::ValidatedXorb,
 }
 
 pub(crate) async fn prepare_xorb_byte_range(
@@ -230,8 +229,7 @@ pub(crate) async fn prepare_xorb_byte_range(
         file,
         pool,
         total_length: observed_length,
-        packed_content_length: validated.packed_content_length(),
-        chunks: validated.chunks().to_vec(),
+        validated,
     })
 }
 
@@ -241,7 +239,7 @@ impl VerifiedXorb {
     }
 
     pub(crate) const fn packed_content_length(&self) -> u64 {
-        self.packed_content_length
+        self.validated.packed_content_length()
     }
 
     pub(crate) fn into_stream(
@@ -254,8 +252,8 @@ impl VerifiedXorb {
         }
         if coverage.as_ref().is_some_and(|allowed| {
             !allowed
-                .for_layout(&self.chunks)
-                .permits(range, self.packed_content_length)
+                .for_layout(self.validated.chunks())
+                .permits(range, self.validated.packed_content_length())
         }) {
             return Err(ServerError::NotFound);
         }
