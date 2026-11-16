@@ -96,73 +96,38 @@ impl From<DataHashBytesParseError> for CoreError {
 mod tests {
     use super::*;
 
-    /// Helper that constructs every variant and checks Display output.
-    fn check_display(variant: CoreError, expected_substr: &str) {
-        let s = format!("{variant}");
-        assert!(
-            s.contains(expected_substr),
-            "Display for {variant:?} should contain '{expected_substr}', got: {s}"
-        );
-    }
-
     #[test]
-    fn display_io() {
-        let err = CoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "lost file",
-        ));
-        check_display(err, "I/O error");
-    }
-
-    #[test]
-    fn display_internal() {
-        check_display(CoreError::InternalError("oops".into()), "Internal error");
-    }
-
-    #[test]
-    fn display_other() {
-        check_display(CoreError::Other("msg".into()), "msg");
-    }
-
-    #[test]
-    fn display_shard_version() {
-        check_display(CoreError::ShardVersion("bad".into()), "Shard version");
-    }
-
-    #[test]
-    fn display_invalid_shard() {
-        check_display(CoreError::InvalidShard("bad".into()), "Invalid shard");
-    }
-
-    #[test]
-    fn display_invalid_range() {
-        check_display(CoreError::InvalidRange, "Invalid range");
-    }
-
-    #[test]
-    fn display_invalid_arguments() {
-        check_display(CoreError::InvalidArguments, "Invalid arguments");
-    }
-
-    #[test]
-    fn display_malformed_data() {
-        check_display(CoreError::MalformedData("garbage".into()), "Malformed data");
-    }
-
-    #[test]
-    fn display_hash_mismatch() {
-        check_display(CoreError::HashMismatch, "Hash mismatch");
-    }
-
-    #[test]
-    fn display_compression_error() {
-        let err = CoreError::CompressionError(lz4_flex::frame::Error::WrongMagicNumber);
-        check_display(err, "Compression error");
-    }
-
-    #[test]
-    fn display_chunk_header_parse() {
-        check_display(CoreError::ChunkHeaderParse, "Chunk header parse");
+    fn display_variants() {
+        let cases = [
+            (
+                CoreError::Io(std::io::Error::other("lost file")),
+                "I/O error: lost file",
+            ),
+            (
+                CoreError::InternalError("oops".into()),
+                "Internal error: oops",
+            ),
+            (CoreError::Other("msg".into()), "msg"),
+            (
+                CoreError::ShardVersion("bad".into()),
+                "Shard version error: bad",
+            ),
+            (CoreError::InvalidShard("bad".into()), "Invalid shard: bad"),
+            (CoreError::InvalidRange, "Invalid range"),
+            (CoreError::InvalidArguments, "Invalid arguments"),
+            (
+                CoreError::MalformedData("garbage".into()),
+                "Malformed data: garbage",
+            ),
+            (CoreError::HashMismatch, "Hash mismatch"),
+            (CoreError::ChunkHeaderParse, "Chunk header parse error"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected, "{error:?}");
+        }
+        let source = lz4_flex::frame::Error::WrongMagicNumber;
+        let expected = format!("Compression error: {source}");
+        assert_eq!(CoreError::CompressionError(source).to_string(), expected);
     }
 
     #[test]
@@ -191,13 +156,20 @@ mod tests {
     #[test]
     fn from_io() {
         let e: CoreError = std::io::Error::other("test").into();
-        assert!(matches!(e, CoreError::Io(_)));
+        let CoreError::Io(source) = e else {
+            panic!("lost I/O error")
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::Other);
+        assert_eq!(source.to_string(), "test");
     }
 
     #[test]
     fn from_lz4() {
         let e: CoreError = lz4_flex::frame::Error::WrongMagicNumber.into();
-        assert!(matches!(e, CoreError::CompressionError(_)));
+        assert!(matches!(
+            e,
+            CoreError::CompressionError(lz4_flex::frame::Error::WrongMagicNumber)
+        ));
     }
 
     #[test]
@@ -231,13 +203,17 @@ mod tests {
     #[test]
     fn validate_other_err() {
         let r: std::result::Result<u32, CoreError> = Err(CoreError::Other("fatal".into()));
-        assert!(r.ok_for_format_error().is_err());
+        assert!(
+            matches!(r.ok_for_format_error(), Err(CoreError::Other(message)) if message == "fatal")
+        );
     }
 
     #[test]
     fn validate_io_err() {
         let r: std::result::Result<u32, CoreError> =
             Err(CoreError::Io(std::io::Error::other("eek")));
-        assert!(r.ok_for_format_error().is_err());
+        assert!(
+            matches!(r.ok_for_format_error(), Err(CoreError::Io(source)) if source.to_string() == "eek")
+        );
     }
 }
