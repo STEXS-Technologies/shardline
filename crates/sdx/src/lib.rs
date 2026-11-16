@@ -154,3 +154,6 @@ pub use xorb_build::{
     BuiltXorb, MAX_XORB_BYTES, MAX_XORB_CHUNKS, SERIALIZED_XORB_SAFETY_CAP_BYTES, XorbChunkEntry,
     build_xorb, serialized_size_le, xorb_cut_condition, xorb_max_addable_chunk,
 };
+
+#[cfg(test)]
+mod metadata_test_support;

@@ -210,42 +210,7 @@ mod tests {
     };
 
     use super::Revision;
-    use crate::{Auth, RepositoryId, XetClientBuilder};
-
-    const READ_TOKEN: &str = "read-token";
-
-    async fn build_client(server: &MockServer) -> crate::XetClient {
-        let auth = Auth::new(
-            &server.uri(),
-            RepositoryId {
-                provider: "github".to_owned(),
-                owner: "team".to_owned(),
-                repo: "assets".to_owned(),
-                revision: "main".to_owned(),
-            },
-        )
-        .unwrap()
-        .with_api_key("bootstrap".to_owned())
-        .with_subject("user".to_owned());
-        let port = server.uri().split(':').next_back().unwrap().to_owned();
-        XetClientBuilder::new()
-            .endpoint(format!("xet://127.0.0.1:{port}/github/team/assets/main"))
-            .auth(auth)
-            .build()
-            .unwrap()
-    }
-
-    async fn mock_read_token(server: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path("/api/github/team/assets/xet-read-token/main"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "casUrl": server.uri(),
-                "exp": 4_000_000_000u64,
-                "accessToken": READ_TOKEN,
-            })))
-            .mount(server)
-            .await;
-    }
+    use crate::metadata_test_support::{build_client, mock_read_token};
 
     fn revision_json(name: &str) -> serde_json::Value {
         json!({"name": name, "createdAt": 1, "updatedAt": 2})
@@ -275,7 +240,7 @@ mod tests {
                     .mount(&server)
                     .await;
             }
-            let client = build_client(&server).await;
+            let client = build_client(&server);
             let result =
                 tokio::time::timeout(std::time::Duration::from_secs(2), client.list_revisions())
                     .await
@@ -298,11 +263,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let error = build_client(&server)
-            .await
-            .list_revisions()
-            .await
-            .unwrap_err();
+        let error = build_client(&server).list_revisions().await.unwrap_err();
         assert!(
             matches!(error, crate::SdxError::Metadata(message) if message.starts_with("list_revisions: "))
         );
@@ -320,11 +281,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let error = build_client(&server)
-            .await
-            .list_revisions()
-            .await
-            .unwrap_err();
+        let error = build_client(&server).list_revisions().await.unwrap_err();
         assert!(matches!(error, crate::SdxError::Metadata(message)
             if message.starts_with("list_revisions: ") && message.len() <= 8 * 1024 + "list_revisions: ".len()
                 && message.contains("[truncated; at line 1 column ")));
@@ -341,7 +298,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let client = build_client(&server).await;
+        let client = build_client(&server);
         for revision in [
             "release candidate",
             "release+candidate",
@@ -427,7 +384,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = build_client(&server).await;
+        let client = build_client(&server);
         let revisions = client.list_revisions().await.unwrap();
         let names: Vec<&str> = revisions.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["one", "two", "three", "four"]);
@@ -447,7 +404,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = build_client(&server).await;
+        let client = build_client(&server);
         let revisions = client.list_revisions().await.unwrap();
         let names: Vec<&str> = revisions.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["main"]);

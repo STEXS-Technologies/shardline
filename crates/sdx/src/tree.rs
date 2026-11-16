@@ -563,42 +563,9 @@ mod tests {
     use super::{build_url, encode_path_segments};
     use crate::{Auth, RepositoryId, XetClientBuilder};
 
-    const READ_TOKEN: &str = "read-token";
+    use crate::metadata_test_support::{BOOTSTRAP_KEY, READ_TOKEN, build_client, mock_read_token};
+
     const WRITE_TOKEN: &str = "write-token";
-    const BOOTSTRAP_KEY: &str = "bootstrap";
-
-    async fn build_client(server: &MockServer) -> crate::XetClient {
-        let auth = Auth::new(
-            &server.uri(),
-            RepositoryId {
-                provider: "github".to_owned(),
-                owner: "team".to_owned(),
-                repo: "assets".to_owned(),
-                revision: "main".to_owned(),
-            },
-        )
-        .unwrap()
-        .with_api_key(BOOTSTRAP_KEY.to_owned())
-        .with_subject("user".to_owned());
-        let port = server.uri().split(':').next_back().unwrap().to_owned();
-        XetClientBuilder::new()
-            .endpoint(format!("xet://127.0.0.1:{port}/github/team/assets/main"))
-            .auth(auth)
-            .build()
-            .unwrap()
-    }
-
-    async fn mock_read_token(server: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path("/api/github/team/assets/xet-read-token/main"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "casUrl": server.uri(),
-                "exp": 4_000_000_000u64,
-                "accessToken": READ_TOKEN,
-            })))
-            .mount(server)
-            .await;
-    }
 
     async fn mock_write_token(server: &MockServer) {
         Mock::given(method("GET"))
@@ -623,7 +590,6 @@ mod tests {
             .mount(&server)
             .await;
         let error = build_client(&server)
-            .await
             .resolve_path("file.txt")
             .await
             .unwrap_err();
@@ -677,7 +643,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let client = build_client(&server).await;
+        let client = build_client(&server);
         for remote in ["directory/../victim", "directory/./victim", ".", ".."] {
             assert!(matches!(
                 client.delete_path(remote, false).await,
@@ -766,7 +732,7 @@ mod tests {
                     .mount(&server)
                     .await;
             }
-            let client = build_client(&server).await;
+            let client = build_client(&server);
             let result =
                 tokio::time::timeout(std::time::Duration::from_secs(2), client.list_dir_all(""))
                     .await
@@ -871,7 +837,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = build_client(&server).await;
+        let client = build_client(&server);
         let all = client.list_dir_all("").await.unwrap();
         // `dir/` appears on both pages but is deduplicated.
         let paths: Vec<String> = all.iter().map(|entry| entry.path.clone()).collect();
@@ -902,7 +868,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = build_client(&server).await;
+        let client = build_client(&server);
         let err = client
             .register_path("a/b.txt", &"0".repeat(64))
             .await
@@ -924,7 +890,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = build_client(&server).await;
+        let client = build_client(&server);
         let err = client.resolve_path("missing.txt").await.unwrap_err();
         assert!(matches!(
             err,
