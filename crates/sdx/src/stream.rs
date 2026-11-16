@@ -1743,7 +1743,6 @@ fn normalize_block(
             .checked_sub(1)
             .and_then(|index| sorted.get(index))
             .filter(|descriptor| descriptor.chunks.1 >= term.range.end)
-            .cloned()
             .ok_or_else(|| SdxError::MissingFetchInfo {
                 term_index,
                 hash: term.hash.clone(),
@@ -1786,7 +1785,7 @@ fn normalize_block(
             offset,
         };
         if let Some(group) = groups.last_mut() {
-            if group.hash == term.hash && group.last_descriptor == descriptor {
+            if group.hash == term.hash && group.last_descriptor == *descriptor {
                 // A descriptor may cover several terms or repeated output.
                 group.budget = group.budget.max(budget);
                 group.exact &= exact;
@@ -1808,7 +1807,7 @@ fn normalize_block(
                 group.descriptor.chunks.1 = descriptor.chunks.1;
                 group.descriptor.bytes.end = descriptor.bytes.end;
                 group.budget = group.budget.saturating_add(budget);
-                group.last_descriptor = descriptor;
+                group.last_descriptor = descriptor.clone();
                 group.terms.push(parsed);
                 continue;
             }
@@ -1816,7 +1815,7 @@ fn normalize_block(
         groups.push(FetchGroup {
             hash: term.hash.clone(),
             descriptor: descriptor.clone(),
-            last_descriptor: descriptor,
+            last_descriptor: descriptor.clone(),
             budget,
             exact,
             terms: vec![parsed],
