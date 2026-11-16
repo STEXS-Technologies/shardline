@@ -192,7 +192,8 @@ where
     {
         let tenant = tenant.into();
         let repository = repository.into();
-        self.begin_upload_scoped(intent, &tenant, &repository)
+        let current = self
+            .begin_upload_record_scoped(intent, &tenant, &repository)
             .await
             .map_err(E::from)?;
         upload_lifecycle_failpoint(
@@ -200,14 +201,6 @@ where
             UploadLifecycleBoundary::AfterIntentCreated,
         )
         .map_err(E::from)?;
-        let current = self
-            .index
-            .intent_by_id(intent.intent_id())
-            .await
-            .map_err(CasError::from_record)
-            .map_err(E::from)?
-            .ok_or_else(|| E::from(CasError::InvalidUploadTransition))?;
-
         // Content-addressed upload retries are idempotent. Once an intent is
         // visible, repeat the storage work only to obtain the protocol response;
         // never reopen the completed durable lifecycle.
@@ -274,6 +267,19 @@ where
         tenant: &str,
         repository: &str,
     ) -> Result<(), CasError> {
+        self.begin_upload_record_scoped(intent, tenant, repository)
+            .await
+            .map(|_| ())
+    }
+
+    // Return the identity-checked snapshot so upload work need not read it again.
+    // State transitions still recheck their own snapshots atomically in the store.
+    async fn begin_upload_record_scoped(
+        &self,
+        intent: &shardline_index::UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<shardline_index::UploadIntent, CasError> {
         self.index
             .create_intent_scoped(intent, tenant, repository)
             .await
@@ -283,11 +289,9 @@ where
             .intent_by_id(intent.intent_id())
             .await
             .map_err(CasError::from_record)?;
-        if stored.is_some_and(|stored| stored.has_same_identity(intent)) {
-            Ok(())
-        } else {
-            Err(CasError::InvalidUploadTransition)
-        }
+        stored
+            .filter(|stored| stored.has_same_identity(intent))
+            .ok_or(CasError::InvalidUploadTransition)
     }
 
     /// Records one validated persistence boundary for an upload.
