@@ -235,24 +235,20 @@ impl ProviderRepositoryState {
             provider: self.provider,
             owner: self.owner.clone(),
             repo: self.repo.clone(),
-            last_access_changed_at_unix_seconds: max_optional_timestamp(
-                self.last_access_changed_at_unix_seconds,
-                incoming.last_access_changed_at_unix_seconds,
-            ),
+            last_access_changed_at_unix_seconds: self
+                .last_access_changed_at_unix_seconds
+                .max(incoming.last_access_changed_at_unix_seconds),
             last_revision_pushed_at_unix_seconds,
             last_pushed_revision,
-            last_cache_invalidated_at_unix_seconds: max_optional_timestamp(
-                self.last_cache_invalidated_at_unix_seconds,
-                incoming.last_cache_invalidated_at_unix_seconds,
-            ),
-            last_authorization_rechecked_at_unix_seconds: max_optional_timestamp(
-                self.last_authorization_rechecked_at_unix_seconds,
-                incoming.last_authorization_rechecked_at_unix_seconds,
-            ),
-            last_drift_checked_at_unix_seconds: max_optional_timestamp(
-                self.last_drift_checked_at_unix_seconds,
-                incoming.last_drift_checked_at_unix_seconds,
-            ),
+            last_cache_invalidated_at_unix_seconds: self
+                .last_cache_invalidated_at_unix_seconds
+                .max(incoming.last_cache_invalidated_at_unix_seconds),
+            last_authorization_rechecked_at_unix_seconds: self
+                .last_authorization_rechecked_at_unix_seconds
+                .max(incoming.last_authorization_rechecked_at_unix_seconds),
+            last_drift_checked_at_unix_seconds: self
+                .last_drift_checked_at_unix_seconds
+                .max(incoming.last_drift_checked_at_unix_seconds),
         }
     }
 
@@ -308,13 +304,6 @@ impl ProviderRepositoryState {
     #[must_use]
     pub const fn last_drift_checked_at_unix_seconds(&self) -> Option<u64> {
         self.last_drift_checked_at_unix_seconds
-    }
-}
-
-fn max_optional_timestamp(current: Option<u64>, incoming: Option<u64>) -> Option<u64> {
-    match (current, incoming) {
-        (Some(current), Some(incoming)) => Some(current.max(incoming)),
-        (current, incoming) => current.or(incoming),
     }
 }
 
