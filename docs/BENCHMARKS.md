@@ -3750,7 +3750,7 @@ metadata.
 
 The November 16, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`39350ca8e590d57a73cb565f48fc678d529478e3`. It counts all tracked `.rs`
+`f120dc00f8e2beeac8f6c30ff79101d9b8e4dcd7`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
@@ -3760,27 +3760,27 @@ checked against the line count of every Rust blob in each Git snapshot.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 578,072 | 25,577 (4.24%) |
-| Server | 220,570 | 210,914 | 9,656 (4.38%) |
-| Server core | 6,454 | 5,501 | 953 (14.77%) |
+| Entire repository | 603,649 | 575,852 | 27,797 (4.60%) |
+| Server | 220,570 | 210,834 | 9,736 (4.41%) |
+| Server core | 6,454 | 5,414 | 1,040 (16.11%) |
 | Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
-| Storage | 20,373 | 19,391 | 982 (4.82%) |
-| S3 adapter | 10,954 | 9,983 | 971 (8.86%) |
+| Storage | 20,373 | 18,472 | 1,901 (9.33%) |
+| S3 adapter | 10,954 | 9,938 | 1,016 (9.28%) |
 | Xet adapter | 17,801 | 15,866 | 1,935 (10.87%) |
-| OCI adapter | 7,700 | 6,649 | 1,051 (13.65%) |
-| Cache | 6,573 | 5,786 | 787 (11.97%) |
+| OCI adapter | 7,700 | 6,629 | 1,071 (13.91%) |
+| Cache | 6,573 | 5,404 | 1,169 (17.78%) |
 | Index | 71,472 | 68,525 | 2,947 (4.12%) |
 | CAS | 3,447 | 2,858 | 589 (17.09%) |
 | GC | 10,954 | 10,110 | 844 (7.70%) |
 | Fsck | 8,989 | 8,493 | 496 (5.52%) |
-| Rebuild | 4,326 | 3,788 | 538 (12.44%) |
+| Rebuild | 4,326 | 3,558 | 768 (17.75%) |
 | CLI | 37,677 | 37,264 | 413 (1.10%) |
-| SDK | 26,965 | 24,479 | 2,486 (9.22%) |
-| Protocol | 4,076 | 3,715 | 361 (8.86%) |
+| SDK | 26,965 | 24,428 | 2,537 (9.41%) |
+| Protocol | 4,076 | 3,502 | 574 (14.08%) |
 | Protocol adapters | 1,670 | 1,240 | 430 (25.75%) |
 | Provider events | 5,283 | 4,905 | 378 (7.16%) |
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
-| Validation | 977 | 789 | 188 (19.24%) |
+| Validation | 977 | 628 | 349 (35.72%) |
 
 The SDK component decrease includes tests relocated to the E2E workspace. Those
 lines remain in the repository total and are not counted as repository deletions.
@@ -4242,6 +4242,54 @@ the unchanged 65,536 KiB additional-RSS threshold. The parent tests took
 elapsed times are not download-throughput measurements. These shared-host
 samples do not isolate any individual optimization, explain the historical
 hosted failure, or qualify the production PostgreSQL/object-store topology.
+
+### Storage and cache checkpoint (2026-11-16)
+
+Source `f120dc00f8e2beeac8f6c30ff79101d9b8e4dcd7` was held fixed for a local
+follow-up after the storage and cache cleanup. The combined `shardline-storage`,
+`shardline-cache`, `sdx` and `shardline-server-core` suites passed 1,072 tests;
+three default-ignored storage tests were skipped. The server's 31 selected
+`reconstruction_cache::tests::` tests also passed; its other 3,197 library tests
+were filtered out. Strict Clippy passed for the four complete crate selections.
+
+The run used the same shared Linux development host, four build jobs, an empty
+`RUSTC_WRAPPER`, disabled dev/test debug information, existing target caches,
+Rust/Cargo 1.99.0 for tests and 1.100.0 for strict Clippy. Docker prerequisites
+were required for the storage and Redis integration fixtures. Reproduce the
+selected checks from the repository root:
+
+```bash
+export RUSTC_WRAPPER= CARGO_BUILD_JOBS=4 \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo +1.99.0 nextest run --offline --locked \
+  -p shardline-storage -p shardline-cache -p sdx -p shardline-server-core
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo +1.99.0 nextest run --offline --locked \
+  -p shardline-server --lib -E 'test(reconstruction_cache::tests::)'
+cargo +1.100.0 clippy --offline --locked \
+  -p shardline-storage -p shardline-cache -p sdx -p shardline-server-core \
+  --lib --tests -- -D warnings
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo +1.99.0 nextest run --offline --locked \
+  --manifest-path e2e/Cargo.toml --all-features \
+  --test sdk_client_e2e --test sdk_xorb_interop --run-ignored all \
+  --no-fail-fast --success-output final --test-threads 2
+```
+
+The SDK/server E2E and Xorb interoperability run passed all 35 tests with none
+skipped in 286.421 s, including the ignored 1 GiB workload. Both isolated client
+workloads checked byte identity and length, and met the unchanged 65,536 KiB
+additional-RSS limit:
+
+| Isolated client workload | Baseline RSS (KiB) | Peak VmHWM (KiB) | Additional RSS (KiB) | Client transfer (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 256 MiB | 24,900 | 68,408 | 43,508 | 1,238 |
+| 1 GiB | 24,580 | 76,052 | 51,472 | 8,239 |
+
+The parent tests took 22.166 s and 212.319 s, including fixture ingestion.
+These are local regression checks on a shared development host, not controlled
+measurements of an individual optimization or production throughput. The full
+server suite, production PostgreSQL/object-store topology and hosted memory
+qualification remain outside this checkpoint. The historical hosted RSS failure
+is still unexplained by these local passes.
 
 ## Shared protocol chunk reuse qualification
 
