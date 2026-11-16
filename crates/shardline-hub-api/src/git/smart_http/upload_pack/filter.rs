@@ -18,14 +18,12 @@ impl Filter {
         let mut leaves = 0usize;
         for line in lines {
             let line = std::str::from_utf8(line).map_err(|_error| invalid())?;
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.first().copied() != Some("filter") {
+            let mut fields = line.split_whitespace();
+            if fields.next() != Some("filter") {
                 continue;
             }
-            let [_, spec] = fields.as_slice() else {
-                return Err(invalid());
-            };
-            if seen || spec.len() > MAX_FILTER_SPEC_BYTES {
+            let spec = fields.next().ok_or_else(invalid)?;
+            if fields.next().is_some() || seen || spec.len() > MAX_FILTER_SPEC_BYTES {
                 return Err(invalid());
             }
             seen = true;
@@ -39,6 +37,9 @@ impl Filter {
         objects: Vec<GitObject>,
         wants: &[String],
     ) -> Result<Vec<GitObject>, HubApiError> {
+        if self.blob_limit.is_none() && self.tree_depth.is_none() && self.object_types.is_none() {
+            return Ok(objects);
+        }
         let explicit: std::collections::HashSet<_> = wants.iter().collect();
         let depths = if self.tree_depth.is_some() {
             tree::depths(&objects, wants)?
@@ -170,34 +171,25 @@ fn parse_spec(
 
 fn decode_component(component: &str) -> Result<String, HubApiError> {
     let invalid = || HubApiError::BadRequest("unsupported or invalid Git object filter".to_owned());
-    let bytes = component.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let current = bytes.get(offset).copied().ok_or_else(invalid)?;
+    let mut bytes = component.as_bytes().iter();
+    let mut decoded = Vec::with_capacity(component.len());
+    while let Some(&current) = bytes.next() {
         if current == b'%' {
-            let hi_offset = offset.checked_add(1).ok_or_else(invalid)?;
-            let lo_offset = offset.checked_add(2).ok_or_else(invalid)?;
             let hi = bytes
-                .get(hi_offset)
+                .next()
                 .and_then(|byte| hex_nibble(*byte))
                 .ok_or_else(invalid)?;
             let lo = bytes
-                .get(lo_offset)
+                .next()
                 .and_then(|byte| hex_nibble(*byte))
                 .ok_or_else(invalid)?;
-            let value = hi
-                .checked_mul(16)
-                .and_then(|value| value.checked_add(lo))
-                .ok_or_else(invalid)?;
+            let value = (hi << 4) | lo;
             if value <= 0x20 || value == 0x7f {
                 return Err(invalid());
             }
             decoded.push(value);
-            offset = offset.checked_add(3).ok_or_else(invalid)?;
         } else {
             decoded.push(current);
-            offset = offset.checked_add(1).ok_or_else(invalid)?;
         }
     }
     String::from_utf8(decoded).map_err(|_error| invalid())
