@@ -63,7 +63,7 @@ use crate::retry::{RetryContext, RetryPolicy, RetryScope};
 use crate::session::DownloadSessionInner;
 use crate::shard::{
     MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG, ShardFileEntry, ShardSegment, ShardXorb, ShardXorbChunk,
-    find_chunk_in_xorbs, parse_shard_xorbs, serialize_shard,
+    find_chunk_in_xorbs, parse_shard_xorbs, serialize_shard_iter,
 };
 use crate::transfer::TransferClient;
 use crate::xorb_build::{
@@ -1065,15 +1065,15 @@ impl UploadSession {
             let mut state = self.inner.state.lock().await;
             (
                 std::mem::take(&mut state.file_infos),
-                std::mem::take(&mut state.xorb_infos)
-                    .into_values()
-                    .collect::<Vec<_>>(),
+                std::mem::take(&mut state.xorb_infos),
                 std::mem::take(&mut state.file_reports),
             )
         };
 
         if !file_infos.is_empty() {
-            let shard = Bytes::from(serialize_shard(&file_infos, &xorb_infos));
+            let shard = Bytes::from(serialize_shard_iter(&file_infos, xorb_infos.values()));
+            drop(file_infos);
+            drop(xorb_infos);
             let (base, token) = self.inner.cas_credentials().await?;
             let _permit = self
                 .inner

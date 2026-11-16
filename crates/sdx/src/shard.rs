@@ -123,6 +123,13 @@ pub struct ShardXorb {
 /// has no failure modes beyond memory.
 #[must_use]
 pub fn serialize_shard(files: &[ShardFileEntry], xorbs: &[ShardXorb]) -> Vec<u8> {
+    serialize_shard_iter(files, xorbs)
+}
+
+pub(crate) fn serialize_shard_iter<'xorb>(
+    files: &[ShardFileEntry],
+    xorbs: impl IntoIterator<Item = &'xorb ShardXorb>,
+) -> Vec<u8> {
     let mut out = Vec::new();
 
     // Header.
