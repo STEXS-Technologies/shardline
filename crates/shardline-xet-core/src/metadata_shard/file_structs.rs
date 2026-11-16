@@ -450,16 +450,11 @@ impl MDBFileInfoView {
     }
 
     pub fn byte_size(&self, with_verification: bool) -> usize {
-        let n = self.num_entries();
-        let n_structs = 1
-            + n
-            + (if with_verification && self.contains_verification() {
-                n
-            } else {
-                0
-            })
-            + (if self.contains_metadata_ext() { 1 } else { 0 });
-        n_structs * MDB_FILE_INFO_ENTRY_SIZE
+        let mut records = 1 + self.header.num_info_entry_following() as usize;
+        if !with_verification && self.contains_verification() {
+            records -= self.num_entries();
+        }
+        records * MDB_FILE_INFO_ENTRY_SIZE
     }
 
     pub fn bytes(&self) -> Bytes {
@@ -958,29 +953,33 @@ mod tests {
 
     #[test]
     fn view_byte_size_variants() {
-        let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 2, true, false);
-        let e1 = FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25);
-        let e2 = FileDataSequenceEntry::new(MerkleHash::default(), 75, 25, 50);
-        let v1 = FileVerificationEntry::new(compute_data_hash(b"v1"));
-        let v2 = FileVerificationEntry::new(compute_data_hash(b"v2"));
-        let mut buf = Vec::new();
-        header.serialize(&mut buf).unwrap();
-        e1.serialize(&mut buf).unwrap();
-        e2.serialize(&mut buf).unwrap();
-        v1.serialize(&mut buf).unwrap();
-        v2.serialize(&mut buf).unwrap();
-        let size = (1 + 2 + 2) * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
-        buf.resize(size, 0);
-
-        let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
-        assert_eq!(
-            view.byte_size(true),
-            (1 + 2 + 2) * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE
-        );
-        assert_eq!(
-            view.byte_size(false),
-            (1 + 2) * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE
-        );
+        for (verification, metadata_ext, records_per_segment, extra_records) in [
+            (false, false, 1, 0),
+            (true, false, 2, 0),
+            (false, true, 1, 1),
+            (true, true, 2, 1),
+        ] {
+            for count in [0, 1, 2] {
+                let header = FileDataSequenceHeader::new(
+                    compute_data_hash(b"f"),
+                    count as u64,
+                    verification,
+                    metadata_ext,
+                );
+                let mut buf = Vec::new();
+                header.serialize(&mut buf).unwrap();
+                let full_size =
+                    (1 + count * records_per_segment + extra_records) * MDB_FILE_INFO_ENTRY_SIZE;
+                buf.resize(full_size, 0);
+                let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
+                assert_eq!(view.byte_size(true), full_size);
+                assert_eq!(
+                    view.byte_size(false),
+                    (1 + count + extra_records) * MDB_FILE_INFO_ENTRY_SIZE
+                );
+                assert_eq!(MDBFileInfo::from(&view).num_bytes(), full_size as u64);
+            }
+        }
     }
 
     #[test]
