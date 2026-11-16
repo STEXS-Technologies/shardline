@@ -493,10 +493,7 @@ impl XorbObject {
 
     pub fn get_info_length<R: Read + Seek>(reader: &mut R) -> Result<u64, CoreError> {
         reader.seek(SeekFrom::End(-(size_of::<u64>() as i64)))?;
-        let mut info_length = [0u8; 8];
-        reader.read_exact(&mut info_length)?;
-        let info_length = u64::from_le_bytes(info_length);
-        Ok(info_length)
+        Ok(read_u64(reader)?)
     }
 
     pub fn deserialize<R: Read + Seek>(reader: &mut R) -> Result<Self, CoreError> {
@@ -519,14 +516,10 @@ impl XorbObject {
         w: &mut W,
         info: XorbObjectInfoV1,
     ) -> Result<(Self, usize), CoreError> {
-        let mut total_written_bytes: usize = 0;
-        let info_length = info.serialize(w)? as u64;
-        total_written_bytes += info_length as usize;
+        let written = info.serialize(w)?;
+        let info_length = written as u64;
         write_u64(w, info_length)?;
-        total_written_bytes += size_of::<u64>();
-
-        let xorb_obj = Self { info, info_length };
-        Ok((xorb_obj, total_written_bytes))
+        Ok((Self { info, info_length }, written + size_of::<u64>()))
     }
 
     pub fn from_info(info: XorbObjectInfoV1) -> Self {
@@ -602,7 +595,6 @@ impl XorbObject {
         let mut hash_chunks = Vec::with_capacity(xorb.info.num_chunks as usize);
         let mut cumulative_compressed_length: u64 = 0;
         let mut unpacked_chunk_offset: u64 = 0;
-        let mut start_offset: u64 = 0;
 
         // Encoded chunks are contiguous. Validate their declared boundaries
         // against bytes consumed below, without discarding a buffered reader's
@@ -637,12 +629,10 @@ impl XorbObject {
                 .chunk_boundary_offsets
                 .get(idx as usize)
                 .ok_or_else(|| CoreError::MalformedData("missing chunk boundary offset".into()))?;
-            if (start_offset + compressed_chunk_length as u64) != boundary {
+            if cumulative_compressed_length != boundary {
                 warn!("XORB Validation: Chunk boundary byte index does not match Info object.");
                 return Ok(None);
             }
-
-            start_offset = boundary;
 
             if xorb.info.boundaries_version == XORB_OBJECT_FORMAT_BOUNDARIES_VERSION
                 && unpacked_chunk_offset
@@ -669,10 +659,11 @@ impl XorbObject {
         }
 
         let cur_position = reader.stream_position()?;
-        let expected_position = cumulative_compressed_length;
         let expected_from_end_position =
             Self::checked_info_start(reader.seek(SeekFrom::End(0))?, xorb.info_length)?;
-        if cur_position != expected_position || cur_position != expected_from_end_position {
+        if cur_position != cumulative_compressed_length
+            || cur_position != expected_from_end_position
+        {
             warn!("XORB Validation: Content bytes after known chunks in Info object.");
             return Ok(None);
         }
@@ -1395,10 +1386,10 @@ mod tests {
     // ======= validate_xorb_object paths =======
 
     #[test]
-    fn validate_xorb_object_success_path() {
+    fn validation_checks_every_chunk_boundary() {
         use crate::xorb_object::xorb_format_test_utils::{ChunkSize, build_xorb_object};
         let (obj, chunk_data, _, _) =
-            build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::LZ4).unwrap();
+            build_xorb_object(3, ChunkSize::Fixed(100), CompressionScheme::LZ4).unwrap();
         let mut buf = Vec::new();
         buf.extend_from_slice(&chunk_data);
         let info_len = obj.info.serialize(&mut buf).unwrap();
@@ -1412,6 +1403,24 @@ mod tests {
             XorbObject::validate_xorb_object_with_info(&mut Cursor::new(&buf), parsed, &hash)
                 .unwrap();
         assert_eq!(result, reused);
+        for index in 0..3 {
+            for delta in [-1, 1] {
+                let mut invalid = obj.clone();
+                invalid.info.chunk_boundary_offsets[index] = invalid.info.chunk_boundary_offsets
+                    [index]
+                    .checked_add_signed(delta)
+                    .unwrap();
+                assert!(
+                    XorbObject::validate_xorb_object_with_info(
+                        &mut Cursor::new(&buf),
+                        invalid,
+                        &hash
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        }
     }
 
     #[test]
