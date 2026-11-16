@@ -20,16 +20,32 @@ use crate::{
 };
 
 #[tokio::test]
-async fn memory_cache_roundtrips_one_payload() {
-    let cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::MIN);
-    let key = ReconstructionCacheKey::latest("asset.bin", None);
-    let put = cache.put(&key, b"payload").await;
-    assert!(put.is_ok());
-
-    let value = cache.get(&key).await;
-
-    assert!(value.is_ok());
-    assert_eq!(value.ok(), Some(Some(b"payload".to_vec())));
+async fn memory_cache_basic_lifecycle_preserves_payload_and_delete_results() {
+    for (ttl, capacity, name, payload) in [
+        (1, 1, "asset.bin", b"payload".as_slice()),
+        (3600, 100, "del-test", b"data".as_slice()),
+    ] {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(ttl).unwrap(),
+            NonZeroUsize::new(capacity).unwrap(),
+        );
+        cache.ready().await.unwrap();
+        let absent = ReconstructionCacheKey::latest("nonexistent", None);
+        assert_eq!(cache.get(&absent).await.unwrap(), None);
+        assert!(!cache.delete(&absent).await.unwrap());
+        assert!(
+            !cache
+                .delete(&ReconstructionCacheKey::latest("missing", None))
+                .await
+                .unwrap()
+        );
+        let key = ReconstructionCacheKey::latest(name, None);
+        cache.put(&key, payload).await.unwrap();
+        assert_eq!(cache.get(&key).await.unwrap(), Some(payload.to_vec()));
+        assert!(cache.delete(&key).await.unwrap());
+        assert_eq!(cache.get(&key).await.unwrap(), None);
+        assert!(!cache.delete(&key).await.unwrap());
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -138,35 +154,6 @@ async fn memory_cache_loader_failure_cleans_up_pending() {
     assert_eq!(result.unwrap(), Some(b"success".to_vec()));
 }
 
-// ── Delete ────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn memory_cache_delete_removes_entry() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap(),
-        NonZeroUsize::new(100).unwrap(),
-    );
-    let key = ReconstructionCacheKey::latest("del-test", None);
-
-    cache.put(&key, b"data").await.unwrap();
-    assert!(cache.get(&key).await.unwrap().is_some());
-
-    let deleted = cache.delete(&key).await.unwrap();
-    assert!(deleted);
-    assert!(cache.get(&key).await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn memory_cache_delete_missing_returns_false() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap(),
-        NonZeroUsize::new(100).unwrap(),
-    );
-    let key = ReconstructionCacheKey::latest("missing", None);
-    let deleted = cache.delete(&key).await.unwrap();
-    assert!(!deleted);
-}
-
 // ── delete() releases an orphaned loading latch ────────────────────────
 //
 // When a loader fails in a path that does not notify (e.g. the caller uses
@@ -230,32 +217,6 @@ async fn delete_clears_orphaned_loading_latch_and_wakes_waiter() {
         Ok(result) => assert_eq!(result.unwrap(), Some(b"ok".to_vec())),
         Err(_) => panic!("get_or_load stalled after latch cleanup"),
     }
-}
-
-// ── ready() test ─────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn memory_cache_ready_returns_ok() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
-    );
-    let result = cache.ready().await;
-    assert!(result.is_ok());
-}
-
-// ── get returns None for missing key ──────────────────────────────────
-
-#[tokio::test]
-async fn memory_cache_get_returns_none_for_missing_key() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
-    );
-    let key = ReconstructionCacheKey::latest("nonexistent", None);
-    let result = cache.get(&key).await;
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), None);
 }
 
 // ── get returns None for expired entry (not in loading state) ─────────
