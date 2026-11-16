@@ -245,19 +245,24 @@ impl<'session> MetadataClient<'session> {
         .await
     }
 
+    /// Validate before resolving credentials, then encode each wildcard segment
+    /// so registration and deletion address the same remote key.
+    fn mutation_url(&self, remote: &str) -> Result<String, SdxError> {
+        validate_mutation_path(remote)?;
+        let route = self
+            .repo_route(XET_PATH_ROUTE)
+            .replace("{*path}", &encode_path_segments(remote));
+        Ok(build_url(self.api_base, &route, &[]))
+    }
+
     pub(crate) async fn register_path(
         &self,
         remote: &str,
         file_id: &str,
     ) -> Result<RegisterResult, SdxError> {
-        validate_mutation_path(remote)?;
+        let url = self.mutation_url(remote)?;
         let retry = self.retry(RetryScope::Write);
         let token = self.tokens.write_token().await?;
-        let route = self.repo_route(XET_PATH_ROUTE);
-        let url = build_url(self.api_base, &route, &[]);
-        // Substitute the `{*path}` wildcard with the remote path (axum decodes
-        // the captured value; encode each segment so special characters survive).
-        let url = url.replace("{*path}", &encode_path_segments(remote));
         self.send_json(
             &retry,
             token.token,
@@ -270,12 +275,9 @@ impl<'session> MetadataClient<'session> {
     }
 
     async fn delete_path(&self, remote: &str, recursive: bool) -> Result<u64, SdxError> {
-        validate_mutation_path(remote)?;
+        let mut url = self.mutation_url(remote)?;
         let retry = self.retry(RetryScope::Write);
         let token = self.tokens.write_token().await?;
-        let route = self.repo_route(XET_PATH_ROUTE);
-        let mut url = build_url(self.api_base, &route, &[]);
-        url = url.replace("{*path}", &encode_path_segments(remote));
         if recursive {
             url.push_str("?recursive=true");
         }
