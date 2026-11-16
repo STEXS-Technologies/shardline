@@ -4163,6 +4163,56 @@ This gate remains unqualified on hosted CI until a current-branch run passes;
 local results do not establish a cause for the historical failure or qualify
 the remaining PostgreSQL/object-store and real-client matrix.
 
+### Integrated cleanup checkpoint (2026-11-16)
+
+An isolated checkout of `013fa01045196a0783e4fdc26a551d14a1d30d20`
+passed the following local checkpoint after the SDK, cache, protocol, S3,
+server-core, validation and rebuild cleanup. Uncommitted changes in the main
+worktree were excluded. Code edits were held during the checkpoint.
+
+| Check | Result |
+| --- | --- |
+| Combined tests for the seven crates below | 1,062 passed, none skipped |
+| SDK/server E2E and Xorb interoperability | 34 passed, one explicitly ignored 1 GiB test skipped |
+| Strict Clippy for the seven crates, library and tests | Passed with `-D warnings` |
+
+The E2E run included full/ranged, sequential/unordered and grouped downloads,
+metadata upload/reupload/deletion, server Xorb byte identity and the 256 MiB
+streamed byte-identity/RSS gate. That memory child reported baseline RSS
+25,348 KiB, peak VmHWM 80,864 KiB and additional RSS 55,516 KiB, below the
+unchanged 65,536 KiB threshold. This is one local sample; it does not explain
+the historical hosted failure above. The ignored 1 GiB test was not run here.
+
+The shared Linux development host used warm artifacts, four build jobs,
+disabled dev/test debug information, no compiler wrapper, Rust 1.99.0 for
+tests and Rust 1.100.0 for Clippy. Docker 29.2.1 was available, with Redis
+containers observed during the cache tests. The crate and E2E commands were
+started together; this was correctness verification, not a controlled timing
+or throughput comparison.
+
+Reproduce with an existing target directory of your choice:
+
+```bash
+export RUSTC_WRAPPER=
+export CARGO_BUILD_JOBS=4
+export CARGO_PROFILE_DEV_DEBUG=0
+export CARGO_PROFILE_TEST_DEBUG=0
+cargo +1.99.0 nextest run --offline --locked \
+  -p sdx -p shardline-cache -p shardline-protocol -p shardline-s3-adapter \
+  -p shardline-server-core -p shardline-validation -p shardline-rebuild
+cargo +1.99.0 nextest run --offline --locked --manifest-path e2e/Cargo.toml \
+  --all-features --test sdk_client_e2e --test sdk_xorb_interop \
+  --no-fail-fast --success-output final --test-threads 2
+cargo +1.100.0 clippy --offline --locked \
+  -p sdx -p shardline-cache -p shardline-protocol -p shardline-s3-adapter \
+  -p shardline-server-core -p shardline-validation -p shardline-rebuild \
+  --lib --tests -- -D warnings
+```
+
+This checkpoint does not cover the entire workspace, hosted CI, or the
+PostgreSQL/object-store production topology. Those qualification gaps remain
+open; the local 256 MiB pass is not a replacement for the hosted RSS gate.
+
 ## Shared protocol chunk reuse qualification
 
 The shared ingestion path now consults the existing scoped native chunk index,
