@@ -505,46 +505,6 @@ fn xorb_object_info_v0_deserialize_invalid_version() {
 // ============================================================================
 
 #[test]
-fn xorb_object_info_v1_default() {
-    let info = XorbObjectInfoV1::default();
-    assert_eq!(info.version, 2);
-    assert_eq!(info.num_chunks, 0);
-    assert!(info.chunk_boundary_offsets.is_empty());
-    assert!(info.chunk_hashes.is_empty());
-}
-
-#[test]
-fn xorb_object_info_v1_fill_in_boundary_offsets() {
-    let mut info = XorbObjectInfoV1::default();
-    info.chunk_hashes = vec![compute_data_hash(b"a")];
-    info.chunk_boundary_offsets = vec![100];
-    info.unpacked_chunk_offsets = vec![50];
-    info.num_chunks = 1;
-    info.fill_in_boundary_offsets();
-    assert!(info.boundary_section_offset_from_end > 0);
-    assert!(info.hashes_section_offset_from_end > 0);
-}
-
-#[test]
-fn xorb_object_info_v1_serialized_length() {
-    let mut info = XorbObjectInfoV1::default();
-    info.chunk_hashes = vec![compute_data_hash(b"a")];
-    info.chunk_boundary_offsets = vec![100];
-    info.unpacked_chunk_offsets = vec![50];
-    info.num_chunks = 1;
-    let len = info.serialized_length();
-    assert!(len > 0);
-}
-
-#[test]
-fn xorb_object_info_v1_has_chunk_hashes() {
-    let mut info = XorbObjectInfoV1::default();
-    assert!(!info.has_chunk_hashes());
-    info.chunk_hashes = vec![compute_data_hash(b"a")];
-    assert!(info.has_chunk_hashes());
-}
-
-#[test]
 fn xorb_object_info_v1_serialize_roundtrip() {
     let mut info = XorbObjectInfoV1::default();
     info.xorb_hash = compute_data_hash(b"test_v1");
@@ -584,56 +544,6 @@ fn xorb_object_info_v1_from_v0() {
     assert_eq!(v1.xorb_hash, expected_hash);
     assert_eq!(v1.num_chunks, 1);
     assert_eq!(v1.chunk_hashes.len(), 1);
-}
-
-#[test]
-fn xorb_object_info_v1_serialize_chunk_hash_mismatch() {
-    let mut info = XorbObjectInfoV1::default();
-    info.num_chunks = 2;
-    info.chunk_hashes = vec![compute_data_hash(b"c1")]; // only 1 hash but num_chunks=2
-    info.chunk_boundary_offsets = vec![50, 100];
-    info.unpacked_chunk_offsets = vec![50, 100];
-    let mut buf = Vec::new();
-    assert!(info.serialize(&mut buf).is_err());
-}
-
-#[test]
-fn xorb_object_info_v1_serialize_boundary_mismatch() {
-    let mut info = XorbObjectInfoV1::default();
-    info.num_chunks = 2;
-    info.chunk_hashes = vec![compute_data_hash(b"c1"), compute_data_hash(b"c2")];
-    info.chunk_boundary_offsets = vec![50]; // only 1 offset but num_chunks=2
-    info.unpacked_chunk_offsets = vec![50, 100];
-    let mut buf = Vec::new();
-    assert!(info.serialize(&mut buf).is_err());
-}
-
-#[test]
-fn xorb_object_info_v1_serialize_unpacked_mismatch() {
-    let mut info = XorbObjectInfoV1::default();
-    info.num_chunks = 2;
-    info.chunk_hashes = vec![compute_data_hash(b"c1"), compute_data_hash(b"c2")];
-    info.chunk_boundary_offsets = vec![50, 100];
-    info.unpacked_chunk_offsets = vec![50]; // only 1 offset but num_chunks=2
-    let mut buf = Vec::new();
-    assert!(info.serialize(&mut buf).is_err());
-}
-
-#[test]
-fn xorb_object_info_v1_deserialize_invalid_ident() {
-    let mut buf = vec![0u8; 200];
-    buf[..7].copy_from_slice(b"BADIDNT");
-    let mut cursor = Cursor::new(buf);
-    assert!(XorbObjectInfoV1::deserialize(&mut cursor).is_err());
-}
-
-#[test]
-fn xorb_object_info_v1_deserialize_invalid_version() {
-    let mut buf = vec![0u8; 200];
-    buf[..7].copy_from_slice(b"XETBLOB");
-    buf[7] = 5; // invalid version
-    let mut cursor = Cursor::new(buf);
-    assert!(XorbObjectInfoV1::deserialize(&mut cursor).is_err());
 }
 
 #[test]

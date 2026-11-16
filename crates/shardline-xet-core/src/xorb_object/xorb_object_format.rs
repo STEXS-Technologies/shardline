@@ -1159,18 +1159,47 @@ mod tests {
     }
 
     #[test]
-    fn v1_deserialize_invalid_ident() {
-        let mut buf = vec![0u8; 200];
-        buf[..7].copy_from_slice(b"BADIDNT");
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[test]
-    fn v1_deserialize_invalid_version() {
-        let mut buf = vec![0u8; 200];
-        buf[..7].copy_from_slice(b"XETBLOB");
-        buf[7] = 5;
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
+    fn metadata_corruption_reports_the_rejected_field() {
+        let mut valid = Vec::new();
+        make_v1_info(1, b"test").serialize(&mut valid).unwrap();
+        // Version 2 with one chunk: 40-byte header, 48-byte hash section,
+        // 32-byte boundary section, then three u64 values and 16 reserved bytes.
+        assert_eq!(valid.len(), 160);
+        for (offset, expected) in [
+            (0, "Xorb Invalid Ident"),
+            (7, "Xorb Invalid Format Version"),
+            (40, "Xorb Invalid Ident for Hash Metadata Section"),
+            (47, "Xorb Invalid Format Version for Hash Metadata Section"),
+            (88, "Xorb Invalid Ident for Boundary Metadata Section"),
+            (
+                95,
+                "Xorb Invalid Format Version for Boundaries Metadata Section",
+            ),
+            (
+                96,
+                "Xorb Invalid: inconsistent num_chunks between hashes and boundaries section.",
+            ),
+            (
+                120,
+                "Xorb Invalid: inconsistent num_chunks between metadata and hashes section.",
+            ),
+            (
+                128,
+                "Xorb Invalid: incorrect hashes_section_offset_from_end.",
+            ),
+            (
+                136,
+                "Xorb Invalid: incorrect boundary_section_offset_from_end.",
+            ),
+        ] {
+            let mut corrupted = valid.clone();
+            corrupted[offset] ^= 0xFF;
+            let error = XorbObjectInfoV1::deserialize(&mut Cursor::new(corrupted)).unwrap_err();
+            let CoreError::MalformedData(message) = error else {
+                panic!("offset {offset}: {error}");
+            };
+            assert_eq!(message, expected, "offset {offset}");
+        }
     }
 
     #[test]
@@ -1196,99 +1225,6 @@ mod tests {
         assert_eq!(v1.chunk_hashes.len(), 2);
         assert_eq!(v1.chunk_boundary_offsets.len(), 2);
         assert!(v1.unpacked_chunk_offsets.is_empty()); // v0 has no unpacked
-    }
-
-    #[test]
-    fn v1_deserialize_wrong_hash_section_ident() {
-        let info = make_v1_info(0, b"test");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // Corrupt hash section ident (offset 40 for n=0: 7+1+32=40)
-        if buf.len() > 47 {
-            buf[40..47].copy_from_slice(b"CORRUPT");
-        }
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[test]
-    fn v1_deserialize_wrong_boundary_section_ident() {
-        let info = make_v1_info(0, b"test");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // Boundary section ident after: ident(7)+ver(1)+hash(32)+hash_ident(7)+hash_ver(1)+nchunks(4)=52
-        if buf.len() > 59 {
-            buf[52..59].copy_from_slice(b"CORRUPT");
-        }
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[test]
-    fn v1_deserialize_wrong_hashes_version() {
-        let info = make_v1_info(0, b"test");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // hashes_version at offset 47: 7+1+32+7 = 47
-        if buf.len() > 47 {
-            buf[47] = 99;
-        }
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[test]
-    fn v1_deserialize_wrong_boundaries_version() {
-        let info = make_v1_info(0, b"test");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // boundaries_version at offset 63: 7+1+32+7+1+8+7 = 63
-        if buf.len() > 63 {
-            buf[63] = 99;
-        }
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[test]
-    fn v1_deserialize_inconsistent_num_chunks() {
-        let info = make_v1_info(1, b"test");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // Boundary section num_chunks at offset 92 for n=1
-        if buf.len() > 95 {
-            buf[92..96].copy_from_slice(&2u32.to_le_bytes());
-        }
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[test]
-    fn v1_deserialize_inconsistent_final_num_chunks() {
-        let info = make_v1_info(1, b"test");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // Final num_chunks at offset 120 for n=1
-        assert!(buf.len() > 127);
-        buf[120..128].copy_from_slice(&99u64.to_le_bytes());
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[test]
-    fn v1_deserialize_incorrect_hashes_section_offset() {
-        let info = make_v1_info(1, b"test");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // hashes_section_offset at offset 128 for n=1
-        assert!(buf.len() > 135);
-        buf[128..136].copy_from_slice(&0u64.to_le_bytes());
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[test]
-    fn v1_deserialize_incorrect_boundary_section_offset() {
-        let info = make_v1_info(1, b"test");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // boundary_section_offset at offset 136 for n=1
-        assert!(buf.len() > 143);
-        buf[136..144].copy_from_slice(&0u64.to_le_bytes());
-        assert!(XorbObjectInfoV1::deserialize(&mut Cursor::new(buf)).is_err());
     }
 
     // ======= XorbObject =======
