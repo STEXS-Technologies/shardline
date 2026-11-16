@@ -97,7 +97,28 @@ impl BuiltXorb {
 /// Returns [`SdxError::XorbBuild`] when `chunks` is empty or a chunk fails to
 /// serialize.
 pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
-    if chunks.is_empty() {
+    build_xorb_entries(
+        chunks
+            .iter()
+            .map(|(data, offset)| (data, *offset, compute_chunk_hash(data))),
+    )
+}
+
+/// Packs immutable chunks already hashed by the upload ingestion pipeline.
+pub(crate) fn build_hashed_xorb(
+    chunks: &[(Bytes, u64, MerkleHash)],
+) -> Result<BuiltXorb, SdxError> {
+    build_xorb_entries(
+        chunks
+            .iter()
+            .map(|(data, offset, hash)| (data, *offset, *hash)),
+    )
+}
+
+fn build_xorb_entries<'chunks>(
+    chunks: impl ExactSizeIterator<Item = (&'chunks Bytes, u64, MerkleHash)>,
+) -> Result<BuiltXorb, SdxError> {
+    if chunks.len() == 0 {
         return Err(SdxError::XorbBuild(
             "cannot build an xorb with no chunks".to_owned(),
         ));
@@ -112,8 +133,7 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
     let mut chunk_entries = Vec::with_capacity(chunks.len());
     let mut unpacked_total: u64 = 0;
 
-    for (index, (data, raw_offset)) in chunks.iter().enumerate() {
-        let hash = compute_chunk_hash(data);
+    for (index, (data, raw_offset, hash)) in chunks.enumerate() {
         let packed_offset = u64::try_from(payload.len()).unwrap_or(u64::MAX);
         let raw_length = u64::try_from(data.len()).unwrap_or(u64::MAX);
 
@@ -125,7 +145,7 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
 
         chunk_entries.push(XorbChunkEntry {
             chunk_index: u32::try_from(index).unwrap_or(u32::MAX),
-            raw_offset: *raw_offset,
+            raw_offset,
             raw_length,
             packed_offset,
             packed_length: written,
@@ -249,17 +269,22 @@ mod tests {
     #[test]
     fn build_xorb_empty_errors() {
         assert!(build_xorb(&[]).is_err());
+        assert!(super::build_hashed_xorb(&[]).is_err());
     }
 
     #[test]
-    fn build_xorb_deterministic() {
+    fn prehashed_xorb_matches_public_builder() {
         let chunks = chunk_pairs(&[
             b"deterministic a".to_vec(),
             lcg_data(8192, 9),
             b"deterministic b".to_vec(),
         ]);
         let first = build_xorb(&chunks).unwrap();
-        let second = build_xorb(&chunks).unwrap();
+        let hashed: Vec<_> = chunks
+            .iter()
+            .map(|(data, offset)| (data.clone(), *offset, crate::hash::compute_chunk_hash(data)))
+            .collect();
+        let second = super::build_hashed_xorb(&hashed).unwrap();
         assert_eq!(first.serialized, second.serialized);
         assert_eq!(first.xorb_hash_hex, second.xorb_hash_hex);
     }

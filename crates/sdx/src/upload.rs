@@ -67,7 +67,7 @@ use crate::shard::{
 };
 use crate::transfer::TransferClient;
 use crate::xorb_build::{
-    SERIALIZED_XORB_SAFETY_CAP_BYTES, build_xorb, xorb_cut_condition, xorb_max_addable_chunk,
+    SERIALIZED_XORB_SAFETY_CAP_BYTES, build_hashed_xorb, xorb_cut_condition, xorb_max_addable_chunk,
 };
 
 /// Size of each ingest block fed to the chunker (files/readers/bytes are all
@@ -499,7 +499,7 @@ struct FileUploadPipeline {
     /// Physical locations for new chunks, in placement order.
     new_chunk_locations: Vec<ChunkLocation>,
     /// Pending new chunks not yet cut into a xorb, with their file offsets.
-    pending: Vec<(Bytes, u64)>,
+    pending: Vec<(Bytes, u64, MerkleHash)>,
     pending_bytes: usize,
     total_bytes: u64,
 }
@@ -622,7 +622,7 @@ impl FileUploadPipeline {
             self.cut_xorb().await?;
         }
         let file_offset = self.total_bytes;
-        self.pending.push((chunk.data, file_offset));
+        self.pending.push((chunk.data, file_offset, hash));
         self.pending_bytes = self.pending_bytes.saturating_add(chunk_len);
         self.placements.push(Placement {
             hash,
@@ -665,7 +665,7 @@ impl FileUploadPipeline {
             if let Some(gate) = serialization_gate {
                 gate.wait()?;
             }
-            let built = build_xorb(&pairs)?;
+            let built = build_hashed_xorb(&pairs)?;
             Ok::<_, SdxError>((built, permit))
         })
         .await
