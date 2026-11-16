@@ -176,26 +176,20 @@ impl SdxConfig {
         env: &dyn Fn(&str) -> Option<String>,
         home: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Result<Option<SdxConfig>, SdxConfigError> {
-        let (resolved, explicit) = match path {
-            Some(path) => (path.to_path_buf(), true),
-            None => {
-                let env_path = env(SHARDLINE_CONFIG_ENV).filter(|value| !value.trim().is_empty());
-                match env_path {
-                    Some(env_path) => (PathBuf::from(env_path), false),
-                    None => {
-                        let Some(base) = home("HOME") else {
-                            return Ok(None);
-                        };
-                        (
-                            PathBuf::from(base)
-                                .join(".config")
-                                .join("shardline")
-                                .join(CONFIG_FILE_NAME),
-                            false,
-                        )
-                    }
-                }
-            }
+        let explicit = path.is_some();
+        let resolved = if let Some(path) = path {
+            path.to_path_buf()
+        } else if let Some(env_path) =
+            env(SHARDLINE_CONFIG_ENV).filter(|value| !value.trim().is_empty())
+        {
+            PathBuf::from(env_path)
+        } else if let Some(base) = home("HOME") {
+            PathBuf::from(base)
+                .join(".config")
+                .join("shardline")
+                .join(CONFIG_FILE_NAME)
+        } else {
+            return Ok(None);
         };
         if explicit && !resolved.is_file() {
             return Err(SdxConfigError::InvalidPath(resolved.display().to_string()));
