@@ -25,22 +25,10 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 #[inline]
 fn write_hex_u64(buf: &mut [u8], pos: &mut usize, val: u64) {
     let p = *pos;
-    buf[p] = HEX_DIGITS[((val >> 60) & 0xF) as usize];
-    buf[p + 1] = HEX_DIGITS[((val >> 56) & 0xF) as usize];
-    buf[p + 2] = HEX_DIGITS[((val >> 52) & 0xF) as usize];
-    buf[p + 3] = HEX_DIGITS[((val >> 48) & 0xF) as usize];
-    buf[p + 4] = HEX_DIGITS[((val >> 44) & 0xF) as usize];
-    buf[p + 5] = HEX_DIGITS[((val >> 40) & 0xF) as usize];
-    buf[p + 6] = HEX_DIGITS[((val >> 36) & 0xF) as usize];
-    buf[p + 7] = HEX_DIGITS[((val >> 32) & 0xF) as usize];
-    buf[p + 8] = HEX_DIGITS[((val >> 28) & 0xF) as usize];
-    buf[p + 9] = HEX_DIGITS[((val >> 24) & 0xF) as usize];
-    buf[p + 10] = HEX_DIGITS[((val >> 20) & 0xF) as usize];
-    buf[p + 11] = HEX_DIGITS[((val >> 16) & 0xF) as usize];
-    buf[p + 12] = HEX_DIGITS[((val >> 12) & 0xF) as usize];
-    buf[p + 13] = HEX_DIGITS[((val >> 8) & 0xF) as usize];
-    buf[p + 14] = HEX_DIGITS[((val >> 4) & 0xF) as usize];
-    buf[p + 15] = HEX_DIGITS[(val & 0xF) as usize];
+    for (index, byte) in val.to_be_bytes().into_iter().enumerate() {
+        buf[p + 2 * index] = HEX_DIGITS[usize::from(byte >> 4)];
+        buf[p + 2 * index + 1] = HEX_DIGITS[usize::from(byte & 0xF)];
+    }
     *pos = p + 16;
 }
 
@@ -324,29 +312,18 @@ mod tests {
     }
 
     #[test]
-    fn write_hex_u64_all_zero() {
-        let mut buf = [0u8; 20];
-        let mut pos = 0;
-        write_hex_u64(&mut buf, &mut pos, 0);
-        assert_eq!(&buf[..16], b"0000000000000000");
-        assert_eq!(pos, 16);
-    }
-
-    #[test]
-    fn write_hex_u64_all_ones() {
-        let mut buf = [0u8; 20];
-        let mut pos = 0;
-        write_hex_u64(&mut buf, &mut pos, u64::MAX);
-        assert_eq!(&buf[..16], b"ffffffffffffffff");
-        assert_eq!(pos, 16);
-    }
-
-    #[test]
-    fn write_hex_u64_pattern() {
-        let mut buf = [0u8; 20];
-        let mut pos = 0;
-        write_hex_u64(&mut buf, &mut pos, 0xDEADBEEFCAFEBABE);
-        assert_eq!(pos, 16);
+    fn write_hex_u64_preserves_format_and_surrounding_bytes() {
+        for value in [0, 1, u64::MAX, 0xDEADBEEFCAFEBABE, 0x0123456789ABCDEF] {
+            for start in [0, 3] {
+                let mut buf = [b'!'; 20];
+                let mut pos = start;
+                write_hex_u64(&mut buf, &mut pos, value);
+                assert_eq!(&buf[start..pos], format!("{value:016x}").as_bytes());
+                assert_eq!(pos, start + 16);
+                assert!(buf[..start].iter().all(|byte| *byte == b'!'));
+                assert!(buf[pos..].iter().all(|byte| *byte == b'!'));
+            }
+        }
     }
 
     #[test]
