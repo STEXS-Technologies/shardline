@@ -4928,6 +4928,52 @@ image was unavailable locally and Docker could not resolve its registry. The
 subsequent release-mode qualification below resolved that prerequisite and
 executed the partition drill successfully.
 
+### Cleanup candidate deployment qualification (2026-11-16)
+
+Clean source commit `683916e8c4330363f711eaad236af917db0d46ca` passed an
+all-features CLI release build using Rust `1.99.0 (b940084d7 2026-09-28)`,
+four build jobs and the workspace's default release profile (optimization level
+3, thin LTO, one codegen unit, panic abort). The build took 7m 17s on a shared
+host; this is not a controlled build-time comparison. The frozen executable's
+SHA-256 was
+`b8f1126d02d32063e14c94a6030b51a638518d3d3c493c0ff98fbab1da9704e7`.
+
+All 51 `deployment_chaos` cases passed, including nine ignored qualification
+cases, in 544.928 seconds with zero skipped tests. The harness ran disposable
+PostgreSQL/MinIO/Redis stacks and used the frozen release CLI, the checksum-pinned
+v1.12.1 baseline, `libfaketime`, `huggingface_hub==2.2.0` and `hf_xet==1.7.0`.
+Coverage includes upload interruption, network faults, GC acknowledgement and
+takeover, mixed-version upgrade/rollback, native protocol history, atomic Git
+publication, read-only maintenance and tracker replacement.
+
+Separately, all eight `multinode_chaos` cases passed in 24.729 seconds with zero
+skipped tests. That suite runs server roles in-process in the test profile; its
+result does not establish optimized CLI throughput. Both logs passed explicit
+checks for runtime prerequisite skips and task panics. The frozen CLI checksum
+was unchanged after the run, and the disposable deployment stacks were removed.
+
+Reproduction uses the prerequisites in
+[the distributed-integrity gate](../CONTRIBUTING.md#distributed-integrity-qualification).
+Set `CARGO_BIN_EXE_shardline` to the frozen all-features release executable,
+`SHARDLINE_N_MINUS_ONE_BINARY` to the verified v1.12.1 executable,
+`SHARDLINE_FAKETIME_LIBRARY` to the clock-skew library, and place the pinned
+Python clients on `PATH`. Then run:
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 SHARDLINE_CHAOS_DEPLOYMENT=1 \
+  cargo nextest run --locked -p shardline-server --all-features \
+  --test deployment_chaos --run-ignored all --test-threads 1 --no-fail-fast \
+  --success-output immediate --failure-output immediate
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 \
+  cargo nextest run --locked -p shardline-server --all-features \
+  --test multinode_chaos --run-ignored all --test-threads 1 --no-fail-fast \
+  --success-output immediate --failure-output immediate
+```
+
+This is local deployment fault qualification, not a full workspace test run,
+hosted CI qualification, a resolution of the historical hosted SDK RSS failure,
+or a production-scale throughput or cost measurement.
+
 ### Release-mode maintenance and LFS partition qualification (2026-11-15)
 
 An all-features CLI built from clean commit
