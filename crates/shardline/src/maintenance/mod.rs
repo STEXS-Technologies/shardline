@@ -34,6 +34,26 @@ pub(crate) struct CommandOutput {
     pub exit_code: Option<u8>,
 }
 
+/// Preserve the CLI's portable outcome categories in every tracking mode.
+fn command_exit_code(status: std::process::ExitCode) -> u8 {
+    if status == std::process::ExitCode::SUCCESS {
+        0
+    } else if status == std::process::ExitCode::FAILURE {
+        1
+    } else {
+        2
+    }
+}
+
+/// Private and deployment-backed inline receipts share the same signed bytes.
+fn command_outcome_report(exit_code: u8) -> Result<String> {
+    Ok(format!(
+        "maintenance.success: {}\n{}",
+        exit_code == 0,
+        serde_json::to_string(&serde_json::json!({"schema": 1, "exit_code": exit_code}))?,
+    ))
+}
+
 /// Maintenance workflows supported by the durable Linux controller.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand, Serialize, Deserialize)]
 pub enum MaintenanceOperation {

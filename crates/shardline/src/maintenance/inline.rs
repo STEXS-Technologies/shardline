@@ -7,7 +7,7 @@ use penelope::core::task::{
     TaskRecoveryPolicy, TaskScope, TaskTenantId, TaskTick, runtime::TaskJournal,
 };
 use shardline_reliability::{BootTaskClock, MaintenanceArtifactKind, ProcessTaskRuntime};
-use std::{ffi::OsString, path::Path, process::ExitCode};
+use std::{ffi::OsString, path::Path};
 
 pub(super) fn run(
     state: &Path,
@@ -200,19 +200,9 @@ fn run_prepared(
             work.await
         }
     });
-    let exit_code = if status == ExitCode::SUCCESS {
-        0
-    } else if status == ExitCode::FAILURE {
-        1
-    } else {
-        2
-    };
+    let exit_code = super::command_exit_code(status);
     let completion = (|| -> Result<()> {
-        let report = format!(
-            "maintenance.success: {}\n{}",
-            exit_code == 0,
-            serde_json::to_string(&serde_json::json!({"schema": 1, "exit_code": exit_code}))?
-        );
+        let report = super::command_outcome_report(exit_code)?;
         let output = artifact::publish(
             &directory,
             scope,

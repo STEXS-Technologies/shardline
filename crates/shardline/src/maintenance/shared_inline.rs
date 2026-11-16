@@ -12,7 +12,7 @@ use shardline_reliability::{
 use shardline_server::task_tracking::{
     TaskEvidenceStore, TaskExecutionMode, TaskOwner, TaskRunIdentity,
 };
-use std::{ffi::OsString, process::ExitCode};
+use std::ffi::OsString;
 
 pub(super) fn run(
     operation: &MaintenanceOperation,
@@ -59,13 +59,7 @@ pub(super) fn run(
             work.await
         }
     });
-    let exit_code = if status == ExitCode::SUCCESS {
-        0
-    } else if status == ExitCode::FAILURE {
-        1
-    } else {
-        2
-    };
+    let exit_code = super::command_exit_code(status);
     let evidence_published = receipt.as_mut().is_some_and(|receipt| {
         match receipt.finish(operation.kind(), exit_code) {
             Ok(()) => true,
@@ -237,11 +231,7 @@ impl Receipt {
     }
 
     fn finish(&mut self, kind: MaintenanceArtifactKind, exit_code: u8) -> Result<()> {
-        let report = format!(
-            "maintenance.success: {}\n{}",
-            exit_code == 0,
-            serde_json::to_string(&serde_json::json!({"schema": 1, "exit_code": exit_code}))?,
-        );
+        let report = super::command_outcome_report(exit_code)?;
         let proof = self.artifact(kind, 2, report.as_bytes())?;
         self.commit(
             TaskExecutionEvent::Completed {

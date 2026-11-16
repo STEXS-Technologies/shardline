@@ -64,13 +64,7 @@ pub(super) fn publish(
     status: ExitCode,
     writer: &mut impl Write,
 ) -> Result<()> {
-    let exit_code = if status == ExitCode::SUCCESS {
-        0
-    } else if status == ExitCode::FAILURE {
-        1
-    } else {
-        2
-    };
+    let exit_code = super::command_exit_code(status);
     let mut stdout = artifact::open_private(&path(directory, generation, "stdout"), u64::MAX)?;
     let mut stderr = artifact::open_private(&path(directory, generation, "stderr"), u64::MAX)?;
     let manifest = Manifest {
