@@ -302,6 +302,9 @@ mod tests {
         let h2 = file_hash_with_salt(&chunks, &[2u8; 32]);
         assert_ne!(h1, h2);
         assert_ne!(h1, MerkleHash::default());
+        assert_ne!(h2, MerkleHash::default());
+        assert_eq!(file_hash(&chunks), file_hash_with_salt(&chunks, &[0; 32]));
+        assert_ne!(file_hash(&chunks), h1);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use proptest::prelude::*;
 use crate::error::{CoreError, Validate};
 use crate::merklehash::{
     DataHash, HMACKey, MerkleHash,
-    aggregated_hashes::{file_hash, file_hash_with_salt, xorb_hash},
+    aggregated_hashes::xorb_hash,
     compute_data_hash, compute_internal_node_hash,
     data_hash::{DataHashBytesParseError, DataHashHexParseError},
 };
@@ -257,82 +257,6 @@ proptest! {
         let back: [u8; 32] = h.into();
         prop_assert_eq!(arr, back);
     }
-}
-
-// ============================================================================
-// Aggregated hashes tests
-// ============================================================================
-
-#[test]
-fn xorb_hash_empty() {
-    let h = xorb_hash(&[]);
-    assert_eq!(h, MerkleHash::default());
-}
-
-#[test]
-fn xorb_hash_single_chunk() {
-    let chunks = vec![(compute_data_hash(b"a"), 1u64)];
-    let h = xorb_hash(&chunks);
-    assert_ne!(h, MerkleHash::default());
-}
-
-#[test]
-fn xorb_hash_deterministic() {
-    let chunks = vec![
-        (compute_data_hash(b"a"), 1u64),
-        (compute_data_hash(b"b"), 2u64),
-    ];
-    let h1 = xorb_hash(&chunks);
-    let h2 = xorb_hash(&chunks);
-    assert_eq!(h1, h2);
-}
-
-#[test]
-fn xorb_hash_order_matters() {
-    let a = (compute_data_hash(b"a"), 1u64);
-    let b = (compute_data_hash(b"b"), 2u64);
-    let h1 = xorb_hash(&[a, b]);
-    let h2 = xorb_hash(&[b, a]);
-    assert_ne!(h1, h2);
-}
-
-#[test]
-fn file_hash_empty() {
-    let h = file_hash(&[]);
-    assert_eq!(h, MerkleHash::default());
-}
-
-#[test]
-fn file_hash_deterministic() {
-    let chunks = vec![(compute_data_hash(b"a"), 1u64)];
-    assert_eq!(file_hash(&chunks), file_hash(&chunks));
-}
-
-#[test]
-fn file_hash_with_salt_deterministic() {
-    let chunks = vec![(compute_data_hash(b"a"), 1u64)];
-    let salt = [1u8; 32];
-    assert_eq!(
-        file_hash_with_salt(&chunks, &salt),
-        file_hash_with_salt(&chunks, &salt)
-    );
-}
-
-#[test]
-fn file_hash_different_from_xorb_hash() {
-    let chunks = vec![
-        (compute_data_hash(b"a"), 100u64),
-        (compute_data_hash(b"b"), 200u64),
-    ];
-    assert_ne!(file_hash(&chunks), xorb_hash(&chunks));
-}
-
-#[test]
-fn file_hash_with_salt_different_from_default() {
-    let chunks = vec![(compute_data_hash(b"a"), 1u64)];
-    let default = file_hash(&chunks);
-    let salted = file_hash_with_salt(&chunks, &[1u8; 32]);
-    assert_ne!(default, salted);
 }
 
 // ============================================================================
@@ -1488,51 +1412,6 @@ fn data_hash_deref_mut() {
 }
 
 // ============================================================================
-// xorb_hash / aggregated hashes — edge-case paths
-// ============================================================================
-
-#[test]
-fn xorb_hash_three_chunks_no_mod_condition_triggers_end_fallback() {
-    // Three hashes where NONE has h[3] % 4 == 0 → triggers line-20 fallback
-    let h1 = MerkleHash::from([0u64, 0, 0, 1]); // 1 % 4 = 1
-    let h2 = MerkleHash::from([0u64, 0, 0, 2]); // 2 % 4 = 2
-    let h3 = MerkleHash::from([0u64, 0, 0, 3]); // 3 % 4 = 3
-    let chunks = vec![(h1, 1), (h2, 2), (h3, 3)];
-    let result = xorb_hash(&chunks);
-    assert_ne!(result, MerkleHash::default());
-}
-
-#[test]
-fn xorb_hash_three_chunks_with_mod_condition_triggers_early_return() {
-    // Three hashes where the third (index 2) has h[3] % 4 == 0 → triggers early return
-    let h1 = MerkleHash::from([0u64, 0, 0, 1]); // 1 % 4 = 1
-    let h2 = MerkleHash::from([0u64, 0, 0, 2]); // 2 % 4 = 2
-    let h3 = MerkleHash::from([0u64, 0, 0, 4]); // 4 % 4 = 0 → triggers early return
-    let chunks = vec![(h1, 1), (h2, 2), (h3, 3)];
-    let result = xorb_hash(&chunks);
-    assert_ne!(result, MerkleHash::default());
-}
-
-#[test]
-fn xorb_hash_many_chunks_exercises_multiple_merge_rounds() {
-    // 10 chunks forces multiple merge rounds and all next_merge_cut paths
-    let mut chunks = Vec::new();
-    for i in 0u64..10 {
-        let h = MerkleHash::from([i, i * 2, i * 3, i * 4]);
-        chunks.push((h, i + 1));
-    }
-    let result = xorb_hash(&chunks);
-    assert_ne!(result, MerkleHash::default());
-}
-
-#[test]
-fn file_hash_with_salt_empty() {
-    let salt = [0xABu8; 32];
-    let result = file_hash_with_salt(&[], &salt);
-    assert_eq!(result, MerkleHash::default());
-}
-
-// ============================================================================
 // HashedWrite tests
 // ============================================================================
 
@@ -1645,16 +1524,6 @@ fn mdb_file_info_view_into_with_verification() {
 // ============================================================================
 
 #[test]
-fn xorb_hash_with_zero_size_triggers_write_decimal_zero_branch() {
-    // write_decimal_u64 has a fast path for val==0 that writes '0' directly.
-    // xorb_hash -> aggregated_node_hash -> merged_hash_of_sequence -> write_hash_entry -> write_decimal_u64.
-    // Passing a chunk with size=0 triggers that branch.
-    let chunks = vec![(MerkleHash::from([1u64, 0, 0, 0]), 0u64)];
-    let result = xorb_hash(&chunks);
-    assert_ne!(result, MerkleHash::default());
-}
-
-#[test]
 fn xorb_hash_with_zero_and_nonzero_sizes_exercises_write_decimal_mixed() {
     // Mix zero and non-zero sizes to exercise write_decimal_u64 both branches.
     let chunks = vec![
@@ -1667,37 +1536,6 @@ fn xorb_hash_with_zero_and_nonzero_sizes_exercises_write_decimal_mixed() {
 }
 
 #[test]
-fn xorb_hash_exact_two_chunks_triggers_next_merge_cut_len_eq_2() {
-    // next_merge_cut returns hashes.len() when len <= 2.
-    let chunks = vec![
-        (MerkleHash::from([0u64, 0, 0, 1]), 10u64),
-        (MerkleHash::from([0u64, 0, 0, 2]), 20u64),
-    ];
-    let result = xorb_hash(&chunks);
-    assert_ne!(result, MerkleHash::default());
-}
-
-#[test]
-fn xorb_hash_mod_condition_at_various_positions_exercises_next_merge_cut() {
-    // Test mod condition hits at different positions (index 2, 3, 4, etc.)
-    for mod_pos in 2..=5 {
-        let chunks: Vec<(MerkleHash, u64)> = (0..6)
-            .map(|i| {
-                // Make position `mod_pos` have hash[3] % 4 == 0
-                let h = if i == mod_pos {
-                    MerkleHash::from([0u64, 0, 0, 4]) // 4 % 4 == 0
-                } else {
-                    MerkleHash::from([0u64, 0, 0, (i + 1) as u64]) // avoid mod 4 == 0
-                };
-                (h, (i + 1) as u64)
-            })
-            .collect();
-        let result = xorb_hash(&chunks);
-        assert_ne!(result, MerkleHash::default(), "failed at mod_pos={mod_pos}");
-    }
-}
-
-#[test]
 fn xorb_hash_large_set_triggers_multiple_merge_passes() {
     // 12 chunks with sizes that force multiple merge passes.
     let mut chunks = Vec::new();
@@ -1707,22 +1545,6 @@ fn xorb_hash_large_set_triggers_multiple_merge_passes() {
     }
     let result = xorb_hash(&chunks);
     assert_ne!(result, MerkleHash::default());
-}
-
-// ============================================================================
-// aggregated_hashes — file_hash_with_salt non-empty edge case
-// ============================================================================
-
-#[test]
-fn file_hash_with_salt_non_empty_produces_different_hash_for_different_salts() {
-    let chunks = vec![(MerkleHash::from([1u64, 2, 3, 4]), 100u64)];
-    let salt1 = [1u8; 32];
-    let salt2 = [2u8; 32];
-    let h1 = file_hash_with_salt(&chunks, &salt1);
-    let h2 = file_hash_with_salt(&chunks, &salt2);
-    assert_ne!(h1, h2);
-    assert_ne!(h1, MerkleHash::default());
-    assert_ne!(h2, MerkleHash::default());
 }
 
 // ============================================================================
