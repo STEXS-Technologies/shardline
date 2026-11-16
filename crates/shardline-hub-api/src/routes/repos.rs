@@ -500,22 +500,8 @@ pub(crate) async fn repo_info(
     {
         crate::revision_access::authorize_read(&state, &name, "main", &sha, repo.capability())
             .await?;
-        let files = state
-            .store
-            .get_files(&sha)
-            .map_err(|e| HubApiError::CasError(e.to_string()))?;
-        if files.iter().any(|file| file.path == "README.md")
-            && let Some(content) =
-                read_file_prefix_from_object_store(&state, &name, "main", &sha, repo.capability())
-                    .await
-        {
-            response.card_data = parse_yaml_frontmatter(&content);
-        }
-        response.sha = Some(
-            crate::git::smart_http::public_commit_id(&state, &name, &sha, repo.capability())
-                .await?,
-        );
-        response.siblings = Some(file_siblings(files));
+        response =
+            revision_response(&state, repo.capability(), &name, "main", &sha, response).await?;
     }
 
     Ok(Json(response))
@@ -538,24 +524,40 @@ pub(crate) async fn repo_revision_info(
             .ok_or(HubApiError::RevisionNotFound)?;
     crate::revision_access::authorize_read(&state, &name, &rev, &commit_sha, _repo.capability())
         .await?;
+    Ok(Json(
+        revision_response(
+            &state,
+            _repo.capability(),
+            &name,
+            &rev,
+            &commit_sha,
+            repo_response_from_hub(&entry),
+        )
+        .await?,
+    ))
+}
+
+async fn revision_response(
+    state: &HubState,
+    auth: &AuthorizedRepository,
+    repo: &str,
+    requested: &str,
+    commit: &str,
+    mut response: RepoResponse,
+) -> Result<RepoResponse, HubApiError> {
     let files = state
         .store
-        .get_files(&commit_sha)
+        .get_files(commit)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    let mut response = repo_response_from_hub(&entry);
-    response.sha = Some(
-        crate::git::smart_http::public_commit_id(&state, &name, &commit_sha, _repo.capability())
-            .await?,
-    );
+    response.sha = Some(crate::git::smart_http::public_commit_id(state, repo, commit, auth).await?);
     if files.iter().any(|file| file.path == "README.md")
         && let Some(content) =
-            read_file_prefix_from_object_store(&state, &name, &rev, &commit_sha, _repo.capability())
-                .await
+            read_file_prefix_from_object_store(state, repo, requested, commit, auth).await
     {
         response.card_data = parse_yaml_frontmatter(&content);
     }
     response.siblings = Some(file_siblings(files));
-    Ok(Json(response))
+    Ok(response)
 }
 
 fn file_siblings(files: Vec<shardline_index::hub::HubFileEntry>) -> Vec<serde_json::Value> {
