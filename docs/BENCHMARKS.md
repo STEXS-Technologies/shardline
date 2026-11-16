@@ -4392,6 +4392,43 @@ stage also exercises MinIO copy-integrity cases; the standalone integration
 targets were run separately below. Full-capacity drills, production throughput
 and the historical hosted SDK RSS failure remain outside these checks.
 
+### PostgreSQL cleanup recheck (2026-11-16)
+
+Source `b08f8cc83e79fe92e685a141c668dad7a81cbc1a` passed the complete
+`scripts/test-postgres.sh` gate against a fresh, migrated PostgreSQL 16 Alpine
+container. This rechecks the subsequent ingestion, deduplication, download and
+CAS cleanup together. It used the same required-fixture settings, cached
+checksum-verified recovery executables and Rust 1.99.0 build settings as the
+checkpoint above, with nextest's default test concurrency rather than an explicit
+`NEXTEST_TEST_THREADS` override. The existing PostgreSQL coordination group still
+serializes tests that share database-wide maintenance locks.
+
+| Gate stage | Passed | Test execution time |
+| --- | ---: | ---: |
+| All-features index library | 813 | 114.695 s |
+| PostgreSQL provider-event integration | 2 | 0.115 s |
+| All-features server library | 3,223 | 472.835 s |
+| Explicitly ignored PostgreSQL copy-integrity and cache-revocation checks | 6 | 3.476 s |
+| CLI PostgreSQL migration E2E | 1 | 0.255 s |
+
+All 4,045 selected tests passed. Strict all-features server library/test Clippy
+also passed with Rust 1.100.0 and `-D warnings`. The default index and server
+stages excluded six and 45 ignored tests respectively; the subsequent stage
+enabled only the six specified server checks. The provider stage selected its
+two PostgreSQL tests. These runs do not cover every ignored test or replace the
+separate integration targets.
+
+The snapshot contains 571,722 tracked Rust lines, down 31,927 (5.29%) from
+the 603,649-line baseline. `git grep` counts were independently checked against
+each tracked Rust blob. Counts include tests, comments and blank lines, and
+exclude uncommitted files. Fewer tests after consolidation do not by themselves
+establish equivalent coverage; the focused contracts and integration checks
+remain necessary.
+
+These are local functional checks on a shared development host. The timings
+are not a controlled performance comparison. Production throughput, unit costs,
+full-capacity drills and the historical hosted SDK RSS failure remain open.
+
 ### MinIO integration cleanup checkpoint (2026-11-16)
 
 At source `394674dc`, the storage and server integration targets passed all
