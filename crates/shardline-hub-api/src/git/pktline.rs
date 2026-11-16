@@ -127,83 +127,35 @@ fn sideband_message(mut msg: &str, channel: u8) -> Vec<u8> {
 /// Returns a list of decoded lines (without the 4-byte length prefix).
 /// Stops at flush packet (`0000`).
 #[must_use]
-pub fn decode_lines(data: &[u8]) -> Vec<Vec<u8>> {
+pub fn decode_lines(mut data: &[u8]) -> Vec<Vec<u8>> {
     let mut lines = Vec::new();
-    let mut pos: usize = 0;
-
-    // SAFETY: guarded by `data.len()` comparison on this same line
-    while pos.wrapping_add(4) <= data.len() {
-        // SAFETY: guarded by `pos + 4 <= data.len()` check in the while condition
-        let Some(hex_len) = data.get(pos..pos.wrapping_add(4)) else {
-            break;
-        };
-        let Ok(hex_str) = std::str::from_utf8(hex_len) else {
-            break;
-        };
-        let Ok(len) = u16::from_str_radix(hex_str, 16) else {
-            break;
-        };
-
-        if len == 0 {
-            // flush
-            break;
-        }
-
-        // SAFETY: checked against data.len() on this same line
-        if (len as usize) < 4 || pos.wrapping_add(len as usize) > data.len() {
-            break;
-        }
-
-        // SAFETY: guarded by the bounds check immediately above
-        let Some(payload) = data.get(pos.wrapping_add(4)..pos.wrapping_add(len as usize)) else {
-            break;
-        };
+    while let Some(payload) = next_packet(&mut data) {
         lines.push(payload.to_vec());
-        // SAFETY: len is bounded by pkt-line max payload (65520 bytes), so wrapping is safe
-        pos = pos.wrapping_add(len as usize);
     }
-
     lines
+}
+
+/// Borrows the next complete payload, stopping at control or malformed packets.
+fn next_packet<'packet>(data: &mut &'packet [u8]) -> Option<&'packet [u8]> {
+    let (prefix, body) = data.split_at_checked(4)?;
+    let length = u16::from_str_radix(std::str::from_utf8(prefix).ok()?, 16).ok()?;
+    let payload_length = usize::from(length).checked_sub(4)?;
+    let (payload, remaining) = body.split_at_checked(payload_length)?;
+    *data = remaining;
+    Some(payload)
 }
 
 /// Decodes sideband multiplexed data.
 ///
 /// Returns the reassembled data from channel 1 (pack data).
-/// Channel 2 (progress) and channel 3 (fatal) are logged but not returned.
+/// Channel 2 (progress) and channel 3 (fatal) are returned as UTF-8 messages.
 #[must_use]
-pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
+pub fn decode_sideband(mut data: &[u8]) -> (Vec<u8>, Vec<String>) {
     let mut pack_data = Vec::new();
     let mut messages = Vec::new();
-    let mut pos: usize = 0;
 
-    // SAFETY: guarded by `data.len()` comparison on this same line
-    while pos.wrapping_add(4) <= data.len() {
-        // SAFETY: guarded by `pos + 4 <= data.len()` check in the while condition
-        let Some(hex_len) = data.get(pos..pos.wrapping_add(4)) else {
-            break;
-        };
-        let Ok(hex_str) = std::str::from_utf8(hex_len) else {
-            break;
-        };
-        let Ok(len) = u16::from_str_radix(hex_str, 16) else {
-            break;
-        };
-
-        if len == 0 {
-            break;
-        }
-
-        // SAFETY: checked against data.len() on this same line
-        if (len as usize) < 5 || pos.wrapping_add(len as usize) > data.len() {
-            break;
-        }
-
-        // SAFETY: guarded by the bounds check immediately above (len >= 5, so pos + 5 <= pos + len <= data.len())
-        let Some(&channel) = data.get(pos.wrapping_add(4)) else {
-            break;
-        };
-        // SAFETY: guarded by the same bounds check above
-        let Some(payload) = data.get(pos.wrapping_add(5)..pos.wrapping_add(len as usize)) else {
+    while let Some(packet) = next_packet(&mut data) {
+        let Some((&channel, payload)) = packet.split_first() else {
             break;
         };
 
@@ -216,9 +168,6 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
             }
             _ => {}
         }
-
-        // SAFETY: len is bounded by pkt-line max payload (65520 bytes), so wrapping is safe
-        pos = pos.wrapping_add(len as usize);
     }
 
     (pack_data, messages)
@@ -259,6 +208,33 @@ mod tests {
     #[test]
     fn encode_flush() {
         assert_eq!(FLUSH, "0000");
+    }
+
+    #[test]
+    fn decoders_stop_at_control_malformed_and_truncated_packets() {
+        for suffix in [
+            &b"0000"[..],
+            b"0001",
+            b"0002",
+            b"0003",
+            b"zzzz",
+            b"\xff000",
+            b"ffffabc",
+            b"00",
+        ] {
+            let mut wire = b"0006\x01x".to_vec();
+            wire.extend_from_slice(suffix);
+            wire.extend_from_slice(b"0006\x01y");
+            assert_eq!(decode_lines(&wire), vec![b"\x01x".to_vec()]);
+            assert_eq!(decode_sideband(&wire), (b"x".to_vec(), Vec::new()));
+        }
+    }
+
+    #[test]
+    fn empty_packet_is_a_line_but_terminates_sideband_decoding() {
+        let wire = b"00040006\x01y";
+        assert_eq!(decode_lines(wire), vec![Vec::new(), b"\x01y".to_vec()]);
+        assert_eq!(decode_sideband(wire), (Vec::new(), Vec::new()));
     }
 
     #[test]
