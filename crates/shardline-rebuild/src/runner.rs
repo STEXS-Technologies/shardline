@@ -123,6 +123,9 @@ where
     }
 
     let desired_reconstructions = desired_reconstruction_file_ids(candidates.values());
+    // Later phases need only file IDs, not complete records or latest paths.
+    drop(candidates);
+    drop(desired_latest_paths);
     prune_stale_reconstructions(index_store, &desired_reconstructions, &mut report).await?;
 
     rebuild_dedupe_shard_mappings(
