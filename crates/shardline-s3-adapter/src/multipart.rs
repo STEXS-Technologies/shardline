@@ -1425,22 +1425,22 @@ async fn load_session_with_snapshot(
             }
         };
     if let Some(head) = journal_head {
-        let records = read_journal::<SessionEvidenceJournalRecord>(dir).await?;
+        let mut records = read_journal::<SessionEvidenceJournalRecord>(dir).await?;
         let head = usize::try_from(head).map_err(|_error| S3SessionError::Overflow)?;
-        let committed = records.get(..head).ok_or_else(|| {
+        let committed = records.get_mut(..head).ok_or_else(|| {
             S3SessionError::Reliability("session evidence journal head is missing".into())
         })?;
         stored_evidence = SessionEvidenceLog::from_events(
             committed
-                .iter()
-                .flat_map(|record| record.evidence.iter().cloned())
+                .iter_mut()
+                .flat_map(|record| record.evidence.drain(..))
                 .collect(),
         )
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
         stored_snapshot_evidence = SnapshotEvidenceLog::from_events(
             committed
-                .iter()
-                .flat_map(|record| record.snapshot_evidence.iter().cloned())
+                .iter_mut()
+                .flat_map(|record| record.snapshot_evidence.drain(..))
                 .collect(),
         )
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
