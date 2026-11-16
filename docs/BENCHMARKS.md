@@ -4387,9 +4387,48 @@ behavior or weakening the repair assertion.
 
 The default stages still exclude ignored tests (six index and 45 server tests);
 only the six explicitly selected server checks above were subsequently enabled.
-The provider stage intentionally selects its two PostgreSQL tests. This gate
-does not qualify MinIO/S3 object storage, full-capacity drills, production
-throughput or the historical hosted SDK RSS failure.
+The provider stage intentionally selects its two PostgreSQL tests. The server
+stage also exercises MinIO copy-integrity cases; the standalone integration
+targets were run separately below. Full-capacity drills, production throughput
+and the historical hosted SDK RSS failure remain outside these checks.
+
+### MinIO integration cleanup checkpoint (2026-11-16)
+
+At source `394674dc`, the storage and server integration targets passed all
+157 tests with zero skipped in 208.675 s:
+
+| Integration target | Passed |
+| --- | ---: |
+| Server `postgres_s3_e2e_http` | 52 |
+| Server `s3_integration` | 69 |
+| Storage `s3_integration` | 36 |
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 RUSTC_WRAPPER= \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 \
+  cargo +1.99.0 nextest run --offline --locked \
+  -p shardline-storage -p shardline-server --all-features \
+  --test s3_integration --test postgres_s3_e2e_http \
+  --no-fail-fast --success-output final --test-threads 4
+```
+
+The required-fixture setting prevents unavailable Docker services from silently
+skipping tests. Fixtures created disposable PostgreSQL and pinned MinIO
+containers, then removed them. These targets cover storage operations and
+protocol HTTP behavior, including overlapping LFS ranges streamed from S3 and
+OCI upload and retrieval.
+
+A focused library run of
+`test(copy_integrity::minio_) | test(copy_integrity::postgres_minio_)` also
+passed all three selected tests in 12.679 s with one test thread. These check
+source replacement during an in-flight copy and reconciliation of a disconnected
+copy-part request through list-parts, including PostgreSQL plus MinIO. They are
+regular tests, already included in the preceding all-features server checkpoint;
+`--run-ignored only` does not select them.
+
+These are local functional regression results on the same shared development
+host, not production-scale latency, throughput, retention-expiry or cost
+measurements. They do not resolve the historical hosted SDK RSS failure.
 
 ## Shared protocol chunk reuse qualification
 
