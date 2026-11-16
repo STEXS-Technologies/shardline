@@ -83,20 +83,7 @@ const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 /// /readyz deliberately no longer carries runtime metadata).
 const TEST_ADMIN_TOKEN: &str = "pg-e2e-admin-read-token";
 
-/// Mint a Write-scoped bearer token bound to an arbitrary `owner/name` repo.
-///
-/// Since the security fix (`5a0df2f`) every repo-scoped Hub-API route enforces
-/// `require_repository_binding`, so tests must present a token whose
-/// `RepositoryScope` exactly matches the `{ns}/{repo}` they operate on.
-/// This is the repo-scoped counterpart to the harness's generic
-/// `auth_header()` (which is fixed to `test/test`).
-fn mint_token_for(owner: &str, name: &str) -> String {
-    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-    let repo =
-        RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
-    let claims = TokenClaims::new("shardline", owner, TokenScope::Write, repo, u64::MAX).unwrap();
-    provider.mint_token(&claims).unwrap()
-}
+use http_contracts::mint_token_for;
 
 struct TestServer {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
@@ -157,12 +144,7 @@ impl TestServer {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Mint a bearer token with full scope.
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo = RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-            .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
-        let token = provider.mint_token(&claims).unwrap();
+        let token = mint_token_for("test", "test");
 
         Self {
             shutdown: Some(shutdown_tx),
@@ -293,12 +275,7 @@ impl TestServerBuilder {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Mint a bearer token with full scope.
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo = RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-            .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
-        let token = provider.mint_token(&claims).unwrap();
+        let token = mint_token_for("test", "test");
 
         TestServer {
             shutdown: Some(shutdown_tx),
@@ -426,14 +403,7 @@ async fn test_oci_upload_session() {
     let app = app::router(config).await.unwrap();
 
     // Mint a token with the same signing key.
-    let token = {
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo = RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-            .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
-        provider.mint_token(&claims).unwrap()
-    };
+    let token = mint_token_for("test", "test");
 
     http_contracts::oci::blob_round_trip(&app, &token, repo, content).await;
 }
@@ -531,12 +501,7 @@ async fn oci_oneshot_app() -> (axum::Router, String, TempDir) {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
-    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-    let repo_s =
-        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
-    let claims =
-        TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
-    let token = provider.mint_token(&claims).unwrap();
+    let token = mint_token_for("test", "test");
     (app, token, tmp)
 }
 
@@ -937,15 +902,7 @@ async fn test_oci_role_all_serves_both() {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
-    let token = {
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
-        provider.mint_token(&claims).unwrap()
-    };
+    let token = mint_token_for("test", "test");
 
     let repo = "test/test";
     let content = b"role-all-blob";
@@ -1011,11 +968,7 @@ async fn test_reconstruction_cache_hit() {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
-    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-    let repo =
-        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
-    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
-    let token = provider.mint_token(&claims).unwrap();
+    let token = mint_token_for("test", "test");
 
     let content = b"reconstruction-cache-hit-test";
     let oid = sha256_hex(content);
@@ -2025,15 +1978,7 @@ async fn test_cross_lfs_to_oci_blob() {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
-    let token = {
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
-        provider.mint_token(&claims).unwrap()
-    };
+    let token = mint_token_for("test", "test");
     let _keep = Box::new(tmp);
 
     let content = b"lfs-to-oci-cross-pg";
@@ -2224,11 +2169,7 @@ async fn app_with_body_limit(
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
-    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-    let repo =
-        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
-    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
-    let token = provider.mint_token(&claims).unwrap();
+    let token = mint_token_for("test", "test");
     // Keep tmp alive
     let _keep = Box::new(tmp);
     (app, token)
@@ -2816,15 +2757,7 @@ async fn test_oci_tags_list_max_page_size() {
     let app = app::router(config).await.unwrap();
     let _keep = Box::new(tmp);
 
-    let token = {
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
-        provider.mint_token(&claims).unwrap()
-    };
+    let token = mint_token_for("test", "test");
 
     // Push a few manifests so there's at least 1 tag to list
     let repo = "test/test";
@@ -3623,15 +3556,7 @@ async fn test_bazel_and_oci_coexist() {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
-    let token = {
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
-        provider.mint_token(&claims).unwrap()
-    };
+    let token = mint_token_for("test", "test");
     let _keep = Box::new(tmp);
 
     let repo = "test/test";
@@ -3739,15 +3664,7 @@ async fn test_hub_xet_lfs_triple_coexist() {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
-    let token = {
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
-        provider.mint_token(&claims).unwrap()
-    };
+    let token = mint_token_for("test", "test");
     let _keep = Box::new(tmp);
 
     let repo = "test/test";
@@ -3932,15 +3849,7 @@ async fn test_graceful_shutdown_during_upload() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
-    let token = {
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repository =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repository, u64::MAX).unwrap();
-        provider.mint_token(&claims).unwrap()
-    };
+    let token = mint_token_for("test", "test");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (server_done_tx, server_done_rx) = tokio::sync::oneshot::channel::<()>();
@@ -4136,15 +4045,7 @@ async fn test_concurrent_cross_protocol_upload_same_hash() {
     config.validate_runtime_requirements().unwrap();
     let app = Arc::new(app::router(config).await.unwrap());
 
-    let token = {
-        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
-        let claims =
-            TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
-        provider.mint_token(&claims).unwrap()
-    };
+    let token = mint_token_for("test", "test");
     let _keep = Box::new(tmp);
 
     let content = b"cross-protocol-race-content";

@@ -8,6 +8,18 @@ pub(crate) mod provider;
 
 use super::{ServerFrontend, TestServer, sha256_hex};
 
+/// Mints a write credential bound to exactly owner/name on main.
+pub(crate) fn mint_token_for(owner: &str, name: &str) -> String {
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+    use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
+
+    let provider = LocalHmacProvider::new(super::TEST_SIGNING_KEY).unwrap();
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", owner, TokenScope::Write, repo, u64::MAX).unwrap();
+    provider.mint_token(&claims).unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_healthz_returns_200() {
     let server = TestServer::start(&[ServerFrontend::Xet]).await;
