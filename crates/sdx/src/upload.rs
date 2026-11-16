@@ -52,7 +52,7 @@ use bytes::Bytes;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use xet_core_structures::merklehash::{MerkleHash, file_hash};
+use xet_core_structures::merklehash::MerkleHash;
 
 use crate::auth::TokenService;
 use crate::chunker::{Chunk, Chunker};
@@ -810,14 +810,17 @@ impl FileUploadPipeline {
             });
         }
 
-        let chunk_list: Vec<(MerkleHash, u64)> = self
-            .placements
-            .iter()
-            .map(|placement| match placement {
-                Placement::New { hash, len } | Placement::Known { hash, len, .. } => (*hash, *len),
-            })
-            .collect();
-        let file_hash = file_hash(&chunk_list);
+        let native_file_hash = shardline_xet_core::merklehash::file_hash_from_iter(
+            self.placements.iter().map(|placement| {
+                let (hash, len) = match placement {
+                    Placement::New { hash, len } | Placement::Known { hash, len, .. } => {
+                        (*hash, *len)
+                    }
+                };
+                (<[u8; 32]>::from(hash).into(), len)
+            }),
+        );
+        let file_hash = MerkleHash::from(<[u8; 32]>::from(native_file_hash));
         let file_entry = ShardFileEntry {
             file_hash,
             segments,
@@ -829,7 +832,7 @@ impl FileUploadPipeline {
             .map(|location| location.xorb_hash)
             .collect::<std::collections::HashSet<_>>()
             .len() as u64;
-        let chunk_count = u64::try_from(chunk_list.len()).unwrap_or(u64::MAX);
+        let chunk_count = u64::try_from(self.placements.len()).unwrap_or(u64::MAX);
         let inserted_chunks = u64::try_from(self.new_chunk_locations.len()).unwrap_or(u64::MAX);
         let info = UploadFileInfo {
             file_id: xet_hash_hex_string(file_hash),
@@ -1498,6 +1501,54 @@ mod tests {
         assert!(state.file_infos.is_empty());
         assert!(state.file_reports.is_empty());
         assert!(state.pending_registrations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_placement_file_ids_match_upstream_across_tree_sizes() {
+        let (_server, client) = mock_client().await;
+        for count in [0, 1, 2, 63, 64, 65, 255, 1023] {
+            let session = client.upload_session().unwrap();
+            let mut pipeline = super::FileUploadPipeline::new(session.clone());
+            let chunks: Vec<_> = (0..count)
+                .map(|index: u32| {
+                    (
+                        compute_chunk_hash(&index.to_le_bytes()),
+                        u64::from(index % 127),
+                    )
+                })
+                .collect();
+            for (index, &(hash, len)) in chunks.iter().enumerate() {
+                let location = super::ChunkLocation {
+                    xorb_hash: compute_chunk_hash(b"stored xorb"),
+                    chunk_index: index as u32,
+                };
+                let placement = if index % 2 == 0 {
+                    pipeline.new_chunk_locations.push(location);
+                    super::Placement::New { hash, len }
+                } else {
+                    super::Placement::Known {
+                        hash,
+                        len,
+                        location,
+                    }
+                };
+                pipeline.placements.push(placement);
+                pipeline.total_bytes += len;
+            }
+            let info = pipeline.finish().await.unwrap();
+            let expected = xet_core_structures::merklehash::file_hash(&chunks);
+            assert_eq!(info.file_id, xet_hash_hex_string(expected));
+            assert_eq!(info.chunk_count, u64::from(count));
+            assert_eq!(
+                info.total_bytes,
+                chunks.iter().map(|(_, len)| *len).sum::<u64>()
+            );
+            assert_eq!(info.inserted_chunks, u64::from(count.div_ceil(2)));
+            assert_eq!(info.reused_chunks, u64::from(count / 2));
+            let state = session.inner.state.lock().await;
+            assert_eq!(state.file_infos[0].file_hash, expected);
+            assert_eq!(state.file_infos[0].segments.len(), usize::from(count != 0));
+        }
     }
 
     #[tokio::test]
