@@ -874,57 +874,6 @@ fn parse_lfs_pointer_field_extra_whitespace() {
     assert!(oid.is_some());
 }
 
-// --- parse_pack_data tests ---
-
-#[test]
-fn parse_pack_data_empty_input() {
-    assert!(parse_pack_data(b"").is_err());
-}
-
-#[test]
-fn parse_pack_data_too_short() {
-    assert!(parse_pack_data(b"PACK").is_err());
-}
-
-#[test]
-fn parse_pack_data_no_pack_magic() {
-    assert!(parse_pack_data(b"NOTAPACKFILE").is_err());
-}
-
-#[test]
-fn parse_pack_data_unsupported_version() {
-    let mut data = b"PACK".to_vec();
-    data.extend_from_slice(&3u32.to_be_bytes()); // version 3 (unsupported)
-    data.extend_from_slice(&0u32.to_be_bytes());
-    assert!(parse_pack_data(&data).is_err());
-}
-
-// --- parse_pack_data truncated pack (F-deep-2.5) ---
-
-#[test]
-fn parse_pack_data_truncated_claims_more_objects_errors() {
-    // A header claiming more objects than the stream actually contains must
-    // error instead of returning a partial object list.
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(b"blob content").unwrap();
-    let compressed = enc.finish().unwrap();
-
-    let mut pack = b"PACK".to_vec();
-    pack.extend_from_slice(&2u32.to_be_bytes()); // version 2
-    pack.extend_from_slice(&2u32.to_be_bytes()); // claims 2 objects
-    // Only 1 object is actually present in the stream.
-    pack.push((3 << 4) | (compressed.len() as u8 & 0x0f)); // blob, size low nibble
-    pack.extend_from_slice(&compressed);
-
-    let result = parse_pack_data(&pack);
-    assert!(
-        result.is_err(),
-        "truncated pack must error instead of returning partial objects, got {result:?}"
-    );
-}
-
 // --- authorize_read / authorize_write tests (no auth configured) ---
 
 #[test]
@@ -1002,72 +951,6 @@ fn parse_pack_data_roundtrip_commit_and_tree() {
     assert_eq!(blob_count, 1);
     assert_eq!(tree_count, 1);
     assert_eq!(commit_count, 1);
-}
-
-#[test]
-fn parse_pack_data_unknown_object_type_breaks() {
-    // A pack with an object of type 5 (reserved, not 1..4 or 6..7) cannot be
-    // parsed, and since the header claims an object that is never produced,
-    // the truncated/malformed pack must error instead of returning a partial
-    // (empty) object list.
-    let mut data = b"PACK".to_vec();
-    data.extend_from_slice(&2u32.to_be_bytes()); // version 2
-    data.extend_from_slice(&1u32.to_be_bytes()); // 1 object
-    // Object header byte: type=5, size=0, no continuation
-    // type 5 = (5 << 4) | 0 = 0x50
-    data.push(0x50);
-    // No compressed data follows, parser will break on zlib decompression
-    let result = parse_pack_data(&data);
-    assert!(
-        result.is_err(),
-        "pack claiming an object that cannot be parsed must error, got {result:?}"
-    );
-}
-
-#[test]
-fn parse_pack_data_with_ref_delta_stops_gracefully() {
-    // A pack with a REF_DELTA object (type 7) but no base object in the index
-    // should produce an error since the base SHA won't be found.
-    // We need at least a valid compressed stream after the REF_DELTA header.
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(b"delta data").unwrap();
-    let compressed = enc.finish().unwrap();
-
-    let mut data = b"PACK".to_vec();
-    data.extend_from_slice(&2u32.to_be_bytes());
-    data.extend_from_slice(&1u32.to_be_bytes()); // 1 object
-    // Object header: type=7, size=0, no continuation
-    // type 7 = (7 << 4) | 0 = 0x70
-    data.push(0x70);
-    // REF_DELTA needs 20 bytes of base SHA
-    data.extend_from_slice(&[0u8; 20]);
-    // Valid zlib data
-    data.extend_from_slice(&compressed);
-    let result = parse_pack_data(&data);
-    assert!(
-        result.is_err(),
-        "expected error for REF_DELTA with missing base"
-    );
-}
-
-#[test]
-fn parse_pack_data_shift_overflow_detected() {
-    // Create a pack with a varint size that keeps shifting past 63 bits
-    let mut data = b"PACK".to_vec();
-    data.extend_from_slice(&2u32.to_be_bytes());
-    data.extend_from_slice(&1u32.to_be_bytes()); // 1 object
-    // Object header byte: type=3 (blob), size continues in following bytes
-    // Start with continuation bit set, size low nibble = 0
-    data.push(0x80 | (3 << 4) | 0x0f); // type=3, continuation, low 4 bits=0x0f
-    // Add more continuation bytes to keep shifting
-    for _ in 0..10 {
-        data.push(0x80); // continuation, 7 bits of zero
-    }
-    // Try to parse - should detect shift >= 64
-    let result = parse_pack_data(&data);
-    assert!(result.is_err());
 }
 
 // --- decompress_zlib with real data ---
@@ -1515,58 +1398,6 @@ fn decompress_zlib_full_stream_ok() {
     let full = enc.finish().unwrap();
     let (decompressed, _used) = decompress_zlib(&full).unwrap();
     assert_eq!(decompressed, payload);
-}
-
-// --- parse_pack_data with invalid offset ---
-
-#[test]
-fn parse_pack_data_ofs_delta_bad_offset() {
-    // A pack with a single OFS_DELTA object (no base) should error.
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(b"delta data").unwrap();
-    let compressed = enc.finish().unwrap();
-
-    let mut pack = b"PACK".to_vec();
-    pack.extend_from_slice(&2u32.to_be_bytes());
-    pack.extend_from_slice(&1u32.to_be_bytes()); // 1 object
-    // OFS_DELTA (type=6), size <= 0x0f
-    pack.push((6 << 4) | compressed.len() as u8);
-    // OFS_DELTA offset: 2 (no base object at offset 2)
-    pack.push(0x02);
-    pack.extend_from_slice(&compressed);
-
-    let result = parse_pack_data(&pack);
-    assert!(result.is_err());
-}
-
-// --- parse_pack_data with OOB OFS_DELTA offset ---
-// (offset calculation underflows)
-
-#[test]
-fn parse_pack_data_ofs_delta_offset_underflow() {
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(b"delta data").unwrap();
-    let compressed = enc.finish().unwrap();
-
-    let mut pack = b"PACK".to_vec();
-    pack.extend_from_slice(&2u32.to_be_bytes());
-    pack.extend_from_slice(&1u32.to_be_bytes());
-    // OFS_DELTA (type=6), size = compressed.len()
-    pack.push((6 << 4) | 0x0f);
-    // Large OFS_DELTA offset encoded as multi-byte varint
-    // offset = 0x01 (MSB=0 means single byte, value=1)
-    // An offset of 1 with 0 objects in the index will produce checked_sub(1) = 0
-    // but objects is empty, so base_idx(0) is out of bounds.
-    // Actually this would work: offset=1 on an empty objects vec:
-    // checked_sub(1) = None → InvalidDelta. Let's test that.
-    pack.push(0x01);
-    pack.extend_from_slice(&compressed);
-    let result = parse_pack_data(&pack);
-    assert!(result.is_err());
 }
 
 // --- receive_pack with invalid pack data (error path, lines ~262) ---

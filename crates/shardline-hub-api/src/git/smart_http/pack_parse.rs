@@ -315,6 +315,77 @@ mod strict_tests {
     }
 
     #[test]
+    fn invalid_headers_are_rejected_before_object_decoding() {
+        for short in [&b""[..], b"PACK", b"NOTAPACKFILE"] {
+            assert!(matches!(
+                parse_pack_data(short),
+                Err(PackError::InvalidPack)
+            ));
+        }
+        let mut pack = generate_pack(&[]).unwrap();
+        pack[..4].copy_from_slice(b"NOPE");
+        assert!(matches!(
+            parse_pack_data(&pack),
+            Err(PackError::InvalidPack)
+        ));
+        for version in [0u32, 1, 4, u32::MAX] {
+            let mut pack = generate_pack(&[]).unwrap();
+            pack[4..8].copy_from_slice(&version.to_be_bytes());
+            resign(&mut pack);
+            assert!(matches!(
+                parse_pack_data(&pack),
+                Err(PackError::InvalidPack)
+            ));
+        }
+    }
+
+    #[test]
+    fn missing_declared_objects_are_rejected_with_valid_checksum() {
+        let mut pack = generate_pack(&[create_blob_object(b"content")]).unwrap();
+        pack[8..12].copy_from_slice(&2u32.to_be_bytes());
+        resign(&mut pack);
+        assert!(matches!(
+            parse_pack_data(&pack),
+            Err(PackError::InvalidPack)
+        ));
+    }
+
+    #[test]
+    fn reserved_object_type_is_rejected_with_valid_checksum() {
+        let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+        pack.push(0x50);
+        pack.extend_from_slice(&compress(b""));
+        assert!(matches!(
+            parse_pack_data(&finish(pack)),
+            Err(PackError::InvalidPack)
+        ));
+    }
+
+    #[test]
+    fn object_size_overflow_is_rejected_with_valid_checksum() {
+        let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+        pack.push(0xbf);
+        pack.extend_from_slice(&[0x80; 10]);
+        assert!(matches!(
+            parse_pack_data(&finish(pack)),
+            Err(PackError::ShiftOverflow)
+        ));
+    }
+
+    #[test]
+    fn offset_delta_rejects_zero_missing_and_underflowing_bases() {
+        for distance in [0, 1, 2, 12, 13, 127] {
+            let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+            pack.extend_from_slice(&[0x63, distance]);
+            pack.extend_from_slice(&compress(&[0, 0, 0]));
+            assert!(matches!(
+                parse_pack_data(&finish(pack)),
+                Err(PackError::InvalidDelta)
+            ));
+        }
+    }
+
+    #[test]
     fn multibyte_size_matches_git_encoding() {
         for len in [16, 127, 128, 2048, 65536] {
             let bytes = vec![b'a'; len];
