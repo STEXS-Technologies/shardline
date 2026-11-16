@@ -159,7 +159,7 @@ pub fn build_typed_merkle_chain<T: DeserializeOwned + EvidenceEventMetadata>(
     };
     let mut result = Vec::with_capacity(events.len());
     for event_json in events {
-        let event = serde_json::from_value::<T>(event_json.clone())?;
+        let event = T::deserialize(event_json)?;
         let sequence = event.sequence_number();
         if expected_sequence.is_some_and(|expected| expected != sequence) {
             return Err(ReliabilityError::ChainDiscontinuity);
@@ -167,8 +167,7 @@ pub fn build_typed_merkle_chain<T: DeserializeOwned + EvidenceEventMetadata>(
         let previous_commit = result
             .last()
             .or(previous)
-            .cloned()
-            .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+            .map(ReliabilityMerkleCommit::deserialize)
             .transpose()?;
         let commit =
             reliability_merkle_commit_json_with_previous(&event, previous_commit.as_ref())?;
@@ -198,7 +197,7 @@ pub fn verify_typed_merkle_chain<T: DeserializeOwned + EvidenceEventMetadata>(
     }
     let expected = build_typed_merkle_chain::<T>(events, None)?;
     for (observed, expected_json) in merkle_commits.iter().zip(expected) {
-        let observed = serde_json::from_value::<ReliabilityMerkleCommit>(observed.clone())?;
+        let observed = ReliabilityMerkleCommit::deserialize(observed)?;
         let expected_commit = serde_json::from_value::<ReliabilityMerkleCommit>(expected_json)?;
         if !observed.matches_expected(&expected_commit) {
             return Err(ReliabilityError::Merkle(
