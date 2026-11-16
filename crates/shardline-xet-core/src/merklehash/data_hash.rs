@@ -164,14 +164,8 @@ impl DataHash {
     }
 
     pub fn from_slice(value: &[u8]) -> Result<Self, DataHashBytesParseError> {
-        if value.len() != 32 {
-            return Err(DataHashBytesParseError);
-        }
-        let mut hash: DataHash = DataHash::default();
-        for (word, bytes) in hash.0.iter_mut().zip(value.as_chunks::<8>().0) {
-            *word = u64::from_le_bytes(*bytes);
-        }
-        Ok(hash)
+        let bytes: &[u8; 32] = value.try_into().map_err(|_error| DataHashBytesParseError)?;
+        Ok(Self::from(bytes))
     }
 }
 

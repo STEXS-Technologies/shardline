@@ -104,24 +104,29 @@ mod tests {
 
     #[test]
     fn write_and_read_hash_roundtrip() {
-        let h = DataHash::from([
-            0xDEADBEEF_CAFEBABEu64,
-            0x12345678_9ABCDEF0,
-            0xFEDCBA09_87654321,
-            0x01020304_05060708,
-        ]);
-        let mut buf = Vec::new();
-        write_hash(&mut buf, &h).unwrap();
-        let mut r = Cursor::new(&buf);
-        let h2 = read_hash(&mut r).unwrap();
-        assert_eq!(h, h2);
+        for h in [
+            DataHash::from([
+                0xDEADBEEF_CAFEBABEu64,
+                0x12345678_9ABCDEF0,
+                0xFEDCBA09_87654321,
+                0x01020304_05060708,
+            ]),
+            crate::merklehash::compute_data_hash(b"serialization test data"),
+            DataHash::default(),
+        ] {
+            let mut buf = Vec::new();
+            write_hash(&mut buf, &h).unwrap();
+            assert_eq!(buf.len(), 32);
+            assert_eq!(read_hash(&mut Cursor::new(&buf)).unwrap(), h);
+        }
     }
 
     #[test]
     fn write_and_read_u8_edge_cases() {
-        for v in [0u8, 1, 127, 128, 255] {
+        for v in [0u8, 1, 127, 128, 0xAB, 255] {
             let mut buf = Vec::new();
             write_u8(&mut buf, v).unwrap();
+            assert_eq!(buf, v.to_le_bytes());
             let mut r = Cursor::new(&buf);
             assert_eq!(read_u8(&mut r).unwrap(), v);
         }
@@ -129,9 +134,18 @@ mod tests {
 
     #[test]
     fn write_and_read_u32_edge_cases() {
-        for v in [0u32, 1, 0xFFFF, 0x1_0000, u32::MAX >> 1, u32::MAX] {
+        for v in [
+            0u32,
+            1,
+            0xFFFF,
+            0x1_0000,
+            0xDEAD_BEEF,
+            u32::MAX >> 1,
+            u32::MAX,
+        ] {
             let mut buf = Vec::new();
             write_u32(&mut buf, v).unwrap();
+            assert_eq!(buf, v.to_le_bytes());
             let mut r = Cursor::new(&buf);
             assert_eq!(read_u32(&mut r).unwrap(), v);
         }
@@ -139,9 +153,10 @@ mod tests {
 
     #[test]
     fn write_and_read_u64_edge_cases() {
-        for v in [0u64, 1, u64::MAX >> 1, u64::MAX] {
+        for v in [0u64, 1, 0xCAFE_BABE_DEAD_BEEF, u64::MAX >> 1, u64::MAX] {
             let mut buf = Vec::new();
             write_u64(&mut buf, v).unwrap();
+            assert_eq!(buf, v.to_le_bytes());
             let mut r = Cursor::new(&buf);
             assert_eq!(read_u64(&mut r).unwrap(), v);
         }
@@ -149,12 +164,16 @@ mod tests {
 
     #[test]
     fn write_and_read_bytes_various_sizes() {
-        for len in [0, 1, 15, 16, 31, 32, 100] {
-            let data: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
+        let cases = [0, 1, 15, 16, 31, 32, 100]
+            .map(|len| (0..len).map(|i| (i % 256) as u8).collect::<Vec<_>>());
+        for data in cases
+            .into_iter()
+            .chain([b"serialization utils bytes test".to_vec()])
+        {
             let mut buf = Vec::new();
             write_bytes(&mut buf, &data).unwrap();
-            assert_eq!(buf.len(), data.len());
-            let mut out = vec![0u8; len];
+            assert_eq!(buf, data);
+            let mut out = vec![0u8; data.len()];
             let mut r = Cursor::new(&buf);
             read_bytes(&mut r, &mut out).unwrap();
             assert_eq!(out, data);
@@ -163,7 +182,13 @@ mod tests {
 
     #[test]
     fn write_and_read_u32s_various() {
-        let cases: [&[u32]; 4] = [&[], &[42], &[0, 1, u32::MAX], &[100, 200, 300, 400, 500]];
+        let cases: [&[u32]; 5] = [
+            &[],
+            &[42],
+            &[0, 1, u32::MAX],
+            &[100, 200, 300, 400, 500],
+            &[1, 100, 1000, u32::MAX, 0],
+        ];
         for input in &cases {
             let mut buf = Vec::new();
             write_u32s(&mut buf, input).unwrap();
@@ -177,7 +202,13 @@ mod tests {
 
     #[test]
     fn write_and_read_u64s_various() {
-        let cases: [&[u64]; 4] = [&[], &[u64::MAX], &[0, 1, u64::MAX], &[100, 200, 300]];
+        let cases: [&[u64]; 5] = [
+            &[],
+            &[u64::MAX],
+            &[0, 1, u64::MAX],
+            &[100, 200, 300],
+            &[1, u64::MAX, 0, 0xDEAD_BEEF_CAFE],
+        ];
         for input in &cases {
             let mut buf = Vec::new();
             write_u64s(&mut buf, input).unwrap();
