@@ -5358,3 +5358,32 @@ It does not measure fresh builds, semantic edits, the full server/CLI build, or
 production throughput. Incremental compilation uses additional cache space and
 its preparation cost is excluded from the table. The repository's normal debug
 information setting was not measured here.
+
+### Hub cleanup package checkpoint (2026-11-16)
+
+Frozen source `22b879b8f780a651c9d56897e933369f7eede397` passed the
+all-features Hub package suite on the shared development host with Rust 1.99.0,
+four build jobs, four test threads, cached dependencies, no compiler wrapper,
+and disabled dev/test debug information. A fresh PostgreSQL 16 Alpine database
+had the current migrations applied. Both native-client and PostgreSQL fixture
+requirements were enabled; all seven PostgreSQL fixture variables pointed at
+that disposable database.
+
+```bash
+# Set DATABASE_URL and each SHARDLINE_*_TEST_DATABASE_URL used by the Hub tests
+# to the migrated disposable database before running this command.
+SHARDLINE_REQUIRE_POSTGRES_TESTS=1 SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 \
+  cargo +1.99.0 nextest run --offline --locked -p shardline-hub-api \
+  --all-features --no-fail-fast --test-threads 4
+```
+
+All 829 selected unit and integration tests passed in 45.335 seconds. The four
+normally ignored tests were not selected: the Git suffix fixture, the two remote
+Git CLI fixtures, and the commit-publication fixture. These require Docker and a
+current server executable; the remote Git fixtures also require object storage.
+The disposable PostgreSQL container was removed afterward. Strict all-features
+Hub library/test Clippy checks passed during the preceding source changes.
+
+This checkpoint covers the accumulated Hub response, streaming-preview, LFS
+staging, and security-test cleanup together. It does not qualify the four ignored
+fixtures, production throughput, or the historical hosted SDK memory failure.
