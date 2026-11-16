@@ -256,7 +256,7 @@ impl PackedProtocolUpload {
                                 );
                             }
                             for ((bytes, offset), entry) in
-                                recovered_chunks.into_iter().zip(packed.chunk_entries)
+                                recovered_chunks.zip(packed.chunk_entries)
                             {
                                 let length = u64::try_from(bytes.len())?;
                                 if offset != entry.raw_offset || length != entry.raw_length {
@@ -301,7 +301,7 @@ impl PackedProtocolUpload {
 
     async fn store_individual_fallback(
         &mut self,
-        chunks: Vec<(Vec<u8>, u64)>,
+        chunks: impl Iterator<Item = (Vec<u8>, u64)>,
         permit: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<(), ServerError> {
         let objects = self.store.clone();

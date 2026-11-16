@@ -47,13 +47,14 @@ impl RecoverableXorbBatch {
         packed_xorb_from_serialized(serialized, metadata)
     }
 
-    pub(in crate::upload_ingest) fn into_chunks(self) -> Vec<(Vec<u8>, u64)> {
+    pub(in crate::upload_ingest) fn into_chunks(
+        self,
+    ) -> impl ExactSizeIterator<Item = (Vec<u8>, u64)> {
         self.raw
             .data
             .into_iter()
             .zip(self.offsets)
             .map(|(data, offset)| (data.into_owned(), offset))
-            .collect()
     }
 }
 
@@ -67,7 +68,7 @@ mod tests {
         let address = bytes.as_ptr();
         let batch = RecoverableXorbBatch::new(vec![(bytes, 0)]);
         let packed = batch.pack().unwrap();
-        let recovered = batch.into_chunks();
+        let recovered: Vec<_> = batch.into_chunks().collect();
         assert_eq!(recovered[0].0.as_ptr(), address);
         assert_eq!(recovered[0].0, b"recoverable bounded payload");
         let expected = SerializedXorbObject::from_xorb_with_compression(
