@@ -3153,31 +3153,28 @@ mod tests {
 
     // ── BufferSemaphore ─────────────────────────────────────────────────────
 
-    #[test]
-    fn buffer_semaphore_acquire_release_bounds_in_flight() {
+    #[tokio::test]
+    async fn buffer_semaphore_acquire_release_bounds_in_flight() {
         let sem = Arc::new(BufferSemaphore::new(100, 100, 100));
         assert_eq!(sem.total_permits(), 100);
         assert_eq!(sem.available_permits(), 100);
 
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut p1 = sem.acquire_many(60).await.unwrap();
-            assert!(p1.split(0).is_none());
-            assert!(p1.split(61).is_none());
-            assert_eq!(p1.num_permits(), 60);
-            let split = p1.split(60).unwrap();
-            assert_eq!(p1.num_permits(), 0);
-            assert_eq!(split.num_permits(), 60);
-            assert_eq!(sem.available_permits(), 40);
-            let p2 = sem.acquire_many(40).await.unwrap();
-            assert_eq!(sem.available_permits(), 0);
-            drop(p1);
-            assert_eq!(sem.available_permits(), 0);
-            drop(split);
-            assert_eq!(sem.available_permits(), 60);
-            drop(p2);
-            assert_eq!(sem.available_permits(), 100);
-        });
+        let mut p1 = sem.acquire_many(60).await.unwrap();
+        assert!(p1.split(0).is_none());
+        assert!(p1.split(61).is_none());
+        assert_eq!(p1.num_permits(), 60);
+        let split = p1.split(60).unwrap();
+        assert_eq!(p1.num_permits(), 0);
+        assert_eq!(split.num_permits(), 60);
+        assert_eq!(sem.available_permits(), 40);
+        let p2 = sem.acquire_many(40).await.unwrap();
+        assert_eq!(sem.available_permits(), 0);
+        drop(p1);
+        assert_eq!(sem.available_permits(), 0);
+        drop(split);
+        assert_eq!(sem.available_permits(), 60);
+        drop(p2);
+        assert_eq!(sem.available_permits(), 100);
     }
 
     #[test]
@@ -3225,8 +3222,8 @@ mod tests {
         assert_eq!(sem.total_permits(), 50);
     }
 
-    #[test]
-    fn buffer_semaphore_large_capacity_uses_scaling_basis() {
+    #[tokio::test]
+    async fn buffer_semaphore_large_capacity_uses_scaling_basis() {
         // 8 GiB exceeds u32::MAX, so a basis > 1 is required; acquisitions of
         // arbitrarily large term sizes must still succeed.
         let sem = Arc::new(BufferSemaphore::new(
@@ -3236,16 +3233,13 @@ mod tests {
         ));
         // ceil(8 GiB / basis) must fit u32::MAX: basis = 4.
         assert_eq!(sem.basis, 4);
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let p = sem
-                .acquire_many(DEFAULT_DOWNLOAD_BUFFER_SIZE)
-                .await
-                .unwrap();
-            assert!(p.num_permits() >= DEFAULT_DOWNLOAD_BUFFER_SIZE);
-            drop(p);
-            assert_eq!(sem.available_permits(), DEFAULT_DOWNLOAD_BUFFER_SIZE);
-        });
+        let p = sem
+            .acquire_many(DEFAULT_DOWNLOAD_BUFFER_SIZE)
+            .await
+            .unwrap();
+        assert!(p.num_permits() >= DEFAULT_DOWNLOAD_BUFFER_SIZE);
+        drop(p);
+        assert_eq!(sem.available_permits(), DEFAULT_DOWNLOAD_BUFFER_SIZE);
     }
 
     // ── RunState ────────────────────────────────────────────────────────────
