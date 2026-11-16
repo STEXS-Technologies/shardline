@@ -436,20 +436,16 @@ pub(crate) fn build_url(api_base: &str, route: &str, query: &[(&str, &str)]) -> 
             }
             url.push_str(key);
             url.push('=');
-            url.push_str(&encode_query(value));
+            url.extend(url::form_urlencoded::byte_serialize(value.as_bytes()));
         }
     }
     url
 }
 
-pub(crate) fn encode_query(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
-}
-
 /// Percent-encodes each path segment, preserving `/` separators (so a
 /// `{*path}` wildcard captures the raw segments and axum decodes them).
 ///
-/// Unlike [`encode_query`], this uses RFC-3986 path-segment encoding rather than
+/// Unlike query-value encoding, this uses RFC-3986 path-segment encoding rather than
 /// `form_urlencoded::byte_serialize`. The query encoder treats a space as `+`
 /// (valid only in query strings), but path segments are NOT query strings: axum's
 /// `Path` percent-decodes segments and treats `+` literally, so using the query
@@ -482,15 +478,14 @@ const PATH_SEGMENT_PCHAR: &percent_encoding::AsciiSet = &percent_encoding::NON_A
     .remove(b':')
     .remove(b'@');
 
+const PATH_PCHAR: &percent_encoding::AsciiSet = &PATH_SEGMENT_PCHAR.remove(b'/');
+
 pub(crate) fn encode_path_segment(segment: &str) -> String {
     percent_encoding::utf8_percent_encode(segment, PATH_SEGMENT_PCHAR).to_string()
 }
 
 pub(crate) fn encode_path_segments(path: &str) -> String {
-    path.split('/')
-        .map(encode_path_segment)
-        .collect::<Vec<_>>()
-        .join("/")
+    percent_encoding::utf8_percent_encode(path, PATH_PCHAR).to_string()
 }
 
 /// HTTP URL parsers remove literal dot segments before the server can reject
@@ -595,7 +590,7 @@ mod tests {
         matchers::{method, path, path_regex, query_param},
     };
 
-    use super::{encode_path_segments, encode_query};
+    use super::{build_url, encode_path_segments};
     use crate::{Auth, RepositoryId, XetClientBuilder};
 
     const READ_TOKEN: &str = "read-token";
@@ -668,16 +663,31 @@ mod tests {
     }
 
     #[test]
-    fn encode_query_escapes_reserved_characters() {
-        assert_eq!(encode_query("data/model.pt"), "data%2Fmodel.pt");
-        assert_eq!(encode_query("a b.txt"), "a+b.txt");
-        assert_eq!(encode_query("plain"), "plain");
+    fn build_url_encodes_query_values() {
+        for (value, encoded) in [
+            ("data/model.pt", "data%2Fmodel.pt"),
+            ("a b.txt", "a+b.txt"),
+            ("plain", "plain"),
+            ("a+b&c%", "a%2Bb%26c%25"),
+        ] {
+            assert_eq!(
+                build_url("http://h/", "/route", &[("path", value)]),
+                format!("http://h/route?path={encoded}")
+            );
+        }
     }
 
     #[test]
     fn encode_path_segments_preserves_separators() {
-        assert_eq!(encode_path_segments("data/model.pt"), "data/model.pt");
-        assert_eq!(encode_path_segments("a b/c.txt"), "a%20b/c.txt");
+        for (path, encoded) in [
+            ("data/model.pt", "data/model.pt"),
+            ("a b/c.txt", "a%20b/c.txt"),
+            ("", ""),
+            ("/", "/"),
+            ("//a///", "//a///"),
+        ] {
+            assert_eq!(encode_path_segments(path), encoded, "{path:?}");
+        }
     }
 
     #[tokio::test]
