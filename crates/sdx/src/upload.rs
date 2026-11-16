@@ -503,7 +503,7 @@ struct FileUploadPipeline {
     /// Physical locations for `Placement::New` chunks, in placement order.
     new_chunk_locations: Vec<ChunkLocation>,
     /// Pending new chunks not yet cut into a xorb, with their file offsets.
-    pending: Vec<(Chunk, u64)>,
+    pending: Vec<(Bytes, u64)>,
     pending_bytes: usize,
     total_bytes: u64,
 }
@@ -636,7 +636,7 @@ impl FileUploadPipeline {
             self.cut_xorb().await?;
         }
         let file_offset = self.total_bytes;
-        self.pending.push((chunk, file_offset));
+        self.pending.push((chunk.data, file_offset));
         self.pending_bytes = self.pending_bytes.saturating_add(chunk_len);
         self.placements.push(Placement::New { hash, len });
         self.total_bytes = self.total_bytes.saturating_add(len);
@@ -665,11 +665,8 @@ impl FileUploadPipeline {
             .map_err(|_error| {
                 SdxError::UploadSession("upload permit semaphore closed".to_owned())
             })?;
-        let pairs: Vec<(Bytes, u64)> = self
-            .pending
-            .iter()
-            .map(|(chunk, offset)| (chunk.data.clone(), *offset))
-            .collect();
+        let pairs = std::mem::take(&mut self.pending);
+        self.pending_bytes = 0;
         #[cfg(test)]
         let serialization_gate = self.session.inner.serialization_gate.clone();
         let (built, upload_permit) = tokio::task::spawn_blocking(move || {
@@ -684,10 +681,8 @@ impl FileUploadPipeline {
         .await
         .map_err(|error| SdxError::TaskJoin(error.to_string()))??;
 
-        // Serialization owns the payload and descriptors now. Release raw
-        // chunks before credentials, HEAD, or POST can wait on the network.
-        self.pending.clear();
-        self.pending_bytes = 0;
+        // The worker consumed the raw chunks before credentials, HEAD, or
+        // POST can wait on the network.
 
         // HEAD-first idempotency probe (retried on transient failures).
         let (base, token) = self.session.inner.cas_credentials().await?;
