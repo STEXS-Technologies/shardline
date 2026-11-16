@@ -69,17 +69,12 @@ impl<'value> CredentialScope<'value> {
     #[must_use]
     pub fn parse(value: &'value str) -> Self {
         let mut parts = value.split('/');
-        let access_key = parts.next().unwrap_or("");
-        let date = parts.next().unwrap_or("");
-        let region = parts.next().unwrap_or("");
-        let service = parts.next().unwrap_or("");
-        let terminator = parts.next().unwrap_or("");
         Self {
-            access_key,
-            date,
-            region,
-            service,
-            terminator,
+            access_key: parts.next().unwrap_or(""),
+            date: parts.next().unwrap_or(""),
+            region: parts.next().unwrap_or(""),
+            service: parts.next().unwrap_or(""),
+            terminator: parts.next().unwrap_or(""),
         }
     }
 
@@ -91,11 +86,7 @@ impl<'value> CredentialScope<'value> {
     pub fn parse_credential_field(field: &'value str) -> Option<Self> {
         let scope = field.strip_prefix("Credential=")?;
         let scope = Self::parse(scope);
-        if scope.access_key.is_empty() {
-            None
-        } else {
-            Some(scope)
-        }
+        (!scope.access_key.is_empty()).then_some(scope)
     }
 }
 
@@ -110,11 +101,7 @@ impl<'value> QueryCredential<'value> {
     #[must_use]
     pub fn parse(value: &'value str) -> Option<Self> {
         let scope = CredentialScope::parse(value);
-        if scope.access_key.is_empty() {
-            None
-        } else {
-            Some(Self(scope))
-        }
+        (!scope.access_key.is_empty()).then_some(Self(scope))
     }
 
     /// Returns the parsed access key.
