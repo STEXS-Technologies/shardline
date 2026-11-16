@@ -4474,8 +4474,8 @@ full-capacity drills and the historical hosted SDK RSS failure remain open.
 
 ### MinIO integration cleanup checkpoint (2026-11-16)
 
-At source `394674dc`, the storage and server integration targets passed all
-157 tests with zero skipped in 208.675 s:
+At source `439144a3`, the storage and server integration targets passed all
+157 tests with zero skipped in 200.304 s:
 
 | Integration target | Passed |
 | --- | ---: |
@@ -4500,7 +4500,7 @@ OCI upload and retrieval.
 
 A focused library run of
 `test(copy_integrity::minio_) | test(copy_integrity::postgres_minio_)` also
-passed all three selected tests in 12.679 s with one test thread. These check
+passed all three selected tests in 13.624 s with one test thread. These check
 source replacement during an in-flight copy and reconciliation of a disconnected
 copy-part request through list-parts, including PostgreSQL plus MinIO. They are
 regular tests, already included in the preceding all-features server checkpoint;
