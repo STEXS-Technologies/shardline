@@ -538,9 +538,9 @@ pub(crate) fn repair_reliability_merkle_commits(
             ));
         }
         let previous = previous_operation
-            .as_ref()
+            .take()
             .filter(|(kind, id, _)| kind == &operation_kind_text && id == &operation_id)
-            .map(|(_, _, commit)| commit.clone());
+            .map(|(_, _, commit)| commit);
         let merkle_commit_json =
             build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous)
                 .map_err(LocalIndexStoreError::Reliability)?;
@@ -611,9 +611,9 @@ pub(crate) fn verify_reliability_events(
         })?;
         let observed: Value = from_str(&merkle_json_text)?;
         let previous = previous_operation
-            .as_ref()
+            .take()
             .filter(|(kind, id, _)| kind == &operation_kind_text && id == &operation_id)
-            .map(|(_, _, commit)| commit.clone());
+            .map(|(_, _, commit)| commit);
         shardline_reliability::verify_persisted_merkle_commit_with_previous(
             operation_kind,
             event_json,
