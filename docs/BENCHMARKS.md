@@ -4127,6 +4127,21 @@ percentage. Reproduce from each revision with an initially absent target path:
 
 ### SDK streaming RSS qualification remains open (2026-11-16)
 
+A three-iteration local run at `96da1316f02a41fce15b9a647011ba68995f00dc` passed both original
+workloads in every iteration (six transfers total, 699.044 seconds). The run
+used the same shared Linux development host and Rust 1.99.0 test profile with
+debug information disabled. Byte identity, length, the 64 MiB decoded-buffer
+cap and the strict 65,536 KiB additional-RSS threshold were unchanged.
+
+| Iteration | 256 MiB additional RSS, KiB | 1 GiB additional RSS, KiB |
+| --- | ---: | ---: |
+| 1 | 47,800 | 52,296 |
+| 2 | 55,208 | 60,960 |
+| 3 | 55,076 | 55,136 |
+
+Reproduce with the command below plus `--stress-count 3 --test-threads 1`.
+These repeated local passes do not establish the cause of the hosted failure.
+
 The earlier local passes above do not explain the failure in
 [hosted E2E run 43704721020](https://github.com/STEXS-Technologies/shardline/actions/runs/43704721020).
 Its checkout was PR merge `74444f2`, merging candidate `a0c995f27545a5fdfd277433fc5d238fd7379bc7`
@@ -4929,6 +4944,25 @@ subsequent release-mode qualification below resolved that prerequisite and
 executed the partition drill successfully.
 
 ### Cleanup candidate deployment qualification (2026-11-16)
+
+The follow-up PostgreSQL gate at
+`96da1316f02a41fce15b9a647011ba68995f00dc` used a fresh disposable PostgreSQL 16 database,
+the candidate migrations, required PostgreSQL/native-client test modes, and the
+released v1.12.1 and v1.11.3 recovery fixtures. `scripts/test-postgres.sh` exited
+successfully: 813 index library tests, two selected provider-event tests, 3,220
+default server library tests, six explicitly selected ignored PostgreSQL
+contracts, and one migration E2E test passed (4,042 executed tests total).
+Default ignored tests and name-filter exclusions remain outside these counts;
+this was not an all-ignored workspace run. The owned database was removed.
+
+The OCI follow-up source `864d11621d5d97981c25dd3be60e973cc0ce7a6c` also
+passed an all-features release build. Its frozen executable SHA-256 was
+`93bd48c1575904f1d87c2afa149bf6d7651a544db975a54ff5c18ac1451454a0`.
+All 13 selected storage-copy maintenance cases passed in 85.150 seconds, and
+both selected OCI deployment cases passed in 18.139 seconds (PostgreSQL failure
+during upload and lost GC deletion acknowledgement). No selected case reported
+a runtime prerequisite skip; other tests were excluded by the filters.
+
 
 Clean source commit `683916e8c4330363f711eaad236af917db0d46ca` passed an
 all-features CLI release build using Rust `1.99.0 (b940084d7 2026-09-28)`,
