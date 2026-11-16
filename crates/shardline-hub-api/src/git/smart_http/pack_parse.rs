@@ -386,6 +386,69 @@ mod strict_tests {
     }
 
     #[test]
+    fn non_delta_objects_preserve_order_type_bytes_and_identity() {
+        use crate::git::pack::{create_commit_object, create_tree_object};
+        let blob = create_blob_object(b"file content");
+        let tree = create_tree_object(&[(0o100644, "f.txt", &blob.sha1())]);
+        let commit = create_commit_object(&tree.sha1(), None, "Test <test@test.com>", "Initial");
+        let tag = GitObject {
+            object_type: ObjectType::Tag,
+            data: format!(
+                "object {}\ntype commit\ntag v1\n\nrelease\n",
+                hex::encode(commit.sha1())
+            )
+            .into_bytes(),
+        };
+        let expected = [
+            blob,
+            tree,
+            commit,
+            tag,
+            create_blob_object(b"hello world"),
+            create_blob_object(b""),
+        ];
+        let parsed = parse_pack_data(&generate_pack(&expected).unwrap()).unwrap();
+        assert_eq!(parsed.len(), expected.len());
+        for (actual, expected) in parsed.iter().zip(&expected) {
+            assert_eq!(actual.object_type, expected.object_type);
+            assert_eq!(actual.data, expected.data);
+            assert_eq!(actual.sha1(), expected.sha1());
+        }
+    }
+
+    #[test]
+    fn zlib_complete_streams_preserve_payload_and_consumption() {
+        for payload in [
+            &b""[..],
+            b"hello",
+            b"complete stream payload",
+            b"Hello, World! This is test data for zlib roundtrip.",
+        ] {
+            let compressed = compress(payload);
+            for trailing in [&b""[..], b"TRAILER"] {
+                let wire = [compressed.as_slice(), trailing].concat();
+                let (decoded, used) = decompress_zlib(&wire).unwrap();
+                assert_eq!(decoded, payload);
+                assert_eq!(used, compressed.len());
+            }
+        }
+    }
+
+    #[test]
+    fn zlib_rejects_garbage_and_every_truncated_prefix() {
+        for wire in [&b""[..], b"x", b"garbage data that is not valid zlib"] {
+            assert!(decompress_zlib(wire).is_err());
+        }
+        let complete = compress(b"hello world, this is a fairly long payload to truncate");
+        for length in 0..complete.len() {
+            assert!(
+                decompress_zlib(&complete[..length]).is_err(),
+                "accepted truncated stream of {length} bytes"
+            );
+        }
+    }
+
+    #[test]
     fn multibyte_size_matches_git_encoding() {
         for len in [16, 127, 128, 2048, 65536] {
             let bytes = vec![b'a'; len];

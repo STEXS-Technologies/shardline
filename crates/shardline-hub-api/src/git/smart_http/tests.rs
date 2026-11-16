@@ -6,7 +6,6 @@
     clippy::vec_init_then_push
 )]
 
-use super::pack_parse::decompress_zlib;
 use super::receive_pack::{build_report_response, find_lfs_blob, parse_receive_pack_request};
 use super::ref_advertisement::{
     GitRef, authorize_read, authorize_write, collect_refs, is_valid_refname, resolve_repo_id,
@@ -890,103 +889,6 @@ fn authorize_write_without_auth_is_permissive() {
     assert!(authorize_write(&state, &headers).is_ok());
 }
 
-// --- decompress_zlib tests ---
-
-#[test]
-fn decompress_zlib_empty_input() {
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(b"").unwrap();
-    let compressed = encoder.finish().unwrap();
-    let (decompressed, _bytes_used) = decompress_zlib(&compressed).unwrap();
-    assert!(decompressed.is_empty());
-}
-
-#[test]
-fn decompress_zlib_short_input_returns_empty() {
-    // Truncated zlib stream
-    let result = decompress_zlib(b"x");
-    assert!(result.is_err() || result.unwrap().0.is_empty());
-}
-
-// --- parse_pack_data round-trip ---
-
-#[test]
-fn parse_pack_data_roundtrip_blob() {
-    // Generate a pack with one blob, then parse it back
-    let blob = crate::git::pack::create_blob_object(b"hello world");
-    let pack = crate::git::pack::generate_pack(&[blob]).unwrap();
-    let objects = parse_pack_data(&pack).unwrap();
-    assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].object_type, ObjectType::Blob);
-    assert_eq!(objects[0].data, b"hello world");
-}
-
-#[test]
-fn parse_pack_data_roundtrip_commit_and_tree() {
-    // Build a tree and commit, generate pack, parse it back
-    let blob = crate::git::pack::create_blob_object(b"file content");
-    let blob_sha = blob.sha1();
-    let tree_entries = vec![(0o100644, "f.txt", &blob_sha)];
-    let tree = crate::git::pack::create_tree_object(&tree_entries);
-    let tree_sha = tree.sha1();
-    let commit =
-        crate::git::pack::create_commit_object(&tree_sha, None, "Test <test@test.com>", "Initial");
-    let pack = crate::git::pack::generate_pack(&[blob, tree, commit]).unwrap();
-    let objects = parse_pack_data(&pack).unwrap();
-    assert_eq!(objects.len(), 3);
-    let blob_count = objects
-        .iter()
-        .filter(|o| o.object_type == ObjectType::Blob)
-        .count();
-    let tree_count = objects
-        .iter()
-        .filter(|o| o.object_type == ObjectType::Tree)
-        .count();
-    let commit_count = objects
-        .iter()
-        .filter(|o| o.object_type == ObjectType::Commit)
-        .count();
-    assert_eq!(blob_count, 1);
-    assert_eq!(tree_count, 1);
-    assert_eq!(commit_count, 1);
-}
-
-// --- decompress_zlib with real data ---
-
-#[test]
-fn decompress_zlib_roundtrip() {
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let original = b"Hello, World! This is test data for zlib roundtrip.";
-    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(original).unwrap();
-    let compressed = encoder.finish().unwrap();
-    let (decompressed, bytes_used) = decompress_zlib(&compressed).unwrap();
-    assert_eq!(decompressed, original);
-    assert_eq!(bytes_used, compressed.len());
-}
-
-#[test]
-fn decompress_zlib_trailing_bytes_still_decompresses() {
-    // decompress_zlib should consume only the bytes it needs, leaving
-    // trailing data unconsumed. It returns the number of bytes consumed.
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(b"hello").unwrap();
-    let compressed = encoder.finish().unwrap();
-
-    // Append trailing data
-    let mut with_trailing = compressed.clone();
-    with_trailing.extend_from_slice(b"TRAILER");
-
-    let (decompressed, bytes_used) = decompress_zlib(&with_trailing).unwrap();
-    assert_eq!(decompressed, b"hello");
-    assert_eq!(bytes_used, compressed.len());
-}
-
 // --- parse_commit_object edge cases ---
 
 #[test]
@@ -1342,62 +1244,6 @@ async fn upload_pack_rejects_unowned_want() {
         matches!(result, Err(crate::error::HubApiError::BadRequest(_))),
         "unowned wants must be rejected: {result:?}"
     );
-}
-
-// --- decompress_zlib error on garbage input ---
-
-#[test]
-fn decompress_zlib_garbage_returns_error() {
-    let result = decompress_zlib(b"garbage data that is not valid zlib");
-    assert!(result.is_err());
-}
-
-#[test]
-fn decompress_zlib_empty_input_is_truncated() {
-    // Empty input never reaches `StreamEnd`, so it is a truncated zlib stream
-    // and must be rejected (it would otherwise return partial bytes as a valid
-    // object).
-    let result = decompress_zlib(b"");
-    assert!(
-        result.is_err(),
-        "empty zlib input should be treated as truncated: {result:?}"
-    );
-}
-
-// --- decompress_zlib truncation (F-deep-2.4) ---
-
-#[test]
-fn decompress_zlib_truncated_stream_errors() {
-    // A valid zlib stream that is cut short must error instead of returning
-    // partial decompressed bytes as a complete object.
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(b"hello world, this is a fairly long payload to truncate")
-        .unwrap();
-    let full = enc.finish().unwrap();
-    assert!(full.len() > 4, "compressed payload should be non-trivial");
-
-    // Truncate several bytes off the end so the stream cannot reach StreamEnd.
-    let truncated = &full[..full.len() - 4];
-    let result = decompress_zlib(truncated);
-    assert!(
-        result.is_err(),
-        "truncated zlib stream must error, got {result:?}"
-    );
-}
-
-#[test]
-fn decompress_zlib_full_stream_ok() {
-    // A complete zlib stream still decompresses successfully.
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    let payload = b"complete stream payload";
-    enc.write_all(payload).unwrap();
-    let full = enc.finish().unwrap();
-    let (decompressed, _used) = decompress_zlib(&full).unwrap();
-    assert_eq!(decompressed, payload);
 }
 
 // --- receive_pack with invalid pack data (error path, lines ~262) ---
