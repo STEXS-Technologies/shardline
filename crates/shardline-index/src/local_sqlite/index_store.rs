@@ -1765,14 +1765,13 @@ impl LifecycleStore for LocalIndexStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT (provider, owner, repo)
              DO UPDATE SET
-                last_access_changed_at_unix_seconds = CASE
-                    WHEN excluded.last_access_changed_at_unix_seconds IS NULL
-                        THEN shardline_provider_repository_states.last_access_changed_at_unix_seconds
-                    WHEN shardline_provider_repository_states.last_access_changed_at_unix_seconds IS NULL
-                      OR excluded.last_access_changed_at_unix_seconds >= shardline_provider_repository_states.last_access_changed_at_unix_seconds
-                        THEN excluded.last_access_changed_at_unix_seconds
-                    ELSE shardline_provider_repository_states.last_access_changed_at_unix_seconds
-                END,
+                -- Scalar MAX returns NULL if either timestamp is NULL;
+                -- COALESCE preserves the available observation in that case.
+                last_access_changed_at_unix_seconds = COALESCE(
+                    MAX(shardline_provider_repository_states.last_access_changed_at_unix_seconds, excluded.last_access_changed_at_unix_seconds),
+                    shardline_provider_repository_states.last_access_changed_at_unix_seconds,
+                    excluded.last_access_changed_at_unix_seconds
+                ),
                 last_pushed_revision = CASE
                     WHEN excluded.last_revision_pushed_at_unix_seconds IS NOT NULL
                      AND (shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
@@ -1780,38 +1779,26 @@ impl LifecycleStore for LocalIndexStore {
                         THEN excluded.last_pushed_revision
                     ELSE shardline_provider_repository_states.last_pushed_revision
                 END,
-                last_revision_pushed_at_unix_seconds = CASE
-                    WHEN excluded.last_revision_pushed_at_unix_seconds IS NULL
-                        THEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
-                    WHEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
-                      OR excluded.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
-                        THEN excluded.last_revision_pushed_at_unix_seconds
-                    ELSE shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
-                END,
-                last_cache_invalidated_at_unix_seconds = CASE
-                    WHEN excluded.last_cache_invalidated_at_unix_seconds IS NULL
-                        THEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
-                    WHEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds IS NULL
-                      OR excluded.last_cache_invalidated_at_unix_seconds >= shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
-                        THEN excluded.last_cache_invalidated_at_unix_seconds
-                    ELSE shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
-                END,
-                last_authorization_rechecked_at_unix_seconds = CASE
-                    WHEN excluded.last_authorization_rechecked_at_unix_seconds IS NULL
-                        THEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
-                    WHEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds IS NULL
-                      OR excluded.last_authorization_rechecked_at_unix_seconds >= shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
-                        THEN excluded.last_authorization_rechecked_at_unix_seconds
-                    ELSE shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
-                END,
-                last_drift_checked_at_unix_seconds = CASE
-                    WHEN excluded.last_drift_checked_at_unix_seconds IS NULL
-                        THEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds
-                    WHEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds IS NULL
-                      OR excluded.last_drift_checked_at_unix_seconds >= shardline_provider_repository_states.last_drift_checked_at_unix_seconds
-                        THEN excluded.last_drift_checked_at_unix_seconds
-                    ELSE shardline_provider_repository_states.last_drift_checked_at_unix_seconds
-                END,
+                last_revision_pushed_at_unix_seconds = COALESCE(
+                    MAX(shardline_provider_repository_states.last_revision_pushed_at_unix_seconds, excluded.last_revision_pushed_at_unix_seconds),
+                    shardline_provider_repository_states.last_revision_pushed_at_unix_seconds,
+                    excluded.last_revision_pushed_at_unix_seconds
+                ),
+                last_cache_invalidated_at_unix_seconds = COALESCE(
+                    MAX(shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds, excluded.last_cache_invalidated_at_unix_seconds),
+                    shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds,
+                    excluded.last_cache_invalidated_at_unix_seconds
+                ),
+                last_authorization_rechecked_at_unix_seconds = COALESCE(
+                    MAX(shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds, excluded.last_authorization_rechecked_at_unix_seconds),
+                    shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds,
+                    excluded.last_authorization_rechecked_at_unix_seconds
+                ),
+                last_drift_checked_at_unix_seconds = COALESCE(
+                    MAX(shardline_provider_repository_states.last_drift_checked_at_unix_seconds, excluded.last_drift_checked_at_unix_seconds),
+                    shardline_provider_repository_states.last_drift_checked_at_unix_seconds,
+                    excluded.last_drift_checked_at_unix_seconds
+                ),
                 updated_at_unix_seconds = excluded.updated_at_unix_seconds",
             params![
                 state.provider().as_str(),
