@@ -562,61 +562,45 @@ mod tests {
     // ======= MDBXorbInfoView =======
 
     #[test]
-    fn view_new() {
-        let data = serialize_header_and_entries(&make_header(1, 100), &[make_entry(100, 0)]);
-        let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
-        assert_eq!(view.num_entries(), 1);
-        assert_eq!(view.xorb_hash(), compute_data_hash(b"xorb"));
-        assert_eq!(view.chunk(0), make_entry(100, 0));
-    }
-
-    #[test]
-    fn view_header() {
-        let header = XorbChunkSequenceHeader::new(compute_data_hash(b"test2"), 3, 300);
-        let data = serialize_header_and_entries(
-            &header,
-            &[
-                make_entry(100, 0),
-                make_entry(100, 100),
-                make_entry(100, 200),
-            ],
-        );
-        let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
-        assert_eq!(view.header(), &header);
-        assert_eq!(view.num_entries(), 3);
-    }
-
-    #[test]
-    fn view_chunk_accessor() {
-        let entries = vec![
-            XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100, 0),
-            XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 200, 100),
-        ];
-        let data = serialize_header_and_entries(&make_header(2, 300), &entries);
-        let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
-        assert_eq!(view.chunk(0), entries[0]);
-        assert_eq!(view.chunk(1), entries[1]);
-    }
-
-    #[test]
-    fn view_byte_size() {
-        let data = serialize_header_and_entries(
-            &make_header(2, 200),
-            &[make_entry(100, 0), make_entry(100, 100)],
-        );
-        let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
-        let expected =
-            size_of::<XorbChunkSequenceHeader>() + 2 * size_of::<XorbChunkSequenceEntry>();
-        assert_eq!(view.byte_size(), expected);
-    }
-
-    #[test]
-    fn view_serialize_roundtrip() {
-        let data = serialize_header_and_entries(&make_header(1, 50), &[make_entry(50, 0)]);
-        let view = MDBXorbInfoView::new(Bytes::from(data.clone())).unwrap();
-        let mut out = Vec::new();
-        view.serialize(&mut out).unwrap();
-        assert_eq!(data, out);
+    fn views_preserve_complete_records_and_serialize_only_their_prefix() {
+        for count in 0..=3 {
+            let chunks: Vec<_> = (0..count)
+                .map(|index| XorbChunkSequenceEntry {
+                    chunk_hash: compute_data_hash(&[index as u8]),
+                    unpacked_segment_bytes: 50 * (index + 1),
+                    chunk_byte_range_start: 25 * index * (index + 1),
+                    flags: index as u32,
+                    _unused: 77 + index,
+                })
+                .collect();
+            let mut header = make_header(count, 25 * count * (count + 1));
+            header.xorb_flags = 0x123;
+            header.num_bytes_on_disk = 77;
+            let expected = MDBXorbInfo {
+                metadata: header.clone(),
+                chunks,
+            };
+            let bytes = serialize_header_and_entries(&header, &expected.chunks);
+            let mut with_suffix = bytes.clone();
+            with_suffix.extend_from_slice(b"next record");
+            for view in [
+                MDBXorbInfoView::new(Bytes::from(with_suffix.clone())).unwrap(),
+                MDBXorbInfoView::from_data_and_header(header.clone(), Bytes::from(with_suffix))
+                    .unwrap(),
+            ] {
+                assert_eq!(view.header(), &header);
+                assert_eq!(view.xorb_hash(), header.xorb_hash);
+                assert_eq!(view.num_entries() as u64, count);
+                assert_eq!(view.byte_size(), (1 + count as usize) * 64);
+                for (index, chunk) in expected.chunks.iter().enumerate() {
+                    assert_eq!(view.chunk(index), *chunk);
+                }
+                assert_eq!(MDBXorbInfo::from(&view), expected);
+                let mut serialized = Vec::new();
+                assert_eq!(view.serialize(&mut serialized).unwrap(), bytes.len());
+                assert_eq!(serialized, bytes);
+            }
+        }
     }
 
     #[test]
@@ -627,32 +611,6 @@ mod tests {
             result.unwrap_err().kind(),
             std::io::ErrorKind::UnexpectedEof
         );
-    }
-
-    #[test]
-    fn view_into_mdb_xorb_info() {
-        let entries = vec![make_entry(50, 0), make_entry(100, 50)];
-        let mut header = make_header(2, 150);
-        header.xorb_flags = 0x123;
-        header.num_bytes_on_disk = 77;
-        let data = serialize_header_and_entries(&header, &entries);
-        let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
-        let info: MDBXorbInfo = (&view).into();
-        assert_eq!(info.chunks.len(), 2);
-        assert_eq!(info.chunks[0].unpacked_segment_bytes, 50);
-        assert_eq!(info.chunks[1].unpacked_segment_bytes, 100);
-        assert_eq!(info.metadata, header);
-        assert_eq!(info.chunks, entries);
-    }
-
-    #[test]
-    fn view_into_mdb_xorb_info_empty() {
-        let header = make_header(0, 0);
-        let data = serialize_header_and_entries(&header, &[]);
-        let view = MDBXorbInfoView::new(Bytes::from(data)).unwrap();
-        let info: MDBXorbInfo = (&view).into();
-        assert!(info.chunks.is_empty());
-        assert_eq!(info.metadata.num_bytes_in_xorb, 0);
     }
 
     #[test]
