@@ -311,7 +311,7 @@ impl<Entry: InventoryEntry> InventoryScan<Entry> {
             INVENTORY_BATCH_SIZE
         );
         let (batch, last_key) = {
-            let mut statement = self.connection.get()?.prepare(&sql)?;
+            let mut statement = self.connection.get()?.prepare_cached(&sql)?;
             let mut rows =
                 statement.query(rusqlite::params_from_iter(self.after.iter().flatten()))?;
             let mut batch = Vec::with_capacity(INVENTORY_BATCH_SIZE);
@@ -327,17 +327,12 @@ impl<Entry: InventoryEntry> InventoryScan<Entry> {
             }
             (batch, last_key)
         };
-        if phase == 1 {
-            Entry::validate_snapshots(&batch)?;
-        }
-        if phase == 2 {
-            Entry::verify_raw_heads(self.connection.get()?, &batch)?;
-        }
-        if phase == 3 {
-            Entry::verify_typed_heads(self.connection.get()?, &batch)?;
-        }
-        if phase == 4 {
-            Entry::verify_batch(self.connection.get()?, &batch)?;
+        match phase {
+            1 => Entry::validate_snapshots(&batch)?,
+            2 => Entry::verify_raw_heads(self.connection.get()?, &batch)?,
+            3 => Entry::verify_typed_heads(self.connection.get()?, &batch)?,
+            4 => Entry::verify_batch(self.connection.get()?, &batch)?,
+            _ => {}
         }
         if let Some(key) = last_key {
             self.after = Some(key);
