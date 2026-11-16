@@ -86,25 +86,17 @@ impl CacheInner {
         }
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
-        self.insert(
-            key,
+        self.entries.insert(
+            key.clone(),
             MemoryEntry {
                 payload: Arc::new(payload.to_vec()),
                 inserted_at: now,
                 seq,
             },
         );
-    }
-
-    pub(super) fn insert(&mut self, key: &ReconstructionCacheKey, entry: MemoryEntry) {
-        let inserted_at = entry.inserted_at;
-        let seq = entry.seq;
-        let payload_len = entry.payload.len();
-        self.remove(key);
-        self.entries.insert(key.clone(), entry);
         self.eviction_order
-            .insert(EvictionKey(inserted_at, seq), key.clone());
-        self.total_bytes = self.total_bytes.saturating_add(payload_len);
+            .insert(EvictionKey(now, seq), key.clone());
+        self.total_bytes = self.total_bytes.saturating_add(payload.len());
     }
 
     pub(super) fn remove(&mut self, key: &ReconstructionCacheKey) -> Option<MemoryEntry> {

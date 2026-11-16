@@ -1973,14 +1973,7 @@ fn cache_inner_replacement_and_removal_preserve_accounting() {
     let key = ReconstructionCacheKey::latest("overwrite", None);
     let now = tokio::time::Instant::now();
     for (seq, payload) in [(0, b"first".as_slice()), (1, b"second".as_slice())] {
-        inner.insert(
-            &key,
-            super::inner::MemoryEntry {
-                payload: std::sync::Arc::new(payload.to_vec()),
-                inserted_at: now,
-                seq,
-            },
-        );
+        inner.store(&key, payload, now, 2, 16);
         assert_eq!(inner.entries.len(), 1);
         assert_eq!(inner.total_bytes, payload.len());
         assert_eq!(inner.eviction_order.len(), 1);
