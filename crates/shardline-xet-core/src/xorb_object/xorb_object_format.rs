@@ -994,66 +994,50 @@ mod tests {
     fn v0_default() {
         let info = XorbObjectInfoV0::default();
         assert_eq!(info.version, 0);
+        assert_eq!(info.num_chunks, 0);
         assert!(info.chunk_boundary_offsets.is_empty());
         assert!(info.chunk_hashes.is_empty());
     }
 
     #[test]
-    fn v0_serialize_roundtrip() {
-        let info = make_v0_info(2, b"v0test");
-        let mut buf = Vec::new();
-        #[allow(deprecated)]
-        let written = info.serialize(&mut buf).unwrap();
-        assert!(written > 0);
-        let mut r = Cursor::new(&buf);
-        #[allow(deprecated)]
-        let (info2, _) = XorbObjectInfoV0::deserialize(&mut r).unwrap();
-        assert_eq!(info2.xorb_hash, info.xorb_hash);
-        assert_eq!(info2.num_chunks, 2);
-        assert_eq!(info2.chunk_boundary_offsets, info.chunk_boundary_offsets);
+    fn v0_roundtrips_preserve_metadata_and_byte_counts() {
+        for (chunks, seed) in [
+            (0, b"zero".as_slice()),
+            (2, b"v0test".as_slice()),
+            (3, b"v0dir".as_slice()),
+        ] {
+            let info = make_v0_info(chunks, seed);
+            let mut bytes = Vec::new();
+            #[allow(deprecated)]
+            let written = info.serialize(&mut bytes).unwrap();
+            assert_eq!(written, bytes.len());
+            #[allow(deprecated)]
+            let (decoded, read) = XorbObjectInfoV0::deserialize(&mut Cursor::new(&bytes)).unwrap();
+            assert_eq!(decoded, info);
+            assert_eq!(read as usize, bytes.len());
+            let (decoded, read) =
+                XorbObjectInfoV0::deserialize_v0(&mut Cursor::new(&bytes[8..])).unwrap();
+            assert_eq!(decoded, info);
+            assert_eq!(read as usize, bytes.len() - 8);
+        }
     }
 
     #[allow(deprecated)]
     #[test]
-    fn v0_deserialize_invalid_ident() {
-        let mut buf = vec![0u8; 100];
-        buf[..7].copy_from_slice(b"INVALID");
-        assert!(XorbObjectInfoV0::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn v0_deserialize_invalid_version() {
-        let mut buf = vec![0u8; 100];
-        buf[..7].copy_from_slice(b"XETBLOB");
-        buf[7] = 99;
-        assert!(XorbObjectInfoV0::deserialize(&mut Cursor::new(buf)).is_err());
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn v0_deserialize_v0_direct() {
-        let info = make_v0_info(3, b"v0dir");
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        // Skip ident+version (8 bytes)
-        let mut r = Cursor::new(&buf[8..]);
-        let (info2, _) = XorbObjectInfoV0::deserialize_v0(&mut r).unwrap();
-        assert_eq!(info2.num_chunks, 3);
-        assert_eq!(info2.chunk_hashes.len(), 3);
-    }
-
-    #[test]
-    fn v0_zero_chunks() {
-        let info = make_v0_info(0, b"zero");
-        let mut buf = Vec::new();
-        #[allow(deprecated)]
-        let _written = info.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        #[allow(deprecated)]
-        let (info2, _) = XorbObjectInfoV0::deserialize(&mut r).unwrap();
-        assert_eq!(info2.num_chunks, 0);
-        assert!(info2.chunk_hashes.is_empty());
+    fn v0_rejects_invalid_ident_and_version() {
+        for (ident, version, expected) in [
+            (b"INVALID", 0, "Xorb Invalid Ident"),
+            (b"XETBLOB", 99, "Xorb Invalid Format Version"),
+        ] {
+            let mut bytes = vec![0; 100];
+            bytes[..7].copy_from_slice(ident);
+            bytes[7] = version;
+            let error = XorbObjectInfoV0::deserialize(&mut Cursor::new(bytes)).unwrap_err();
+            let CoreError::MalformedData(message) = error else {
+                panic!("{error}");
+            };
+            assert_eq!(message, expected);
+        }
     }
 
     // ======= XorbObjectInfoV1 =======

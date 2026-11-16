@@ -427,15 +427,6 @@ fn deserialize_chunk_header_errors_on_empty() {
 // ============================================================================
 
 #[test]
-fn xorb_object_info_v0_default() {
-    let info = XorbObjectInfoV0::default();
-    assert_eq!(info.version, 0);
-    assert_eq!(info.num_chunks, 0);
-    assert!(info.chunk_boundary_offsets.is_empty());
-    assert!(info.chunk_hashes.is_empty());
-}
-
-#[test]
 fn xorb_object_info_v0_serialize_roundtrip() {
     let mut info = XorbObjectInfoV0::default();
     info.xorb_hash = compute_data_hash(b"test");
@@ -477,27 +468,6 @@ fn xorb_object_info_v0_deserialize_v0_roundtrip() {
     assert_eq!(deserialized.xorb_hash, info.xorb_hash);
     assert_eq!(deserialized.num_chunks, 2);
     assert_eq!(deserialized.chunk_hashes, info.chunk_hashes);
-}
-
-#[test]
-fn xorb_object_info_v0_deserialize_invalid_ident() {
-    let mut buf = vec![0u8; 100];
-    buf[..7].copy_from_slice(b"INVALID");
-    let mut cursor = Cursor::new(buf);
-    #[allow(deprecated)]
-    let result = XorbObjectInfoV0::deserialize(&mut cursor);
-    assert!(result.is_err());
-}
-
-#[test]
-fn xorb_object_info_v0_deserialize_invalid_version() {
-    let mut buf = vec![0u8; 100];
-    buf[..7].copy_from_slice(b"XETBLOB");
-    buf[7] = 99; // invalid version
-    let mut cursor = Cursor::new(buf);
-    #[allow(deprecated)]
-    let result = XorbObjectInfoV0::deserialize(&mut cursor);
-    assert!(result.is_err());
 }
 
 // ============================================================================
