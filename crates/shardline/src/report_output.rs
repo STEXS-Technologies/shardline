@@ -251,32 +251,23 @@ pub(crate) fn write_backup_manifest_summary(
     writeln!(writer, "manifest_version: {}", report.manifest_version)?;
     writeln!(writer, "metadata_backend: {}", report.metadata_backend)?;
     writeln!(writer, "object_backend: {}", report.object_backend)?;
-    writeln!(writer, "object_count: {}", report.object_count)?;
-    writeln!(writer, "object_bytes: {}", report.object_bytes)?;
-    writeln!(writer, "latest_records: {}", report.latest_records)?;
-    writeln!(writer, "version_records: {}", report.version_records)?;
-    writeln!(
-        writer,
-        "reconstruction_rows: {}",
-        report.reconstruction_rows
-    )?;
-    writeln!(
-        writer,
-        "dedupe_shard_mappings: {}",
-        report.dedupe_shard_mappings
-    )?;
-    writeln!(
-        writer,
-        "quarantine_candidates: {}",
-        report.quarantine_candidates
-    )?;
-    writeln!(writer, "retention_holds: {}", report.retention_holds)?;
-    writeln!(writer, "webhook_deliveries: {}", report.webhook_deliveries)?;
-    writeln!(
-        writer,
-        "provider_repository_states: {}",
-        report.provider_repository_states
-    )?;
+    for (name, value) in [
+        ("object_count", report.object_count),
+        ("object_bytes", report.object_bytes),
+        ("latest_records", report.latest_records),
+        ("version_records", report.version_records),
+        ("reconstruction_rows", report.reconstruction_rows),
+        ("dedupe_shard_mappings", report.dedupe_shard_mappings),
+        ("quarantine_candidates", report.quarantine_candidates),
+        ("retention_holds", report.retention_holds),
+        ("webhook_deliveries", report.webhook_deliveries),
+        (
+            "provider_repository_states",
+            report.provider_repository_states,
+        ),
+    ] {
+        writeln!(writer, "{name}: {value}")?;
+    }
 
     writer.flush()
 }
@@ -847,20 +838,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn backup_manifest_summary_runs() {
-        print_backup_manifest_summary(&empty_backup_report());
-    }
-
-    #[test]
-    fn backup_manifest_cli_summary_runs() {
-        print_backup_manifest_cli_summary(
-            &empty_backup_report(),
-            Path::new("/root"),
-            Path::new("/out.json"),
-        );
-    }
-
     // -----------------------------------------------------------------------
     // print_storage_migration_summary
     // -----------------------------------------------------------------------
@@ -1032,20 +1009,48 @@ mod tests {
     }
 
     #[test]
-    fn fallible_cli_summaries_preserve_report_format() {
+    fn backup_manifest_writer_preserves_fields_and_order() {
+        let report = BackupManifestReport {
+            object_count: 1,
+            object_bytes: 2,
+            latest_records: 3,
+            version_records: 4,
+            reconstruction_rows: 5,
+            dedupe_shard_mappings: 6,
+            quarantine_candidates: 7,
+            retention_holds: 8,
+            webhook_deliveries: 9,
+            provider_repository_states: 10,
+            ..empty_backup_report()
+        };
         let mut writer = Vec::new();
         write_backup_manifest_cli_summary(
             &mut writer,
-            &empty_backup_report(),
+            &report,
             Path::new("/root"),
             Path::new("/manifest.json"),
         )
         .unwrap();
-        let text = String::from_utf8(writer).unwrap();
-        assert!(text.starts_with("root: /root\noutput: /manifest.json\nmanifest_version: 1\n"));
-        assert!(text.contains("object_count: 0\n"));
-        assert!(text.ends_with("provider_repository_states: 0\n"));
+        assert_eq!(
+            writer,
+            concat!(
+                "root: /root\noutput: /manifest.json\nmanifest_version: 1\n",
+                "metadata_backend: local\nobject_backend: fs\n",
+                "object_count: 1\n",
+                "object_bytes: 2\n",
+                "latest_records: 3\n",
+                "version_records: 4\n",
+                "reconstruction_rows: 5\n",
+                "dedupe_shard_mappings: 6\n",
+                "quarantine_candidates: 7\n",
+                "retention_holds: 8\n",
+                "webhook_deliveries: 9\n",
+                "provider_repository_states: 10\n",
+            )
+            .as_bytes()
+        );
     }
+
     #[test]
     fn remaining_summary_writers_propagate_write_and_flush_errors() {
         let config = ConfigCheckReport {
