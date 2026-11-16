@@ -4224,6 +4224,25 @@ and SDK-only strict Clippy also passed; the other six crate suites were not
 repeated for this follow-up. These single shared-host samples do not measure
 the individual changes' memory savings or resolve hosted qualification.
 
+A broader follow-up at `108e5669aeb21d20a8794b918f2c100a5ad438fd`
+held code fixed and repeated all three commands above, adding
+`--run-ignored all` to the E2E command to include the 1 GiB case. The seven
+crate suites passed all 1,055 tests with none skipped, and strict Clippy
+passed. All 35 SDK/server E2E and Xorb interoperability tests passed with
+none skipped in 278.806 s. The same local build settings were used.
+
+| Isolated client workload | Baseline RSS (KiB) | Peak VmHWM (KiB) | Additional RSS (KiB) | Client transfer (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 256 MiB | 24,620 | 68,432 | 43,812 | 1,126 |
+| 1 GiB | 24,464 | 75,208 | 50,744 | 8,227 |
+
+Both workloads checked every streamed byte and the total length, retaining
+the unchanged 65,536 KiB additional-RSS threshold. The parent tests took
+21.467 s and 206.160 s respectively, including fixture ingestion; these
+elapsed times are not download-throughput measurements. These shared-host
+samples do not isolate any individual optimization, explain the historical
+hosted failure, or qualify the production PostgreSQL/object-store topology.
+
 ## Shared protocol chunk reuse qualification
 
 The shared ingestion path now consults the existing scoped native chunk index,
