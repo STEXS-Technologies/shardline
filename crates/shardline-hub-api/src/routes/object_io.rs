@@ -110,13 +110,7 @@ pub(crate) fn read_object_prefix(
         let range =
             ByteRange::new(offset, end).map_err(|_error| ServerObjectStoreError::Overflow)?;
         let chunk = store.read_range(key, range)?;
-        if chunk.is_empty() {
-            return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
-        }
-        let expected_u64 = end
-            .checked_sub(offset)
-            .and_then(|value| value.checked_add(1))
-            .ok_or(ServerObjectStoreError::Overflow)?;
+        let expected_u64 = range.len().ok_or(ServerObjectStoreError::Overflow)?;
         let expected =
             usize::try_from(expected_u64).map_err(|_error| ServerObjectStoreError::Overflow)?;
         if chunk.len() != expected {
@@ -175,12 +169,9 @@ pub(crate) fn stream_object_range(
             let range = ByteRange::new(offset, end).map_err(|_error| {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid object range")
             })?;
-            let expected_u64 = end
-                .checked_sub(offset)
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
-                })?;
+            let expected_u64 = range.len().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
+            })?;
             let expected = usize::try_from(expected_u64).map_err(|_error| {
                 io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
             })?;

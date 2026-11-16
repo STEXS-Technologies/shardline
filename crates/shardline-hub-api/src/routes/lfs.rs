@@ -957,9 +957,7 @@ pub(crate) async fn lfs_download(
         }
         LfsRangeSelection::Partial(range) => {
             let range_length = range
-                .end_inclusive()
-                .checked_sub(range.start())
-                .and_then(|distance| distance.checked_add(1))
+                .len()
                 .ok_or_else(|| HubApiError::CasError("invalid LFS range".to_owned()))?;
             let mut response = stream_object_range(
                 &state.object_store,
