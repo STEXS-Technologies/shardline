@@ -28,7 +28,7 @@ use crate::xorb_object::{
     compression_scheme::lz4_compress_from_slice,
     xorb_chunk_format::{
         XORB_CHUNK_HEADER_LENGTH, XorbChunkHeader, deserialize_chunk, deserialize_chunk_header,
-        deserialize_chunks_to_writer, serialize_chunk, write_chunk_header,
+        serialize_chunk, write_chunk_header,
     },
     xorb_format_test_utils::{ChunkSize, build_raw_xorb, build_xorb_object},
     xorb_object_format::{
@@ -1140,55 +1140,6 @@ proptest! {
 }
 
 // ============================================================================
-// deserialize_chunks_to_writer tests
-// ============================================================================
-
-#[test]
-fn deserialize_chunks_to_writer_empty_input() {
-    let mut reader = std::io::Cursor::new(Vec::new());
-    let mut writer = Vec::new();
-    let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
-    assert_eq!(compressed, 0);
-    assert_eq!(indices, vec![0]);
-}
-
-#[test]
-fn deserialize_chunks_to_writer_single_chunk() {
-    let data = b"single chunk test data";
-    let mut src = std::io::Cursor::new(Vec::new());
-    serialize_chunk(data, &mut src, CompressionScheme::None).unwrap();
-    let serialized = src.into_inner();
-
-    let mut reader = std::io::Cursor::new(&serialized);
-    let mut writer = Vec::new();
-    let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
-    assert!(compressed > 0);
-    assert_eq!(writer, data);
-    assert_eq!(indices, vec![0, data.len() as u32]);
-}
-
-#[test]
-fn deserialize_chunks_to_writer_multiple_chunks() {
-    let chunk1 = b"first chunk data here";
-    let chunk2 = b"second chunk data here";
-    let mut src = std::io::Cursor::new(Vec::new());
-    serialize_chunk(chunk1, &mut src, CompressionScheme::LZ4).unwrap();
-    serialize_chunk(chunk2, &mut src, CompressionScheme::LZ4).unwrap();
-    let serialized = src.into_inner();
-
-    let mut reader = std::io::Cursor::new(&serialized);
-    let mut writer = Vec::new();
-    let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
-    assert!(compressed > 0);
-    let expected = [chunk1.as_slice(), chunk2.as_slice()].concat();
-    assert_eq!(writer, expected);
-    assert_eq!(
-        indices,
-        vec![0, chunk1.len() as u32, (chunk1.len() + chunk2.len()) as u32]
-    );
-}
-
-// ============================================================================
 // deserialize_chunk decompressed length mismatch
 // ============================================================================
 
@@ -1207,16 +1158,6 @@ fn deserialize_chunk_rejects_uncompressed_length_mismatch() {
     buf.extend_from_slice(data);
     let mut reader = std::io::Cursor::new(buf);
     let result = crate::xorb_object::xorb_chunk_format::deserialize_chunk(&mut reader);
-    assert!(result.is_err());
-}
-
-#[test]
-fn deserialize_chunks_to_writer_partial_header_errors() {
-    // Only provide 3 bytes (incomplete header)
-    let partial_data = [1u8, 2, 3];
-    let mut reader = std::io::Cursor::new(partial_data);
-    let mut writer = Vec::new();
-    let result = deserialize_chunks_to_writer(&mut reader, &mut writer);
     assert!(result.is_err());
 }
 
@@ -1644,21 +1585,6 @@ fn xorb_object_serialize_given_info_zero_chunks() {
     let (obj, written) = XorbObject::serialize_given_info(&mut buf, info).unwrap();
     assert!(written > 0);
     assert_eq!(obj.info.num_chunks, 0);
-}
-
-// ============================================================================
-// try_read_chunk_header edge cases
-// ============================================================================
-
-#[test]
-fn try_read_chunk_header_empty_reader_returns_none() {
-    let mut reader = std::io::Cursor::new(Vec::new());
-    // We can't call try_read_chunk_header directly (it's private),
-    // but deserialize_chunks_to_writer should handle this case
-    let mut writer = Vec::new();
-    let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
-    assert_eq!(compressed, 0);
-    assert_eq!(indices, vec![0]);
 }
 
 // ============================================================================
@@ -2193,20 +2119,6 @@ fn deserialize_chunk_rejects_uncompressed_length_mismatch_using_function() {
 }
 
 // ============================================================================
-// try_read_chunk_header — partial read edge case
-// ============================================================================
-
-#[test]
-fn try_read_chunk_header_partial_read_triggers_read_exact_fallback() {
-    // Provide exactly 5 bytes (less than full 8-byte header)
-    let partial = [0u8, 1, 2, 3, 4];
-    let mut reader = Cursor::new(&partial);
-    let mut writer = Vec::new();
-    let result = deserialize_chunks_to_writer(&mut reader, &mut writer);
-    assert!(result.is_err());
-}
-
-// ============================================================================
 // MDBShardInfo load_from_reader — error paths
 // ============================================================================
 
@@ -2608,30 +2520,6 @@ fn reconstruct_xorb_with_footer_malformed_compressed_length_causes_read_error() 
     let mut output = Vec::new();
     let result = reconstruct_xorb_with_footer(&mut output, &chunk);
     assert!(result.is_err());
-}
-
-// ============================================================================
-// try_read_chunk_header — IO error on read (private fn tested via
-// deserialize_chunks_to_writer with a reader that returns errors)
-// ============================================================================
-
-struct ErrorReader;
-
-impl std::io::Read for ErrorReader {
-    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::other("read error"))
-    }
-}
-
-#[test]
-fn deserialize_chunks_to_writer_io_error_propagates() {
-    let mut reader = ErrorReader;
-    let mut writer = Vec::new();
-    let result = deserialize_chunks_to_writer(&mut reader, &mut writer);
-    assert!(result.is_err());
-    // Should be an IO error, not a header parse error
-    let err = result.unwrap_err();
-    assert!(matches!(err, CoreError::Io(_)));
 }
 
 // ============================================================================

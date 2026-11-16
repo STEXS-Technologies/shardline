@@ -525,53 +525,45 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_chunks_to_writer_empty_input() {
-        let mut r = Cursor::new(Vec::new());
-        let mut w = Vec::new();
-        let (comp, indices) = deserialize_chunks_to_writer(&mut r, &mut w).unwrap();
-        assert_eq!(comp, 0);
-        assert_eq!(indices, vec![0]);
-        assert!(w.is_empty());
-    }
-
-    #[test]
-    fn deserialize_chunks_to_writer_single_chunk() {
-        let data = b"single chunk for deserialize_chunks_to_writer";
-        let serialized = make_chunk_data(data, CompressionScheme::None);
-        let mut r = Cursor::new(&serialized);
-        let mut w = Vec::new();
-        let (comp, indices) = deserialize_chunks_to_writer(&mut r, &mut w).unwrap();
-        assert!(comp > 0);
-        assert_eq!(&w, data);
-        assert_eq!(indices, vec![0, data.len() as u32]);
-    }
-
-    #[test]
-    fn deserialize_chunks_to_writer_multiple_chunks_v2() {
-        let data1 = b"first chunk data";
-        let data2 = b"second chunk data that is longer";
-        let mut combined = Vec::new();
-        combined.extend_from_slice(&make_chunk_data(data1, CompressionScheme::LZ4));
-        combined.extend_from_slice(&make_chunk_data(data2, CompressionScheme::LZ4));
-
-        let mut r = Cursor::new(&combined);
-        let mut w = Vec::new();
-        let (comp, indices) = deserialize_chunks_to_writer(&mut r, &mut w).unwrap();
-        assert!(comp > 0);
-        let expected = [data1.as_slice(), data2.as_slice()].concat();
-        assert_eq!(&w, &expected);
-        assert_eq!(
-            indices,
-            vec![0, data1.len() as u32, (data1.len() + data2.len()) as u32]
-        );
+    fn deserialize_chunks_to_writer_roundtrips() {
+        let chunks: [&[u8]; 2] = [b"first chunk data", b"second chunk data that is longer"];
+        for scheme in [
+            CompressionScheme::None,
+            CompressionScheme::LZ4,
+            CompressionScheme::ByteGrouping4LZ4,
+            CompressionScheme::Auto,
+        ] {
+            for count in 0..=chunks.len() {
+                let mut serialized = Vec::new();
+                let mut indices = vec![0];
+                for chunk in &chunks[..count] {
+                    serialize_chunk(chunk, &mut serialized, scheme).unwrap();
+                    indices.push(indices.last().unwrap() + chunk.len() as u32);
+                }
+                let mut reader = Cursor::new(&serialized);
+                let mut output = Vec::new();
+                let (compressed, decoded_indices) =
+                    deserialize_chunks_to_writer(&mut reader, &mut output).unwrap();
+                assert_eq!(compressed, serialized.len(), "{scheme:?}, {count}");
+                assert_eq!(reader.position(), serialized.len() as u64);
+                assert_eq!(output, chunks[..count].concat());
+                assert_eq!(decoded_indices, indices);
+            }
+        }
     }
 
     #[test]
     fn deserialize_chunks_to_writer_partial_header_errors() {
-        let partial = [1u8, 2, 3];
-        let mut r = Cursor::new(partial);
-        let mut w = Vec::new();
-        assert!(deserialize_chunks_to_writer(&mut r, &mut w).is_err());
+        for len in 1..XORB_CHUNK_HEADER_LENGTH {
+            let bytes = [0; XORB_CHUNK_HEADER_LENGTH];
+            let mut reader = Cursor::new(&bytes[..len]);
+            let mut output = Vec::new();
+            assert!(matches!(
+                deserialize_chunks_to_writer(&mut reader, &mut output),
+                Err(CoreError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+            ));
+            assert!(output.is_empty());
+        }
     }
 
     #[test]
@@ -585,7 +577,7 @@ mod tests {
         let mut r = FailReader;
         let mut w = Vec::new();
         let err = deserialize_chunks_to_writer(&mut r, &mut w).unwrap_err();
-        assert!(matches!(err, CoreError::Io(_)));
+        assert!(matches!(err, CoreError::Io(source) if source.to_string() == "read fail"));
     }
 
     #[test]
