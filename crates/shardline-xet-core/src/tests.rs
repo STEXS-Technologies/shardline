@@ -122,21 +122,6 @@ fn deserialize_chunk_header_errors_on_empty() {
 // ============================================================================
 
 #[test]
-fn xorb_object_default() {
-    let obj = XorbObject::default();
-    assert_eq!(obj.info.version, 2);
-    assert!(obj.info_length > 0);
-}
-
-#[test]
-fn xorb_object_from_info() {
-    let info = XorbObjectInfoV1::default();
-    let len = info.serialized_length() as u64;
-    let obj = XorbObject::from_info(info);
-    assert_eq!(obj.info_length, len);
-}
-
-#[test]
 fn xorb_object_serialize_given_info_roundtrip() {
     let mut info = XorbObjectInfoV1::default();
     info.xorb_hash = compute_data_hash(b"obj");
@@ -156,21 +141,6 @@ fn xorb_object_serialize_given_info_roundtrip() {
     let deserialized = XorbObject::deserialize(&mut cursor).unwrap();
     assert_eq!(deserialized.info.xorb_hash, info.xorb_hash);
     assert_eq!(deserialized.info.num_chunks, info.num_chunks);
-}
-
-#[test]
-fn xorb_object_get_info_length() {
-    let mut info = XorbObjectInfoV1::default();
-    info.xorb_hash = compute_data_hash(b"len");
-    info.num_chunks = 0;
-    info.fill_in_boundary_offsets();
-
-    let mut buf = Vec::new();
-    XorbObject::serialize_given_info(&mut buf, info).unwrap();
-
-    let mut cursor = Cursor::new(&buf);
-    let len = XorbObject::get_info_length(&mut cursor).unwrap();
-    assert!(len > 0);
 }
 
 #[test]
@@ -211,12 +181,6 @@ fn xorb_object_get_contents_length() {
 
     let obj = XorbObject::from_info(info);
     assert_eq!(obj.get_contents_length().unwrap(), 42);
-}
-
-#[test]
-fn xorb_object_get_contents_length_no_chunks_errors() {
-    let obj = XorbObject::default();
-    assert!(obj.get_contents_length().is_err());
 }
 
 #[test]
@@ -484,34 +448,6 @@ fn xorb_object_format_constants() {
     assert_eq!(XORB_OBJECT_FORMAT_HASHES_VERSION, 0);
     assert_eq!(XORB_OBJECT_FORMAT_BOUNDARIES_VERSION, 1);
     assert_eq!(XORB_OBJECT_FORMAT_BOUNDARIES_VERSION_NO_UNPACKED_INFO, 0);
-}
-
-// ============================================================================
-// File data sequence constants
-// ============================================================================
-
-#[test]
-fn file_flag_constants() {
-    assert_eq!(
-        crate::metadata_shard::file_structs::MDB_DEFAULT_FILE_FLAG,
-        0
-    );
-    assert_eq!(
-        crate::metadata_shard::file_structs::MDB_FILE_FLAG_WITH_VERIFICATION,
-        1u32 << 31
-    );
-    assert_eq!(
-        crate::metadata_shard::file_structs::MDB_FILE_FLAG_VERIFICATION_MASK,
-        1u32 << 31
-    );
-    assert_eq!(
-        crate::metadata_shard::file_structs::MDB_FILE_FLAG_WITH_METADATA_EXT,
-        1u32 << 30
-    );
-    assert_eq!(
-        crate::metadata_shard::file_structs::MDB_FILE_FLAG_METADATA_EXT_MASK,
-        1u32 << 30
-    );
 }
 
 // ============================================================================
@@ -923,19 +859,6 @@ fn data_hash_deref_mut() {
     let mut h = DataHash::from([0u64; 4]);
     h[0] = 42;
     assert_eq!(h[0], 42);
-}
-
-// ============================================================================
-// XorbObject serialize_given_info with various sizes
-// ============================================================================
-
-#[test]
-fn xorb_object_serialize_given_info_zero_chunks() {
-    let info = XorbObjectInfoV1::default();
-    let mut buf = Vec::new();
-    let (obj, written) = XorbObject::serialize_given_info(&mut buf, info).unwrap();
-    assert!(written > 0);
-    assert_eq!(obj.info.num_chunks, 0);
 }
 
 // ============================================================================

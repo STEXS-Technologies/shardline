@@ -1225,10 +1225,11 @@ mod tests {
 
     #[test]
     fn xorb_object_from_info() {
-        let info = make_v1_info(1, b"frominfo");
-        let len = info.serialized_length() as u64;
-        let obj = XorbObject::from_info(info);
-        assert_eq!(obj.info_length, len);
+        for info in [XorbObjectInfoV1::default(), make_v1_info(1, b"frominfo")] {
+            let len = info.serialized_length() as u64;
+            let obj = XorbObject::from_info(info);
+            assert_eq!(obj.info_length, len);
+        }
     }
 
     #[test]
