@@ -267,10 +267,12 @@ pub fn group_page(
             common_prefixes.push(group_prefix);
             next_cursor = Some(group_last);
         } else {
-            next_cursor = Some(entry.object_key.clone());
+            // Defer copying a content cursor until the last row is known.
+            next_cursor = None;
             contents.push(contents_row(entry));
         }
     }
+    let next_cursor = next_cursor.or_else(|| contents.last().map(|row| row.key.clone()));
     ListPage {
         contents,
         common_prefixes,
