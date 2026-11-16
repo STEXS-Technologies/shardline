@@ -49,12 +49,10 @@ pub(super) fn create(
             Ok(HubCreationOutcome::Created(created)) => {
                 return Ok((
                     StatusCode::CREATED,
-                    Json(serde_json::to_value(
-                        super::repos::repo_response_for_public_base(
-                            &state.public_base_url,
-                            &created,
-                        ),
-                    )?),
+                    Json(super::repos::repo_response_for_public_base(
+                        &state.public_base_url,
+                        &created,
+                    )),
                 )
                     .into_response());
             }
@@ -92,14 +90,20 @@ pub(super) fn create(
         let repository = claims.repository();
         name == format!("{}/{}", repository.owner(), repository.name())
     });
-    let response = if owns_target {
-        serde_json::to_value(super::repos::repo_response_for_public_base(
-            &state.public_base_url,
-            &existing,
-        ))?
-    } else {
-        // A creation-only grant is not permission to inspect an existing repo.
-        serde_json::json!({"name":name,"message":"repository already exists"})
-    };
-    Ok((StatusCode::CONFLICT, Json(response)).into_response())
+    if owns_target {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(super::repos::repo_response_for_public_base(
+                &state.public_base_url,
+                &existing,
+            )),
+        )
+            .into_response());
+    }
+    // A creation-only grant is not permission to inspect an existing repo.
+    Ok((
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({"name":name,"message":"repository already exists"})),
+    )
+        .into_response())
 }
