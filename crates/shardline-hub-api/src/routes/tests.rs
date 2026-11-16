@@ -1511,27 +1511,32 @@ async fn handler_repo_revisions_with_revisions() {
 // ------------------------------------------------------------------
 
 #[tokio::test]
-async fn handler_repo_create_model() {
-    let (_td, state) = make_test_state();
-    let req = RepoCreateRequest {
-        repo_type: RepoType::Model,
-        name: "ns/new-repo".to_owned(),
-        organization: None,
-        private: false,
-        visibility: None,
-    };
-    let (status, json) = decode_creation_response(
-        repo_create(
-            State(state.clone()),
-            test_repo(&state, &default_headers()),
-            Json(req),
+async fn handler_repo_create_model_with_optional_organization() {
+    for (name, organization, expected_id) in [
+        ("ns/new-repo", None, "ns/new-repo"),
+        ("my-repo", Some("org"), "org/my-repo"),
+    ] {
+        let (_td, state) = make_test_state();
+        let request = RepoCreateRequest {
+            repo_type: RepoType::Model,
+            name: name.to_owned(),
+            organization: organization.map(str::to_owned),
+            private: false,
+            visibility: None,
+        };
+        let (status, json) = decode_creation_response(
+            repo_create(
+                State(state.clone()),
+                test_repo(&state, &default_headers()),
+                Json(request),
+            )
+            .await
+            .unwrap(),
         )
-        .await
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json["id"], "ns/new-repo");
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json["id"], expected_id);
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1556,40 +1561,34 @@ async fn handler_repo_create_type_invalid_type() {
 }
 
 #[tokio::test]
-async fn handler_repo_create_type_success() {
-    let (_td, state) = make_test_state();
-    let (status, json) = decode_creation_response(
-        repo_create_type(
-            State(state.clone()),
-            test_repo(&state, &default_headers()),
-            Path(("models".into(), "ns".into(), "my-repo".into())),
-            Json(serde_json::json!({})),
+async fn handler_repo_create_type_preserves_type_and_privacy() {
+    for (api_type, name, options, expected_type, private) in [
+        ("models", "my-repo", serde_json::json!({}), "model", false),
+        (
+            "datasets",
+            "secret-data",
+            serde_json::json!({"private": true}),
+            "dataset",
+            true,
+        ),
+    ] {
+        let (_td, state) = make_test_state();
+        let (status, json) = decode_creation_response(
+            repo_create_type(
+                State(state.clone()),
+                test_repo(&state, &default_headers()),
+                Path((api_type.into(), "ns".into(), name.into())),
+                Json(options),
+            )
+            .await
+            .unwrap(),
         )
-        .await
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json["id"], "ns/my-repo");
-    assert_eq!(json["type"], "model");
-}
-
-#[tokio::test]
-async fn handler_repo_create_type_private() {
-    let (_td, state) = make_test_state();
-    let (_, json) = decode_creation_response(
-        repo_create_type(
-            State(state.clone()),
-            test_repo(&state, &default_headers()),
-            Path(("datasets".into(), "ns".into(), "secret-data".into())),
-            Json(serde_json::json!({"private": true})),
-        )
-        .await
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(json["private"], true);
-    assert_eq!(json["type"], "dataset");
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json["id"], format!("ns/{name}"));
+        assert_eq!(json["type"], expected_type);
+        assert_eq!(json["private"], private);
+    }
 }
 
 // ------------------------------------------------------------------
@@ -4286,32 +4285,8 @@ async fn handler_git_head_nonexistent_repo_returns_zero_sha() {
 }
 
 // ------------------------------------------------------------------
-// repo_create with organization and conflict
+// repo_create conflict
 // ------------------------------------------------------------------
-
-#[tokio::test]
-async fn handler_repo_create_with_organization() {
-    let (_td, state) = make_test_state();
-    let req = RepoCreateRequest {
-        repo_type: RepoType::Model,
-        name: "my-repo".to_owned(),
-        organization: Some("org".to_owned()),
-        private: false,
-        visibility: None,
-    };
-    let (status, json) = decode_creation_response(
-        repo_create(
-            State(state.clone()),
-            test_repo(&state, &default_headers()),
-            Json(req),
-        )
-        .await
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json["id"], "org/my-repo");
-}
 
 #[tokio::test]
 async fn handler_repo_create_conflict() {
