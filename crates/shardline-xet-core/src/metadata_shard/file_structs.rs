@@ -810,6 +810,29 @@ mod tests {
                 assert_eq!(written, bytes.len());
                 assert_eq!(bytes.len() as u64, info.num_bytes());
                 assert_eq!(reader.position(), bytes.len() as u64);
+
+                let view = MDBFileInfoView::new(Bytes::from(bytes)).unwrap();
+                assert_eq!(view.header(), &info.metadata);
+                assert_eq!(view.num_entries() as u64, count);
+                assert_eq!(view.file_hash(), info.metadata.file_hash);
+                assert_eq!(view.file_flags(), info.metadata.file_flags);
+                assert_eq!(view.contains_verification(), verification);
+                assert_eq!(view.contains_metadata_ext(), extension);
+                let base_records = 1 + count as usize + usize::from(extension);
+                assert_eq!(
+                    view.byte_size(false),
+                    base_records * MDB_FILE_INFO_ENTRY_SIZE
+                );
+                let full_records = base_records + usize::from(verification) * count as usize;
+                assert_eq!(written, full_records * MDB_FILE_INFO_ENTRY_SIZE);
+                assert_eq!(view.byte_size(true), written);
+                for (index, entry) in info.segments.iter().enumerate() {
+                    assert_eq!(view.entry(index), *entry);
+                }
+                for (index, entry) in info.verification.iter().enumerate() {
+                    assert_eq!(view.verification(index), *entry);
+                }
+                assert_eq!(MDBFileInfo::from(&view), info);
             }
         }
     }
@@ -874,21 +897,6 @@ mod tests {
     // ======= MDBFileInfoView =======
 
     #[test]
-    fn view_basic() {
-        let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, false, false);
-        let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100, 0, 50);
-        let mut buf = Vec::new();
-        header.serialize(&mut buf).unwrap();
-        entry.serialize(&mut buf).unwrap();
-        let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
-        assert_eq!(view.num_entries(), 1);
-        assert_eq!(view.file_hash(), compute_data_hash(b"f"));
-        assert_eq!(view.file_flags(), header.file_flags);
-        assert!(!view.contains_verification());
-        assert!(!view.contains_metadata_ext());
-    }
-
-    #[test]
     fn view_with_verification_and_metadata_ext() {
         let mut header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, true);
         header.file_flags |= 0x123;
@@ -923,37 +931,6 @@ mod tests {
                 metadata_ext: Some(met),
             }
         );
-    }
-
-    #[test]
-    fn view_byte_size_variants() {
-        for (verification, metadata_ext, records_per_segment, extra_records) in [
-            (false, false, 1, 0),
-            (true, false, 2, 0),
-            (false, true, 1, 1),
-            (true, true, 2, 1),
-        ] {
-            for count in [0, 1, 2] {
-                let header = FileDataSequenceHeader::new(
-                    compute_data_hash(b"f"),
-                    count as u64,
-                    verification,
-                    metadata_ext,
-                );
-                let mut buf = Vec::new();
-                header.serialize(&mut buf).unwrap();
-                let full_size =
-                    (1 + count * records_per_segment + extra_records) * MDB_FILE_INFO_ENTRY_SIZE;
-                buf.resize(full_size, 0);
-                let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
-                assert_eq!(view.byte_size(true), full_size);
-                assert_eq!(
-                    view.byte_size(false),
-                    (1 + count + extra_records) * MDB_FILE_INFO_ENTRY_SIZE
-                );
-                assert_eq!(MDBFileInfo::from(&view).num_bytes(), full_size as u64);
-            }
-        }
     }
 
     #[test]
