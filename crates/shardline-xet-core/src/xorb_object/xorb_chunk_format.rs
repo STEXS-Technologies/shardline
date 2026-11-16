@@ -272,16 +272,18 @@ mod tests {
 
     #[test]
     fn xorb_chunk_header_setters() {
-        let mut h = XorbChunkHeader::new(CompressionScheme::None, 0, 0);
-        h.set_compressed_length(0xFFFFFF);
-        h.set_uncompressed_length(0x1FFFFF);
-        h.set_compression_scheme(CompressionScheme::ByteGrouping4LZ4);
-        assert_eq!(h.get_compressed_length(), 0xFFFFFF);
-        assert_eq!(h.get_uncompressed_length(), 0x1FFFFF);
-        assert_eq!(
-            h.get_compression_scheme().unwrap(),
-            CompressionScheme::ByteGrouping4LZ4
-        );
+        for (scheme, compressed, uncompressed) in [
+            (CompressionScheme::ByteGrouping4LZ4, 0xFFFFFF, 0x1FFFFF),
+            (CompressionScheme::None, 500, 1000),
+        ] {
+            let mut header = XorbChunkHeader::default();
+            header.set_compressed_length(compressed);
+            header.set_uncompressed_length(uncompressed);
+            header.set_compression_scheme(scheme);
+            assert_eq!(header.get_compressed_length(), compressed);
+            assert_eq!(header.get_uncompressed_length(), uncompressed);
+            assert_eq!(header.get_compression_scheme().unwrap(), scheme);
+        }
     }
 
     #[test]
@@ -298,6 +300,7 @@ mod tests {
 
     #[test]
     fn chunk_header_wire_format() {
+        assert_eq!(XORB_CHUNK_HEADER_LENGTH, 8);
         for (header, expected) in [
             (
                 XorbChunkHeader::new(CompressionScheme::LZ4, 100, 200),
@@ -310,6 +313,11 @@ mod tests {
             (
                 XorbChunkHeader::new(CompressionScheme::None, 0x010203, 0x020304),
                 [0, 3, 2, 1, 0, 4, 3, 2],
+            ),
+            (XorbChunkHeader::new(CompressionScheme::None, 0, 0), [0; 8]),
+            (
+                XorbChunkHeader::new(CompressionScheme::None, 0xFFFFFF, 0xFFFFFF),
+                [0, 255, 255, 255, 0, 255, 255, 255],
             ),
         ] {
             let mut bytes = Vec::new();

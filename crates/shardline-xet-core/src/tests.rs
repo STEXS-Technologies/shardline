@@ -28,7 +28,7 @@ use crate::xorb_object::{
     compression_scheme::lz4_compress_from_slice,
     xorb_chunk_format::{
         XORB_CHUNK_HEADER_LENGTH, XorbChunkHeader, deserialize_chunk, deserialize_chunk_header,
-        deserialize_chunks_to_writer, parse_chunk_header, serialize_chunk, write_chunk_header,
+        deserialize_chunks_to_writer, serialize_chunk, write_chunk_header,
     },
     xorb_format_test_utils::{ChunkSize, build_raw_xorb, build_xorb_object},
     xorb_object_format::{
@@ -338,56 +338,6 @@ fn file_hash_with_salt_different_from_default() {
 // ============================================================================
 // XorbChunkHeader tests
 // ============================================================================
-
-#[test]
-fn xorb_chunk_header_new_roundtrip() {
-    let header = XorbChunkHeader::new(CompressionScheme::LZ4, 100, 200);
-    assert_eq!(header.get_compressed_length(), 100);
-    assert_eq!(header.get_uncompressed_length(), 200);
-    assert_eq!(
-        header.get_compression_scheme().unwrap(),
-        CompressionScheme::LZ4
-    );
-}
-
-#[test]
-fn xorb_chunk_header_setters() {
-    let mut header = XorbChunkHeader::default();
-    header.set_compressed_length(500);
-    header.set_uncompressed_length(1000);
-    header.set_compression_scheme(CompressionScheme::None);
-    assert_eq!(header.get_compressed_length(), 500);
-    assert_eq!(header.get_uncompressed_length(), 1000);
-    assert_eq!(
-        header.get_compression_scheme().unwrap(),
-        CompressionScheme::None
-    );
-}
-
-#[test]
-fn xorb_chunk_header_parse_roundtrip() {
-    let header = XorbChunkHeader::new(CompressionScheme::None, 42, 84);
-    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
-    buf[0] = header.version;
-    buf[1..4].copy_from_slice(&header.get_compressed_length().to_le_bytes()[0..3]);
-    buf[4] = header.get_compression_scheme().unwrap() as u8;
-    buf[5..8].copy_from_slice(&header.get_uncompressed_length().to_le_bytes()[0..3]);
-
-    let parsed = parse_chunk_header(buf).unwrap();
-    assert_eq!(parsed.get_compressed_length(), 42);
-    assert_eq!(parsed.get_uncompressed_length(), 84);
-    assert_eq!(
-        parsed.get_compression_scheme().unwrap(),
-        CompressionScheme::None
-    );
-}
-
-#[test]
-fn xorb_chunk_header_parse_rejects_xetblob_ident() {
-    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
-    buf[..7].copy_from_slice(b"XETBLOB");
-    assert!(parse_chunk_header(buf).is_err());
-}
 
 #[test]
 fn serialize_chunk_roundtrip() {
@@ -984,15 +934,6 @@ fn file_flag_constants() {
 }
 
 // ============================================================================
-// XorbChunkFormat constants
-// ============================================================================
-
-#[test]
-fn xorb_chunk_header_length() {
-    assert_eq!(XORB_CHUNK_HEADER_LENGTH, 8);
-}
-
-// ============================================================================
 // Property tests for serialization roundtrips
 // ============================================================================
 
@@ -1196,54 +1137,6 @@ proptest! {
         let deserialized = deserialize_chunk_header(&mut Cursor::new(&buf)).unwrap();
         prop_assert_eq!(header, deserialized);
     }
-}
-
-// ============================================================================
-// XorbChunkHeader validate error paths
-// ============================================================================
-
-#[test]
-fn xorb_chunk_header_validate_version_too_high() {
-    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
-    buf[0] = 1; // version > CURRENT_VERSION (0)
-    // Valid compressed length
-    buf[1..4].copy_from_slice(&100u32.to_le_bytes()[0..3]);
-    buf[4] = CompressionScheme::None as u8;
-    // Valid uncompressed length
-    buf[5..8].copy_from_slice(&100u32.to_le_bytes()[0..3]);
-    let result = parse_chunk_header(buf);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(matches!(err, CoreError::MalformedData(_)));
-    assert!(err.to_string().contains("version too high"));
-}
-
-#[test]
-fn xorb_chunk_header_validate_version_too_high_is_tested_separately() {
-    // The compressed_length/uncompressed_length checks in validate() can only be
-    // triggered when MAX_CHUNK_SIZE is lowered below the 3-byte encoding limit.
-    // Since that requires modifying a global AtomicU64, it creates unavoidable
-    // test-flakiness under parallel execution. The version-check path (version > 0)
-    // is tested in xorb_chunk_header_validate_version_too_high above.
-    // These size checks are trivially correct inequality comparisons.
-    // We verify the validate() function is called by testing max 3-byte values:
-    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
-    buf[1..4].copy_from_slice(&0xFFFFFFu32.to_le_bytes()[0..3]); // max 3-byte compressed len
-    buf[4] = CompressionScheme::None as u8;
-    buf[5..8].copy_from_slice(&0xFFFFFFu32.to_le_bytes()[0..3]); // max 3-byte uncompressed len
-    let result = parse_chunk_header(buf);
-    // Should succeed because 0xFFFFFF < 16MB*2 and 0xFFFFFF < 16MB
-    assert!(result.is_ok());
-}
-
-#[test]
-fn xorb_chunk_header_validate_invalid_compression_scheme() {
-    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
-    buf[4] = 255; // invalid compression scheme
-    buf[1..4].copy_from_slice(&100u32.to_le_bytes()[0..3]);
-    buf[5..8].copy_from_slice(&100u32.to_le_bytes()[0..3]);
-    let result = parse_chunk_header(buf);
-    assert!(result.is_err());
 }
 
 // ============================================================================
@@ -2275,43 +2168,6 @@ fn xorb_object_info_v0_serialize_with_multiple_chunks() {
     assert_eq!(deser.num_chunks, 3);
     assert_eq!(deser.chunk_boundary_offsets.len(), 3);
     assert_eq!(deser.chunk_hashes.len(), 3);
-}
-
-// ============================================================================
-// XorbChunkHeader — remaining validation paths
-// ============================================================================
-
-#[test]
-fn xorb_chunk_header_validate_invalid_compression_scheme_via_header() {
-    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
-    buf[1..4].copy_from_slice(&100u32.to_le_bytes()[0..3]);
-    buf[4] = 255; // invalid scheme
-    buf[5..8].copy_from_slice(&100u32.to_le_bytes()[0..3]);
-    let result = parse_chunk_header(buf);
-    assert!(result.is_err());
-}
-
-#[test]
-fn xorb_chunk_header_validate_compressed_length_zero() {
-    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
-    buf[1..4].copy_from_slice(&0u32.to_le_bytes()[0..3]);
-    buf[4] = CompressionScheme::None as u8;
-    buf[5..8].copy_from_slice(&0u32.to_le_bytes()[0..3]);
-    let result = parse_chunk_header(buf);
-    assert!(result.is_ok());
-    let header = result.unwrap();
-    assert_eq!(header.get_compressed_length(), 0);
-    assert_eq!(header.get_uncompressed_length(), 0);
-}
-
-#[test]
-fn xorb_chunk_header_get_set_compressed_length_roundtrip_edge() {
-    let mut header = XorbChunkHeader::new(CompressionScheme::None, 0, 0);
-    assert_eq!(header.get_compressed_length(), 0);
-    assert_eq!(header.get_uncompressed_length(), 0);
-    // Max 3-byte value
-    header.set_compressed_length(0xFFFFFF);
-    assert_eq!(header.get_compressed_length(), 0xFFFFFF);
 }
 
 // ============================================================================
