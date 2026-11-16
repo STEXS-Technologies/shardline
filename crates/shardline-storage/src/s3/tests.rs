@@ -1158,6 +1158,35 @@ mod minio_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn minio_resumable_completion_sorts_parts_and_preserves_bytes() {
+        let Some(stack) = ensure_minio() else {
+            return;
+        };
+        let prefix = stack.unique_s3_key_prefix("resumable-order");
+        let store = build_s3_store(&stack, Some(&prefix));
+        let key = ObjectKey::parse("objects/resumable.xorb").unwrap();
+        let mut body = vec![b'a'; 5 * 1024 * 1024];
+        let split = body.len();
+        body.extend_from_slice(b"final part");
+        let body = bytes::Bytes::from(body);
+        let upload_id = store.create_resumable_upload(&key).await.unwrap();
+        let first = store
+            .upload_resumable_part(&key, &upload_id, 0, body.slice(..split))
+            .await
+            .unwrap();
+        let last = store
+            .upload_resumable_part(&key, &upload_id, 1, body.slice(split..))
+            .await
+            .unwrap();
+        store
+            .complete_resumable_upload(&key, &upload_id, vec![(1, last), (0, first)])
+            .await
+            .unwrap();
+        let range = ByteRange::new(0, body.len() as u64 - 1).unwrap();
+        assert_eq!(store.read_range(&key, range).unwrap(), body.as_ref());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn minio_put_and_get_roundtrip() {
         let stack = match ensure_minio() {
             Some(s) => s,
@@ -1937,31 +1966,6 @@ async fn resumable_completion_rejects_invalid_parts_before_contacting_storage() 
             std::io::ErrorKind::WouldBlock
         );
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_complete_resumable_reordered_parts_validated() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18976".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-
-    // Parts are out of order but consecutive — sort fixes them,
-    // then validation passes and we proceed to the S3 call which fails.
-    let result = store
-        .complete_resumable_upload(&key, "upload-id", vec![(1, "e1".into()), (0, "e0".into())])
-        .await;
-
-    // The connection to the fake endpoint fails after validation passes.
-    // We expect an External error, not InvalidUploadParts.
-    assert!(
-        !matches!(result, Err(S3ObjectStoreError::InvalidUploadParts)),
-        "consecutive parts should pass validation"
-    );
-    assert!(result.is_err(), "should fail with connection error");
 }
 
 // ── begin_content_addressed_upload early return ─────────────────────
