@@ -544,10 +544,21 @@ impl FileUploadPipeline {
         let hash = chunk.hash();
         let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
 
-        // 1. Session dedup store.
-        let session_hit = {
-            let state = self.session.inner.state.lock().await;
-            state.chunk_locations.get(&hash).copied()
+        // Reserve an eligible global query only on a session miss, under
+        // the same lock as the reuse lookup. Network work stays outside it.
+        let (session_hit, eligible) = {
+            let mut state = self.session.inner.state.lock().await;
+            let session_hit = state.chunk_locations.get(&hash).copied();
+            let eligible = session_hit.is_none()
+                && is_global_dedup_eligible(
+                    state.global_chunk_index,
+                    &hash,
+                    state.last_global_query_index,
+                );
+            if eligible {
+                state.last_global_query_index = Some(state.global_chunk_index);
+            }
+            (session_hit, eligible)
         };
         if let Some(location) = session_hit {
             self.placements.push(Placement::Known {
@@ -560,24 +571,7 @@ impl FileUploadPipeline {
         }
 
         // 2. Eligibility-gated global dedup query.
-        let (global_index, eligible) = {
-            let state = self.session.inner.state.lock().await;
-            (
-                state.global_chunk_index,
-                is_global_dedup_eligible(
-                    state.global_chunk_index,
-                    &hash,
-                    state.last_global_query_index,
-                ),
-            )
-        };
         if eligible {
-            self.session
-                .inner
-                .state
-                .lock()
-                .await
-                .last_global_query_index = Some(global_index);
             let session = self.session.clone();
             let (base, token) = session.inner.cas_credentials().await?;
             let hash_hex = xet_hash_hex_string(hash);
