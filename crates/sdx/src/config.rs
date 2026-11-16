@@ -112,19 +112,14 @@ pub enum SdxConfigError {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct DefaultSection {
     /// Full `xet://` endpoint URL (overrides the other fields).
-    #[serde(default)]
     pub endpoint: Option<String>,
     /// Provider name, used when `endpoint` is absent or lacks a provider.
-    #[serde(default)]
     pub provider: Option<String>,
     /// Repository owner.
-    #[serde(default)]
     pub owner: Option<String>,
     /// Repository name.
-    #[serde(default)]
     pub repo: Option<String>,
     /// Revision / branch.
-    #[serde(default)]
     pub revision: Option<String>,
 }
 
@@ -132,13 +127,10 @@ pub struct DefaultSection {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct AuthSection {
     /// Opaque bearer token (priority 1 within the config).
-    #[serde(default)]
     pub token: Option<String>,
     /// Provider bootstrap API key (priority 2 within the config).
-    #[serde(default)]
     pub api_key: Option<String>,
     /// Path to a token file (priority 3 within the config).
-    #[serde(default)]
     pub token_file: Option<String>,
 }
 
@@ -191,16 +183,16 @@ impl SdxConfig {
                 match env_path {
                     Some(env_path) => (PathBuf::from(env_path), false),
                     None => {
-                        let base = home("HOME").map(PathBuf::from);
-                        match base {
-                            Some(base) => (
-                                base.join(".config")
-                                    .join("shardline")
-                                    .join(CONFIG_FILE_NAME),
-                                false,
-                            ),
-                            None => return Ok(None),
-                        }
+                        let Some(base) = home("HOME") else {
+                            return Ok(None);
+                        };
+                        (
+                            PathBuf::from(base)
+                                .join(".config")
+                                .join("shardline")
+                                .join(CONFIG_FILE_NAME),
+                            false,
+                        )
                     }
                 }
             }
