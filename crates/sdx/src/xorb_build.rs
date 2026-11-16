@@ -322,8 +322,7 @@ mod tests {
         // (LZ4 expansion + 8-byte headers + format-v2 footer) can exceed the
         // 60 MiB safety cap and even the 64 MiB hard body cap — exactly why
         // M3b must cut on the serialized size (plan §4.4.2).
-        let chunks: Vec<Vec<u8>> = (0..1024).map(|i| lcg_data(65536, i)).collect();
-        let pairs = chunk_pairs(&chunks);
+        let pairs = chunk_pairs(&(0..1024).map(|i| lcg_data(65536, i)).collect::<Vec<_>>());
         let built = build_xorb(&pairs).unwrap();
         let overhead = XORB_CHUNK_HEADER_BYTES.saturating_mul(1024).saturating_add(
             XORB_FOOTER_FIXED_BYTES
@@ -342,6 +341,8 @@ mod tests {
             "a 64 MiB uncompressed xorb must not be assumed safe"
         );
 
+        drop(built);
+
         // A build planned with `xorb_max_addable_chunk` (60 MiB cap) stays
         // under the cap even for incompressible data.
         let chunk_size = 65536usize;
@@ -351,8 +352,7 @@ mod tests {
             total = total.saturating_add(chunk_size);
             count = count.saturating_add(1);
         }
-        let planned: Vec<Vec<u8>> = (0..count).map(|i| lcg_data(chunk_size, i as u64)).collect();
-        let built = build_xorb(&chunk_pairs(&planned)).unwrap();
+        let built = build_xorb(pairs.get(..count).unwrap()).unwrap();
         assert!(
             serialized_size_le(
                 u64::try_from(built.serialized.len()).unwrap_or(u64::MAX),
