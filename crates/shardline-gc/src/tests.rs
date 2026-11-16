@@ -117,21 +117,35 @@ fn quarantine_record_paths_preserve_prefix_and_filename() {
     }
 }
 
-// GcError display message tests
+fn gc_error_from_source<E: std::error::Error>(source: E) -> GcError
+where
+    GcError: From<E>,
+{
+    let expected = source.to_string();
+    let error = GcError::from(source);
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        expected
+    );
+    error
+}
 
 #[test]
-fn gc_error_display_messages() {
+fn gc_error_conversions_preserve_categories_and_sources() {
     for (error, expected) in [
         (
-            GcError::Io(std::io::Error::other("test")),
+            gc_error_from_source(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            )),
             "local storage operation failed",
         ),
         (
-            GcError::Json(serde_json::from_str::<serde_json::Value>("invalid").unwrap_err()),
+            gc_error_from_source(serde_json::from_str::<serde_json::Value>("invalid").unwrap_err()),
             "json operation failed",
         ),
         (
-            GcError::NumericConversion(u8::try_from(256u32).unwrap_err()),
+            gc_error_from_source(u8::try_from(256u32).unwrap_err()),
             "numeric conversion exceeded supported bounds",
         ),
         (
@@ -140,63 +154,63 @@ fn gc_error_display_messages() {
         ),
         (GcError::Overflow, "arithmetic overflow"),
         (
-            GcError::ObjectStore(ServerObjectStoreError::NotFound),
+            gc_error_from_source(ServerObjectStoreError::NotFound),
             "object storage adapter operation failed",
         ),
         (
-            GcError::XetAdapter(XetAdapterError::NotFound),
+            gc_error_from_source(XetAdapterError::NotFound),
             "xet adapter operation failed",
         ),
         (
-            GcError::LocalObjectStore(LocalObjectStoreError::Io(std::io::Error::other("test"))),
+            gc_error_from_source(LocalObjectStoreError::Io(std::io::Error::other("test"))),
             "local object storage operation failed",
         ),
         (
-            GcError::S3ObjectStore(S3ObjectStoreError::Io(std::io::Error::other("test"))),
+            gc_error_from_source(S3ObjectStoreError::Io(std::io::Error::other("test"))),
             "s3 object storage operation failed",
         ),
         (
-            GcError::ObjectPrefix(ObjectPrefixError::UnsafePath),
+            gc_error_from_source(ObjectPrefixError::UnsafePath),
             "object storage prefix validation failed",
         ),
         (
-            GcError::IndexStore(shardline_index::LocalIndexStoreError::Io(
+            gc_error_from_source(shardline_index::LocalIndexStoreError::Io(
                 std::io::Error::other("test"),
             )),
             "index adapter operation failed",
         ),
         (
-            GcError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned("test".to_owned())),
+            gc_error_from_source(MemoryIndexStoreError::LockPoisoned("test".to_owned())),
             "memory index adapter operation failed",
         ),
         (
-            GcError::MemoryRecordStore(MemoryRecordStoreError::RecordNotFound),
+            gc_error_from_source(MemoryRecordStoreError::RecordNotFound),
             "memory record adapter operation failed",
         ),
         (
-            GcError::PostgresMetadata(PostgresMetadataStoreError::HashParse(
+            gc_error_from_source(PostgresMetadataStoreError::HashParse(
                 shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
             )),
             "postgres metadata adapter operation failed",
         ),
         (
-            GcError::RetentionHold(RetentionHoldError::EmptyReason),
+            gc_error_from_source(RetentionHoldError::EmptyReason),
             "retention hold input was invalid",
         ),
         (
-            GcError::QuarantineCandidate(QuarantineCandidateError::InvertedTimeline),
+            gc_error_from_source(QuarantineCandidateError::InvertedTimeline),
             "quarantine candidate input was invalid",
         ),
         (
-            GcError::WebhookDelivery(WebhookDeliveryError::EmptyRepositoryOwner),
+            gc_error_from_source(WebhookDeliveryError::EmptyRepositoryOwner),
             "webhook delivery metadata was invalid",
         ),
         (
-            GcError::FileRecordInvariant(FileRecordInvariantError::EmptyChunk),
+            gc_error_from_source(FileRecordInvariantError::EmptyChunk),
             "stored file metadata was invalid",
         ),
         (
-            GcError::InvalidLifecycleMetadata(
+            gc_error_from_source(
                 InvalidLifecycleMetadataError::QuarantineCandidateMissingObject {
                     object_key: "test".to_owned(),
                 },
@@ -286,24 +300,6 @@ fn minimum_gc_retention_seconds_is_enforced() {
     assert_eq!(MINIMUM_GC_RETENTION_SECONDS, 3600);
 }
 
-// Error conversion: From<io::Error> for GcError
-
-#[test]
-fn gc_error_from_io_error() {
-    let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-    let gc_err: GcError = io_err.into();
-    assert!(matches!(gc_err, GcError::Io(_)));
-}
-
-// Error conversion: From<serde_json::Error> for GcError
-
-#[test]
-fn gc_error_from_serde_json_error() {
-    let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
-    let gc_err: GcError = json_err.into();
-    assert!(matches!(gc_err, GcError::Json(_)));
-}
-
 // GcError → ServerObjectStoreError for all mapped variants
 
 #[test]
@@ -365,103 +361,6 @@ fn gc_error_unmapped_variants_preserve_sources_when_wrapped_as_io() {
             assert_eq!(source.to_string(), expected_message);
         }
     }
-}
-
-// ── From impl for remaining source types ────────────────────────────
-
-#[test]
-fn gc_error_from_local_index_store_error() {
-    let inner = shardline_index::LocalIndexStoreError::Io(std::io::Error::other("test"));
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::IndexStore(_)));
-}
-
-#[test]
-fn gc_error_from_memory_index_store_error() {
-    let inner = MemoryIndexStoreError::LockPoisoned("test".to_owned());
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::MemoryIndexStore(_)));
-}
-
-#[test]
-fn gc_error_from_memory_record_store_error() {
-    let inner = MemoryRecordStoreError::RecordNotFound;
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::MemoryRecordStore(_)));
-}
-
-#[test]
-fn gc_error_from_postgres_metadata_store_error() {
-    let inner = PostgresMetadataStoreError::HashParse(
-        shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
-    );
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::PostgresMetadata(_)));
-}
-
-#[test]
-fn gc_error_from_retention_hold_error() {
-    let inner = RetentionHoldError::EmptyReason;
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::RetentionHold(_)));
-}
-
-#[test]
-fn gc_error_from_quarantine_candidate_error() {
-    let inner = QuarantineCandidateError::InvertedTimeline;
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::QuarantineCandidate(_)));
-}
-
-#[test]
-fn gc_error_from_webhook_delivery_error() {
-    let inner = WebhookDeliveryError::EmptyRepositoryOwner;
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::WebhookDelivery(_)));
-}
-
-#[test]
-fn gc_error_from_file_record_invariant_error() {
-    let inner = FileRecordInvariantError::EmptyChunk;
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::FileRecordInvariant(_)));
-}
-
-#[test]
-fn gc_error_from_invalid_lifecycle_metadata_error() {
-    let inner = InvalidLifecycleMetadataError::QuarantineCandidateMissingObject {
-        object_key: "test".to_owned(),
-    };
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::InvalidLifecycleMetadata(_)));
-}
-
-#[test]
-fn gc_error_from_object_prefix_error() {
-    let inner = ObjectPrefixError::UnsafePath;
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::ObjectPrefix(_)));
-}
-
-#[test]
-fn gc_error_from_xet_adapter_error() {
-    let inner = XetAdapterError::NotFound;
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::XetAdapter(_)));
-}
-
-#[test]
-fn gc_error_from_local_object_store_error() {
-    let inner = LocalObjectStoreError::Io(std::io::Error::other("test"));
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::LocalObjectStore(_)));
-}
-
-#[test]
-fn gc_error_from_s3_object_store_error() {
-    let inner = S3ObjectStoreError::Io(std::io::Error::other("test"));
-    let gc_err: GcError = inner.into();
-    assert!(matches!(gc_err, GcError::S3ObjectStore(_)));
 }
 
 // ── retention_report_entry tests ────────────────────────────────────
@@ -1668,18 +1567,6 @@ async fn gc_with_lfs_frontend_does_not_error() {
         "empty frontend should not error: {:?}",
         result
     );
-}
-
-// ── Additional GcError boundary tests ───────────────────────────────
-
-#[test]
-fn gc_error_from_s3_object_store_error_display() {
-    let inner = S3ObjectStoreError::Io(std::io::Error::other("s3 error"));
-    let err = GcError::from(inner);
-    assert_eq!(err.to_string(), "s3 object storage operation failed");
-    let inner2 = S3ObjectStoreError::Io(std::io::Error::other("s3 error"));
-    let err2 = GcError::S3ObjectStore(inner2);
-    assert!(matches!(err2, GcError::S3ObjectStore(_)));
 }
 
 // ── GcReport default ────────────────────────────────────────────────
