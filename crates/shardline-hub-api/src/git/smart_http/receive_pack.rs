@@ -33,6 +33,34 @@ mod commands;
 mod push_options;
 pub(super) use commands::parse as parse_receive_pack_request;
 
+/// Immutable lookups shared by every reference prepared from one push.
+#[derive(Default)]
+struct PushObjects<'object> {
+    all: &'object [GitObject],
+    git: HashMap<[u8; 20], &'object GitObject>,
+    lfs: HashMap<String, &'object GitObject>,
+    inline: HashMap<String, &'object GitObject>,
+}
+
+impl<'object> PushObjects<'object> {
+    fn new(objects: &'object [GitObject]) -> Self {
+        let mut indexed = Self {
+            all: objects,
+            ..Self::default()
+        };
+        for object in objects {
+            indexed.git.insert(object.sha1(), object);
+            if object.object_type == ObjectType::Blob {
+                indexed.lfs.insert(content_sha256(&object.data), object);
+                indexed
+                    .inline
+                    .insert(blake3::hash(&object.data).to_hex().to_string(), object);
+            }
+        }
+        indexed
+    }
+}
+
 // ---- Receive-pack: POST /{type}/{ns}/{repo}/git-receive-pack ----
 
 /// Handles the receive-pack request (push).
@@ -155,6 +183,14 @@ pub async fn receive_pack(
             );
         }
     };
+    let indexed = if updates
+        .iter()
+        .all(|(_, new_sha, _)| new_sha == "0000000000000000000000000000000000000000")
+    {
+        PushObjects::default()
+    } else {
+        PushObjects::new(&objects)
+    };
     let mut results = Vec::new();
     let mut changes = Vec::new();
 
@@ -187,7 +223,7 @@ pub async fn receive_pack(
                     &resolved_old,
                     new_sha,
                     refname,
-                    &objects,
+                    &indexed,
                     &capability,
                 )
             };
@@ -201,7 +237,7 @@ pub async fn receive_pack(
                 &resolved_old,
                 new_sha,
                 refname,
-                &objects,
+                &indexed,
                 &capability,
             )
         };
@@ -261,7 +297,7 @@ fn store_push_objects(
     old_sha: &str,
     new_sha: &str,
     ref_name: &str,
-    objects: &[GitObject],
+    objects: &PushObjects<'_>,
     auth: &AuthorizedRepository,
 ) -> Result<(), SmartHttpError> {
     let change = prepare_push_objects(state, repo_id, old_sha, new_sha, ref_name, objects, auth)?;
@@ -274,16 +310,9 @@ fn prepare_push_objects(
     old_sha: &str,
     new_sha: &str,
     ref_name: &str,
-    objects: &[GitObject],
+    objects: &PushObjects<'_>,
     auth: &AuthorizedRepository,
 ) -> Result<HubRefChange, SmartHttpError> {
-    // Build SHA → object index.
-    let mut sha_to_obj: HashMap<[u8; 20], &GitObject> = HashMap::new();
-    for obj in objects {
-        let sha = obj.sha1();
-        sha_to_obj.insert(sha, obj);
-    }
-
     // Find the commit object for new_sha.
     let new_sha_bytes =
         hex::decode(new_sha).map_err(|e| SmartHttpError::InvalidCommitShaHex(e.to_string()))?;
@@ -291,7 +320,8 @@ fn prepare_push_objects(
         .try_into()
         .map_err(|_err| SmartHttpError::CommitShaMustBe20Bytes)?;
 
-    let commit_obj = sha_to_obj
+    let commit_obj = objects
+        .git
         .get(&new_sha_arr)
         .ok_or_else(|| SmartHttpError::CommitNotFoundInPack(new_sha.to_owned()))?;
 
@@ -317,7 +347,7 @@ fn prepare_push_objects(
         .try_into()
         .map_err(|_err| SmartHttpError::TreeShaMustBe20Bytes)?;
 
-    let files = walk_git_tree(&tree_sha_arr, &sha_to_obj, "")?;
+    let files = walk_git_tree(&tree_sha_arr, &objects.git, "")?;
 
     // Determine parent SHA for revision creation.
     //
@@ -357,16 +387,6 @@ fn prepare_push_objects(
         }
         Some(old_sha)
     };
-
-    // Build an O(1) index of blob content (keyed by its sha256, the LFS OID)
-    // once, before resolving any per-file LFS content. This avoids re-hashing
-    // every pack blob for every LFS file (previously O(files × blobs)). The map
-    // borrows the parsed pack objects and lives only as long as `objects`.
-    let content_by_sha256: HashMap<String, &GitObject> = objects
-        .iter()
-        .filter(|obj| obj.object_type == ObjectType::Blob)
-        .map(|obj| (content_sha256(&obj.data), obj))
-        .collect();
 
     // A pointer is metadata, never payload. Validate all referenced LFS
     // payloads before persisting this tree or any inline content.
@@ -427,7 +447,7 @@ fn prepare_push_objects(
                 ));
             }
         } else {
-            let blob = find_lfs_blob(file, &sha_to_obj, &content_by_sha256)
+            let blob = find_lfs_blob(file, &objects.lfs)
                 .ok_or_else(|| SmartHttpError::LfsContentNotFoundInPack(file.sha.clone()))?;
             let integrity = ObjectIntegrity::new(
                 ShardlineHash::from_bytes(*blake3::hash(&blob.data).as_bytes()),
@@ -442,13 +462,9 @@ fn prepare_push_objects(
 
     // Keep inline bytes available to both Hub resolve and later NDJSON edits.
     // Exact Git packs retain modes/authorship; this shared CAS retains content.
-    let inline_by_hash: HashMap<_, _> = objects
-        .iter()
-        .filter(|obj| obj.object_type == ObjectType::Blob)
-        .map(|obj| (blake3::hash(&obj.data).to_hex().to_string(), obj))
-        .collect();
     for file in files.iter().filter(|file| !file.is_lfs) {
-        let blob = inline_by_hash
+        let blob = objects
+            .inline
             .get(&file.sha)
             .ok_or_else(|| SmartHttpError::BlobObjectNotFound(file.sha.clone()))?;
         let key = lfs_object_key(&file.sha, auth)
@@ -475,7 +491,7 @@ fn prepare_push_objects(
         .store_files(new_sha, &files)
         .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
-    super::projection::archive_objects(state, repo_id, new_sha, objects, auth)
+    super::projection::archive_objects(state, repo_id, new_sha, objects.all, auth)
         .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
     Ok(HubRefChange {
@@ -541,7 +557,6 @@ fn publish_push_ref(
 /// Finds actual payload by SHA256 and size; pointer bytes are never content.
 pub(super) fn find_lfs_blob<'obj>(
     file: &HubFileEntry,
-    _sha_to_obj: &HashMap<[u8; 20], &'obj GitObject>,
     content_by_sha256: &HashMap<String, &'obj GitObject>,
 ) -> Option<&'obj GitObject> {
     content_by_sha256
@@ -805,7 +820,7 @@ mod publication_tests {
             EMPTY_HUB_REVISION,
             &new_sha,
             "selected",
-            &[blob, tree, commit],
+            &PushObjects::new(&[blob, tree, commit]),
             &AuthorizedRepository::anonymous_full_access(),
         );
         assert!(matches!(result, Err(SmartHttpError::NonFastForward(_))));

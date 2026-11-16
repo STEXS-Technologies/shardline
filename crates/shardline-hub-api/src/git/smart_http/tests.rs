@@ -93,14 +93,9 @@ fn find_lfs_blob_non_canonical_pointer_finds_content() {
         b"version https://git-lfs.github.com/spec/v1\r\noid sha256:<oid>\r\nsize <n>\r\n",
     );
     let objects = vec![content_obj, noncanonical_pointer];
-    let mut sha_to_obj: std::collections::HashMap<[u8; 20], &GitObject> =
-        std::collections::HashMap::new();
-    for obj in &objects {
-        sha_to_obj.insert(obj.sha1(), obj);
-    }
     let content_by_sha256 = build_content_index(&objects);
 
-    let found = find_lfs_blob(&file, &sha_to_obj, &content_by_sha256);
+    let found = find_lfs_blob(&file, &content_by_sha256);
     assert!(
         found.is_some(),
         "non-canonical pointer must still find the content blob"
@@ -113,7 +108,7 @@ fn find_lfs_blob_non_canonical_pointer_finds_content() {
 }
 
 #[test]
-fn find_lfs_blob_canonical_pointer_matches_by_sha1() {
+fn find_lfs_blob_canonical_pointer_resolves_payload() {
     use sha2::Digest;
     let content = b"canonical content";
     let oid = hex::encode(sha2::Sha256::digest(content));
@@ -127,13 +122,8 @@ fn find_lfs_blob_canonical_pointer_matches_by_sha1() {
     let pointer = build_lfs_pointer_blob(&file.sha, file.size);
     let content_obj = crate::git::pack::create_blob_object(content);
     let objects = vec![pointer, content_obj];
-    let mut sha_to_obj: std::collections::HashMap<[u8; 20], &GitObject> =
-        std::collections::HashMap::new();
-    for obj in &objects {
-        sha_to_obj.insert(obj.sha1(), obj);
-    }
     let content_by_sha256 = build_content_index(&objects);
-    let found = find_lfs_blob(&file, &sha_to_obj, &content_by_sha256);
+    let found = find_lfs_blob(&file, &content_by_sha256);
     // LFS resolution must return the content, never the pointer bytes.
     assert_eq!(found.unwrap().data, content);
 }
@@ -153,14 +143,9 @@ fn find_lfs_blob_none_when_no_matching_object() {
     // content object with the matching sha256 is present.
     let unrelated = crate::git::pack::create_blob_object(b"unrelated");
     let objects = vec![unrelated];
-    let mut sha_to_obj: std::collections::HashMap<[u8; 20], &GitObject> =
-        std::collections::HashMap::new();
-    for obj in &objects {
-        sha_to_obj.insert(obj.sha1(), obj);
-    }
     let content_by_sha256 = build_content_index(&objects);
     assert!(
-        find_lfs_blob(&file, &sha_to_obj, &content_by_sha256).is_none(),
+        find_lfs_blob(&file, &content_by_sha256).is_none(),
         "no matching object should yield None (the push is then failed)"
     );
 }
