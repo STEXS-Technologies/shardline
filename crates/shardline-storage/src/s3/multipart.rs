@@ -186,17 +186,15 @@ impl S3ObjectStore {
         &self,
         key: &ObjectKey,
         upload_id: &str,
-        parts: Vec<(usize, String)>,
+        mut parts: Vec<(usize, String)>,
     ) -> Result<(), S3ObjectStoreError> {
-        let count = parts.len();
-        if count == 0 {
+        if parts.is_empty() {
             return Err(S3ObjectStoreError::InvalidUploadParts);
         }
 
-        // Validate consecutive 0..count numbering.
-        let mut indexed: Vec<(usize, String)> = parts;
-        indexed.sort_by_key(|(part_number, _etag)| *part_number);
-        for (expected, (part_number, _etag)) in indexed.iter().enumerate() {
+        // Equal part numbers are invalid, so stable ordering is unnecessary.
+        parts.sort_unstable_by_key(|(part_number, _etag)| *part_number);
+        for (expected, (part_number, _etag)) in parts.iter().enumerate() {
             if *part_number != expected {
                 return Err(S3ObjectStoreError::InvalidUploadParts);
             }
@@ -204,16 +202,15 @@ impl S3ObjectStore {
 
         let location = self.location_for_key(key)?;
         let multipart_id = upload_id.to_owned();
-        let part_ids = indexed
+        let part_ids = parts
             .into_iter()
             .map(|(_part_number, content_id)| PartId { content_id })
             .collect();
-        let _result = self
-            .inner
+        self.inner
             .complete_multipart(&location, &multipart_id, part_ids)
             .await
-            .map_err(S3ObjectStoreError::External)?;
-        Ok(())
+            .map(|_result| ())
+            .map_err(S3ObjectStoreError::External)
     }
 
     /// Aborts a resumable multipart upload and discards any uploaded parts.
