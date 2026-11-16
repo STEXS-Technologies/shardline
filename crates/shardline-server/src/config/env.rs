@@ -17,18 +17,24 @@ use super::{
     DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
     DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_REVISIONS_PER_REPO,
     DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
-    DEFAULT_MAX_SHARD_XORBS, DEFAULT_MAX_TREE_ENTRIES_PER_REPO, DEFAULT_S3_MAX_PART_BYTES,
-    DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
-    DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
-    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode,
-    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ADMIN_READ_TOKEN_BYTES, MAX_ED25519_KEY_BYTES,
-    MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig,
-    ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    DEFAULT_MAX_SHARD_XORBS, DEFAULT_MAX_TREE_ENTRIES_PER_REPO,
+    DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
+    DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
+    DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES, DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS,
+    DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES,
+    MAX_ADMIN_READ_TOKEN_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
+    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
     default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
     jwt_keys::is_secure_url as is_secure_jwks_url,
-    reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
+    reconstruction_cache::{
+        DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES, DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
+        ReconstructionCacheAdapter,
+    },
+    server_frontend::ServerFrontend,
     server_role::ServerRole,
 };
 
@@ -59,13 +65,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         ObjectStorageAdapter::Local => None,
         ObjectStorageAdapter::S3 => Some(load_s3_object_store_config_from_env()?),
     };
-    let raw_max_request_body_bytes = var("SHARDLINE_MAX_REQUEST_BODY_BYTES")
-        .unwrap_or_else(|_error| DEFAULT_MAX_REQUEST_BODY_BYTES.get().to_string())
-        .parse::<usize>()
-        .map_err(ServerConfigError::MaxRequestBodyBytes)?;
-    let Some(max_request_body_bytes) = NonZeroUsize::new(raw_max_request_body_bytes) else {
-        return Err(ServerConfigError::ZeroMaxRequestBodyBytes);
-    };
+    let max_request_body_bytes = load_non_zero_usize_env(
+        "SHARDLINE_MAX_REQUEST_BODY_BYTES",
+        DEFAULT_MAX_REQUEST_BODY_BYTES,
+        ServerConfigError::MaxRequestBodyBytes,
+        || ServerConfigError::ZeroMaxRequestBodyBytes,
+    )?;
     let max_xorb_body_bytes = max_xorb_body_bytes_from_env(max_request_body_bytes)?;
     let shard_metadata_limits = ShardMetadataLimits::new(
         load_non_zero_usize_env(
@@ -133,50 +138,36 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let reconstruction_cache_adapter = ReconstructionCacheAdapter::parse(
         &var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER").unwrap_or_else(|_error| "memory".to_owned()),
     )?;
-    let raw_reconstruction_cache_ttl_seconds = var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS")
-        .unwrap_or_else(|_error| "30".to_owned())
-        .parse::<u64>()
-        .map_err(ServerConfigError::ReconstructionCacheTtl)?;
-    let Some(reconstruction_cache_ttl_seconds) =
-        NonZeroU64::new(raw_reconstruction_cache_ttl_seconds)
-    else {
-        return Err(ServerConfigError::ZeroReconstructionCacheTtlSeconds);
-    };
-    let raw_reconstruction_cache_memory_max_entries =
-        var("SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES")
-            .unwrap_or_else(|_error| "4096".to_owned())
-            .parse::<usize>()
-            .map_err(ServerConfigError::ReconstructionCacheMemoryMaxEntries)?;
-    let Some(reconstruction_cache_memory_max_entries) =
-        NonZeroUsize::new(raw_reconstruction_cache_memory_max_entries)
-    else {
-        return Err(ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries);
-    };
-    let raw_oci_upload_session_ttl_seconds = var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS")
-        .unwrap_or_else(|_error| "3600".to_owned())
-        .parse::<u64>()
-        .map_err(ServerConfigError::OciUploadSessionTtl)?;
-    let Some(oci_upload_session_ttl_seconds) = NonZeroU64::new(raw_oci_upload_session_ttl_seconds)
-    else {
-        return Err(ServerConfigError::ZeroOciUploadSessionTtlSeconds);
-    };
-    let raw_oci_upload_max_active_sessions = var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS")
-        .unwrap_or_else(|_error| "1024".to_owned())
-        .parse::<usize>()
-        .map_err(ServerConfigError::OciUploadMaxActiveSessions)?;
-    let Some(oci_upload_max_active_sessions) =
-        NonZeroUsize::new(raw_oci_upload_max_active_sessions)
-    else {
-        return Err(ServerConfigError::ZeroOciUploadMaxActiveSessions);
-    };
-    let raw_oci_registry_token_ttl_seconds = var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS")
-        .unwrap_or_else(|_error| "300".to_owned())
-        .parse::<u64>()
-        .map_err(ServerConfigError::OciRegistryTokenTtl)?;
-    let Some(oci_registry_token_ttl_seconds) = NonZeroU64::new(raw_oci_registry_token_ttl_seconds)
-    else {
-        return Err(ServerConfigError::ZeroOciRegistryTokenTtlSeconds);
-    };
+    let reconstruction_cache_ttl_seconds = load_non_zero_u64_env(
+        "SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS",
+        DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
+        ServerConfigError::ReconstructionCacheTtl,
+        || ServerConfigError::ZeroReconstructionCacheTtlSeconds,
+    )?;
+    let reconstruction_cache_memory_max_entries = load_non_zero_usize_env(
+        "SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES",
+        DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES,
+        ServerConfigError::ReconstructionCacheMemoryMaxEntries,
+        || ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries,
+    )?;
+    let oci_upload_session_ttl_seconds = load_non_zero_u64_env(
+        "SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS",
+        DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
+        ServerConfigError::OciUploadSessionTtl,
+        || ServerConfigError::ZeroOciUploadSessionTtlSeconds,
+    )?;
+    let oci_upload_max_active_sessions = load_non_zero_usize_env(
+        "SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS",
+        DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
+        ServerConfigError::OciUploadMaxActiveSessions,
+        || ServerConfigError::ZeroOciUploadMaxActiveSessions,
+    )?;
+    let oci_registry_token_ttl_seconds = load_non_zero_u64_env(
+        "SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS",
+        DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
+        ServerConfigError::OciRegistryTokenTtl,
+        || ServerConfigError::ZeroOciRegistryTokenTtlSeconds,
+    )?;
     let raw_oci_registry_token_max_in_flight_requests =
         var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS")
             .unwrap_or_else(|_error| "64".to_owned())
@@ -189,89 +180,72 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     else {
         return Err(ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests);
     };
-    let raw_s3_max_part_bytes = var("SHARDLINE_S3_MAX_PART_BYTES")
-        .unwrap_or_else(|_error| DEFAULT_S3_MAX_PART_BYTES.get().to_string())
-        .parse::<u64>()
-        .map_err(ServerConfigError::S3MaxPartBytes)?;
-    let Some(s3_max_part_bytes) = NonZeroU64::new(raw_s3_max_part_bytes) else {
-        return Err(ServerConfigError::ZeroS3MaxPartBytes);
-    };
-    let raw_s3_upload_session_ttl_seconds = var("SHARDLINE_S3_UPLOAD_SESSION_TTL_SECONDS")
-        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS.get().to_string())
-        .parse::<u64>()
-        .map_err(ServerConfigError::S3UploadSessionTtl)?;
-    let Some(s3_upload_session_ttl_seconds) = NonZeroU64::new(raw_s3_upload_session_ttl_seconds)
-    else {
-        return Err(ServerConfigError::ZeroS3UploadSessionTtlSeconds);
-    };
-    let raw_s3_upload_max_active_sessions = var("SHARDLINE_S3_UPLOAD_MAX_ACTIVE_SESSIONS")
-        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS.get().to_string())
-        .parse::<usize>()
-        .map_err(ServerConfigError::S3UploadMaxActiveSessions)?;
-    let Some(s3_upload_max_active_sessions) = NonZeroUsize::new(raw_s3_upload_max_active_sessions)
-    else {
-        return Err(ServerConfigError::ZeroS3UploadMaxActiveSessions);
-    };
-    let raw_s3_min_part_bytes = var("SHARDLINE_S3_MIN_PART_BYTES")
-        .unwrap_or_else(|_error| DEFAULT_S3_MIN_PART_BYTES.get().to_string())
-        .parse::<u64>()
-        .map_err(ServerConfigError::S3MinPartBytes)?;
-    let Some(s3_min_part_bytes) = NonZeroU64::new(raw_s3_min_part_bytes) else {
-        return Err(ServerConfigError::ZeroS3MinPartBytes);
-    };
-    let raw_s3_upload_session_max_bytes = var("SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES")
-        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES.get().to_string())
-        .parse::<u64>()
-        .map_err(ServerConfigError::S3UploadSessionMaxBytes)?;
-    let Some(s3_upload_session_max_bytes) = NonZeroU64::new(raw_s3_upload_session_max_bytes) else {
-        return Err(ServerConfigError::ZeroS3UploadSessionMaxBytes);
-    };
-    let raw_s3_upload_total_max_bytes = var("SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES")
-        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES.get().to_string())
-        .parse::<u64>()
-        .map_err(ServerConfigError::S3UploadTotalMaxBytes)?;
-    let Some(s3_upload_total_max_bytes) = NonZeroU64::new(raw_s3_upload_total_max_bytes) else {
-        return Err(ServerConfigError::ZeroS3UploadTotalMaxBytes);
-    };
-    let raw_s3_upload_max_active_part_files = var("SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES")
-        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES.get().to_string())
-        .parse::<usize>()
-        .map_err(ServerConfigError::S3UploadMaxActivePartFiles)?;
-    let Some(s3_upload_max_active_part_files) =
-        NonZeroUsize::new(raw_s3_upload_max_active_part_files)
-    else {
-        return Err(ServerConfigError::ZeroS3UploadMaxActivePartFiles);
-    };
-    let raw_lfs_patch_ttl_seconds = var("SHARDLINE_LFS_PATCH_TTL_SECONDS")
-        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_TTL_SECONDS.get().to_string())
-        .parse::<u64>()
-        .map_err(ServerConfigError::LfsPatchTtl)?;
-    let Some(lfs_patch_ttl_seconds) = NonZeroU64::new(raw_lfs_patch_ttl_seconds) else {
-        return Err(ServerConfigError::ZeroLfsPatchTtlSeconds);
-    };
-    let raw_lfs_patch_max_active_sessions = var("SHARDLINE_LFS_PATCH_MAX_ACTIVE_SESSIONS")
-        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS.get().to_string())
-        .parse::<usize>()
-        .map_err(ServerConfigError::LfsPatchMaxActiveSessions)?;
-    let Some(lfs_patch_max_active_sessions) = NonZeroUsize::new(raw_lfs_patch_max_active_sessions)
-    else {
-        return Err(ServerConfigError::ZeroLfsPatchMaxActiveSessions);
-    };
-    let raw_lfs_patch_total_max_bytes = var("SHARDLINE_LFS_PATCH_TOTAL_MAX_BYTES")
-        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES.get().to_string())
-        .parse::<u64>()
-        .map_err(ServerConfigError::LfsPatchTotalMaxBytes)?;
-    let Some(lfs_patch_total_max_bytes) = NonZeroU64::new(raw_lfs_patch_total_max_bytes) else {
-        return Err(ServerConfigError::ZeroLfsPatchTotalMaxBytes);
-    };
-    let raw_lfs_patch_max_seek_ahead_bytes = var("SHARDLINE_LFS_PATCH_MAX_SEEK_AHEAD_BYTES")
-        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES.get().to_string())
-        .parse::<u64>()
-        .map_err(ServerConfigError::LfsPatchMaxSeekAheadBytes)?;
-    let Some(lfs_patch_max_seek_ahead_bytes) = NonZeroU64::new(raw_lfs_patch_max_seek_ahead_bytes)
-    else {
-        return Err(ServerConfigError::ZeroLfsPatchMaxSeekAheadBytes);
-    };
+    let s3_max_part_bytes = load_non_zero_u64_env(
+        "SHARDLINE_S3_MAX_PART_BYTES",
+        DEFAULT_S3_MAX_PART_BYTES,
+        ServerConfigError::S3MaxPartBytes,
+        || ServerConfigError::ZeroS3MaxPartBytes,
+    )?;
+    let s3_upload_session_ttl_seconds = load_non_zero_u64_env(
+        "SHARDLINE_S3_UPLOAD_SESSION_TTL_SECONDS",
+        DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS,
+        ServerConfigError::S3UploadSessionTtl,
+        || ServerConfigError::ZeroS3UploadSessionTtlSeconds,
+    )?;
+    let s3_upload_max_active_sessions = load_non_zero_usize_env(
+        "SHARDLINE_S3_UPLOAD_MAX_ACTIVE_SESSIONS",
+        DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
+        ServerConfigError::S3UploadMaxActiveSessions,
+        || ServerConfigError::ZeroS3UploadMaxActiveSessions,
+    )?;
+    let s3_min_part_bytes = load_non_zero_u64_env(
+        "SHARDLINE_S3_MIN_PART_BYTES",
+        DEFAULT_S3_MIN_PART_BYTES,
+        ServerConfigError::S3MinPartBytes,
+        || ServerConfigError::ZeroS3MinPartBytes,
+    )?;
+    let s3_upload_session_max_bytes = load_non_zero_u64_env(
+        "SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES",
+        DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
+        ServerConfigError::S3UploadSessionMaxBytes,
+        || ServerConfigError::ZeroS3UploadSessionMaxBytes,
+    )?;
+    let s3_upload_total_max_bytes = load_non_zero_u64_env(
+        "SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES",
+        DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES,
+        ServerConfigError::S3UploadTotalMaxBytes,
+        || ServerConfigError::ZeroS3UploadTotalMaxBytes,
+    )?;
+    let s3_upload_max_active_part_files = load_non_zero_usize_env(
+        "SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES",
+        DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
+        ServerConfigError::S3UploadMaxActivePartFiles,
+        || ServerConfigError::ZeroS3UploadMaxActivePartFiles,
+    )?;
+    let lfs_patch_ttl_seconds = load_non_zero_u64_env(
+        "SHARDLINE_LFS_PATCH_TTL_SECONDS",
+        DEFAULT_LFS_PATCH_TTL_SECONDS,
+        ServerConfigError::LfsPatchTtl,
+        || ServerConfigError::ZeroLfsPatchTtlSeconds,
+    )?;
+    let lfs_patch_max_active_sessions = load_non_zero_usize_env(
+        "SHARDLINE_LFS_PATCH_MAX_ACTIVE_SESSIONS",
+        DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
+        ServerConfigError::LfsPatchMaxActiveSessions,
+        || ServerConfigError::ZeroLfsPatchMaxActiveSessions,
+    )?;
+    let lfs_patch_total_max_bytes = load_non_zero_u64_env(
+        "SHARDLINE_LFS_PATCH_TOTAL_MAX_BYTES",
+        DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
+        ServerConfigError::LfsPatchTotalMaxBytes,
+        || ServerConfigError::ZeroLfsPatchTotalMaxBytes,
+    )?;
+    let lfs_patch_max_seek_ahead_bytes = load_non_zero_u64_env(
+        "SHARDLINE_LFS_PATCH_MAX_SEEK_AHEAD_BYTES",
+        DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES,
+        ServerConfigError::LfsPatchMaxSeekAheadBytes,
+        || ServerConfigError::ZeroLfsPatchMaxSeekAheadBytes,
+    )?;
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
@@ -817,6 +791,19 @@ fn load_non_zero_usize_env(
         .parse::<usize>()
         .map_err(parse_error)?;
     NonZeroUsize::new(raw).ok_or_else(zero_error)
+}
+
+fn load_non_zero_u64_env(
+    name: &str,
+    default: NonZeroU64,
+    parse_error: fn(ParseIntError) -> ServerConfigError,
+    zero_error: impl FnOnce() -> ServerConfigError,
+) -> Result<NonZeroU64, ServerConfigError> {
+    let raw = var(name)
+        .unwrap_or_else(|_error| default.get().to_string())
+        .parse::<u64>()
+        .map_err(parse_error)?;
+    NonZeroU64::new(raw).ok_or_else(zero_error)
 }
 
 /// Loads server configuration from environment variables, applying optional
