@@ -28,7 +28,11 @@ impl Seek for ShortReader {
 
 #[test]
 fn footerless_inspection_tracks_short_reads_without_position_queries() {
-    for compression in [CompressionScheme::None, CompressionScheme::LZ4] {
+    for compression in [
+        CompressionScheme::None,
+        CompressionScheme::LZ4,
+        CompressionScheme::ByteGrouping4LZ4,
+    ] {
         let encoded = SerializedXorbObject::from_xorb_with_compression(
             build_raw_xorb(32, ChunkSize::Fixed(65536)),
             compression,
@@ -45,6 +49,17 @@ fn footerless_inspection_tracks_short_reads_without_position_queries() {
         assert_eq!(info.xorb_hash, encoded.hash);
         assert_eq!(info.num_chunks, 32);
         assert_eq!(info.chunk_boundary_offsets.last(), Some(&length));
+        assert_eq!(
+            info.unpacked_chunk_offsets,
+            (1..=32).map(|n| n * 65536).collect::<Vec<u64>>()
+        );
+        let mut wire = Cursor::new(reader.input.get_ref());
+        for boundary in &info.chunk_boundary_offsets {
+            let header = deserialize_chunk_header(&mut wire).unwrap();
+            let end = wire.position() + u64::from(header.get_compressed_length());
+            assert_eq!(*boundary, end);
+            wire.set_position(end);
+        }
         assert_eq!(reader.seeks, 1);
         assert_eq!(reader.positions, 0);
         // A claimed complete frame must never conceal a truncated payload.

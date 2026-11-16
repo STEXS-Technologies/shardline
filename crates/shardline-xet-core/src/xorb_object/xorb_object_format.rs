@@ -884,14 +884,14 @@ fn inspect_footerless_chunks(
         position = packed_end;
 
         let declared_uncompressed_len = u64::from(chunk_header.get_uncompressed_length());
-        if total_decompressed_bytes
+        let next_decompressed_bytes = total_decompressed_bytes
             .checked_add(declared_uncompressed_len)
-            .is_none_or(|total| total > MAX_DECOMPRESSED_OUTPUT_BYTES)
-        {
-            return Err(CoreError::MalformedData(
-                "decompressed output exceeds normalization limit".to_owned(),
-            ));
-        }
+            .filter(|total| *total <= MAX_DECOMPRESSED_OUTPUT_BYTES)
+            .ok_or_else(|| {
+                CoreError::MalformedData(
+                    "decompressed output exceeds normalization limit".to_owned(),
+                )
+            })?;
         let uncompressed_data = {
             // Bound per-chunk decompression to the header's declared
             // uncompressed length DURING decompression (not after), so a crafted
@@ -918,29 +918,14 @@ fn inspect_footerless_chunks(
             dest
         };
 
-        let uncompressed_len = uncompressed_data.len() as u64;
-        total_decompressed_bytes = total_decompressed_bytes
-            .checked_add(uncompressed_len)
-            .ok_or_else(|| {
-                CoreError::MalformedData("decompressed output size overflow".to_string())
-            })?;
-        if total_decompressed_bytes > MAX_DECOMPRESSED_OUTPUT_BYTES {
-            return Err(CoreError::MalformedData(format!(
-                "decompressed output exceeds maximum of {MAX_DECOMPRESSED_OUTPUT_BYTES} bytes"
-            )));
-        }
-
+        // Bounded decompression and the exact-length check above establish
+        // that the checked declared total is also the actual decoded total.
+        total_decompressed_bytes = next_decompressed_bytes;
         let chunk_hash = compute_data_hash(&uncompressed_data);
-        chunk_hash_and_size.push((chunk_hash, uncompressed_data.len() as u64));
-
+        chunk_hash_and_size.push((chunk_hash, declared_uncompressed_len));
         info.chunk_hashes.push(chunk_hash);
-        info.chunk_boundary_offsets.push(
-            info.chunk_boundary_offsets.last().unwrap_or(&0)
-                + (size_of::<XorbChunkHeader>() + compressed_len) as u64,
-        );
-        info.unpacked_chunk_offsets.push(
-            info.unpacked_chunk_offsets.last().unwrap_or(&0) + uncompressed_data.len() as u64,
-        );
+        info.chunk_boundary_offsets.push(position);
+        info.unpacked_chunk_offsets.push(total_decompressed_bytes);
 
         visit(&chunk_header, &compressed_buf)?;
     }
