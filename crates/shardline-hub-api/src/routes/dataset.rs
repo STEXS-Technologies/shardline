@@ -638,20 +638,15 @@ fn read_text_rows_streaming(
             let value: serde_json::Value = serde_json::from_str(line).map_err(|_error| {
                 HubApiError::PathValidation("invalid JSON in dataset text".to_owned())
             })?;
-            let mapped = value
-                .as_object()
-                .map(|object| {
-                    object
-                        .iter()
-                        .map(|(field, field_value)| (field.clone(), field_value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let mapped = if let serde_json::Value::Object(object) = value {
+                object.into_iter().collect()
+            } else {
+                Default::default()
+            };
             DatasetRow { columns: mapped }
         };
         if columns.is_empty() {
             columns = row.columns.keys().cloned().collect();
-            columns.sort();
         }
         rows.push(row);
         data_row = data_row.saturating_add(1);
@@ -860,6 +855,22 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].columns.get("n"), Some(&serde_json::json!(3)));
         assert_eq!(rows[1].columns.get("n"), Some(&serde_json::json!(4)));
+    }
+
+    #[test]
+    fn jsonl_preview_preserves_nested_values_and_empty_non_object_rows() {
+        let content = br#"{"nested":{"items":[1,{"name":"value"}]}}
+[1,2]
+null
+42
+"#;
+        let rows = read_preview(content, "data.jsonl", 0, 10).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows[0].columns.get("nested"),
+            Some(&serde_json::json!({"items": [1, {"name": "value"}]}))
+        );
+        assert!(rows[1..].iter().all(|row| row.columns.is_empty()));
     }
 
     #[test]
