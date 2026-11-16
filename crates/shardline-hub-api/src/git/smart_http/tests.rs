@@ -693,72 +693,60 @@ async fn collect_refs_nonexistent_repo_returns_empty() {
 
 // --- build_report_response tests ---
 
-fn body_string(response: Response) -> String {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        String::from_utf8(bytes.to_vec()).unwrap()
-    })
+async fn body_string(response: Response) -> String {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-#[test]
-fn build_report_response_unpack_ok_and_ok_refs() {
-    let results = vec![
-        ("refs/heads/main".to_owned(), true, None),
-        ("refs/heads/dev".to_owned(), true, None),
-    ];
-    let response = build_report_response(&results, true, false).unwrap();
-    let body = body_string(response);
-    assert!(body.contains("unpack ok"));
-    assert!(body.contains("ok refs/heads/main"));
-    assert!(body.contains("ok refs/heads/dev"));
-}
-
-#[test]
-fn build_report_response_unpack_failed_and_ng_refs() {
-    let results = vec![(
-        "refs/heads/main".to_owned(),
-        false,
-        Some("unpack failed".to_owned()),
-    )];
-    let response = build_report_response(&results, false, false).unwrap();
-    let body = body_string(response);
-    assert!(body.contains("unpack failed"));
-    assert!(body.contains("ng refs/heads/main"));
-    assert!(body.contains("unpack failed"));
-}
-
-#[test]
-fn build_report_response_ng_with_default_message() {
-    let results = vec![("refs/heads/bad".to_owned(), false, None)];
-    let response = build_report_response(&results, false, false).unwrap();
-    let body = body_string(response);
-    assert!(body.contains("ng refs/heads/bad failed"));
-}
-
-#[test]
-fn build_report_response_ends_with_flush() {
-    let results: Vec<(String, bool, Option<String>)> = vec![];
-    let response = build_report_response(&results, true, false).unwrap();
-    let body = body_string(response);
-    assert!(
-        body.ends_with("0000"),
-        "response should end with flush packet"
-    );
+#[tokio::test]
+async fn receive_status_preserves_exact_packet_framing_and_messages() {
+    for (results, unpack_ok, expected) in [
+        (vec![], true, "000eunpack ok\n0000"),
+        (
+            vec![
+                ("refs/heads/main".into(), true, None),
+                ("refs/heads/dev".into(), true, None),
+            ],
+            true,
+            "000eunpack ok\n0017ok refs/heads/main\n0016ok refs/heads/dev\n0000",
+        ),
+        (
+            vec![(
+                "refs/heads/main".into(),
+                false,
+                Some("unpack failed".into()),
+            )],
+            false,
+            "0012unpack failed\n0025ng refs/heads/main unpack failed\n0000",
+        ),
+        (
+            vec![("refs/heads/bad".into(), false, None)],
+            false,
+            "0012unpack failed\n001dng refs/heads/bad failed\n0000",
+        ),
+    ] {
+        let response = build_report_response(&results, unpack_ok, false).unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/x-git-receive-pack-result"
+        );
+        assert_eq!(body_string(response).await, expected);
+    }
 }
 
 // --- parse_receive_pack_request tests ---
 
-#[test]
-fn receive_sideband_preserves_status_across_frame_boundaries() {
+#[tokio::test]
+async fn receive_sideband_preserves_status_across_frame_boundaries() {
     let results: Vec<_> = (0..4000)
         .map(|index| (format!("refs/heads/branch-{index}"), index % 2 == 0, None))
         .collect();
     for unpack_ok in [true, false] {
-        let plain = body_string(build_report_response(&results, unpack_ok, false).unwrap());
-        let framed = body_string(build_report_response(&results, unpack_ok, true).unwrap());
+        let plain = body_string(build_report_response(&results, unpack_ok, false).unwrap()).await;
+        let framed = body_string(build_report_response(&results, unpack_ok, true).unwrap()).await;
         assert!(framed.ends_with("0000"));
         let packets = pktline::decode_lines(framed.as_bytes());
         assert!(
