@@ -183,17 +183,14 @@ pub(super) async fn handle_provider_webhook(
             )
             .await?;
             let (mutation, applied_outcome, duplicate_outcome) = plan.into_parts();
-            let expected_fences = repository_guards
-                .iter()
-                .map(|guard| {
+            let mut expected_fences = Vec::new();
+            for guard in &repository_guards {
+                expected_fences.extend(
                     guard
                         .postgres_fences()
-                        .ok_or(ServerError::StaleResourceFence)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>();
+                        .ok_or(ServerError::StaleResourceFence)?,
+                );
+            }
             let connection = repository_guards
                 .first_mut()
                 .and_then(|guard| guard.postgres_connection_mut())

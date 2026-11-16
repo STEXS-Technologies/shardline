@@ -121,17 +121,16 @@ impl ResourceWriteGuard {
         Ok(())
     }
 
-    pub(crate) fn postgres_fences(&self) -> Option<Vec<shardline_index::PostgresResourceFence>> {
+    pub(crate) fn postgres_fences(
+        &self,
+    ) -> Option<impl ExactSizeIterator<Item = shardline_index::PostgresResourceFence> + '_> {
         match self {
             Self::Local { .. } => None,
-            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => Some(
-                fences
-                    .iter()
-                    .map(|(key, epoch)| {
-                        shardline_index::PostgresResourceFence::new(key.clone(), *epoch)
-                    })
-                    .collect(),
-            ),
+            Self::Postgres { fences, .. } | Self::PostgresRequest { fences, .. } => {
+                Some(fences.iter().map(|(key, epoch)| {
+                    shardline_index::PostgresResourceFence::new(key.clone(), *epoch)
+                }))
+            }
         }
     }
 
