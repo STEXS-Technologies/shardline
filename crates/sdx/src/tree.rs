@@ -103,10 +103,8 @@ fn tree_page_response_limit(limit: Option<usize>) -> usize {
 #[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 struct RegisterResponse {
-    path: String,
-    file_id: String,
-    size: u64,
-    updated_at: u64,
+    #[serde(flatten)]
+    entry: PathEntry,
     created: bool,
 }
 
@@ -288,12 +286,7 @@ impl<'session> MetadataClient<'session> {
             .await?;
 
         Ok(RegisterResult {
-            entry: PathEntry {
-                path: response.path,
-                file_id: response.file_id,
-                size: response.size,
-                updated_at: response.updated_at,
-            },
+            entry: response.entry,
             created: response.created,
         })
     }
@@ -542,10 +535,7 @@ mod tests {
             updated_at: u64::MAX,
         };
         let register = super::RegisterResponse {
-            path: path.clone(),
-            file_id: "a".repeat(64),
-            size: u64::MAX,
-            updated_at: u64::MAX,
+            entry: resolve.clone(),
             created: false,
         };
         assert!(serde_json::to_vec(&resolve).unwrap().len() <= super::PATH_RESPONSE_LIMIT);
