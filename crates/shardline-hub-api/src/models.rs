@@ -687,178 +687,49 @@ mod tests {
         assert_eq!(response.cas_url, "");
     }
 
-    // -----------------------------------------------------------------------
-    // RepoType::from_api_str
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn from_str_models() {
-        assert_eq!(RepoType::from_api_str("models"), Some(RepoType::Model));
+    fn repository_types_preserve_api_names_conversions_and_wire_format() {
+        for (kind, stored, singular, plural) in [
+            (RepoType::Model, HubRepoType::Model, "model", "models"),
+            (
+                RepoType::Dataset,
+                HubRepoType::Dataset,
+                "dataset",
+                "datasets",
+            ),
+            (RepoType::Space, HubRepoType::Space, "space", "spaces"),
+        ] {
+            assert_eq!(RepoType::from_api_str(singular), Some(kind));
+            assert_eq!(RepoType::from_api_str(plural), Some(kind));
+            assert_eq!(kind.as_path_str(), plural);
+            assert_eq!(RepoType::from(stored), kind);
+            assert_eq!(HubRepoType::from(kind), stored);
+            let wire = format!("\"{singular}\"");
+            assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<RepoType>(&wire).unwrap(), kind);
+        }
     }
 
     #[test]
-    fn from_str_model() {
-        assert_eq!(RepoType::from_api_str("model"), Some(RepoType::Model));
+    fn repository_type_parser_rejects_unknown_empty_and_wrong_case() {
+        for input in ["unknown", "", "Model", "MODEL"] {
+            assert_eq!(RepoType::from_api_str(input), None, "{input:?}");
+        }
     }
 
     #[test]
-    fn from_str_datasets() {
-        assert_eq!(RepoType::from_api_str("datasets"), Some(RepoType::Dataset));
-    }
-
-    #[test]
-    fn from_str_dataset() {
-        assert_eq!(RepoType::from_api_str("dataset"), Some(RepoType::Dataset));
-    }
-
-    #[test]
-    fn from_str_spaces() {
-        assert_eq!(RepoType::from_api_str("spaces"), Some(RepoType::Space));
-    }
-
-    #[test]
-    fn from_str_space() {
-        assert_eq!(RepoType::from_api_str("space"), Some(RepoType::Space));
-    }
-
-    #[test]
-    fn from_str_unknown() {
-        assert_eq!(RepoType::from_api_str("unknown"), None);
-    }
-
-    #[test]
-    fn from_str_empty() {
-        assert_eq!(RepoType::from_api_str(""), None);
-    }
-
-    // -----------------------------------------------------------------------
-    // RepoType::as_path_str
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn as_path_str_model() {
-        assert_eq!(RepoType::Model.as_path_str(), "models");
-    }
-
-    #[test]
-    fn as_path_str_dataset() {
-        assert_eq!(RepoType::Dataset.as_path_str(), "datasets");
-    }
-
-    #[test]
-    fn as_path_str_space() {
-        assert_eq!(RepoType::Space.as_path_str(), "spaces");
-    }
-
-    // -----------------------------------------------------------------------
-    // From impls between RepoType and HubRepoType
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn from_hub_repo_type_model() {
-        assert_eq!(RepoType::from(HubRepoType::Model), RepoType::Model);
-    }
-
-    #[test]
-    fn from_hub_repo_type_dataset() {
-        assert_eq!(RepoType::from(HubRepoType::Dataset), RepoType::Dataset);
-    }
-
-    #[test]
-    fn from_hub_repo_type_space() {
-        assert_eq!(RepoType::from(HubRepoType::Space), RepoType::Space);
-    }
-
-    #[test]
-    fn into_hub_repo_type_model() {
-        assert_eq!(HubRepoType::from(RepoType::Model), HubRepoType::Model);
-    }
-
-    #[test]
-    fn into_hub_repo_type_dataset() {
-        assert_eq!(HubRepoType::from(RepoType::Dataset), HubRepoType::Dataset);
-    }
-
-    #[test]
-    fn into_hub_repo_type_space() {
-        assert_eq!(HubRepoType::from(RepoType::Space), HubRepoType::Space);
-    }
-
-    #[test]
-    fn from_api_str_routes_through_hub_parser() {
-        // from_api_str delegates to the canonical HubRepoType::parse_str parser.
-        assert_eq!(RepoType::from_api_str("models"), Some(RepoType::Model));
-        assert_eq!(RepoType::from_api_str("dataset"), Some(RepoType::Dataset));
-        assert_eq!(RepoType::from_api_str("spaces"), Some(RepoType::Space));
-        assert_eq!(RepoType::from_api_str("unknown"), None);
-    }
-
-    // -----------------------------------------------------------------------
-    // RepoType serialization round-trip
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn repo_type_roundtrip_model() {
-        let value = serde_json::to_string(&RepoType::Model).unwrap();
-        assert_eq!(value, "\"model\"");
-        let deserialized: RepoType = serde_json::from_str(&value).unwrap();
-        assert_eq!(deserialized, RepoType::Model);
-    }
-
-    #[test]
-    fn repo_type_roundtrip_dataset() {
-        let value = serde_json::to_string(&RepoType::Dataset).unwrap();
-        assert_eq!(value, "\"dataset\"");
-        let deserialized: RepoType = serde_json::from_str(&value).unwrap();
-        assert_eq!(deserialized, RepoType::Dataset);
-    }
-
-    #[test]
-    fn repo_type_roundtrip_space() {
-        let value = serde_json::to_string(&RepoType::Space).unwrap();
-        assert_eq!(value, "\"space\"");
-        let deserialized: RepoType = serde_json::from_str(&value).unwrap();
-        assert_eq!(deserialized, RepoType::Space);
-    }
-
-    // -----------------------------------------------------------------------
-    // LfsBatchOperation serialization
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn lfs_batch_operation_download_serializes_to_lowercase() {
-        let json = serde_json::to_string(&LfsBatchOperation::Download).unwrap();
-        assert_eq!(json, "\"download\"");
-    }
-
-    #[test]
-    fn lfs_batch_operation_upload_serializes_to_lowercase() {
-        let json = serde_json::to_string(&LfsBatchOperation::Upload).unwrap();
-        assert_eq!(json, "\"upload\"");
-    }
-
-    #[test]
-    fn lfs_batch_operation_verify_serializes_to_lowercase() {
-        let json = serde_json::to_string(&LfsBatchOperation::Verify).unwrap();
-        assert_eq!(json, "\"verify\"");
-    }
-
-    #[test]
-    fn lfs_batch_operation_roundtrip_download() {
-        let op: LfsBatchOperation = serde_json::from_str("\"download\"").unwrap();
-        assert_eq!(op, LfsBatchOperation::Download);
-    }
-
-    #[test]
-    fn lfs_batch_operation_roundtrip_upload() {
-        let op: LfsBatchOperation = serde_json::from_str("\"upload\"").unwrap();
-        assert_eq!(op, LfsBatchOperation::Upload);
-    }
-
-    #[test]
-    fn lfs_batch_operation_roundtrip_verify() {
-        let op: LfsBatchOperation = serde_json::from_str("\"verify\"").unwrap();
-        assert_eq!(op, LfsBatchOperation::Verify);
+    fn lfs_batch_operations_preserve_lowercase_wire_format() {
+        for (operation, wire) in [
+            (LfsBatchOperation::Download, r#""download""#),
+            (LfsBatchOperation::Upload, r#""upload""#),
+            (LfsBatchOperation::Verify, r#""verify""#),
+        ] {
+            assert_eq!(serde_json::to_string(&operation).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<LfsBatchOperation>(wire).unwrap(),
+                operation
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1068,15 +939,5 @@ mod tests {
         assert_eq!(json["href"], "/lfs/objects/abc");
         assert!(json.get("header").is_none());
         assert!(json.get("ssh").is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // RepoType from_api_str case sensitivity
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn from_str_case_sensitive() {
-        assert_eq!(RepoType::from_api_str("Model"), None);
-        assert_eq!(RepoType::from_api_str("MODEL"), None);
     }
 }
