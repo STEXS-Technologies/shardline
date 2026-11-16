@@ -353,8 +353,8 @@ fn tree_children(tree: &GitObject) -> Result<HashMap<String, (String, String)>, 
         let tail = data
             .get(nul.saturating_add(1)..)
             .ok_or_else(|| failure("invalid Git tree tail"))?;
-        let child = tail
-            .get(..20)
+        let (child, remaining) = tail
+            .split_at_checked(20)
             .ok_or_else(|| failure("truncated Git tree OID"))?;
         if children
             .insert(entry_name.to_owned(), (hex::encode(child), mode.to_owned()))
@@ -362,9 +362,7 @@ fn tree_children(tree: &GitObject) -> Result<HashMap<String, (String, String)>, 
         {
             return Err(failure("duplicate Git tree entry"));
         }
-        data = tail
-            .get(20..)
-            .ok_or_else(|| failure("truncated Git tree tail"))?;
+        data = remaining;
     }
     Ok(children)
 }

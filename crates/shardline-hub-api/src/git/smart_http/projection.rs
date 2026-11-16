@@ -813,8 +813,8 @@ pub(super) fn object_children(object: &GitObject) -> Result<Vec<String>, HubApiE
                 let tail = data
                     .get(separator.saturating_add(1)..)
                     .ok_or_else(|| failure("invalid archived Git tree tail"))?;
-                let sha = tail
-                    .get(..20)
+                let (sha, remaining) = tail
+                    .split_at_checked(20)
                     .ok_or_else(|| failure("truncated archived Git tree"))?;
                 // Submodule commits belong to another repository; Git packs don't include them.
                 if !entry.starts_with(b"160000 ") {
@@ -823,9 +823,7 @@ pub(super) fn object_children(object: &GitObject) -> Result<Vec<String>, HubApiE
                     }
                     children.push(hex::encode(sha));
                 }
-                data = tail
-                    .get(20..)
-                    .ok_or_else(|| failure("truncated archived Git tree"))?;
+                data = remaining;
             }
         }
         ObjectType::Blob | ObjectType::Tag => {}
