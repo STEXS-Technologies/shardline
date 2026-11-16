@@ -468,11 +468,10 @@ mod tests {
         )
         .unwrap();
 
-        let chained_commit = second_commit.clone();
         verify_persisted_merkle_commit_with_previous(
             OperationKind::Upload,
             second_json.clone(),
-            Some(chained_commit.clone()),
+            Some(second_commit.clone()),
             Some(first_commit.clone()),
         )
         .unwrap();
@@ -480,23 +479,12 @@ mod tests {
             verify_persisted_merkle_commit(
                 OperationKind::Upload,
                 second_json,
-                Some(chained_commit)
+                Some(second_commit.clone())
             )
             .is_err()
         );
 
-        let mut legacy_commit = build_persisted_merkle_commit_with_previous(
-            OperationKind::Upload,
-            serde_json::to_value(&second).unwrap(),
-            Some(
-                build_persisted_merkle_commit(
-                    OperationKind::Upload,
-                    serde_json::to_value(&first).unwrap(),
-                )
-                .unwrap(),
-            ),
-        )
-        .unwrap();
+        let mut legacy_commit = second_commit;
         legacy_commit
             .as_object_mut()
             .unwrap()
