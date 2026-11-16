@@ -1327,24 +1327,3 @@ pub(crate) fn verify_file_length(
 
 #[cfg(test)]
 pub(crate) use crate::object::chunk_hash;
-
-#[cfg(test)]
-pub(crate) fn temporary_upload_location(key_prefix: &Option<String>) -> ObjectStorePath {
-    use super::types::TEMP_UPLOAD_COUNTER;
-    use std::{
-        sync::atomic::Ordering,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-    let counter = TEMP_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let unix_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_u128, |duration| duration.as_nanos());
-    let relative = format!(
-        "__tmp/shardline-stream-upload/{unix_nanos}-{}-{counter}",
-        std::process::id()
-    );
-    let path = key_prefix
-        .as_ref()
-        .map_or_else(|| relative.clone(), |prefix| format!("{prefix}/{relative}"));
-    ObjectStorePath::from(path)
-}

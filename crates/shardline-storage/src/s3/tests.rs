@@ -10,7 +10,7 @@ use shardline_protocol::{ByteRange, SecretString, ShardlineHash};
 use super::{
     S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, STREAM_COMPARE_CHUNK_BYTES, chunk_hash,
     is_temp_upload_key, normalize_prefix, stream_payload_for_range, temp_key_for,
-    temporary_upload_location, validated_external_range, verify_file_length, verify_integrity,
+    validated_external_range, verify_file_length, verify_integrity,
 };
 use crate::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore as ObjectStoreTrait,
@@ -559,8 +559,7 @@ fn is_temp_upload_key_matches_generated_overwrite_temp_format() {
 #[test]
 fn is_temp_upload_key_matches_generated_stream_upload_temp_prefix() {
     // Grammar (b): the reserved `__tmp/shardline-stream-upload/` prefix with a
-    // `<nanos>-<pid>-<counter>` tail — the exact shape
-    // `temporary_upload_location` generates.
+    // legacy `<nanos>-<pid>-<counter>` tail, retained for upgrade cleanup.
     assert!(is_temp_upload_key(
         "__tmp/shardline-stream-upload/1750000000000000000-42-7"
     ));
@@ -728,26 +727,6 @@ fn verify_file_length_mismatch() {
         verify_file_length(&path, &integrity),
         Err(S3ObjectStoreError::IntegrityLengthMismatch)
     ));
-}
-
-// ── temporary_upload_location ─────────────────────────────────────────
-
-#[test]
-fn temporary_upload_location_with_prefix() {
-    let prefix = Some("tenant-a".to_owned());
-    let location = temporary_upload_location(&prefix);
-    let path_str = location.as_ref();
-    assert!(path_str.starts_with("tenant-a/__tmp/shardline-stream-upload/"));
-    assert!(path_str.len() > "tenant-a/__tmp/shardline-stream-upload/".len());
-}
-
-#[test]
-fn temporary_upload_location_without_prefix() {
-    let prefix: Option<String> = None;
-    let location = temporary_upload_location(&prefix);
-    let path_str = location.as_ref();
-    assert!(path_str.starts_with("__tmp/shardline-stream-upload/"));
-    assert!(path_str.len() > "__tmp/shardline-stream-upload/".len());
 }
 
 // ── normalize_prefix edge cases ───────────────────────────────────────
