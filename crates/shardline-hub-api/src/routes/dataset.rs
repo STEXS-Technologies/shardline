@@ -403,103 +403,6 @@ pub(crate) fn find_dataset_file<'input>(
     None
 }
 
-/// Parses rows from inline file content (CSV or JSONL).
-#[cfg(test)]
-pub(crate) fn parse_rows_from_content(
-    content: &[u8],
-    path: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<Vec<DatasetRow>, HubApiError> {
-    let text = std::str::from_utf8(content)
-        .map_err(|e| HubApiError::PathValidation(format!("invalid UTF-8: {e}")))?;
-    if path.ends_with(".jsonl") {
-        parse_jsonl_rows(text, offset, limit)
-    } else if path.ends_with(".csv") {
-        parse_csv_rows(text, offset, limit)
-    } else {
-        Err(HubApiError::PathValidation(format!(
-            "unsupported file format: {path}"
-        )))
-    }
-}
-
-/// Parses JSONL (newline-delimited JSON) rows.
-#[cfg(test)]
-pub(crate) fn parse_jsonl_rows(
-    text: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<Vec<DatasetRow>, HubApiError> {
-    let mut rows = Vec::new();
-    for (i, line) in text.lines().enumerate() {
-        if i < offset {
-            continue;
-        }
-        if rows.len() >= limit {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let line_number = i
-            .checked_add(1)
-            .ok_or_else(|| HubApiError::PathValidation("line number overflow".to_owned()))?;
-        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-            HubApiError::PathValidation(format!("invalid JSON at line {}: {e}", line_number))
-        })?;
-        let columns = value
-            .as_object()
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default();
-        rows.push(DatasetRow { columns });
-    }
-    Ok(rows)
-}
-
-/// Parses CSV rows, handling quoted fields that may contain commas.
-#[cfg(test)]
-pub(crate) fn parse_csv_rows(
-    text: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<Vec<DatasetRow>, HubApiError> {
-    let mut lines = text.lines();
-    let header_line = lines
-        .next()
-        .ok_or_else(|| HubApiError::PathValidation("empty CSV file".to_owned()))?;
-    let headers: Vec<String> = parse_csv_line(header_line)
-        .into_iter()
-        .map(|h| h.trim().trim_matches('"').to_owned())
-        .collect();
-    let mut rows = Vec::new();
-    for (i, line) in lines.enumerate() {
-        if i < offset {
-            continue;
-        }
-        if rows.len() >= limit {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let values: Vec<&str> = parse_csv_line(line);
-        let columns: std::collections::BTreeMap<String, serde_json::Value> = headers
-            .iter()
-            .zip(values.iter())
-            .map(|(h, v)| {
-                let json_val = serde_json::from_str(v)
-                    .unwrap_or_else(|_| serde_json::Value::String(v.trim_matches('"').to_owned()));
-                (h.clone(), json_val)
-            })
-            .collect();
-        rows.push(DatasetRow { columns });
-    }
-    Ok(rows)
-}
-
 fn read_dataset_rows(
     state: &HubState,
     file: &HubFileEntry,
@@ -862,10 +765,12 @@ pub(crate) fn parse_csv_line(line: &str) -> Vec<&str> {
 }
 
 #[cfg(test)]
-mod cancellation_tests {
-    use super::{QueryCancellationGuard, RangeLineReader};
+mod tests {
+    use super::{
+        DatasetRow, HubApiError, QueryCancellationGuard, RangeLineReader, read_text_rows_streaming,
+    };
     use shardline_server_core::ServerObjectStore;
-    use shardline_storage::ObjectKey;
+    use shardline_storage::{ObjectKey, ObjectStore};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -898,5 +803,146 @@ mod cancellation_tests {
             cancelled,
         );
         assert!(reader.next_line().is_err());
+    }
+    fn preview_store(content: &[u8]) -> (tempfile::TempDir, ServerObjectStore, ObjectKey) {
+        use shardline_protocol::ShardlineHash;
+        use shardline_storage::{ObjectBody, ObjectIntegrity};
+        let directory = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(directory.path().to_path_buf()).unwrap();
+        let key = ObjectKey::parse("preview").unwrap();
+        let integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
+            content.len() as u64,
+        );
+        store
+            .put_if_absent(&key, ObjectBody::from_vec(content.to_vec()), &integrity)
+            .unwrap();
+        (directory, store, key)
+    }
+
+    fn read_preview(
+        content: &[u8],
+        path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<DatasetRow>, HubApiError> {
+        let (_directory, store, key) = preview_store(content);
+        read_text_rows_streaming(
+            &store,
+            &key,
+            content.len() as u64,
+            path,
+            offset,
+            limit,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .map(|(_, rows)| rows)
+    }
+
+    #[test]
+    fn streaming_preview_rejects_invalid_utf8() {
+        assert!(read_preview(b"\xff\xfe\x00", "data.csv", 0, 10).is_err());
+    }
+
+    #[test]
+    fn parse_jsonl_rows_simple() {
+        let text = "{\"a\":1,\"b\":2}\n{\"a\":3,\"b\":4}";
+        let rows = read_preview(text.as_bytes(), "data.jsonl", 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].columns.get("a"), Some(&serde_json::json!(1)));
+        assert_eq!(rows[1].columns.get("b"), Some(&serde_json::json!(4)));
+    }
+
+    #[test]
+    fn parse_jsonl_rows_with_offset_and_limit() {
+        let text = "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n{\"n\":5}";
+        let rows = read_preview(text.as_bytes(), "data.jsonl", 2, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].columns.get("n"), Some(&serde_json::json!(3)));
+        assert_eq!(rows[1].columns.get("n"), Some(&serde_json::json!(4)));
+    }
+
+    #[test]
+    fn parse_jsonl_rows_empty_lines() {
+        let text = "{\"a\":1}\n\n{\"a\":2}\n";
+        let rows = read_preview(text.as_bytes(), "data.jsonl", 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn parse_jsonl_rows_invalid_json() {
+        let text = "{\"a\":1}\nnot_json\n{\"a\":2}";
+        let result = read_preview(text.as_bytes(), "data.jsonl", 0, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_jsonl_rows_empty_input() {
+        let rows = read_preview("".as_bytes(), "data.jsonl", 0, 10).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn parse_jsonl_rows_limit_bounds() {
+        let text = "{\"x\":1}\n{\"x\":2}\n{\"x\":3}";
+        let rows = read_preview(text.as_bytes(), "data.jsonl", 0, 0).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_csv_rows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_csv_rows_simple() {
+        let text = "name,age\nAlice,30\nBob,25";
+        let rows = read_preview(text.as_bytes(), "data.csv", 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].columns.get("name"),
+            Some(&serde_json::json!("Alice"))
+        );
+        assert_eq!(rows[1].columns.get("age"), Some(&serde_json::json!(25)));
+    }
+
+    #[test]
+    fn parse_csv_rows_with_offset_and_limit() {
+        let text = "n\n1\n2\n3\n4\n5";
+        let rows = read_preview(text.as_bytes(), "data.csv", 2, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].columns.get("n"), Some(&serde_json::json!(3)));
+        assert_eq!(rows[1].columns.get("n"), Some(&serde_json::json!(4)));
+    }
+
+    #[test]
+    fn parse_csv_rows_quoted_fields() {
+        let text = r#"name,description
+Alice,"hello, world"
+Bob,"say ""hi"""#;
+        let rows = read_preview(text.as_bytes(), "data.csv", 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].columns.get("description"),
+            Some(&serde_json::json!("hello, world"))
+        );
+    }
+
+    #[test]
+    fn parse_csv_rows_empty_input() {
+        let result = read_preview("".as_bytes(), "data.csv", 0, 10);
+        assert!(result.is_err()); // no header
+    }
+
+    #[test]
+    fn parse_csv_rows_header_only() {
+        let rows = read_preview("a,b,c".as_bytes(), "data.csv", 0, 10).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn parse_csv_rows_skip_empty() {
+        let text = "a\n1\n\n2\n";
+        let rows = read_preview(text.as_bytes(), "data.csv", 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
     }
 }
