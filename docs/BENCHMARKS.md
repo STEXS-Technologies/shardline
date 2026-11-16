@@ -4183,8 +4183,26 @@ transfers passed in 76.163 seconds, with additional RSS of 54,268, 53,684 and
 54,228 KiB. The historical command uses `-p sdx --test e2e` in place of
 `--manifest-path e2e/Cargo.toml --test sdk_client_e2e`. This source-matched
 comparison still did not reproduce the hosted failure. It also means the
-current local passes cannot be attributed to a cleanup fix; hosted-machine
-differences and the original concurrent-test scheduling remain uncontrolled.
+current local passes cannot be attributed to a cleanup fix.
+
+On November 17, both original workloads were also run together with
+`--test-threads 2`, using the same compiler, profile and CPU affinity. Each
+source checkout passed byte identity, length and the unchanged RSS gate for
+both transfers; 28 unrelated E2E cases were filtered out.
+
+| Source | 256 MiB additional RSS, KiB | 1 GiB additional RSS, KiB | Two-test elapsed time |
+| --- | ---: | ---: | ---: |
+| Historical merge `74444f20` | 52,404 | 51,232 | 237.793 s |
+| Cleanup `abf47371` | 49,016 | 49,476 | 241.215 s |
+
+For this concurrent comparison, replace `--stress-count 3 --test-threads 1`
+above with `--test-threads 2` and select both tests:
+`-E 'test(stream_large_file_memory_bounded_cat) or test(stream_gib_file_memory_bounded_cat)'`.
+The historical checkout still uses its original `-p sdx --test e2e` target.
+This closes the local concurrent-scheduling comparison, including the 1 GiB
+workload under the matched profile. It does not reproduce the hosted machine,
+explain its failure or demonstrate a performance improvement. Further identical
+local repetitions would not close that remaining environment gap.
 
 The earlier local passes above do not explain the failure in
 [hosted E2E run 43704721020](https://github.com/STEXS-Technologies/shardline/actions/runs/43704721020).
