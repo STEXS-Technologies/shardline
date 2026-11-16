@@ -430,6 +430,32 @@ mod tests {
 
         let parsed = parse_shard_xorbs(&bytes).unwrap();
         assert_eq!(parsed, xorbs);
+
+        let core =
+            shardline_xet_core::metadata_shard::shard_format::MDBShardInfo::load_from_reader(
+                &mut std::io::Cursor::new(&bytes),
+            )
+            .unwrap();
+        assert_eq!(core.file_infos.len(), files.len());
+        for (actual, expected) in core.file_infos.iter().zip(&files) {
+            assert_eq!(
+                <[u8; 32]>::from(actual.metadata.file_hash),
+                hash_bytes(expected.file_hash)
+            );
+            assert_eq!(actual.segments.len(), expected.segments.len());
+            for (actual, expected) in actual.segments.iter().zip(&expected.segments) {
+                assert_eq!(
+                    <[u8; 32]>::from(actual.xorb_hash),
+                    hash_bytes(expected.xorb_hash)
+                );
+                assert_eq!(
+                    actual.unpacked_segment_bytes,
+                    expected.unpacked_segment_bytes
+                );
+                assert_eq!(actual.chunk_index_start, expected.chunk_index_start);
+                assert_eq!(actual.chunk_index_end, expected.chunk_index_end);
+            }
+        }
     }
 
     #[test]
