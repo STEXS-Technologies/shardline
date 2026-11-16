@@ -101,16 +101,16 @@ impl XetUrl {
             api_base.push_str(&port.to_string());
         }
 
-        let raw_segments: Vec<&str> = url
+        let mut raw_segments = url
             .path()
             .strip_prefix('/')
             .unwrap_or_else(|| url.path())
-            .splitn(5, '/')
-            .collect();
-        let [provider, owner, repo, revision, path_segments @ ..] = raw_segments.as_slice() else {
+            .splitn(5, '/');
+        let identity: [_; 4] = std::array::from_fn(|_| raw_segments.next());
+        let [Some(provider), Some(owner), Some(repo), Some(revision)] = identity else {
             return Err(SdxError::InvalidEndpoint(format!(
                 "expected provider/owner/repo/revision (plus optional path) in {input:?}, got {} segment(s)",
-                raw_segments.len()
+                identity.into_iter().flatten().count()
             )));
         };
         let provider = decode_segment(provider, input)?;
@@ -127,7 +127,7 @@ impl XetUrl {
         }
         // Remove trailing empty encoded segments before decoding: a percent-
         // encoded slash is content and must not be trimmed as a separator.
-        let encoded_path = path_segments.first().copied().unwrap_or_default();
+        let encoded_path = raw_segments.next().unwrap_or_default();
         let mut path = decode_segment(encoded_path.trim_end_matches('/'), input)?;
         let trailing_slash = url.path().ends_with('/');
         if trailing_slash && !path.is_empty() {
