@@ -53,15 +53,12 @@ impl XorbChunkSequenceHeader {
 
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<usize, std::io::Error> {
         let mut buf = [0u8; size_of::<Self>()];
-        {
-            let mut writer_cur = Cursor::new(&mut buf[..]);
-            let writer = &mut writer_cur;
-            write_hash(writer, &self.xorb_hash)?;
-            write_u32(writer, self.xorb_flags)?;
-            write_u64(writer, self.num_entries)?;
-            write_u64(writer, self.num_bytes_in_xorb)?;
-            write_u64(writer, self.num_bytes_on_disk)?;
-        }
+        let record_writer = &mut Cursor::new(&mut buf[..]);
+        write_hash(record_writer, &self.xorb_hash)?;
+        write_u32(record_writer, self.xorb_flags)?;
+        write_u64(record_writer, self.num_entries)?;
+        write_u64(record_writer, self.num_bytes_in_xorb)?;
+        write_u64(record_writer, self.num_bytes_on_disk)?;
         writer.write_all(&buf[..])?;
         Ok(size_of::<Self>())
     }
@@ -135,15 +132,12 @@ impl XorbChunkSequenceEntry {
 
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<usize, std::io::Error> {
         let mut buf = [0u8; size_of::<Self>()];
-        {
-            let mut writer_cur = Cursor::new(&mut buf[..]);
-            let writer = &mut writer_cur;
-            write_hash(writer, &self.chunk_hash)?;
-            write_u64(writer, self.chunk_byte_range_start)?;
-            write_u64(writer, self.unpacked_segment_bytes)?;
-            write_u32(writer, self.flags)?;
-            write_u64(writer, self._unused)?;
-        }
+        let record_writer = &mut Cursor::new(&mut buf[..]);
+        write_hash(record_writer, &self.chunk_hash)?;
+        write_u64(record_writer, self.chunk_byte_range_start)?;
+        write_u64(record_writer, self.unpacked_segment_bytes)?;
+        write_u32(record_writer, self.flags)?;
+        write_u64(record_writer, self._unused)?;
         writer.write_all(&buf[..])?;
         Ok(size_of::<XorbChunkSequenceEntry>())
     }

@@ -82,15 +82,12 @@ impl FileDataSequenceHeader {
 
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<usize, std::io::Error> {
         let mut buf = [0u8; size_of::<Self>()];
-        {
-            let mut writer_cur = Cursor::new(&mut buf[..]);
-            let writer = &mut writer_cur;
-            write_hash(writer, &self.file_hash)?;
-            write_u32(writer, self.file_flags)?;
-            write_u64(writer, self.num_entries)?;
-            write_u64(writer, self._unused)?;
-            write_u64(writer, self._pad)?;
-        }
+        let record_writer = &mut Cursor::new(&mut buf[..]);
+        write_hash(record_writer, &self.file_hash)?;
+        write_u32(record_writer, self.file_flags)?;
+        write_u64(record_writer, self.num_entries)?;
+        write_u64(record_writer, self._unused)?;
+        write_u64(record_writer, self._pad)?;
         writer.write_all(&buf[..])?;
         Ok(size_of::<FileDataSequenceHeader>())
     }
@@ -188,15 +185,12 @@ impl FileDataSequenceEntry {
 
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<usize, std::io::Error> {
         let mut buf = [0u8; size_of::<Self>()];
-        {
-            let mut writer_cur = Cursor::new(&mut buf[..]);
-            let writer = &mut writer_cur;
-            write_hash(writer, &self.xorb_hash)?;
-            write_u32(writer, self.xorb_flags)?;
-            write_u64(writer, self.unpacked_segment_bytes)?;
-            write_u64(writer, self.chunk_index_start)?;
-            write_u64(writer, self.chunk_index_end)?;
-        }
+        let record_writer = &mut Cursor::new(&mut buf[..]);
+        write_hash(record_writer, &self.xorb_hash)?;
+        write_u32(record_writer, self.xorb_flags)?;
+        write_u64(record_writer, self.unpacked_segment_bytes)?;
+        write_u64(record_writer, self.chunk_index_start)?;
+        write_u64(record_writer, self.chunk_index_end)?;
         writer.write_all(&buf[..])?;
         Ok(size_of::<FileDataSequenceEntry>())
     }
