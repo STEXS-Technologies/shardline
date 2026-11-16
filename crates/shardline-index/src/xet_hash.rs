@@ -52,45 +52,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_xet_hash_hex_rejects_short_string() {
-        assert!(matches!(
-            parse_xet_hash_hex("abc"),
-            Err(shardline_protocol::HashParseError::InvalidLength)
-        ));
-    }
-
-    #[test]
-    fn parse_xet_hash_hex_rejects_long_string() {
-        assert!(matches!(
-            parse_xet_hash_hex(&"a".repeat(65)),
-            Err(shardline_protocol::HashParseError::InvalidLength)
-        ));
-    }
-
-    #[test]
-    fn parse_xet_hash_hex_rejects_uppercase() {
-        let hex = "A".repeat(64);
-        assert!(matches!(
-            parse_xet_hash_hex(&hex),
-            Err(shardline_protocol::HashParseError::InvalidCharacter(_))
-        ));
-    }
-
-    #[test]
-    fn parse_xet_hash_hex_rejects_non_hex_characters() {
-        let hex = format!("{}z{}", "a".repeat(32), "b".repeat(31));
-        assert!(matches!(
-            parse_xet_hash_hex(&hex),
-            Err(shardline_protocol::HashParseError::InvalidCharacter(_))
-        ));
-    }
-
-    #[test]
-    fn parse_xet_hash_hex_rejects_empty_string() {
-        assert!(matches!(
-            parse_xet_hash_hex(""),
-            Err(shardline_protocol::HashParseError::InvalidLength)
-        ));
+    fn parser_rejects_wrong_lengths_and_noncanonical_characters() {
+        for value in [String::new(), "abc".to_owned(), "a".repeat(65)] {
+            assert!(
+                matches!(
+                    parse_xet_hash_hex(&value),
+                    Err(shardline_protocol::HashParseError::InvalidLength)
+                ),
+                "{value:?}"
+            );
+        }
+        for value in [
+            "A".repeat(64),
+            format!("{}z{}", "a".repeat(32), "b".repeat(31)),
+        ] {
+            assert!(
+                matches!(
+                    parse_xet_hash_hex(&value),
+                    Err(shardline_protocol::HashParseError::InvalidCharacter(_))
+                ),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
