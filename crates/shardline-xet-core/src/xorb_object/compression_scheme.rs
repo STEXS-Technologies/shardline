@@ -561,67 +561,28 @@ mod tests {
     // --- BG4-specific regression tests ---
 
     #[test]
-    fn bg4_roundtrip_small_payload() {
-        let data = b"Hello, this tests BG4 byte-interleaving compression!";
-        let compressed = CompressionScheme::ByteGrouping4LZ4
-            .compress_from_slice(data)
-            .unwrap();
-        let decompressed = CompressionScheme::ByteGrouping4LZ4
-            .decompress_from_slice(&compressed)
-            .unwrap();
-        assert_eq!(&*decompressed, data);
-    }
-
-    #[test]
-    fn bg4_roundtrip_empty() {
-        let data: &[u8] = b"";
-        let compressed = CompressionScheme::ByteGrouping4LZ4
-            .compress_from_slice(data)
-            .unwrap();
-        let decompressed = CompressionScheme::ByteGrouping4LZ4
-            .decompress_from_slice(&compressed)
-            .unwrap();
-        assert!(decompressed.is_empty());
-    }
-
-    #[test]
-    fn bg4_roundtrip_single_byte() {
-        let data = &[42u8];
-        let compressed = CompressionScheme::ByteGrouping4LZ4
-            .compress_from_slice(data)
-            .unwrap();
-        let decompressed = CompressionScheme::ByteGrouping4LZ4
-            .decompress_from_slice(&compressed)
-            .unwrap();
-        assert_eq!(&*decompressed, data);
-    }
-
-    #[test]
-    fn bg4_roundtrip_not_multiple_of_4() {
-        // Test various sizes that don't divide evenly by 4
-        for n in [1, 2, 3, 5, 7, 13, 65535, 65537, 131073] {
-            let data: Vec<u8> = (0..n).map(|i| (i % 256) as u8).collect();
-            let compressed = CompressionScheme::ByteGrouping4LZ4
-                .compress_from_slice(&data)
+    fn bg4_roundtrips_slice_and_reader_across_payload_sizes() {
+        let cases = [
+            b"Hello, this tests BG4 byte-interleaving compression!".to_vec(),
+            vec![42],
+        ]
+        .into_iter()
+        .chain(
+            [0, 1, 2, 3, 5, 7, 13, 10000, 65535, 65536, 65537, 131073]
+                .into_iter()
+                .map(|len| (0..len).map(|i| (i % 256) as u8).collect()),
+        );
+        let scheme = CompressionScheme::ByteGrouping4LZ4;
+        for data in cases {
+            let compressed = scheme.compress_from_slice(&data).unwrap();
+            assert_eq!(&*scheme.decompress_from_slice(&compressed).unwrap(), data);
+            let mut output = Vec::new();
+            let written = scheme
+                .decompress_from_reader(&mut Cursor::new(&*compressed), &mut output)
                 .unwrap();
-            let decompressed = CompressionScheme::ByteGrouping4LZ4
-                .decompress_from_slice(&compressed)
-                .unwrap();
-            assert_eq!(*decompressed, data, "BG4 roundtrip failed for size {n}");
+            assert_eq!(written, data.len() as u64);
+            assert_eq!(output, data);
         }
-    }
-
-    #[test]
-    fn bg4_roundtrip_chunk_sized_payload() {
-        // Typical chunk size used in shardline (64 KiB)
-        let data: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
-        let compressed = CompressionScheme::ByteGrouping4LZ4
-            .compress_from_slice(&data)
-            .unwrap();
-        let decompressed = CompressionScheme::ByteGrouping4LZ4
-            .decompress_from_slice(&compressed)
-            .unwrap();
-        assert_eq!(*decompressed, data);
     }
 
     #[test]
@@ -655,21 +616,6 @@ mod tests {
             .decompress_from_slice(&compressed)
             .unwrap();
         assert_eq!(*decompressed, data);
-    }
-
-    #[test]
-    fn bg4_roundtrip_reader_based() {
-        let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
-        let compressed = CompressionScheme::ByteGrouping4LZ4
-            .compress_from_slice(&data)
-            .unwrap();
-        let mut reader = Cursor::new(&*compressed);
-        let mut writer = Vec::new();
-        let n = CompressionScheme::ByteGrouping4LZ4
-            .decompress_from_reader(&mut reader, &mut writer)
-            .unwrap();
-        assert_eq!(n, data.len() as u64);
-        assert_eq!(writer, data);
     }
 
     #[test]
