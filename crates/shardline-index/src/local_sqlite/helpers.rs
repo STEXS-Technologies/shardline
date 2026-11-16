@@ -304,11 +304,10 @@ fn load_latest_verified_event_json_chunk(
     // and avoid repeated Merkle verification.
     let requested_ids = operation_ids.iter().collect::<BTreeSet<_>>();
     let sql = latest_verified_event_json_batch_sql(requested_ids.len());
-    let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
-    parameters.push(operation_kind.as_str().to_owned());
-    parameters.extend(requested_ids.into_iter().cloned());
+    let parameters = std::iter::once(operation_kind.as_str())
+        .chain(requested_ids.into_iter().map(String::as_str));
     let mut statement = transaction.prepare(&sql)?;
-    let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
+    let rows = statement.query_map(params_from_iter(parameters), |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
