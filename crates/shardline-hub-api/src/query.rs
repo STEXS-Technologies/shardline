@@ -145,17 +145,15 @@ impl DatasetQueryRequest {
                 return Err(QueryValidationError::InvalidIdentifier(field));
             }
         }
-        if self.columns.len() > MAX_COLUMNS {
-            return Err(QueryValidationError::TooMany("columns"));
-        }
-        if self.predicates.len() > MAX_PREDICATES {
-            return Err(QueryValidationError::TooMany("predicates"));
-        }
-        if self.order_by.len() > MAX_ORDER_TERMS {
-            return Err(QueryValidationError::TooMany("order terms"));
-        }
-        if self.aggregates.len() > MAX_AGGREGATES {
-            return Err(QueryValidationError::TooMany("aggregates"));
+        for (length, maximum, field) in [
+            (self.columns.len(), MAX_COLUMNS, "columns"),
+            (self.predicates.len(), MAX_PREDICATES, "predicates"),
+            (self.order_by.len(), MAX_ORDER_TERMS, "order terms"),
+            (self.aggregates.len(), MAX_AGGREGATES, "aggregates"),
+        ] {
+            if length > maximum {
+                return Err(QueryValidationError::TooMany(field));
+            }
         }
         if self.limit == 0 || self.limit > MAX_LIMIT {
             return Err(QueryValidationError::OutOfRange("limit"));
@@ -389,22 +387,17 @@ mod tests {
 
     #[test]
     fn validation_errors_have_stable_display_text() {
-        assert_eq!(
-            QueryValidationError::EmptyField("x").to_string(),
-            "x must not be empty"
-        );
-        assert_eq!(
-            QueryValidationError::InvalidIdentifier("x").to_string(),
-            "invalid x identifier"
-        );
-        assert_eq!(QueryValidationError::TooMany("x").to_string(), "too many x");
-        assert_eq!(
-            QueryValidationError::OutOfRange("x").to_string(),
-            "x is out of range"
-        );
-        assert_eq!(
-            QueryValidationError::InvalidAggregate.to_string(),
-            "invalid aggregate"
-        );
+        for (error, expected) in [
+            (QueryValidationError::EmptyField("x"), "x must not be empty"),
+            (
+                QueryValidationError::InvalidIdentifier("x"),
+                "invalid x identifier",
+            ),
+            (QueryValidationError::TooMany("x"), "too many x"),
+            (QueryValidationError::OutOfRange("x"), "x is out of range"),
+            (QueryValidationError::InvalidAggregate, "invalid aggregate"),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 }
