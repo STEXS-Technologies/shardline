@@ -1625,15 +1625,15 @@ enum XorbDescriptorSource {
 }
 
 impl XorbDescriptorSource {
-    fn for_hash(&self, hash: &str) -> Vec<XorbDescriptor> {
+    fn take_for_hash(&mut self, hash: &str) -> Vec<XorbDescriptor> {
         match self {
             XorbDescriptorSource::V2(xorbs) => xorbs
-                .get(hash)
+                .remove(hash)
                 .map(|entries| {
                     entries
-                        .iter()
+                        .into_iter()
                         .flat_map(|entry| {
-                            entry.ranges.iter().map(|range| XorbDescriptor {
+                            entry.ranges.into_iter().map(move |range| XorbDescriptor {
                                 url: entry.url.clone(),
                                 bytes: ByteRange::new(range.bytes.start, range.bytes.end),
                                 chunks: (range.chunks.start, range.chunks.end),
@@ -1643,12 +1643,12 @@ impl XorbDescriptorSource {
                 })
                 .unwrap_or_default(),
             XorbDescriptorSource::V1(fetch_info) => fetch_info
-                .get(hash)
+                .remove(hash)
                 .map(|entries| {
                     entries
-                        .iter()
+                        .into_iter()
                         .map(|entry| XorbDescriptor {
-                            url: entry.url.clone(),
+                            url: entry.url,
                             bytes: ByteRange::new(entry.url_range.start, entry.url_range.end),
                             chunks: (entry.range.start, entry.range.end),
                         })
@@ -1710,7 +1710,7 @@ fn normalize_block(
     query_end: u64,
     buffer_capacity: u64,
 ) -> Result<Option<TermBlock>, SdxError> {
-    let (offset_into_first_range, terms, descriptors) = match response {
+    let (offset_into_first_range, terms, mut descriptors) = match response {
         ReconstructionResponse::V2(resp) => (
             resp.offset_into_first_range,
             resp.terms,
@@ -1725,16 +1725,16 @@ fn normalize_block(
     if terms.is_empty() {
         return Ok(None);
     }
-    let mut descriptor_index: HashMap<String, Vec<XorbDescriptor>> = HashMap::new();
+    let mut descriptor_index: HashMap<&str, Vec<XorbDescriptor>> = HashMap::new();
     let mut groups: Vec<FetchGroup> = Vec::new();
     let mut current_offset = query_start;
     let merge_limit = buffer_capacity.min(MAX_COALESCED_BLOCK_BYTES);
     for (term_index, term) in terms.iter().enumerate() {
         parse_xet_hash_hex(&term.hash)?;
         let sorted = descriptor_index
-            .entry(term.hash.clone())
+            .entry(term.hash.as_str())
             .or_insert_with(|| {
-                let mut list = descriptors.for_hash(&term.hash);
+                let mut list = descriptors.take_for_hash(&term.hash);
                 list.sort_by_key(|descriptor| descriptor.chunks.0);
                 list
             });
