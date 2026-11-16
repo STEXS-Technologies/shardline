@@ -684,6 +684,11 @@ impl FileUploadPipeline {
         .await
         .map_err(|error| SdxError::TaskJoin(error.to_string()))??;
 
+        // Serialization owns the payload and descriptors now. Release raw
+        // chunks before credentials, HEAD, or POST can wait on the network.
+        self.pending.clear();
+        self.pending_bytes = 0;
+
         // HEAD-first idempotency probe (retried on transient failures).
         let (base, token) = self.session.inner.cas_credentials().await?;
         let retry = self.session.inner.upload_retry_context();
@@ -764,8 +769,6 @@ impl FileUploadPipeline {
             state.chunk_locations.insert(entry.hash, location);
             self.new_chunk_locations.push(location);
         }
-        self.pending.clear();
-        self.pending_bytes = 0;
         Ok(())
     }
 
