@@ -10,7 +10,6 @@ readme = "README.md"
 description = "Garbage collection for Shardline chunk storage."
 
 [dependencies]
-async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shardline-index.workspace = true

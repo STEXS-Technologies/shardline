@@ -3661,7 +3661,6 @@ dependencies = [
 name = "shardline-gc"
 version = "1.13.0"
 dependencies = [
- "async-trait",
  "serde",
  "serde_json",
  "shardline-index",

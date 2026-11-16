@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 
 use shardline_index::{
@@ -32,9 +31,11 @@ pub(crate) struct OciTombstoneGcReport {
 }
 
 #[doc(hidden)]
-#[async_trait]
 pub trait OciRecordReclaimer {
-    async fn delete_protocol_record(&self, record: &FileRecord) -> Result<(), GcError>;
+    fn delete_protocol_record(
+        &self,
+        record: &FileRecord,
+    ) -> impl std::future::Future<Output = Result<(), GcError>> + Send;
 }
 
 async fn latest_records_by_file_id<RecordAdapter>(
@@ -55,7 +56,6 @@ where
     Ok(records)
 }
 
-#[async_trait]
 impl OciRecordReclaimer for LocalRecordStore {
     async fn delete_protocol_record(&self, record: &FileRecord) -> Result<(), GcError> {
         self.delete_file_version_metadata(record).await?;
@@ -63,7 +63,6 @@ impl OciRecordReclaimer for LocalRecordStore {
     }
 }
 
-#[async_trait]
 impl OciRecordReclaimer for PostgresRecordStore {
     async fn delete_protocol_record(&self, record: &FileRecord) -> Result<(), GcError> {
         self.delete_file_version_metadata(record).await?;
