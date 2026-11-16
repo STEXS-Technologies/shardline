@@ -12,9 +12,7 @@ use super::ref_advertisement::{
     GitRef, authorize_read, authorize_write, collect_refs, is_valid_refname, resolve_repo_id,
 };
 use super::tree_walk::parse_lfs_pointer_field;
-use super::upload_pack::{
-    build_git_tree_objects, build_inline_blob, build_lfs_pointer_blob, parse_haves, parse_wants,
-};
+use super::upload_pack::{build_lfs_pointer_blob, parse_haves, parse_wants};
 use super::*;
 use crate::git::pack::{GitObject, ObjectType, apply_delta};
 use crate::git::pktline;
@@ -162,62 +160,6 @@ fn find_lfs_blob_none_when_no_matching_object() {
         find_lfs_blob(&file, &sha_to_obj, &content_by_sha256).is_none(),
         "no matching object should yield None (the push is then failed)"
     );
-}
-
-#[test]
-fn inline_blob_deterministic() {
-    let file = HubFileEntry {
-        path: "test.txt".to_owned(),
-        size: 11,
-        sha: "aabbccdd".to_owned(),
-        is_lfs: false,
-    };
-    let b1 = build_inline_blob(&file);
-    let b2 = build_inline_blob(&file);
-    assert_eq!(b1.sha1(), b2.sha1());
-}
-
-#[test]
-fn tree_from_empty_files() {
-    let tree = build_git_tree_objects(&[]);
-    assert_eq!(tree.0.object_type, ObjectType::Tree);
-}
-
-#[test]
-fn tree_from_single_file() {
-    let files = vec![HubFileEntry {
-        path: "README.md".to_owned(),
-        size: 13,
-        sha: "deadbeef".to_owned(),
-        is_lfs: false,
-    }];
-    let (tree, sub_trees) = build_git_tree_objects(&files);
-    let tree_sha = tree.sha1();
-    assert_ne!(tree_sha, [0u8; 20]);
-    assert!(sub_trees.is_empty());
-}
-
-#[test]
-fn tree_from_nested_files() {
-    let files = vec![
-        HubFileEntry {
-            path: "src/main.rs".to_owned(),
-            size: 100,
-            sha: "aaaa".to_owned(),
-            is_lfs: false,
-        },
-        HubFileEntry {
-            path: "Cargo.toml".to_owned(),
-            size: 200,
-            sha: "bbbb".to_owned(),
-            is_lfs: false,
-        },
-    ];
-    let (tree, sub_trees) = build_git_tree_objects(&files);
-    let tree_sha = tree.sha1();
-    assert_ne!(tree_sha, [0u8; 20]);
-    // src/ should produce a sub-tree
-    assert_eq!(sub_trees.len(), 1);
 }
 
 // --- is_valid_refname tests ---
@@ -1491,31 +1433,6 @@ fn authorize_write_with_auth_rejects_missing_token() {
     assert!(result.is_err());
 }
 
-// --- build_git_tree_objects with nested directories ---
-
-#[test]
-fn tree_from_nested_lfs_files_creates_sub_trees() {
-    let files = vec![
-        HubFileEntry {
-            path: "models/a/big.bin".to_owned(),
-            size: 2_000_000,
-            sha: "lfs_oid_ab".to_owned(),
-            is_lfs: true,
-        },
-        HubFileEntry {
-            path: "models/b/big.bin".to_owned(),
-            size: 2_000_000,
-            sha: "lfs_oid_bb".to_owned(),
-            is_lfs: true,
-        },
-    ];
-    let (root, sub_trees) = build_git_tree_objects(&files);
-    // Root tree + 3 sub-trees (models/, models/a/, models/b/)
-    assert!(!sub_trees.is_empty(), "expected sub-trees for nested dirs");
-    let root_sha = root.sha1();
-    assert_ne!(root_sha, [0u8; 20]);
-}
-
 // --- parse_receive_pack_request with valid commands ---
 
 #[test]
@@ -1662,22 +1579,6 @@ fn parse_pack_data_ofs_delta_offset_underflow() {
     pack.extend_from_slice(&compressed);
     let result = parse_pack_data(&pack);
     assert!(result.is_err());
-}
-
-// --- build_git_tree_objects with inline blob creation ---
-
-#[test]
-fn tree_from_inline_files_creates_blobs_in_tree_entries() {
-    let files = vec![HubFileEntry {
-        path: "a/b/file.txt".to_owned(),
-        size: 3,
-        sha: "abc".to_owned(),
-        is_lfs: false,
-    }];
-    let (root, sub_trees) = build_git_tree_objects(&files);
-    assert_eq!(sub_trees.len(), 2, "a/ and a/b/ sub-trees");
-    let root_sha = root.sha1();
-    assert_ne!(root_sha, [0u8; 20]);
 }
 
 // --- receive_pack with invalid pack data (error path, lines ~262) ---
@@ -1837,24 +1738,6 @@ fn walk_git_tree_truncated_sha_errors() {
 
     let result = walk_git_tree(&tree_sha, &objects, "");
     assert!(result.is_err());
-}
-
-// --- build_git_tree_objects with LFS leaf blob (line ~544) ---
-
-#[test]
-fn build_tree_entries_lfs_leaf_blob() {
-    // A single LFS file at the root level exercises the LFS blob creation
-    // in build_tree_entries (line 538).
-    let files = vec![HubFileEntry {
-        path: "model.bin".to_owned(),
-        size: 2_000_000,
-        sha: "oid_lfs_leaf".to_owned(),
-        is_lfs: true,
-    }];
-    let (root, sub_trees) = build_git_tree_objects(&files);
-    assert!(sub_trees.is_empty());
-    let root_sha = root.sha1();
-    assert_ne!(root_sha, [0u8; 20]);
 }
 
 // --- info_refs_upload_pack / info_refs_receive_pack wrappers ---
