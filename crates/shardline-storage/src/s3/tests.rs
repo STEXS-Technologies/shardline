@@ -1842,62 +1842,45 @@ fn metadata_conversion_preserves_keys_lengths_and_prefix_boundaries() {
     }
 }
 
-// ── existing_object_outcome_from_file edge case ────────────────────
-
 #[test]
-fn existing_object_outcome_from_file_verify_file_length_fails() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18985".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
+fn file_upload_preflight_rejects_local_failures_before_contacting_storage() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let store = synchronous_runtime_fixture(format!("http://{}", listener.local_addr().unwrap()));
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mismatch.bin");
-    std::fs::write(&path, b"short").unwrap();
+    let path = dir.path().join("source.bin");
     let key = ObjectKey::parse("test/key").unwrap();
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b"short"), 99);
-    // verify_file_length fails
-    let result = super::existing_object_outcome_from_file(&store, &key, &path, &integrity);
-    assert!(matches!(
-        result,
-        Err(S3ObjectStoreError::IntegrityLengthMismatch)
-    ));
-}
-
-// ── put_file_if_absent with non-existent file ──────────────────────
-
-#[test]
-fn s3_put_file_if_absent_nonexistent_file() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18981".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("nonexistent.bin");
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
-    // verify_file_length will fail with Io error (file not found)
-    let result = store.put_file_if_absent(&key, &path, &integrity);
-    assert!(matches!(result, Err(S3ObjectStoreError::Io(_))));
-}
-
-#[test]
-fn s3_put_content_addressed_file_nonexistent_file() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18980".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("nonexistent.bin");
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
-    let result = store.put_content_addressed_file(&key, &path, &integrity);
-    assert!(matches!(result, Err(S3ObjectStoreError::Io(_))));
+    let integrity = ObjectIntegrity::new(chunk_hash(b"short"), 99);
+    for exists in [false, true] {
+        if exists {
+            std::fs::write(&path, b"short").unwrap();
+        }
+        let results = [
+            super::existing_object_outcome_from_file(&store, &key, &path, &integrity).map(|_| ()),
+            store
+                .put_file_if_absent(&key, &path, &integrity)
+                .map(|_| ()),
+            store
+                .put_content_addressed_file(&key, &path, &integrity)
+                .map(|_| ()),
+        ];
+        for result in results {
+            if exists {
+                assert!(matches!(
+                    result,
+                    Err(S3ObjectStoreError::IntegrityLengthMismatch)
+                ));
+            } else {
+                assert!(
+                    matches!(result, Err(S3ObjectStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
+                );
+            }
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 // ── S3MultipartUploadWriter finish via InMemory ────────────────────
