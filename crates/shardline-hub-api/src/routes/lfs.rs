@@ -994,13 +994,11 @@ pub(crate) async fn lfs_download(
     };
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        "application/octet-stream"
-            .parse()
-            .map_err(|_error| HubApiError::NotFound)?,
+        HeaderValue::from_static("application/octet-stream"),
     );
     response.headers_mut().insert(
         axum::http::header::ACCEPT_RANGES,
-        "bytes".parse().map_err(|_error| HubApiError::NotFound)?,
+        HeaderValue::from_static("bytes"),
     );
     response.headers_mut().insert(
         axum::http::header::ETAG,
@@ -1150,16 +1148,10 @@ async fn stream_hf_xet_object(
             upstream.status()
         )));
     }
-    let response_headers = upstream.headers().clone();
-    let stream = upstream
-        .bytes_stream()
-        .map(|chunk| chunk.map_err(std::io::Error::other));
-    let mut response = Response::new(Body::from_stream(stream));
+    let mut response = Response::new(Body::empty());
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        "application/octet-stream"
-            .parse()
-            .map_err(|_error| HubApiError::NotFound)?,
+        HeaderValue::from_static("application/octet-stream"),
     );
     for name in [
         axum::http::header::CONTENT_LENGTH,
@@ -1167,10 +1159,14 @@ async fn stream_hf_xet_object(
         axum::http::header::ACCEPT_RANGES,
         axum::http::header::ETAG,
     ] {
-        if let Some(value) = response_headers.get(&name) {
+        if let Some(value) = upstream.headers().get(&name) {
             response.headers_mut().insert(name, value.clone());
         }
     }
+    let stream = upstream
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(std::io::Error::other));
+    *response.body_mut() = Body::from_stream(stream);
     *response.status_mut() = status;
     Ok(response)
 }

@@ -340,9 +340,7 @@ pub(crate) async fn repo_modelcard(
     let mut response = stream_object(&state.object_store, key, length).into_response();
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        "text/markdown; charset=utf-8"
-            .parse()
-            .map_err(|_error| HubApiError::NotFound)?,
+        axum::http::HeaderValue::from_static("text/markdown; charset=utf-8"),
     );
     response.headers_mut().insert(
         "x-shardline-sha",
