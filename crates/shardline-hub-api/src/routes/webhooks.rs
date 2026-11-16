@@ -9,8 +9,6 @@ use axum::{
 };
 
 use crate::{error::HubApiError, models::*, types::WebhookScheme};
-// HubRepoType used in the webhook_create handler for repo lookup
-// (used implicitly via state.store methods)
 use shardline_index::hub::HubWebhook;
 use shardline_protocol::SecretString;
 
@@ -81,7 +79,7 @@ pub(crate) async fn deliver_webhook_events(
         data: serde_json::json!({}),
     };
     let body = match serde_json::to_vec(&payload) {
-        Ok(b) => b,
+        Ok(b) => bytes::Bytes::from(b),
         Err(e) => {
             tracing::warn!("failed to serialize webhook payload: {e}");
             return;
@@ -112,7 +110,7 @@ pub(crate) async fn deliver_webhook_events(
             deliver_one_webhook(
                 &client,
                 &url,
-                &body,
+                body,
                 secret.as_ref().map(SecretString::expose_secret),
             )
             .await
@@ -210,7 +208,7 @@ pub(crate) fn sanitize_log_url(url: &str) -> String {
 async fn deliver_one_webhook(
     client: &reqwest::Client,
     url: &str,
-    body: &[u8],
+    body: bytes::Bytes,
     secret: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_webhook_url(url)?;
@@ -242,7 +240,7 @@ async fn deliver_one_webhook(
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes())?;
-        mac.update(body);
+        mac.update(&body);
         let signature = hex::encode(mac.finalize().into_bytes());
         request = request.header("X-Hub-Signature-256", format!("sha256={signature}"));
     }
@@ -262,7 +260,7 @@ async fn deliver_one_webhook(
         }
     }
     let response = request
-        .body(body.to_vec())
+        .body(body)
         .send()
         .await
         .map_err(reqwest::Error::without_url)?;
@@ -518,9 +516,14 @@ mod tests {
             "http://[::1]/hook",
             "http://[::ffff:127.0.0.1]/hook",
         ] {
-            let error = deliver_one_webhook(&client, url, b"private payload", None)
-                .await
-                .expect_err("unsafe destination must fail before sending the payload");
+            let error = deliver_one_webhook(
+                &client,
+                url,
+                bytes::Bytes::from_static(b"private payload"),
+                None,
+            )
+            .await
+            .expect_err("unsafe destination must fail before sending the payload");
             assert!(
                 matches!(
                     error.downcast_ref::<HubApiError>(),

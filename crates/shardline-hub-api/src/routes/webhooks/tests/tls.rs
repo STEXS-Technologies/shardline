@@ -25,7 +25,13 @@ async fn webhook_https_validates_ca_hostname_and_preserves_signed_payload() {
             .build()
             .unwrap();
         let url = format!("https://{host}:{}/webhook", receiver.address().port());
-        let result = deliver_one_webhook(&client, &url, body, Some("fixture-secret")).await;
+        let result = deliver_one_webhook(
+            &client,
+            &url,
+            bytes::Bytes::from_static(body),
+            Some("fixture-secret"),
+        )
+        .await;
         if !valid {
             let error =
                 result.expect_err("invalid CA or hostname must fail before sending payload");
