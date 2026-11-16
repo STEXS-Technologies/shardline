@@ -1,4 +1,4 @@
-use shardline_index::{AsyncIndexStore, StoredObjectId};
+use shardline_index::{AsyncIndexStore, StoredObjectId, UploadIntentState};
 use shardline_reliability::{
     OperationIdentity, ReliabilityError, upload_lifecycle_event, upload_operation_identity,
 };
@@ -330,19 +330,12 @@ where
         let Some(current) = current else {
             return Err(CasError::InvalidUploadTransition);
         };
-        if current.state() == shardline_index::UploadIntentState::Failed {
-            return if next == shardline_index::UploadIntentState::Failed {
-                Ok(())
-            } else {
-                Err(CasError::InvalidUploadTransition)
-            };
-        }
-        // Already at or past the target in the committed chain: a concurrent
-        // duplicate caller advanced it, so the boundary is effectively reached.
-        if next != shardline_index::UploadIntentState::Failed
-            && current.state().committed_rank() >= next.committed_rank()
-        {
+        // Apply the same completion rule to this snapshot and a raced update.
+        if upload_boundary_reached(current.state(), next) {
             return Ok(());
+        }
+        if current.state() == UploadIntentState::Failed {
+            return Err(CasError::InvalidUploadTransition);
         }
         let event = upload_lifecycle_event(
             tenant,
@@ -371,22 +364,20 @@ where
             .intent_by_id(intent_id)
             .await
             .map_err(CasError::from_record)?;
-        match after {
-            Some(intent) if intent.state() == shardline_index::UploadIntentState::Failed => {
-                if next == shardline_index::UploadIntentState::Failed {
-                    Ok(())
-                } else {
-                    Err(CasError::InvalidUploadTransition)
-                }
-            }
-            Some(intent)
-                if next != shardline_index::UploadIntentState::Failed
-                    && intent.state().committed_rank() >= next.committed_rank() =>
-            {
-                Ok(())
-            }
-            _ => Err(CasError::InvalidUploadTransition),
+        if after.is_some_and(|intent| upload_boundary_reached(intent.state(), next)) {
+            Ok(())
+        } else {
+            Err(CasError::InvalidUploadTransition)
         }
+    }
+}
+
+/// Successful boundaries advance monotonically; failure only satisfies itself.
+fn upload_boundary_reached(current: UploadIntentState, target: UploadIntentState) -> bool {
+    if current == UploadIntentState::Failed || target == UploadIntentState::Failed {
+        current == target
+    } else {
+        current.committed_rank() >= target.committed_rank()
     }
 }
 
@@ -534,6 +525,29 @@ mod tests {
                 .delete_if_present(key)
                 .await
                 .map_err(|error| LostAcknowledgementError::Inner(error.to_string()))
+        }
+    }
+
+    #[test]
+    fn upload_boundaries_keep_failure_separate_from_success() {
+        use UploadIntentState::{Created, Failed, MetadataCommitted, Stored, Storing, Visible};
+        let states = [Created, Storing, Stored, MetadataCommitted, Visible, Failed];
+        let expected = [
+            [true, false, false, false, false, false],
+            [true, true, false, false, false, false],
+            [true, true, true, false, false, false],
+            [true, true, true, true, false, false],
+            [true, true, true, true, true, false],
+            [false, false, false, false, false, true],
+        ];
+        for (current, row) in states.into_iter().zip(expected) {
+            for (target, reached) in states.into_iter().zip(row) {
+                assert_eq!(
+                    super::upload_boundary_reached(current, target),
+                    reached,
+                    "{current:?} -> {target:?}"
+                );
+            }
         }
     }
 
