@@ -969,19 +969,7 @@ impl ObjectStore for S3ObjectStore {
             &location,
             GetOptions::new().with_range(Some(external_range.clone())),
         ))?;
-        if result.range != external_range {
-            return Err(S3ObjectStoreError::RangeOutOfBounds);
-        }
-        let bytes = self.block_on(async {
-            let mut acc = Vec::new();
-            let mut stream = result.into_stream();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
-                acc.extend_from_slice(&chunk);
-            }
-            Ok::<_, ExternalObjectStoreError>(acc)
-        })?;
-        Ok(bytes)
+        self.block_on_result(read_range_payload(result, external_range))
     }
 
     fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {

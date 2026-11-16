@@ -1,17 +1,22 @@
 //! Provider responses cannot change the byte budget of a requested range.
 use super::*;
-use crate::AsyncObjectStore;
+use crate::{AsyncObjectStore, ObjectStore};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn ranged_get_rejects_short_and_oversized_bodies() {
-    exercise(false).await;
+    exercise(ReadMode::Asynchronous).await;
+}
+
+#[tokio::test]
+async fn synchronous_ranged_get_rejects_short_and_oversized_bodies() {
+    exercise(ReadMode::Synchronous).await;
 }
 
 #[tokio::test]
 async fn suffix_get_uses_one_request_and_rejects_short_and_oversized_bodies() {
-    exercise(true).await;
+    exercise(ReadMode::Suffix).await;
 }
 
 #[tokio::test]
@@ -65,7 +70,14 @@ async fn suffix_distinguishes_missing_forbidden_and_zero_length_reads() {
     }
 }
 
-async fn exercise(suffix: bool) {
+#[derive(Clone, Copy)]
+enum ReadMode {
+    Synchronous,
+    Asynchronous,
+    Suffix,
+}
+
+async fn exercise(mode: ReadMode) {
     for length in [3_usize, 2, 4] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -96,7 +108,7 @@ async fn exercise(suffix: bool) {
             }
             assert!(request.starts_with(b"GET /assets/chunks/range-budget "));
             let headers = String::from_utf8(request).unwrap().to_ascii_lowercase();
-            let (requested, returned) = if suffix {
+            let (requested, returned) = if matches!(mode, ReadMode::Suffix) {
                 ("bytes=-3", "7-9/10")
             } else {
                 ("bytes=0-2", "0-2/10")
@@ -108,16 +120,20 @@ async fn exercise(suffix: bool) {
         });
         let store = synchronous_runtime_fixture(format!("http://{address}"));
         let key = ObjectKey::parse("chunks/range-budget").unwrap();
-        let result = if suffix {
-            AsyncObjectStore::read_suffix(&store, &key, 3)
+        let result = match mode {
+            ReadMode::Synchronous => {
+                ObjectStore::read_range(&store, &key, ByteRange::new(0, 2).unwrap())
+            }
+            ReadMode::Suffix => AsyncObjectStore::read_suffix(&store, &key, 3)
                 .await
                 .map(|found| {
                     let (bytes, total) = found.expect("source exists");
                     assert_eq!(total, 10);
                     bytes
-                })
-        } else {
-            AsyncObjectStore::read_range(&store, &key, ByteRange::new(0, 2).unwrap()).await
+                }),
+            ReadMode::Asynchronous => {
+                AsyncObjectStore::read_range(&store, &key, ByteRange::new(0, 2).unwrap()).await
+            }
         };
         server.join().unwrap().unwrap();
         if length == 3 {
