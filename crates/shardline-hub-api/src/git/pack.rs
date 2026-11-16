@@ -390,26 +390,19 @@ pub(crate) fn apply_delta_with_limit(
 /// Encoding: little-endian, 7 bits of value per byte; MSB is the continuation flag.
 fn parse_delta_varint(data: &[u8], mut pos: usize) -> Result<(usize, usize), PackError> {
     let mut result: usize = 0;
-    let mut shift: u32 = 0;
-    let mut terminated = false;
-    for _ in 0..MAX_DELTA_VARINT_BYTES {
+    for shift in (0..usize::BITS).step_by(7).take(MAX_DELTA_VARINT_BYTES) {
         let byte = data.get(pos).copied().ok_or(PackError::InvalidDelta)?;
         pos = pos.wrapping_add(1);
         let value = usize::from(byte & 0x7f);
-        if shift >= usize::BITS || value > (usize::MAX >> shift) {
+        if value > (usize::MAX >> shift) {
             return Err(PackError::InvalidDelta);
         }
         result |= value << shift;
-        shift = shift.wrapping_add(7);
         if byte & 0x80 == 0 {
-            terminated = true;
-            break;
+            return Ok((result, pos));
         }
     }
-    if !terminated {
-        return Err(PackError::InvalidDelta);
-    }
-    Ok((result, pos))
+    Err(PackError::InvalidDelta)
 }
 
 /// Parses the negative offset from an OFS_DELTA entry in a pack file.
