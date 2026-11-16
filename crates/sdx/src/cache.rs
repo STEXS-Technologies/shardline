@@ -1246,45 +1246,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_file_returns_miss_and_is_deleted() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = ChunkCache::new(dir.path().to_path_buf(), 1024).unwrap();
-        let key = hash('d');
-        put(&cache, &key, b"some cached data").await;
-        assert!(get(&cache, &key).await.is_some());
-
-        // Overwrite the entry with garbage.
-        let path = item_path(&cache.cache_dir, &cache_key(&key, (0, 1))).unwrap();
-        std::fs::write(&path, b"garbage that is not a cache entry").unwrap();
-
-        // get must report a miss and delete the corrupt file.
-        assert!(get(&cache, &key).await.is_none());
-        assert!(!path.exists());
+    async fn corrupt_and_truncated_files_are_deleted_and_untracked() {
+        for (digit, payload, truncate) in [
+            ('d', b"some cached data".as_slice(), false),
+            ('e', b"truncate me later".as_slice(), true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = ChunkCache::new(dir.path(), 1024).unwrap();
+            let key = hash(digit);
+            put(&cache, &key, payload).await;
+            assert!(get(&cache, &key).await.is_some());
+            let path = item_path(&cache.cache_dir, &cache_key(&key, (0, 1))).unwrap();
+            let damaged = if truncate {
+                let mut bytes = std::fs::read(&path).unwrap();
+                bytes.truncate(bytes.len().saturating_sub(10));
+                bytes
+            } else {
+                b"garbage that is not a cache entry".to_vec()
+            };
+            std::fs::write(&path, damaged).unwrap();
+            assert!(get(&cache, &key).await.is_none());
+            assert!(!path.exists());
+            assert_eq!(cache.entry_count().await.unwrap(), 0);
+            assert_eq!(cache.total_bytes().await.unwrap(), 0);
+        }
     }
 
     #[tokio::test]
-    async fn truncated_file_returns_miss_and_is_deleted() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = ChunkCache::new(dir.path().to_path_buf(), 1024).unwrap();
-        let key = hash('e');
-        put(&cache, &key, b"truncate me later").await;
-
-        let path = item_path(&cache.cache_dir, &cache_key(&key, (0, 1))).unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        std::fs::write(&path, &bytes[..bytes.len().saturating_sub(10)]).unwrap();
-
-        assert!(get(&cache, &key).await.is_none());
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn budget_zero_disables_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = ChunkCache::new(dir.path().to_path_buf(), 0).unwrap();
-        let key = hash('f');
-        put(&cache, &key, b"nope").await;
-        assert!(get(&cache, &key).await.is_none());
-        assert_eq!(cache.total_bytes().await.unwrap(), 0);
+    async fn disabled_and_oversized_writes_leave_cache_empty() {
+        for (budget, digit, data) in [(0, 'f', b"nope".to_vec()), (32, '8', vec![0; 1024])] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = ChunkCache::new(dir.path(), budget).unwrap();
+            let key = hash(digit);
+            put(&cache, &key, &data).await;
+            assert!(get(&cache, &key).await.is_none());
+            assert_eq!(cache.entry_count().await.unwrap(), 0);
+            assert_eq!(cache.total_bytes().await.unwrap(), 0);
+        }
     }
 
     #[tokio::test]
@@ -1334,19 +1332,6 @@ mod tests {
         assert!(result.is_err());
         let result = cache.put(&key, (0, 1), &[5], b"data").await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn oversize_entry_is_not_stored() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = ChunkCache::new(dir.path().to_path_buf(), 32).unwrap();
-        let key = hash('8');
-        let data = vec![0u8; 1024];
-        cache
-            .put(&key, (0, 1), &offsets_for(&data), &data)
-            .await
-            .unwrap();
-        assert!(get(&cache, &key).await.is_none());
     }
 
     #[tokio::test]
