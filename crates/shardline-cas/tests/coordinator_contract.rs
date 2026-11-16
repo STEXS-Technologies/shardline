@@ -7,9 +7,9 @@ use shardline_cas::paths::xorb_key;
 use shardline_cas::{CasCoordinator, CasError, CasLimits};
 use shardline_index::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore, LocalIndexStore,
-    MemoryIndexStore, ProviderRepositoryState, QuarantineCandidate, ReconstructionStore,
-    ReconstructionTerm, RetentionHold, StoredObjectId, UploadIntent, UploadIntentState,
-    UploadIntentStore, WebhookDelivery, xet_hash_hex_string,
+    MemoryIndexStore, ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm,
+    RetentionHold, StoredObjectId, UploadIntent, UploadIntentState, UploadIntentStore,
+    WebhookDelivery, xet_hash_hex_string,
 };
 use shardline_protocol::{ByteRange, ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::{
@@ -71,34 +71,51 @@ impl UploadIntentStore for FailingIntentStore {
 
 // ── Contract tests ─────────────────────────────────────────────────
 
-#[test]
-fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
+#[tokio::test]
+async fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
     let index = MemoryIndexStore::default();
     let storage = tempfile::tempdir().unwrap();
     let object_store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
     let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
     let coordinator = CasCoordinator::new(index, object_store, (), limits);
 
-    let hash = ShardlineHash::from_bytes([5; 32]);
-    let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
+    assert_lifecycle_and_reconstruction_contract(&coordinator, 5, [10, 20, 30, 40], (10, 20)).await;
+}
 
-    let body = [10, 20, 30, 40];
+#[tokio::test]
+async fn coordinator_local_filesystem_adapters_support_lifecycle_and_reconstruction_contracts() {
+    let storage = tempfile::tempdir().unwrap();
+    let object_store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+    let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
+
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
+
+    assert_lifecycle_and_reconstruction_contract(&coordinator, 8, [1, 2, 3, 4], (11, 22)).await;
+}
+
+async fn assert_lifecycle_and_reconstruction_contract<I>(
+    coordinator: &CasCoordinator<I, LocalObjectStore, ()>,
+    hash_byte: u8,
+    body: [u8; 4],
+    timeline: (u64, u64),
+) where
+    I: shardline_index::AsyncIndexStore,
+    <I as shardline_index::AsyncIndexStore>::Error: std::fmt::Debug,
+{
+    let index = coordinator.index();
+    let objects = coordinator.object_store();
+    let hash = ShardlineHash::from_bytes([hash_byte; 32]);
+    let key = xorb_key(&format!("{hash_byte:02x}"), "hash");
     let integrity = ObjectIntegrity::new(blake3_hash(&body), 4);
-    let first =
-        coordinator
-            .object_store()
-            .put_if_absent(&key, ObjectBody::from_slice(&body), &integrity);
-    let second =
-        coordinator
-            .object_store()
-            .put_if_absent(&key, ObjectBody::from_slice(&body), &integrity);
+    let first = objects.put_if_absent(&key, ObjectBody::from_slice(&body), &integrity);
+    let second = objects.put_if_absent(&key, ObjectBody::from_slice(&body), &integrity);
 
     assert_eq!(first.unwrap(), PutOutcome::Inserted);
     assert_eq!(second.unwrap(), PutOutcome::AlreadyExists);
-    assert!(coordinator.object_store().contains(&key).unwrap());
+    assert!(objects.contains(&key).unwrap());
     assert_eq!(
-        coordinator
-            .object_store()
+        objects
             .metadata(&key)
             .unwrap()
             .map(|metadata| metadata.length()),
@@ -106,19 +123,12 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
     );
 
     let prefix = ObjectPrefix::parse("xorbs/default/").unwrap();
-    let listed = coordinator.object_store().list_prefix(&prefix).unwrap();
+    let listed = objects.list_prefix(&prefix).unwrap();
     assert_eq!(listed.len(), 1);
-    let first_listed = listed.first();
-    assert!(first_listed.is_some());
-    if let Some(first_listed) = first_listed {
-        assert_eq!(first_listed.key().as_str(), key.as_str());
-    }
+    assert_eq!(listed[0].key(), &key);
 
     let range = ByteRange::new(1, 2).unwrap();
-    assert_eq!(
-        coordinator.object_store().read_range(&key, range).unwrap(),
-        vec![20, 30]
-    );
+    assert_eq!(objects.read_range(&key, range).unwrap(), [body[1], body[2]]);
 
     let file_id = FileId::new(hash);
     let object_id = StoredObjectId::new(hash);
@@ -126,51 +136,38 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
     let term = ReconstructionTerm::new(object_id, chunk_range, 4);
     let reconstruction = FileReconstruction::new(vec![term]);
 
-    coordinator.index().insert_object(&object_id).unwrap();
-    coordinator
-        .index()
+    index
         .insert_reconstruction(&file_id, &reconstruction)
+        .await
         .unwrap();
+    index.insert_object(&object_id).await.unwrap();
 
-    let candidate = QuarantineCandidate::new(key.clone(), 4, 10, 20).unwrap();
-    coordinator
-        .index()
-        .upsert_quarantine_candidate(&candidate)
-        .unwrap();
+    let candidate = QuarantineCandidate::new(key.clone(), 4, timeline.0, timeline.1).unwrap();
+    index.upsert_quarantine_candidate(&candidate).await.unwrap();
 
-    assert!(coordinator.index().contains_object(&object_id).unwrap());
+    assert!(index.contains_object(&object_id).await.unwrap());
     assert_eq!(
-        coordinator.index().reconstruction(&file_id).unwrap(),
+        index.reconstruction(&file_id).await.unwrap(),
         Some(reconstruction)
     );
     assert_eq!(
-        coordinator.index().quarantine_candidate(&key).unwrap(),
+        index.quarantine_candidate(&key).await.unwrap(),
         Some(candidate.clone())
     );
     assert_eq!(
-        coordinator.index().list_quarantine_candidates().unwrap(),
+        index.list_quarantine_candidates().await.unwrap(),
         vec![candidate]
     );
     assert_eq!(
-        coordinator.object_store().delete_if_present(&key).unwrap(),
+        objects.delete_if_present(&key).unwrap(),
         DeleteOutcome::Deleted
     );
     assert_eq!(
-        coordinator.object_store().delete_if_present(&key).unwrap(),
+        objects.delete_if_present(&key).unwrap(),
         DeleteOutcome::NotFound
     );
-    assert!(
-        coordinator
-            .index()
-            .delete_quarantine_candidate(&key)
-            .unwrap()
-    );
-    assert!(
-        !coordinator
-            .index()
-            .delete_quarantine_candidate(&key)
-            .unwrap()
-    );
+    assert!(index.delete_quarantine_candidate(&key).await.unwrap());
+    assert!(!index.delete_quarantine_candidate(&key).await.unwrap());
 
     let hold = RetentionHold::new(
         key.clone(),
@@ -179,79 +176,14 @@ fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
         Some(90),
     )
     .unwrap();
-    coordinator.index().upsert_retention_hold(&hold).unwrap();
+    index.upsert_retention_hold(&hold).await.unwrap();
     assert_eq!(
-        coordinator.index().retention_hold(&key).unwrap(),
+        index.retention_hold(&key).await.unwrap(),
         Some(hold.clone())
     );
-    assert_eq!(
-        coordinator.index().list_retention_holds().unwrap(),
-        vec![hold]
-    );
-    assert!(coordinator.index().delete_retention_hold(&key).unwrap());
-    assert!(!coordinator.index().delete_retention_hold(&key).unwrap());
-}
-
-#[test]
-fn coordinator_local_filesystem_adapters_support_lifecycle_and_reconstruction_contracts() {
-    let storage = tempfile::tempdir().unwrap();
-    let object_store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
-    let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
-
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
-    let coordinator = CasCoordinator::new(index, object_store, (), limits);
-
-    let hash = ShardlineHash::from_bytes([8; 32]);
-    let key = ObjectKey::parse("xorbs/default/08/hash.xorb").unwrap();
-    let body = [1, 2, 3, 4];
-    let integrity = ObjectIntegrity::new(blake3_hash(&body), 4);
-    let inserted =
-        coordinator
-            .object_store()
-            .put_if_absent(&key, ObjectBody::from_slice(&body), &integrity);
-    assert!(matches!(inserted, Ok(PutOutcome::Inserted)));
-    assert!(matches!(
-        coordinator
-            .object_store()
-            .put_if_absent(&key, ObjectBody::from_slice(&body), &integrity),
-        Ok(PutOutcome::AlreadyExists)
-    ));
-
-    let prefix = ObjectPrefix::parse("xorbs/default/").unwrap();
-    let listed = coordinator.object_store().list_prefix(&prefix).unwrap();
-    assert_eq!(listed.len(), 1);
-
-    let file_id = FileId::new(hash);
-    let object_id = StoredObjectId::new(hash);
-    let range = ChunkRange::new(0, 1).unwrap();
-    let reconstruction =
-        FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 4)]);
-    let inserted_reconstruction = coordinator
-        .index()
-        .insert_reconstruction(&file_id, &reconstruction);
-    assert!(inserted_reconstruction.is_ok());
-    let inserted_object = coordinator.index().insert_object(&object_id);
-    assert!(inserted_object.is_ok());
-
-    let candidate = QuarantineCandidate::new(key.clone(), 4, 11, 22).unwrap();
-    assert!(matches!(
-        coordinator.index().upsert_quarantine_candidate(&candidate),
-        Ok(())
-    ));
-    let loaded_reconstruction = coordinator.index().reconstruction(&file_id);
-    assert!(loaded_reconstruction.is_ok());
-    if let Ok(Some(loaded_reconstruction)) = loaded_reconstruction {
-        assert_eq!(loaded_reconstruction, reconstruction);
-    }
-    let loaded_candidate = coordinator.index().quarantine_candidate(&key);
-    assert!(loaded_candidate.is_ok());
-    if let Ok(Some(loaded_candidate)) = loaded_candidate {
-        assert_eq!(loaded_candidate, candidate);
-    }
-    assert!(matches!(
-        coordinator.object_store().delete_if_present(&key),
-        Ok(DeleteOutcome::Deleted)
-    ));
+    assert_eq!(index.list_retention_holds().await.unwrap(), vec![hold]);
+    assert!(index.delete_retention_hold(&key).await.unwrap());
+    assert!(!index.delete_retention_hold(&key).await.unwrap());
 }
 
 // ── LocalObjectStore error paths ─────────────────────────────────────
