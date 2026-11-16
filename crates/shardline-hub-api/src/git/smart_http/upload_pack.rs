@@ -391,30 +391,3 @@ pub(super) fn build_lfs_pointer_blob(oid: &str, size: u64) -> GitObject {
         format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n");
     GitObject::blob(pointer.into_bytes())
 }
-
-/// Generates a `.gitattributes` blob that tells Git to treat LFS files
-/// as LFS-tracked. Returns `None` if no files are LFS-tracked.
-#[cfg(test)]
-pub(super) fn build_gitattributes_blob(files: &[HubFileEntry]) -> Option<GitObject> {
-    let lfs_files: Vec<&HubFileEntry> = files.iter().filter(|f| f.is_lfs).collect();
-    if lfs_files.is_empty() {
-        return None;
-    }
-
-    let mut content = String::new();
-    // Sort for deterministic output.
-    let mut sorted = lfs_files;
-    sorted.sort_by(|a, b| a.path.cmp(&b.path));
-
-    for file in &sorted {
-        use std::fmt::Write;
-        writeln!(
-            &mut content,
-            "{} filter=lfs diff=lfs merge=lfs -text",
-            file.path
-        )
-        .ok();
-    }
-
-    Some(GitObject::blob(content.into_bytes()))
-}

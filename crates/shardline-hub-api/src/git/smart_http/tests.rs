@@ -13,8 +13,7 @@ use super::ref_advertisement::{
 };
 use super::tree_walk::parse_lfs_pointer_field;
 use super::upload_pack::{
-    build_git_tree_objects, build_gitattributes_blob, build_inline_blob, build_lfs_pointer_blob,
-    parse_haves, parse_wants,
+    build_git_tree_objects, build_inline_blob, build_lfs_pointer_blob, parse_haves, parse_wants,
 };
 use super::*;
 use crate::git::pack::{GitObject, ObjectType, apply_delta};
@@ -219,40 +218,6 @@ fn tree_from_nested_files() {
     assert_ne!(tree_sha, [0u8; 20]);
     // src/ should produce a sub-tree
     assert_eq!(sub_trees.len(), 1);
-}
-
-#[test]
-fn gitattributes_blob_generated_for_lfs_files() {
-    let files = vec![
-        HubFileEntry {
-            path: "model.bin".to_owned(),
-            size: 1024,
-            sha: "oid1".to_owned(),
-            is_lfs: true,
-        },
-        HubFileEntry {
-            path: "README.md".to_owned(),
-            size: 100,
-            sha: "oid2".to_owned(),
-            is_lfs: false,
-        },
-    ];
-    let blob = build_gitattributes_blob(&files);
-    assert!(blob.is_some());
-    let content = String::from_utf8(blob.unwrap().data).unwrap();
-    assert!(content.contains("model.bin filter=lfs"));
-    assert!(!content.contains("README.md"));
-}
-
-#[test]
-fn gitattributes_blob_none_when_no_lfs() {
-    let files = vec![HubFileEntry {
-        path: "README.md".to_owned(),
-        size: 100,
-        sha: "oid2".to_owned(),
-        is_lfs: false,
-    }];
-    assert!(build_gitattributes_blob(&files).is_none());
 }
 
 // --- is_valid_refname tests ---
@@ -1303,40 +1268,6 @@ fn walk_git_tree_wrong_object_type_errors() {
     );
 }
 
-// --- build_gitattributes_blob with multiple LFS files ---
-
-#[test]
-fn build_gitattributes_blob_multiple_lfs_files() {
-    let files = vec![
-        HubFileEntry {
-            path: "z.bin".to_owned(),
-            size: 200,
-            sha: "oid_z".to_owned(),
-            is_lfs: true,
-        },
-        HubFileEntry {
-            path: "a.bin".to_owned(),
-            size: 100,
-            sha: "oid_a".to_owned(),
-            is_lfs: true,
-        },
-        HubFileEntry {
-            path: "m.bin".to_owned(),
-            size: 300,
-            sha: "oid_m".to_owned(),
-            is_lfs: true,
-        },
-    ];
-    let blob = build_gitattributes_blob(&files);
-    assert!(blob.is_some());
-    let content = String::from_utf8(blob.unwrap().data).unwrap();
-    // Should be sorted: a.bin, m.bin, z.bin
-    let lines: Vec<&str> = content.lines().collect();
-    assert!(lines[0].starts_with("a.bin"));
-    assert!(lines[1].starts_with("m.bin"));
-    assert!(lines[2].starts_with("z.bin"));
-}
-
 // --- parse_lfs_pointer_field edge cases ---
 
 #[test]
@@ -1558,30 +1489,6 @@ fn authorize_write_with_auth_rejects_missing_token() {
     let headers = axum::http::HeaderMap::new();
     let result = authorize_write(&state, &headers);
     assert!(result.is_err());
-}
-
-// --- build_gitattributes_blob with nested LFS path ---
-
-#[test]
-fn gitattributes_blob_handles_nested_lfs_paths() {
-    let files = vec![
-        HubFileEntry {
-            path: "data/nested/model.bin".to_owned(),
-            size: 1024,
-            sha: "oid_nested".to_owned(),
-            is_lfs: true,
-        },
-        HubFileEntry {
-            path: "data/nested/readme.md".to_owned(),
-            size: 100,
-            sha: "oid_rn".to_owned(),
-            is_lfs: false,
-        },
-    ];
-    let blob = build_gitattributes_blob(&files);
-    assert!(blob.is_some());
-    let content = String::from_utf8(blob.unwrap().data).unwrap();
-    assert!(content.contains("data/nested/model.bin filter=lfs"));
 }
 
 // --- build_git_tree_objects with nested directories ---
