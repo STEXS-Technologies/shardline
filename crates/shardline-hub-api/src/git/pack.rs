@@ -167,25 +167,22 @@ fn write_object(out: &mut Vec<u8>, obj: &GitObject) -> Result<(), PackError> {
 
     if size_remaining > 0 {
         byte |= 0x80; // continuation bit
-        out.push(byte);
+    }
+    out.push(byte);
 
-        while size_remaining > 0 {
-            let mut next_byte = (size_remaining & 0x7f) as u8;
-            size_remaining >>= 7;
-            if size_remaining > 0 {
-                next_byte |= 0x80;
-            }
-            out.push(next_byte);
+    while size_remaining > 0 {
+        let mut next_byte = (size_remaining & 0x7f) as u8;
+        size_remaining >>= 7;
+        if size_remaining > 0 {
+            next_byte |= 0x80;
         }
-    } else {
-        out.push(byte);
+        out.push(next_byte);
     }
 
     // Zlib-compress the object content
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    let mut encoder = ZlibEncoder::new(out, Compression::default());
     encoder.write_all(&obj.data).map_err(PackError::Zlib)?;
-    let compressed = encoder.finish().map_err(PackError::Zlib)?;
-    out.extend_from_slice(&compressed);
+    encoder.finish().map_err(PackError::Zlib)?;
     Ok(())
 }
 
