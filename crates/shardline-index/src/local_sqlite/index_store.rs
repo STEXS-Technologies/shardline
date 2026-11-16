@@ -436,11 +436,7 @@ impl InventoryEntry for QuarantineCandidate {
         connection: &rusqlite::Connection,
         batch: &[Self],
     ) -> Result<(), LocalIndexStoreError> {
-        let keys = batch
-            .iter()
-            .map(|entry| entry.object_key().as_str().to_owned())
-            .collect::<Vec<_>>();
-        let evidence = load_quarantine_evidence_batch(connection, &keys)?;
+        let evidence = load_quarantine_evidence_batch(connection, &Self::operation_ids(batch)?)?;
         for entry in batch {
             let snapshot =
                 super::helpers::quarantine_snapshot(entry, QuarantineLifecycleState::Active)?;
@@ -487,11 +483,7 @@ impl InventoryEntry for RetentionHold {
         connection: &rusqlite::Connection,
         batch: &[Self],
     ) -> Result<(), LocalIndexStoreError> {
-        let keys = batch
-            .iter()
-            .map(|entry| entry.object_key().as_str().to_owned())
-            .collect::<Vec<_>>();
-        let evidence = load_retention_evidence_batch(connection, &keys)?;
+        let evidence = load_retention_evidence_batch(connection, &Self::operation_ids(batch)?)?;
         for entry in batch {
             let snapshot = retention_snapshot(entry, RetentionHoldLifecycleState::Active)?;
             let stored = evidence.get(entry.object_key().as_str()).ok_or(
