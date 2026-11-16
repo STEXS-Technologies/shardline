@@ -163,16 +163,18 @@ pub fn file_hash_from_iter<'a>(chunks: impl Iterator<Item = (MerkleHash, u64)> +
             .chain(std::iter::once(second))
             .chain(level);
         level = Box::new(std::iter::from_fn(move || {
-            let mut group = Vec::with_capacity(MAX_GROUP_SIZE);
+            let mut group = [(MerkleHash::default(), 0); MAX_GROUP_SIZE];
+            let mut len = 0;
             for entry in source.by_ref().take(MAX_GROUP_SIZE) {
                 let is_cut =
-                    group.len() >= 2 && entry.0 % AGGREGATED_HASHES_MEAN_TREE_BRANCHING_FACTOR == 0;
-                group.push(entry);
+                    len >= 2 && entry.0 % AGGREGATED_HASHES_MEAN_TREE_BRANCHING_FACTOR == 0;
+                group[len] = entry;
+                len += 1;
                 if is_cut {
                     break;
                 }
             }
-            (!group.is_empty()).then(|| merged_hash_of_sequence(&group))
+            (len != 0).then(|| merged_hash_of_sequence(&group[..len]))
         }));
     }
 }
