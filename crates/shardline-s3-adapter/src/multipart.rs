@@ -467,11 +467,11 @@ pub fn stored_part_file_path(
 ) -> Result<PathBuf, S3SessionError> {
     validate_part_number(part_number)?;
     let legacy = format!("part-{part_number}");
-    let prefix = format!("{legacy}-");
     if part.file_name != legacy
         && !part
             .file_name
-            .strip_prefix(&prefix)
+            .strip_prefix(&legacy)
+            .and_then(|suffix| suffix.strip_prefix('-'))
             .is_some_and(|digest| is_lower_hex(digest, 64))
     {
         return Err(S3SessionError::Reliability(
@@ -1308,19 +1308,15 @@ async fn load_session_head_with_snapshot(
     let Ok(persisted) = serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) else {
         return load_session_with_snapshot(dir).await;
     };
-    let Some(evidence_head) = persisted.journal_evidence_head else {
-        return load_session_with_snapshot(dir).await;
-    };
-    let Some(snapshot_head) = persisted.journal_snapshot_head else {
-        return load_session_with_snapshot(dir).await;
-    };
-    let Some(journal_bytes) = persisted.journal_bytes else {
-        return load_session_with_snapshot(dir).await;
-    };
-    let Some(merkle_head) = persisted.merkle_head else {
-        return load_session_with_snapshot(dir).await;
-    };
-    let Some(merkle_bytes) = persisted.merkle_bytes else {
+    let PersistedMultipartUploadSession {
+        journal_evidence_head: Some(evidence_head),
+        journal_snapshot_head: Some(snapshot_head),
+        journal_bytes: Some(journal_bytes),
+        merkle_head: Some(merkle_head),
+        merkle_bytes: Some(merkle_bytes),
+        ..
+    } = persisted
+    else {
         return load_session_with_snapshot(dir).await;
     };
     if persisted.merkle_evidence_commit.is_none() || persisted.merkle_snapshot_commit.is_none() {
