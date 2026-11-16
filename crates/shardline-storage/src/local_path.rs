@@ -35,12 +35,8 @@ pub fn ensure_directory_path_components_are_not_symlinked(
     for component in path.components() {
         match component {
             Component::RootDir | Component::CurDir => {}
-            Component::ParentDir => {
+            Component::ParentDir | Component::Normal(_) => {
                 current.push(component.as_os_str());
-                validate_existing_directory_component(&current)?;
-            }
-            Component::Normal(segment) => {
-                current.push(segment);
                 validate_existing_directory_component(&current)?;
             }
             Component::Prefix(_prefix) => return Err(DirectoryPathError::UnsupportedPrefix),
@@ -157,31 +153,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_platform_symlinks_normal_path_returns_itself() {
-        let path = Path::new("/tmp/test/path");
-        let result = resolve_platform_symlinks(path);
-        assert_eq!(result, path);
-    }
-
-    #[test]
-    fn resolve_platform_symlinks_relative_path_returns_itself() {
-        let path = Path::new("relative/path");
-        let result = resolve_platform_symlinks(path);
-        assert_eq!(result, path);
-    }
-
-    #[test]
-    fn resolve_platform_symlinks_root_path_returns_itself() {
-        let path = Path::new("/");
-        let result = resolve_platform_symlinks(path);
-        assert_eq!(result, path);
-    }
-
-    #[test]
-    fn resolve_platform_symlinks_empty_returns_empty() {
-        let path = Path::new("");
-        let result = resolve_platform_symlinks(path);
-        assert_eq!(result, path);
+    fn platform_paths_resolve_only_known_absolute_prefixes() {
+        for (input, macos) in [
+            ("/tmp/test/path", "/private/tmp/test/path"),
+            ("/var/log/system.log", "/private/var/log/system.log"),
+            ("/etc/config", "/private/etc/config"),
+            ("/tmpfile/child", "/tmpfile/child"),
+            ("relative/path", "relative/path"),
+            ("tmp/child", "tmp/child"),
+            ("/", "/"),
+            ("", ""),
+        ] {
+            let expected = if cfg!(target_os = "macos") {
+                macos
+            } else {
+                input
+            };
+            assert_eq!(
+                resolve_platform_symlinks(Path::new(input)),
+                Path::new(expected)
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -225,52 +217,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_path_when_trailing_separator_not_allowed() {
-        // The function accepts Path::new("") which is empty
+    fn allows_empty_directory_path() {
         let result = ensure_directory_path_components_are_not_symlinked(Path::new(""));
         assert!(result.is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn resolve_platform_symlinks_var_path() {
-        // On Linux, this returns the path as-is. On macOS it would resolve to /private/var/...
-        let path = Path::new("/var/log/system.log");
-        let result = resolve_platform_symlinks(path);
-        // On Linux: same path; on macOS: /private/var/log/system.log
-        #[cfg(target_os = "macos")]
-        assert_eq!(result, Path::new("/private/var/log/system.log"));
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(result, path);
-    }
-
-    #[test]
-    fn directory_path_error_debug_format() {
-        use super::DirectoryPathError;
-        let err = DirectoryPathError::UnsupportedPrefix;
-        let debug = format!("{err:?}");
-        assert!(!debug.is_empty());
-
-        let io_err = DirectoryPathError::Io(std::io::Error::other("fail"));
-        let debug2 = format!("{io_err:?}");
-        assert!(!debug2.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_unsupported_prefix_component() {
-        // Windows prefixes like \\?\C:\ are Component::Prefix on Windows.
-        // On Unix, Path::new("//?/C:/") is treated as RootDir + Normal components,
-        // so we test the Prefix variant another way.
-        // On all platforms, we can test the Io error branch:
-        // Create a dangling-symlink-like path by using a non-existent mount point.
-        let result = ensure_directory_path_components_are_not_symlinked(std::path::Path::new(
-            "/proc/self/does-not-exist",
-        ));
-        // This may succeed (if it's a regular missing component) or fail depending
-        // on /proc contents — but it shouldn't panic.
-        // What matters is that we cover the error branch in validate_existing_directory_component.
-        let _ = result;
     }
 
     #[cfg(unix)]
