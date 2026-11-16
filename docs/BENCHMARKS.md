@@ -5361,13 +5361,13 @@ information setting was not measured here.
 
 ### Hub cleanup package checkpoint (2026-11-16)
 
-Frozen source `22b879b8f780a651c9d56897e933369f7eede397` passed the
+Frozen source `b16369aade8dd4d099f1e567d6ccda465848fb96` passed the
 all-features Hub package suite on the shared development host with Rust 1.99.0,
 four build jobs, four test threads, cached dependencies, no compiler wrapper,
-and disabled dev/test debug information. A fresh PostgreSQL 16 Alpine database
-had the current migrations applied. Both native-client and PostgreSQL fixture
-requirements were enabled; all seven PostgreSQL fixture variables pointed at
-that disposable database.
+and disabled dev/test debug information. The current all-features CLI built in
+27.79 seconds and applied migrations to a fresh PostgreSQL 16 Alpine database.
+Both native-client and PostgreSQL fixture requirements were enabled; all seven
+PostgreSQL fixture variables pointed at that disposable database.
 
 ```bash
 # Set DATABASE_URL and each SHARDLINE_*_TEST_DATABASE_URL used by the Hub tests
@@ -5377,20 +5377,10 @@ SHARDLINE_REQUIRE_POSTGRES_TESTS=1 SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 \
   --all-features --no-fail-fast --test-threads 4
 ```
 
-All 829 selected unit and integration tests passed in 45.335 seconds. The four
-normally ignored tests were not selected: the Git suffix fixture, the two remote
-Git CLI fixtures, and the commit-publication fixture. These require Docker and a
-current server executable; the remote Git fixtures also require object storage.
-The disposable PostgreSQL container was removed afterward. Strict all-features
-Hub library/test Clippy checks passed during the preceding source changes.
-
-A follow-up at `c88935ce` (documentation-only changes since the frozen source)
-built the current all-features CLI in 23.31 seconds, then explicitly ran all four
-normally ignored Hub tests. The Git clone/fetch and protocol-v2 matrices used
-stock Git with disposable PostgreSQL/MinIO; the snapshot-token fixture checked
-confinement on PostgreSQL/MinIO; and the publication fixture checked PostgreSQL
-conflicts, deleted branches, concurrent reads, and corrupt journal rejection.
-All four passed in 37.743 seconds, using one test thread:
+All 824 selected unit and integration tests passed in 48.387 seconds. The four
+normally ignored tests were explicitly selected in a separate run against the
+same frozen source and current CLI. The two runs overlapped on the shared host;
+the durations are observations, not isolated performance comparisons.
 
 ```bash
 SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 SHARDLINE_BIN="$CARGO_TARGET_DIR/debug/shardline" \
@@ -5399,9 +5389,18 @@ SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 SHARDLINE_BIN="$CARGO_TARGET_DIR/debug/shardl
   --test-threads 1
 ```
 
+All four passed in 46.963 seconds. The clone/fetch and protocol-v2 matrices used
+stock Git with disposable PostgreSQL/MinIO; the snapshot-token fixture checked
+confinement on PostgreSQL/MinIO; and the publication fixture checked PostgreSQL
+conflicts, deleted branches, concurrent reads, and corrupt journal rejection.
 The fixture containers were cleaned up; the running-container inventory matched
-the pre-run inventory. Across the two runs, all 833 Hub tests passed, including
-the four normally ignored tests. This checkpoint covers the accumulated Hub
-response, streaming-preview, LFS staging, and security-test cleanup together.
-It does not qualify production throughput or resolve the historical hosted SDK
+the pre-run inventory.
+
+Across the two runs, all 828 Hub tests passed, including the four normally
+ignored tests. This updates the earlier `22b879b8`/`c88935ce` checkpoint with
+coverage of the subsequent Git framing, negotiation ownership, direct pack
+compression, and shared receive-pack object indexes. Focused strict all-features
+Hub library/test Clippy checks passed during those source changes. This is local
+functional qualification; it does not qualify production throughput, establish
+a measured speedup from these changes, or resolve the historical hosted SDK
 memory failure.
