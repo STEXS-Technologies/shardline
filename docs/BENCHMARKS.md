@@ -4213,6 +4213,17 @@ This checkpoint does not cover the entire workspace, hosted CI, or the
 PostgreSQL/object-store production topology. Those qualification gaps remain
 open; the local 256 MiB pass is not a replacement for the hosted RSS gate.
 
+A follow-up at `201699a1bf444b06eaa825d8a2c43024767772be` held SDK code
+fixed and repeated the same E2E command after the cache-write, upload-buffer,
+credential-resolution and session cleanup. All 34 tests passed in 119.477 s;
+the ignored 1 GiB case remained skipped. The 256 MiB child reported baseline
+RSS 25,608 KiB, peak VmHWM 79,164 KiB and additional RSS 53,556 KiB against
+the unchanged 65,536 KiB threshold (1,083 ms transfer; 21.945 s parent test).
+The same local build settings above were used. The SDK's 344 unit/mock tests
+and SDK-only strict Clippy also passed; the other six crate suites were not
+repeated for this follow-up. These single shared-host samples do not measure
+the individual changes' memory savings or resolve hosted qualification.
+
 ## Shared protocol chunk reuse qualification
 
 The shared ingestion path now consults the existing scoped native chunk index,
