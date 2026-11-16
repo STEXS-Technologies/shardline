@@ -562,12 +562,8 @@ fn read_entry_bounded(
     };
     let mut fixed_header = [0u8; HEADER_LEN];
     file.read_exact(&mut fixed_header)?;
-    let header = parse_header(&fixed_header).ok_or_else(|| {
-        SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache entry header is corrupt",
-        ))
-    })?;
+    let header = parse_header(&fixed_header)
+        .ok_or_else(|| invalid_entry("cache entry header is corrupt"))?;
     // Read the fixed header before allocating payload or offset storage. A
     // sparse file or forged data_len must not turn a cache lookup into an
     // allocation larger than the active download's reservation.
@@ -580,36 +576,22 @@ fn read_entry_bounded(
                 .saturating_sub(header.chunk_range.0)
                 .saturating_add(1)
     {
-        return Err(SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache entry exceeds decoded bounds",
-        )));
+        return Err(invalid_entry("cache entry exceeds decoded bounds"));
     }
     let offsets_len = header
         .num_offsets
         .checked_mul(4)
         .and_then(|len| usize::try_from(len).ok())
-        .ok_or_else(|| {
-            SdxError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "cache entry offsets length overflow",
-            ))
-        })?;
-    let total = HEADER_LEN
+        .ok_or_else(|| invalid_entry("cache entry offsets length overflow"))?;
+    let offsets_end = HEADER_LEN
         .checked_add(offsets_len)
-        .and_then(|len| u64::try_from(len).ok())
+        .ok_or_else(|| invalid_entry("cache offsets end overflow"))?;
+    let total = u64::try_from(offsets_end)
+        .ok()
         .and_then(|len| len.checked_add(header.data_len))
-        .ok_or_else(|| {
-            SdxError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "cache entry length overflow",
-            ))
-        })?;
+        .ok_or_else(|| invalid_entry("cache entry length overflow"))?;
     if file.metadata()?.len() != total {
-        return Err(SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache entry length does not match header",
-        )));
+        return Err(invalid_entry("cache entry length does not match header"));
     }
     let length =
         usize::try_from(total).map_err(|error| SdxError::Io(std::io::Error::other(error)))?;
@@ -620,68 +602,48 @@ fn read_entry_bounded(
     file.take(total.saturating_sub(HEADER_LEN as u64).saturating_add(1))
         .read_to_end(&mut bytes)?;
     if bytes.len() != length {
-        return Err(SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache entry changed during read",
-        )));
+        return Err(invalid_entry("cache entry changed during read"));
     }
     // The CRC covers the payload that starts right after the fixed header:
     // the offsets table followed by the data.
-    let payload = bytes.get(HEADER_LEN..).ok_or_else(|| {
-        SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache payload out of bounds",
-        ))
-    })?;
+    let payload = bytes
+        .get(HEADER_LEN..)
+        .ok_or_else(|| invalid_entry("cache payload out of bounds"))?;
     if crc32fast::hash(payload) != header.crc {
-        return Err(SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache entry checksum mismatch",
-        )));
+        return Err(invalid_entry("cache entry checksum mismatch"));
     }
-    let offsets_end = HEADER_LEN.checked_add(offsets_len).ok_or_else(|| {
-        SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache offsets end overflow",
-        ))
-    })?;
-    let offsets_bytes = bytes.get(HEADER_LEN..offsets_end).ok_or_else(|| {
-        SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache offsets out of bounds",
-        ))
-    })?;
+
+    let offsets_bytes = bytes
+        .get(HEADER_LEN..offsets_end)
+        .ok_or_else(|| invalid_entry("cache offsets out of bounds"))?;
     let chunk_offsets: Vec<u32> = offsets_bytes
         .as_chunks::<4>()
         .0
         .iter()
         .map(|window| u32::from_le_bytes(*window))
         .collect();
-    let data_start = offsets_end;
     // The checked total above already includes the header, offsets, and data.
-    let data_end = length;
-    let data = bytes.get(data_start..data_end).ok_or_else(|| {
-        SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache data out of bounds",
-        ))
-    })?;
+    let data = bytes
+        .get(offsets_end..length)
+        .ok_or_else(|| invalid_entry("cache data out of bounds"))?;
     validate_offsets(header.chunk_range, &chunk_offsets, data)?;
     Ok(Some(CachedXorbRange {
         chunk_range: header.chunk_range,
         chunk_offsets,
-        data: Bytes::from(bytes).slice(data_start..data_end),
+        data: Bytes::from(bytes).slice(offsets_end..length),
     }))
+}
+
+fn invalid_entry(message: &'static str) -> SdxError {
+    SdxError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
 }
 
 /// Parses and structurally validates the fixed entry header.
 fn parse_header(bytes: &[u8]) -> Option<EntryHeader> {
-    if bytes.get(..MAGIC.len())? != MAGIC.as_slice() {
-        return None;
-    }
-    let mut cursor = Cursor::new(bytes);
-    let mut magic = [0u8; 8];
-    cursor.read_exact(&mut magic).ok()?;
+    let mut cursor = Cursor::new(bytes.strip_prefix(MAGIC.as_slice())?);
     let mut buf = [0u8; 8];
     cursor.read_exact(&mut buf).ok()?;
     let chunk_start = u64::from_le_bytes(buf);
