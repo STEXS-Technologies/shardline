@@ -182,7 +182,7 @@ pub(super) fn fetch_response(
             }
         }
         body.extend_from_slice(pktline::encode_line("packfile\n")?.as_bytes());
-        body.extend_from_slice(&pktline::sideband_data(pack));
+        pktline::append_sideband_data(&mut body, pack);
         body.extend_from_slice(pktline::FLUSH.as_bytes());
     } else {
         body.extend_from_slice(pktline::encode_line("acknowledgments\n")?.as_bytes());

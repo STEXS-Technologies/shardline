@@ -164,7 +164,7 @@ pub async fn upload_pack(
         }
         response_body.extend_from_slice(pktline::encode_line("NAK\n")?.as_bytes());
         if sideband {
-            response_body.extend_from_slice(&pktline::sideband_data(&pack_data));
+            pktline::append_sideband_data(&mut response_body, &pack_data);
             response_body.extend_from_slice(FLUSH.as_bytes());
         } else {
             response_body.extend_from_slice(&pack_data);

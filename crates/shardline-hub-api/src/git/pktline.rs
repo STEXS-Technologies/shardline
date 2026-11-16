@@ -80,6 +80,12 @@ pub const RESPONSE_END: &str = "0002";
 #[must_use]
 pub fn sideband_data(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
+    append_sideband_data(&mut out, data);
+    out
+}
+
+/// Appends channel-1 packets without allocating a separate framed response.
+pub(crate) fn append_sideband_data(out: &mut Vec<u8>, data: &[u8]) {
     // The channel byte counts toward the 65516-byte packet payload ceiling.
     for chunk in data.chunks(MAX_PAYLOAD - 1) {
         let len = chunk.len().wrapping_add(5); // 4-byte length prefix + 1-byte channel
@@ -87,7 +93,6 @@ pub fn sideband_data(data: &[u8]) -> Vec<u8> {
         out.push(1); // channel 1 = pack data
         out.extend_from_slice(chunk);
     }
-    out
 }
 
 /// Wraps a message in sideband channel 2 (progress).
@@ -193,6 +198,9 @@ mod tests {
             payload in prop::collection::vec(any::<u8>(), 0..100_000),
         ) {
             let encoded = sideband_data(&payload);
+            let mut appended = b"existing response prefix".to_vec();
+            append_sideband_data(&mut appended, &payload);
+            prop_assert_eq!(appended.strip_prefix(b"existing response prefix"), Some(encoded.as_slice()));
             let (decoded, messages) = decode_sideband(&encoded);
             prop_assert_eq!(decoded, payload);
             prop_assert!(messages.is_empty());
