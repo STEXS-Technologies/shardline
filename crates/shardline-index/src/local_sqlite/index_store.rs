@@ -315,15 +315,13 @@ impl<Entry: InventoryEntry> InventoryScan<Entry> {
             let mut rows =
                 statement.query(rusqlite::params_from_iter(self.after.iter().flatten()))?;
             let mut batch = Vec::with_capacity(INVENTORY_BATCH_SIZE);
-            let mut last_key = None;
+            let mut last_key = Vec::with_capacity(Entry::KEYS.len());
             while let Some(row) = rows.next()? {
                 batch.push(Entry::from_row(row)?);
-                last_key = Some(
-                    Entry::KEYS
-                        .iter()
-                        .map(|key| row.get::<_, String>(*key))
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
+                last_key.clear();
+                for key in Entry::KEYS {
+                    last_key.push(row.get::<_, String>(*key)?);
+                }
             }
             (batch, last_key)
         };
@@ -334,8 +332,8 @@ impl<Entry: InventoryEntry> InventoryScan<Entry> {
             4 => Entry::verify_batch(self.connection.get()?, &batch)?,
             _ => {}
         }
-        if let Some(key) = last_key {
-            self.after = Some(key);
+        if !batch.is_empty() {
+            self.after = Some(last_key);
         }
         Ok(batch)
     }
