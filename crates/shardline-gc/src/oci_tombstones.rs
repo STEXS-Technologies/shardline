@@ -111,7 +111,7 @@ where
         scanned: u64::try_from(tombstones.len())?,
         ..OciTombstoneGcReport::default()
     };
-    if !options.sweep {
+    if !options.sweep || tombstones.is_empty() {
         return Ok(report);
     }
 
@@ -296,6 +296,49 @@ mod tests {
             let eligible_later = delete_after.is_some_and(|deadline| deadline <= later_now);
             prop_assert!(!eligible_first || eligible_later);
         }
+    }
+
+    #[tokio::test]
+    async fn empty_tombstone_inventory_skips_records_but_pending_reclamation_validates_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let object_store = ServerObjectStore::local(root.join("chunks")).unwrap();
+        let index_store = LocalIndexStore::new(root.clone()).unwrap();
+        let blocked_root = root.join("unavailable-records");
+        std::fs::write(&blocked_root, b"not a directory").unwrap();
+        let record_store = LocalRecordStore::open(blocked_root);
+        assert!(latest_records_by_file_id(&record_store).await.is_err());
+
+        let report =
+            reclaim_oci_tombstones(&record_store, &index_store, &object_store, sweep_now())
+                .await
+                .unwrap();
+        assert_eq!(report, OciTombstoneGcReport::default());
+        // The shortcut skips only OCI's extra scan; ordinary GC still validates records.
+        assert!(
+            run_gc_with_oci_tombstones(
+                &record_store,
+                &index_store,
+                &object_store,
+                &[],
+                sweep_now()
+            )
+            .await
+            .is_err()
+        );
+
+        let digest = "a".repeat(64);
+        let key = oci_blob_key_from_namespace("team/assets", &digest, "global").unwrap();
+        put(&object_store, &key, b"retained blob");
+        let object = tombstone(OciObjectKind::Blob, &digest);
+        index_store.delete_oci_object(&object).await.unwrap();
+        assert!(
+            reclaim_oci_tombstones(&record_store, &index_store, &object_store, sweep_now())
+                .await
+                .is_err()
+        );
+        assert!(object_store.contains(&key).unwrap());
+        assert!(index_store.oci_object_is_deleted(&object).await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]
