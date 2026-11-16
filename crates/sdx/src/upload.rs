@@ -484,15 +484,11 @@ struct ChunkLocation {
 
 /// One file's chunk in file order.
 #[derive(Debug, Clone, Copy)]
-enum Placement {
-    /// Chunk staged into a new xorb (not yet cut).
-    New { hash: MerkleHash, len: u64 },
-    /// Chunk already stored; references an existing xorb.
-    Known {
-        hash: MerkleHash,
-        len: u64,
-        location: ChunkLocation,
-    },
+struct Placement {
+    hash: MerkleHash,
+    len: u64,
+    /// Existing location for reused content; new chunks resolve after packing.
+    location: Option<ChunkLocation>,
 }
 
 /// Per-file ingest pipeline: chunker + dedup + pending-xorb buffer.
@@ -500,7 +496,7 @@ struct FileUploadPipeline {
     session: UploadSession,
     chunker: Chunker,
     placements: Vec<Placement>,
-    /// Physical locations for `Placement::New` chunks, in placement order.
+    /// Physical locations for new chunks, in placement order.
     new_chunk_locations: Vec<ChunkLocation>,
     /// Pending new chunks not yet cut into a xorb, with their file offsets.
     pending: Vec<(Bytes, u64)>,
@@ -561,10 +557,10 @@ impl FileUploadPipeline {
             (session_hit, eligible)
         };
         if let Some(location) = session_hit {
-            self.placements.push(Placement::Known {
+            self.placements.push(Placement {
                 hash,
                 len,
-                location,
+                location: Some(location),
             });
             self.total_bytes = self.total_bytes.saturating_add(len);
             return Ok(());
@@ -610,10 +606,10 @@ impl FileUploadPipeline {
                     });
                     state.global_chunk_index = state.global_chunk_index.saturating_add(1);
                 }
-                self.placements.push(Placement::Known {
+                self.placements.push(Placement {
                     hash,
                     len,
-                    location,
+                    location: Some(location),
                 });
                 self.total_bytes = self.total_bytes.saturating_add(len);
                 return Ok(());
@@ -628,7 +624,11 @@ impl FileUploadPipeline {
         let file_offset = self.total_bytes;
         self.pending.push((chunk.data, file_offset));
         self.pending_bytes = self.pending_bytes.saturating_add(chunk_len);
-        self.placements.push(Placement::New { hash, len });
+        self.placements.push(Placement {
+            hash,
+            len,
+            location: None,
+        });
         self.total_bytes = self.total_bytes.saturating_add(len);
         {
             let mut state = self.session.inner.state.lock().await;
@@ -773,15 +773,14 @@ impl FileUploadPipeline {
         let mut segments: Vec<ShardSegment> = Vec::new();
         let mut new_locations = self.new_chunk_locations.iter();
         for placement in &self.placements {
-            let (location, len) = match placement {
-                Placement::Known { location, len, .. } => (location, *len),
-                Placement::New { len, .. } => (
-                    new_locations.next().ok_or_else(|| {
-                        SdxError::UploadSession("new chunk has no Xorb location".to_owned())
-                    })?,
-                    *len,
-                ),
-            };
+            let location = placement
+                .location
+                .as_ref()
+                .or_else(|| new_locations.next())
+                .ok_or_else(|| {
+                    SdxError::UploadSession("new chunk has no Xorb location".to_owned())
+                })?;
+            let len = placement.len;
             let xorb_hash = location.xorb_hash;
             let chunk_index = u64::from(location.chunk_index);
             if let Some(last) = segments.last_mut()
@@ -801,14 +800,9 @@ impl FileUploadPipeline {
         }
 
         let native_file_hash = shardline_xet_core::merklehash::file_hash_from_iter(
-            self.placements.iter().map(|placement| {
-                let (hash, len) = match placement {
-                    Placement::New { hash, len } | Placement::Known { hash, len, .. } => {
-                        (*hash, *len)
-                    }
-                };
-                (<[u8; 32]>::from(hash).into(), len)
-            }),
+            self.placements
+                .iter()
+                .map(|placement| (<[u8; 32]>::from(placement.hash).into(), placement.len)),
         );
         let file_hash = MerkleHash::from(<[u8; 32]>::from(native_file_hash));
         let file_entry = ShardFileEntry {
@@ -1478,9 +1472,10 @@ mod tests {
         let (_server, client) = mock_client().await;
         let session = client.upload_session().unwrap();
         let mut pipeline = super::FileUploadPipeline::new(session.clone());
-        pipeline.placements.push(super::Placement::New {
+        pipeline.placements.push(super::Placement {
             hash: compute_chunk_hash(b"unplaced"),
             len: 8,
+            location: None,
         });
         let result = pipeline.finish().await;
         assert!(
@@ -1512,17 +1507,17 @@ mod tests {
                     xorb_hash: compute_chunk_hash(b"stored xorb"),
                     chunk_index: index as u32,
                 };
-                let placement = if index % 2 == 0 {
+                let existing_location = if index % 2 == 0 {
                     pipeline.new_chunk_locations.push(location);
-                    super::Placement::New { hash, len }
+                    None
                 } else {
-                    super::Placement::Known {
-                        hash,
-                        len,
-                        location,
-                    }
+                    Some(location)
                 };
-                pipeline.placements.push(placement);
+                pipeline.placements.push(super::Placement {
+                    hash,
+                    len,
+                    location: existing_location,
+                });
                 pipeline.total_bytes += len;
             }
             let info = pipeline.finish().await.unwrap();
