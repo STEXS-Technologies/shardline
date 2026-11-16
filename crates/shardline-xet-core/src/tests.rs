@@ -1,4 +1,4 @@
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 
 use proptest::prelude::*;
 
@@ -6,7 +6,7 @@ use crate::error::{CoreError, Validate};
 use crate::merklehash::{
     DataHash, HMACKey, MerkleHash,
     aggregated_hashes::xorb_hash,
-    compute_data_hash, compute_internal_node_hash,
+    compute_data_hash,
     data_hash::{DataHashBytesParseError, DataHashHexParseError},
 };
 use crate::metadata_shard::{
@@ -40,185 +40,6 @@ use crate::xorb_object::{
 // ============================================================================
 // DataHash / MerkleHash tests
 // ============================================================================
-
-#[test]
-fn data_hash_default_is_all_zeros() {
-    let h = DataHash::default();
-    assert_eq!(*h, [0u64; 4]);
-}
-
-#[test]
-fn data_hash_from_u64_array_roundtrip() {
-    let arr = [1u64, 2, 3, 4];
-    let h = DataHash::from(arr);
-    assert_eq!(*h, arr);
-}
-
-#[test]
-fn data_hash_from_u8_array_roundtrip() {
-    let arr = [1u8; 32];
-    let h = DataHash::from(arr);
-    let back: [u8; 32] = h.into();
-    assert_eq!(arr, back);
-}
-
-#[test]
-fn data_hash_from_u8_ref_roundtrip() {
-    let arr = [0xABu8; 32];
-    let h = DataHash::from(&arr);
-    let back: [u8; 32] = h.into();
-    assert_eq!(arr, back);
-}
-
-#[test]
-fn data_hash_from_slice_valid() {
-    let bytes = vec![42u8; 32];
-    let h = DataHash::from_slice(&bytes).unwrap();
-    let back: [u8; 32] = h.into();
-    assert_eq!(bytes.as_slice(), &back);
-}
-
-#[test]
-fn data_hash_from_slice_wrong_length() {
-    let bytes = vec![0u8; 31];
-    assert!(DataHash::from_slice(&bytes).is_err());
-
-    let bytes = vec![0u8; 33];
-    assert!(DataHash::from_slice(&bytes).is_err());
-}
-
-#[test]
-fn data_hash_try_from_slice() {
-    let bytes = [7u8; 32];
-    let h = DataHash::try_from(bytes.as_slice()).unwrap();
-    let back: [u8; 32] = h.into();
-    assert_eq!(bytes, back);
-
-    let short = [0u8; 16];
-    assert!(DataHash::try_from(short.as_slice()).is_err());
-}
-
-#[test]
-fn data_hash_hex_roundtrip() {
-    let arr = [0xDEADBEEFu64, 0xCAFEBABE, 0x12345678, 0x9ABCDEF0];
-    let h = DataHash::from(arr);
-    let hex_str = h.hex();
-    assert_eq!(hex_str.len(), 64);
-    let h2 = DataHash::from_hex(&hex_str).unwrap();
-    assert_eq!(h, h2);
-}
-
-#[test]
-fn data_hash_from_hex_invalid_length() {
-    assert!(DataHash::from_hex("abc").is_err());
-    assert!(DataHash::from_hex(&"a".repeat(63)).is_err());
-    assert!(DataHash::from_hex(&"a".repeat(65)).is_err());
-}
-
-#[test]
-fn data_hash_from_hex_invalid_chars() {
-    assert!(DataHash::from_hex(&"g".repeat(64)).is_err());
-    assert!(DataHash::from_hex(&"z".repeat(64)).is_err());
-}
-
-#[test]
-fn data_hash_display_and_lower_hex() {
-    let h = DataHash::from([1u64, 2, 3, 4]);
-    let disp = format!("{h}");
-    let hex = format!("{h:x}");
-    assert_eq!(disp, hex);
-    assert_eq!(disp.len(), 64);
-}
-
-#[test]
-fn data_hash_debug() {
-    let h = DataHash::from([0u64; 4]);
-    let dbg = format!("{h:?}");
-    assert_eq!(
-        dbg,
-        "0000000000000000000000000000000000000000000000000000000000000000"
-    );
-}
-
-#[test]
-fn data_hash_ord() {
-    let a = DataHash::from([1u64, 0, 0, 0]);
-    let b = DataHash::from([2u64, 0, 0, 0]);
-    assert!(a < b);
-    assert!(b > a);
-    assert!(a <= a);
-    assert!(a >= a);
-}
-
-#[test]
-fn data_hash_eq() {
-    let a = DataHash::from([1, 2, 3, 4]);
-    let b = DataHash::from([1, 2, 3, 4]);
-    let c = DataHash::from([1, 2, 3, 5]);
-    assert_eq!(a, b);
-    assert_ne!(a, c);
-}
-
-#[test]
-fn data_hash_rem() {
-    let h = DataHash::from([0, 0, 0, 10]);
-    assert_eq!(h % 3, 1);
-    assert_eq!(h % 5, 0);
-    assert_eq!(h % 10, 0);
-}
-
-#[test]
-fn data_hash_as_ref_and_into_vec() {
-    let h = DataHash::from([1, 2, 3, 4]);
-    let bytes_ref: [u8; 32] = h.into();
-    assert_eq!(bytes_ref.len(), 32);
-    let vec: Vec<u8> = h.into();
-    assert_eq!(vec.len(), 32);
-}
-
-#[test]
-fn data_hash_as_ref_data_hash() {
-    let h = DataHash::from([1, 2, 3, 4]);
-    let r: &DataHash = h.as_ref();
-    assert_eq!(*r, h);
-}
-
-#[test]
-fn compute_data_hash_consistent() {
-    let data = b"hello world";
-    let h1 = compute_data_hash(data);
-    let h2 = compute_data_hash(data);
-    assert_eq!(h1, h2);
-}
-
-#[test]
-fn compute_data_hash_different_inputs() {
-    let h1 = compute_data_hash(b"hello");
-    let h2 = compute_data_hash(b"world");
-    assert_ne!(h1, h2);
-}
-
-#[test]
-fn compute_data_hash_empty() {
-    let h = compute_data_hash(b"");
-    assert_ne!(h, MerkleHash::default());
-}
-
-#[test]
-fn compute_internal_node_hash_consistent() {
-    let data = b"test internal node";
-    let h1 = compute_internal_node_hash(data);
-    let h2 = compute_internal_node_hash(data);
-    assert_eq!(h1, h2);
-}
-
-#[test]
-fn compute_internal_node_hash_different_from_data_hash() {
-    let data = b"same data";
-    let dh = compute_data_hash(data);
-    let ih = compute_internal_node_hash(data);
-    assert_ne!(dh, ih);
-}
 
 #[test]
 fn merkle_hash_type_is_data_hash() {
@@ -1269,48 +1090,6 @@ fn data_hash_deref_mut() {
 }
 
 // ============================================================================
-// HashedWrite tests
-// ============================================================================
-
-#[test]
-fn hashed_write_computes_hash() {
-    use crate::merklehash::HashedWrite;
-    let data = b"hashed write test data";
-    let mut writer = HashedWrite::new(Vec::new());
-    writer.write_all(data).unwrap();
-    let hash = writer.hash();
-    let expected = compute_data_hash(data);
-    assert_eq!(hash, expected);
-}
-
-#[test]
-fn hashed_write_into_inner() {
-    use crate::merklehash::HashedWrite;
-    let data = b"data for into_inner";
-    let mut writer = HashedWrite::new(Vec::new());
-    writer.write_all(data).unwrap();
-    let inner = writer.into_inner();
-    assert_eq!(inner, data);
-}
-
-#[test]
-fn hashed_write_empty_input() {
-    use crate::merklehash::HashedWrite;
-    let writer = HashedWrite::new(Vec::new());
-    let hash = writer.hash();
-    let expected = compute_data_hash(b"");
-    assert_eq!(hash, expected);
-}
-
-#[test]
-fn hashed_write_flush() {
-    use crate::merklehash::HashedWrite;
-    let mut writer = HashedWrite::new(Vec::new());
-    writer.write_all(b"flush test").unwrap();
-    writer.flush().unwrap();
-}
-
-// ============================================================================
 // XorbObject serialize_given_info with various sizes
 // ============================================================================
 
@@ -2034,22 +1813,6 @@ fn mdb_file_info_view_from_data_too_small_with_flags() {
     let header = FileDataSequenceHeader::new(MerkleHash::default(), 1u64, true, true);
     let result = MDBFileInfoView::from_data_and_header(header, bytes::Bytes::from(vec![0u8; 10]));
     assert!(result.is_err());
-}
-
-// ============================================================================
-// HashedWrite — byte-level write and flush coverage
-// ============================================================================
-
-#[test]
-fn hashed_write_multiple_writes() {
-    use crate::merklehash::HashedWrite;
-    let mut writer = HashedWrite::new(Vec::new());
-    writer.write_all(b"part1").unwrap();
-    writer.write_all(b"part2").unwrap();
-    writer.write_all(b"part3").unwrap();
-    let hash = writer.hash();
-    let expected = compute_data_hash(b"part1part2part3");
-    assert_eq!(hash, expected);
 }
 
 // ============================================================================

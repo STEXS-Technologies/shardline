@@ -311,6 +311,7 @@ mod tests {
     #[test]
     fn byte_conversions_preserve_little_endian_words() {
         for bytes in [
+            [1; 32],
             [0xAB; 32],
             [0xCD; 32],
             [42; 32],
@@ -354,6 +355,7 @@ mod tests {
 
     #[test]
     fn from_hex_invalid_chars() {
+        assert!(DataHash::from_hex(&"g".repeat(64)).is_err());
         assert!(DataHash::from_hex(&"z".repeat(64)).is_err());
         assert!(DataHash::from_hex(&"xyz".repeat(22)[..64]).is_err());
     }
@@ -403,6 +405,10 @@ mod tests {
         let b = DataHash::from([2u64, 0, 0, 0]);
         assert!(a < b);
         assert!(b > a);
+        assert!(a <= a);
+        assert!(a >= a);
+        assert_eq!(DataHash::from([1, 2, 3, 4]), DataHash::from([1, 2, 3, 4]));
+        assert_ne!(DataHash::from([1, 2, 3, 4]), DataHash::from([1, 2, 3, 5]));
         assert_eq!(a, a);
         assert_ne!(a, b);
     }
@@ -498,7 +504,10 @@ mod tests {
         w.write_all(b"part1").unwrap();
         w.write_all(b"part2").unwrap();
         assert_eq!(w.hash(), compute_data_hash(b"part1part2"));
+        w.write_all(b"part3").unwrap();
+        assert_eq!(w.hash(), compute_data_hash(b"part1part2part3"));
         w.flush().unwrap();
+        assert_eq!(w.into_inner(), b"part1part2part3");
     }
 
     #[test]
