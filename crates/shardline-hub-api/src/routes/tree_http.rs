@@ -114,14 +114,9 @@ async fn tree_response(
     if listing.entries.is_empty() {
         return Ok(Json(Vec::<ExpandedTreeEntry>::new()).into_response());
     }
-    let paths: Vec<_> = listing
-        .entries
-        .iter()
-        .map(|entry| entry.path.clone())
-        .collect();
     let mut headers = HeaderMap::new();
     if listing.has_more
-        && let Some(cursor) = paths.last()
+        && let Some(last_entry) = listing.entries.last()
     {
         let public =
             crate::git::smart_http::public_commit_id(&state, &repo_id, &listing.revision, &auth)
@@ -146,7 +141,7 @@ async fn tree_response(
             .append_pair("expand", &expand.to_string())
             .append_pair("recursive", &recursive.to_string())
             .append_pair("limit", &limit.to_string())
-            .append_pair("cursor", cursor);
+            .append_pair("cursor", &last_entry.path);
         headers.insert(
             LINK,
             HeaderValue::from_str(&format!("<{url}>; rel=\"next\"")).map_err(|_error| {
@@ -157,6 +152,11 @@ async fn tree_response(
     if !expand {
         return Ok((headers, Json(listing.entries)).into_response());
     }
+    let paths: Vec<_> = listing
+        .entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
     let files = state
         .store
         .get_files(&listing.revision)
