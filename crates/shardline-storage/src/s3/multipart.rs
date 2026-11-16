@@ -26,7 +26,14 @@ impl S3ObjectStore {
     ) -> Result<(S3MultipartUploadWriter, ObjectKey), S3ObjectStoreError> {
         let seed = ObjectKey::parse("staging/resumable/stream")
             .map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
-        let temp_key = temp_key_for(&seed)?;
+        self.begin_temporary_upload(&seed).await
+    }
+
+    async fn begin_temporary_upload(
+        &self,
+        seed: &ObjectKey,
+    ) -> Result<(S3MultipartUploadWriter, ObjectKey), S3ObjectStoreError> {
+        let temp_key = temp_key_for(seed)?;
         let location = self.location_for_key(&temp_key)?;
         let upload = self
             .inner
@@ -88,19 +95,8 @@ impl S3ObjectStore {
             return Ok(BeginMultipartUploadResult::AlreadyExists);
         }
 
-        let temp_key = temp_key_for(key)?;
-        let location = self.location_for_key(&temp_key)?;
-        let upload = self
-            .inner
-            .put_multipart(&location)
-            .await
-            .map_err(S3ObjectStoreError::External)?;
-        Ok(BeginMultipartUploadResult::Upload(
-            S3MultipartUploadWriter {
-                writer: WriteMultipart::new_with_chunk_size(upload, STREAM_UPLOAD_CHUNK_BYTES),
-            },
-            temp_key,
-        ))
+        let (writer, temp_key) = self.begin_temporary_upload(key).await?;
+        Ok(BeginMultipartUploadResult::Upload(writer, temp_key))
     }
 
     /// Finishes a content-addressed upload and atomically promotes the temp content
