@@ -99,14 +99,14 @@ pub(crate) async fn dataset_parquet(
         .get_files(&commit_sha)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     let parquet_files: Vec<DatasetParquetFile> = files
-        .iter()
+        .into_iter()
         .filter(|f| {
             f.path.ends_with(".parquet") || f.path.ends_with(".csv") || f.path.ends_with(".jsonl")
         })
         .map(|f| DatasetParquetFile {
-            path: f.path.clone(),
+            path: f.path,
             size: f.size,
-            sha: f.sha.clone(),
+            sha: f.sha,
         })
         .collect();
     Ok(Json(DatasetParquetResponse {
@@ -310,9 +310,10 @@ pub(crate) async fn dataset_query(
             selected_columns.push(order.column.clone());
         }
     }
-    let predicates = request.predicates.clone();
-    let aggregates = request.aggregates.clone();
-    let order_by = request.order_by.clone();
+    let has_aggregates = !request.aggregates.is_empty();
+    let predicates = request.predicates;
+    let aggregates = request.aggregates;
+    let order_by = request.order_by;
     let offset = request.offset as usize;
     let limit = request.limit as usize;
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -358,13 +359,13 @@ pub(crate) async fn dataset_query(
             return Err(failure.error);
         }
     };
-    let (output_columns, rows) = if request.aggregates.is_empty() && !request.columns.is_empty() {
+    let (output_columns, rows) = if !has_aggregates && !request.columns.is_empty() {
         let mut rows = rows;
         for row in &mut rows {
             row.columns
                 .retain(|column, _| request.columns.iter().any(|selected| selected == column));
         }
-        (request.columns.clone(), rows)
+        (request.columns, rows)
     } else {
         (output_columns, rows)
     };
