@@ -42,12 +42,12 @@ pub async fn upload_pack(
     let (body, request_admission) =
         super::admission::read_request(body, MAX_UPLOAD_PACK_REQUEST_BYTES, "upload-pack").await?;
     let v2_request = v2::parse(&body)?;
-    let (request_lines, v2_fetch, v2_ls_refs) = match v2_request {
-        Some(v2::Request::Fetch(fetch)) => (fetch.lines.clone(), Some(fetch), None),
+    let (request_lines, v2_done, v2_ls_refs) = match v2_request {
+        Some(v2::Request::Fetch(fetch)) => (fetch.lines, Some(fetch.done), None),
         Some(v2::Request::LsRefs(request)) => (Vec::new(), None, Some(request)),
         None => (decode_negotiation(&body)?, None, None),
     };
-    if v2_fetch.is_none() && v2_ls_refs.is_none() {
+    if v2_done.is_none() && v2_ls_refs.is_none() {
         super::capabilities::upload(&request_lines)?;
     }
     let object_filter = filter::Filter::parse(&request_lines)?;
@@ -55,14 +55,14 @@ pub async fn upload_pack(
     let wants = parse_object_ids(&request_lines, "want ");
     let mut haves = parse_object_ids(&request_lines, "have ");
 
+    let capability = match auth_ctx {
+        Some(ctx) => shardline_server_core::AuthorizedRepository::from_verified_context(
+            ctx,
+            shardline_protocol::TokenScope::Read,
+        )?,
+        None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
+    };
     if let Some(request) = v2_ls_refs {
-        let capability = match auth_ctx {
-            Some(ctx) => shardline_server_core::AuthorizedRepository::from_verified_context(
-                ctx,
-                shardline_protocol::TokenScope::Read,
-            )?,
-            None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
-        };
         let projection = super::projection::project_history_admitted(
             state.clone(),
             repo_id.clone(),
@@ -101,13 +101,6 @@ pub async fn upload_pack(
         return Ok(response);
     }
 
-    let capability = match auth_ctx {
-        Some(ctx) => shardline_server_core::AuthorizedRepository::from_verified_context(
-            ctx,
-            shardline_protocol::TokenScope::Read,
-        )?,
-        None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
-    };
     let snapshot = crate::revision_access::snapshot_commit(&state, &repo_id, &capability)?;
     let projection = super::projection::project_history_admitted(
         state.clone(),
@@ -119,7 +112,7 @@ pub async fn upload_pack(
     if let Some(snapshot) = snapshot {
         let public = projection.identities.get(&snapshot).unwrap_or(&snapshot);
         haves.retain(|have| have == public);
-        shallow_request.restrict_to_snapshot(public, &wants, v2_fetch.is_some());
+        shallow_request.restrict_to_snapshot(public, &wants, v2_done.is_some());
     }
     shallow_request
         .resolve_exclusions(&state, &repo_id, &projection.identities)
@@ -136,19 +129,16 @@ pub async fn upload_pack(
             ));
         }
     }
-    let sideband = v2_fetch.is_some()
+    let sideband = v2_done.is_some()
         || request_lines.iter().any(|line| {
             std::str::from_utf8(line)
                 .is_ok_and(|line| line.split_whitespace().any(|word| word == "side-band-64k"))
         });
-    let done = v2_fetch.as_ref().map_or_else(
-        || {
-            request_lines
-                .iter()
-                .any(|line| line.as_slice() == b"done\n" || line.as_slice() == b"done")
-        },
-        |fetch| fetch.done,
-    );
+    let done = v2_done.unwrap_or_else(|| {
+        request_lines
+            .iter()
+            .any(|line| line.as_slice() == b"done\n" || line.as_slice() == b"done")
+    });
     let common_haves = haves
         .iter()
         .filter(|have| identities.contains(*have))
@@ -160,13 +150,13 @@ pub async fn upload_pack(
             .ok_or_else(|| HubApiError::CasError("Git projection missing admission".to_owned()))?;
         let (objects, mut response_body) =
             shallow::negotiate(projection.objects, &wants, &haves, &shallow_request)?;
-        if v2_fetch.is_some() && !done {
+        if v2_done.is_some() && !done {
             return Ok((v2::fetch_response(common_haves, &[], None)?, pack_admission));
         } else if !done && !response_body.is_empty() {
             return Ok((response_body, pack_admission));
         }
         let pack_data = generate_pack(&object_filter.apply(objects, &wants)?)?;
-        if v2_fetch.is_some() {
+        if v2_done.is_some() {
             return Ok((
                 v2::fetch_response(common_haves, &response_body, Some(&pack_data))?,
                 pack_admission,
