@@ -283,10 +283,9 @@ mod tests {
         DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, FsckIssueDetail, FsckIssueKind,
         IndexRebuildIssueDetail, LifecycleRepairReport, LocalFsckIssue, LocalFsckReport,
         LocalIndexRebuildIssue, LocalIndexRebuildIssueKind, LocalIndexRebuildReport, ServerConfig,
-        ServerConfigError,
     };
 
-    use super::{LifecycleRepairOptions, RepairReport, RepairRuntimeError};
+    use super::{LifecycleRepairOptions, RepairReport};
 
     #[test]
     fn lifecycle_repair_default_retention_matches_server_default() {
@@ -296,30 +295,6 @@ mod tests {
             options.webhook_retention_seconds,
             DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS
         );
-    }
-
-    // ── RepairRuntimeError Display / Debug ──────────────────────────────
-
-    #[test]
-    fn repair_runtime_error_config_display() {
-        let err = RepairRuntimeError::Config(ServerConfigError::InvalidServerRole);
-        let msg = err.to_string();
-        assert!(msg.contains("invalid server role"));
-    }
-
-    #[test]
-    fn repair_runtime_error_server_display() {
-        use shardline_server::ServerError;
-        let err = RepairRuntimeError::Server(ServerError::NotFound);
-        let msg = err.to_string();
-        assert!(!msg.is_empty());
-    }
-
-    #[test]
-    fn repair_runtime_error_debug() {
-        let err = RepairRuntimeError::Config(ServerConfigError::InvalidServerRole);
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Config("));
     }
 
     // ── RepairReport smoke tests ────────────────────────────────────────

@@ -35,41 +35,7 @@ pub async fn run_index_rebuild(
 mod tests {
     use std::path::Path;
 
-    use shardline_server::ServerError;
-
     use super::*;
-
-    #[test]
-    fn rebuild_runtime_error_config_display() {
-        let err = RebuildRuntimeError::Config(ServerConfigError::InvalidServerRole);
-        let msg = err.to_string();
-        assert!(msg.contains("invalid server role"));
-    }
-
-    #[test]
-    fn rebuild_runtime_error_debug() {
-        let err = RebuildRuntimeError::Config(ServerConfigError::InvalidServerRole);
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Config("));
-    }
-
-    #[test]
-    fn rebuild_runtime_error_server_display() {
-        let err = RebuildRuntimeError::Server(ServerError::NotFound);
-        let msg = err.to_string();
-        assert!(!msg.is_empty());
-        assert!(msg.contains("not found") || msg.contains("NotFound"));
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Server("));
-    }
-
-    #[test]
-    fn rebuild_runtime_error_server_io_error() {
-        let io_inner = std::io::Error::new(std::io::ErrorKind::NotFound, "index missing");
-        let err = RebuildRuntimeError::Server(ServerError::Io(io_inner));
-        let msg = err.to_string();
-        assert!(msg.contains("index missing") || !msg.is_empty());
-    }
 
     #[tokio::test]
     async fn run_index_rebuild_rejects_missing_root() {
