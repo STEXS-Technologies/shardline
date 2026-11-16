@@ -1677,11 +1677,11 @@ async fn prepare_journal_append(
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         if !line.is_empty() && line.iter().any(|byte| !byte.is_ascii_whitespace()) {
             records = records.checked_add(1).ok_or(S3SessionError::Overflow)?;
-            if records <= committed_head {
-                committed_bytes = committed_bytes
-                    .checked_add(line.len())
-                    .ok_or(S3SessionError::Overflow)?;
-            }
+        }
+        if records <= committed_head {
+            committed_bytes = committed_bytes
+                .checked_add(line.len())
+                .ok_or(S3SessionError::Overflow)?;
         }
     }
     if records < committed_head {
@@ -2484,7 +2484,9 @@ mod tests {
         assert_eq!(advanced_evidence.events().len(), 2);
 
         let path = dir.join(SESSION_MERKLE_JOURNAL);
-        let committed = fs::read(&path).await.unwrap();
+        let mut committed = fs::read(&path).await.unwrap();
+        committed.insert(0, b'\n');
+        fs::write(&path, &committed).await.unwrap();
         append_journal(&dir, 2, None, &record).await.unwrap();
         assert_eq!(
             prepare_journal_append(&path, 2, None).await.unwrap(),

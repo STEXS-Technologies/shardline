@@ -772,15 +772,16 @@ fn prepare_journal_append(
             records = records
                 .checked_add(units)
                 .ok_or_else(|| invalid_evidence("LFS journal record count overflow"))?;
-            if records <= head {
-                committed_bytes = committed_bytes
-                    .checked_add(line.len())
-                    .ok_or_else(|| invalid_evidence("LFS journal byte count overflow"))?;
-            } else if records.saturating_sub(units) < head {
+            if records > head && records.saturating_sub(units) < head {
                 return Err(invalid_evidence(
                     "LFS journal head splits a persisted record",
                 ));
             }
+        }
+        if records <= head {
+            committed_bytes = committed_bytes
+                .checked_add(line.len())
+                .ok_or_else(|| invalid_evidence("LFS journal byte count overflow"))?;
         }
     }
     if records < head {
@@ -1710,12 +1711,16 @@ mod tests {
                 fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
             }
             let journal = evidence_journal_path(directory.path(), OID);
-            let committed_record = fs::read_to_string(&journal).expect("journal");
+            let mut committed_record = fs::read_to_string(&journal).expect("journal");
+            if legacy {
+                committed_record.insert(0, '\n');
+                fs::write(&journal, &committed_record).unwrap();
+            }
             let mut file = fs::OpenOptions::new()
                 .append(true)
                 .open(&journal)
                 .expect("open journal");
-            file.write_all(committed_record.as_bytes())
+            file.write_all(committed_record.trim_start_matches('\n').as_bytes())
                 .expect("append uncommitted tail");
             let loaded =
                 load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("load evidence");

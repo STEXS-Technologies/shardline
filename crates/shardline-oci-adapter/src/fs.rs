@@ -843,14 +843,14 @@ fn prepare_journal_append(
                     "journal record count overflow",
                 )
             })?;
-            if records <= committed_head {
-                committed_bytes = committed_bytes.checked_add(line.len()).ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "journal byte count overflow",
-                    )
-                })?;
-            }
+        }
+        if records <= committed_head {
+            committed_bytes = committed_bytes.checked_add(line.len()).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "journal byte count overflow",
+                )
+            })?;
         }
     }
     if records < committed_head {
@@ -1224,5 +1224,35 @@ mod portable_temporary_guard_tests {
         temporary.published = true;
         drop(temporary);
         assert_eq!(fs::read(destination).unwrap(), b"published bytes");
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    #[test]
+    fn legacy_tail_trimming_counts_empty_lines_in_committed_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("journal");
+        for (prefix, head) in [
+            (b"\n{}\n".as_slice(), 1),
+            (b"{}\n\n{}\n".as_slice(), 2),
+            (b"{}\n\n".as_slice(), 1),
+        ] {
+            for orphaned in [false, true] {
+                let mut bytes = prefix.to_vec();
+                if orphaned {
+                    bytes.extend_from_slice(b"{}\n");
+                }
+                std::fs::write(&path, bytes)?;
+                let retained_length = super::prepare_journal_append(&path, head, None)?;
+                if retained_length != u64::try_from(prefix.len())?
+                    || std::fs::read(&path)? != prefix
+                {
+                    return Err(format!("committed prefix changed at journal head {head}").into());
+                }
+            }
+        }
+        Ok(())
     }
 }
