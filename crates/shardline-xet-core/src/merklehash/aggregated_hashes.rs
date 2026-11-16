@@ -108,7 +108,11 @@ pub(crate) fn xorb_hash_from_owned(mut hashes: Vec<(MerkleHash, u64)>) -> Merkle
 
 #[inline]
 pub fn xorb_hash(chunks: &[(MerkleHash, u64)]) -> MerkleHash {
-    xorb_hash_from_owned(chunks.to_vec())
+    match chunks {
+        [] => MerkleHash::default(),
+        [(hash, _)] => *hash,
+        _ => xorb_hash_from_owned(chunks.to_vec()),
+    }
 }
 
 #[inline]
@@ -175,8 +179,10 @@ mod tests {
 
     #[test]
     fn xorb_hash_single() {
-        let h = xorb_hash(&[(compute_data_hash(b"a"), 1)]);
-        assert_ne!(h, MerkleHash::default());
+        let hash = compute_data_hash(b"a");
+        for size in [0, 1, u64::MAX] {
+            assert_eq!(xorb_hash(&[(hash, size)]), hash);
+        }
     }
 
     #[test]
