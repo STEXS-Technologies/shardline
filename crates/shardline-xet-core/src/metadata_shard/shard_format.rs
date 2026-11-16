@@ -200,9 +200,7 @@ impl MDBShardInfo {
         _expiration: Option<std::time::Duration>,
     ) -> Result<()> {
         let header = MDBShardFileHeader::default();
-        header.serialize(writer)?;
-
-        let mut footer = MDBShardFileFooter::default();
+        let file_info_offset = header.serialize(writer)? as u64;
 
         for file_info in shard.file_content.values() {
             file_info.serialize(writer)?;
@@ -215,12 +213,11 @@ impl MDBShardInfo {
         XorbChunkSequenceHeader::bookend().serialize(writer)?;
 
         // Write footer (for backward compatibility with code that reads it)
-        footer.file_info_offset = MDBShardFileHeader::default()
-            .serialize(&mut std::io::sink())
-            .unwrap_or(0) as u64;
-        footer.xorb_info_offset = 0;
-        footer.footer_offset = 0;
-        footer.serialize(writer)?;
+        MDBShardFileFooter {
+            file_info_offset,
+            ..Default::default()
+        }
+        .serialize(writer)?;
 
         Ok(())
     }
@@ -685,7 +682,16 @@ mod tests {
             .unwrap();
         let mut buf = Vec::new();
         MDBShardInfo::serialize_from(&mut buf, &shard, None).unwrap();
-        assert!(!buf.is_empty());
+        let footer_start = buf.len() - size_of::<MDBShardFileFooter>();
+        let footer =
+            MDBShardFileFooter::deserialize(&mut Cursor::new(&buf[footer_start..])).unwrap();
+        assert_eq!(
+            footer,
+            MDBShardFileFooter {
+                file_info_offset: size_of::<MDBShardFileHeader>() as u64,
+                ..Default::default()
+            }
+        );
 
         // Verify can be loaded back
         let info = MDBShardInfo::load_from_reader(&mut Cursor::new(&buf)).unwrap();

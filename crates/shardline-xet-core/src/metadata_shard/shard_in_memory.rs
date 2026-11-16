@@ -37,18 +37,14 @@ impl MDBInMemoryShard {
     }
 
     pub fn materialized_bytes(&self) -> u64 {
-        self.file_content.iter().fold(0u64, |acc, (_, file)| {
-            acc + file
-                .segments
-                .iter()
-                .fold(0u64, |acc, entry| acc + entry.unpacked_segment_bytes)
-        })
+        self.file_content.values().map(MDBFileInfo::file_size).sum()
     }
 
     pub fn stored_bytes(&self) -> u64 {
         self.xorb_content
-            .iter()
-            .fold(0u64, |acc, (_, xorb)| acc + xorb.metadata.num_bytes_in_xorb)
+            .values()
+            .map(|xorb| xorb.metadata.num_bytes_in_xorb)
+            .sum()
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -93,45 +89,7 @@ mod tests {
         }
     }
 
-    fn make_xorb_info(num_chunks: u64, bytes_per_chunk: u64) -> MDBXorbInfo {
-        let entries = (0..num_chunks)
-            .map(|i| {
-                XorbChunkSequenceEntry::new(
-                    compute_data_hash(b"c"),
-                    bytes_per_chunk,
-                    i * bytes_per_chunk,
-                )
-            })
-            .collect();
-        MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(
-                compute_data_hash(b"x"),
-                num_chunks,
-                num_chunks * bytes_per_chunk,
-            ),
-            chunks: entries,
-        }
-    }
-
-    #[test]
-    fn default_is_empty() {
-        let shard = MDBInMemoryShard::default();
-        assert_eq!(shard.num_xorb_entries(), 0);
-        assert_eq!(shard.num_file_entries(), 0);
-        assert_eq!(shard.materialized_bytes(), 0);
-        assert_eq!(shard.stored_bytes(), 0);
-    }
-
-    #[test]
-    fn add_single_xorb_block() {
-        let mut shard = MDBInMemoryShard::default();
-        let xorb = make_xorb_info(1, 200);
-        shard.add_xorb_block(xorb).unwrap();
-        assert_eq!(shard.num_xorb_entries(), 1);
-        assert_eq!(shard.stored_bytes(), 200);
-    }
-
-    fn make_xorb_info_v2(hash_data: &[u8], num_chunks: u64, bytes_per_chunk: u64) -> MDBXorbInfo {
+    fn make_xorb_info(hash_data: &[u8], num_chunks: u64, bytes_per_chunk: u64) -> MDBXorbInfo {
         let entries = (0..num_chunks)
             .map(|i| {
                 XorbChunkSequenceEntry::new(
@@ -152,14 +110,28 @@ mod tests {
     }
 
     #[test]
+    fn default_is_empty() {
+        let shard = MDBInMemoryShard::default();
+        assert_eq!(shard.num_xorb_entries(), 0);
+        assert_eq!(shard.num_file_entries(), 0);
+        assert_eq!(shard.materialized_bytes(), 0);
+        assert_eq!(shard.stored_bytes(), 0);
+    }
+
+    #[test]
+    fn add_single_xorb_block() {
+        let mut shard = MDBInMemoryShard::default();
+        let xorb = make_xorb_info(b"x", 1, 200);
+        shard.add_xorb_block(xorb).unwrap();
+        assert_eq!(shard.num_xorb_entries(), 1);
+        assert_eq!(shard.stored_bytes(), 200);
+    }
+
+    #[test]
     fn add_multiple_xorb_blocks() {
         let mut shard = MDBInMemoryShard::default();
-        shard
-            .add_xorb_block(make_xorb_info_v2(b"x1", 1, 100))
-            .unwrap();
-        shard
-            .add_xorb_block(make_xorb_info_v2(b"x2", 2, 150))
-            .unwrap();
+        shard.add_xorb_block(make_xorb_info(b"x1", 1, 100)).unwrap();
+        shard.add_xorb_block(make_xorb_info(b"x2", 2, 150)).unwrap();
         assert_eq!(shard.num_xorb_entries(), 2);
         assert_eq!(shard.stored_bytes(), 100 + 300);
     }
@@ -167,7 +139,7 @@ mod tests {
     #[test]
     fn add_xorb_block_zero_chunks() {
         let mut shard = MDBInMemoryShard::default();
-        let xorb = make_xorb_info(0, 0);
+        let xorb = make_xorb_info(b"x", 0, 0);
         shard.add_xorb_block(xorb).unwrap();
         assert_eq!(shard.num_xorb_entries(), 1);
         assert_eq!(shard.stored_bytes(), 0);
@@ -197,7 +169,7 @@ mod tests {
     #[test]
     fn add_xorb_and_file_then_to_bytes() {
         let mut shard = MDBInMemoryShard::default();
-        shard.add_xorb_block(make_xorb_info(1, 100)).unwrap();
+        shard.add_xorb_block(make_xorb_info(b"x", 1, 100)).unwrap();
         shard
             .add_file_reconstruction_info(make_file_info(1, 50))
             .unwrap();
@@ -210,7 +182,7 @@ mod tests {
     #[test]
     fn add_xorb_block_via_arc_directly() {
         let mut shard = MDBInMemoryShard::default();
-        let xorb = Arc::new(make_xorb_info(1, 50));
+        let xorb = Arc::new(make_xorb_info(b"x", 1, 50));
         shard.add_xorb_block(xorb).unwrap();
         assert_eq!(shard.num_xorb_entries(), 1);
     }
