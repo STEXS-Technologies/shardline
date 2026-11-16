@@ -557,59 +557,40 @@ fn tree_entries_recursive_empty() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn find_dataset_file_default_train() {
-    use shardline_index::hub::HubFileEntry;
-    let files = vec![HubFileEntry {
-        path: "data/train/data.jsonl".into(),
-        size: 100,
-        sha: "abc".into(),
-        is_lfs: false,
-    }];
-    let result = find_dataset_file(&files, "default", "train");
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().path, "data/train/data.jsonl");
-}
-
-#[test]
-fn find_dataset_file_config_split() {
-    use shardline_index::hub::HubFileEntry;
-    let files = vec![HubFileEntry {
-        path: "myconfig/test/data.parquet".into(),
-        size: 200,
-        sha: "def".into(),
-        is_lfs: false,
-    }];
-    let result = find_dataset_file(&files, "myconfig", "test");
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().path, "myconfig/test/data.parquet");
-}
-
-#[test]
-fn find_dataset_file_split_only() {
-    use shardline_index::hub::HubFileEntry;
-    let files = vec![HubFileEntry {
-        path: "train/data.csv".into(),
-        size: 300,
-        sha: "ghi".into(),
-        is_lfs: false,
-    }];
-    let result = find_dataset_file(&files, "default", "train");
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().path, "train/data.csv");
-}
-
-#[test]
-fn find_dataset_file_root() {
-    use shardline_index::hub::HubFileEntry;
-    let files = vec![HubFileEntry {
-        path: "data.parquet".into(),
-        size: 400,
-        sha: "jkl".into(),
-        is_lfs: false,
-    }];
-    let result = find_dataset_file(&files, "default", "train");
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().path, "data.parquet");
+fn find_dataset_file_respects_layout_and_format_priority() {
+    let paths = [
+        "myconfig/train/data.parquet",
+        "myconfig/train/data.csv",
+        "myconfig/train/data.jsonl",
+        "data/train/data.parquet",
+        "data/train/data.csv",
+        "data/train/data.jsonl",
+        "train/data.parquet",
+        "train/data.csv",
+        "train/data.jsonl",
+        "data.parquet",
+        "data.csv",
+        "data.jsonl",
+    ];
+    let files: Vec<_> = paths
+        .iter()
+        .rev()
+        .map(|path| HubFileEntry {
+            path: (*path).to_owned(),
+            size: 100,
+            sha: "abc".to_owned(),
+            is_lfs: false,
+        })
+        .collect();
+    for (index, expected) in paths.iter().enumerate() {
+        let remaining = &files[..files.len() - index];
+        assert_eq!(
+            find_dataset_file(remaining, "myconfig", "train")
+                .unwrap()
+                .path,
+            *expected,
+        );
+    }
 }
 
 #[test]
@@ -625,14 +606,6 @@ fn find_dataset_file_not_found() {
 }
 
 // -----------------------------------------------------------------------
-// parse_jsonl_rows
-// -----------------------------------------------------------------------
-
-// -----------------------------------------------------------------------
-// is_cgnat
-// -----------------------------------------------------------------------
-
-// -----------------------------------------------------------------------
 // authorize (route-level helper)
 // -----------------------------------------------------------------------
 
@@ -644,18 +617,6 @@ fn route_authorize_without_auth_is_permissive() {
 }
 
 // -----------------------------------------------------------------------
-// parse_csv_line — additional edge cases
-// -----------------------------------------------------------------------
-
-// -----------------------------------------------------------------------
-// is_private_ip — IPv4-mapped IPv6
-// -----------------------------------------------------------------------
-
-// -----------------------------------------------------------------------
-// validate_webhook_url — edge cases
-// -----------------------------------------------------------------------
-
-// -----------------------------------------------------------------------
 // HubState debug
 // -----------------------------------------------------------------------
 
@@ -665,10 +626,6 @@ fn hub_state_debug_redacts_auth() {
     let debug = format!("{state:?}");
     assert!(debug.contains("auth"));
 }
-
-// -----------------------------------------------------------------------
-// parse_csv_line — remaining edge cases
-// -----------------------------------------------------------------------
 
 // -----------------------------------------------------------------------
 // parse_yaml_frontmatter — additional edge cases
@@ -4069,14 +4026,6 @@ async fn handler_webhook_create_repo_not_found() {
     .await;
     assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
 }
-
-// ------------------------------------------------------------------
-// is_private_ip — broadcast and documentation IPs
-// ------------------------------------------------------------------
-
-// ------------------------------------------------------------------
-// validate_webhook_url — scheme edge cases
-// ------------------------------------------------------------------
 
 // ------------------------------------------------------------------
 // parse_yaml_frontmatter — key without colon separator
