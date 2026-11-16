@@ -1413,7 +1413,7 @@ async fn patch_object_resumes_across_postgres_nodes_without_shared_rwx() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn patch_object_hash_mismatch_can_be_repaired_durably() {
+async fn postgres_patch_object_hash_mismatch_can_be_repaired_durably() {
     let Some(database_url) = shardline_test_support::postgres_fixture_url("DATABASE_URL") else {
         return;
     };
@@ -1474,7 +1474,12 @@ async fn patch_object_hash_mismatch_can_be_repaired_durably() {
         )
         .await
         .expect("corrected patch");
-    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        retry.status(),
+        StatusCode::OK,
+        "{}",
+        crate::test_support::json_body(retry).await
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
