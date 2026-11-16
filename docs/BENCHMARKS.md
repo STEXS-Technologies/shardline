@@ -4408,30 +4408,35 @@ test skipped), 19 selected real-server metadata/range/Xorb interoperability test
 (16 other E2E tests filtered out), the all-features CLI build, strict Clippy and
 wire-only doctests. The publish-order checker accepted the updated graph.
 
-### SDK ingestion hash reuse checkpoint (2026-11-16)
+### SDK/native-storage regression checkpoint (2026-11-16)
 
-Source `32bf52ae7adc55949afb81203e2f1868abd27cb9` passed the complete
+Frozen source `812fc7844b987d0c7774b41ad3d037ae9e6d03ac` passed the complete
 SDK/server E2E and Xorb interoperability command above, including ignored tests,
 required native fixtures and two test threads: **35 passed, none skipped**, in
-287.453 s. The SDK library selection passed 322 tests and the separate mock
-conformance selection passed 12 tests; strict SDK library/test Clippy passed.
-The upload path now retains ingestion hashes for immutable pending chunks and
-uses one shared Xorb serializer for both prehashed and public inputs. Repeated
-reconstruction terms also avoid cloning fetch descriptors before comparison.
+297.014 s. This rerun covers the accumulated changes through this source,
+including native Xet metadata routes with the Hub frontend enabled. It does not
+run the entire E2E workspace or the separate PostgreSQL/MinIO gates.
 
 Both isolated clients verified exact byte identity and length and passed the
 unchanged 65,536 KiB additional-RSS gate:
 
 | Isolated client workload | Baseline RSS (KiB) | Peak VmHWM (KiB) | Additional RSS (KiB) | Client transfer (ms) |
 | --- | ---: | ---: | ---: | ---: |
-| 256 MiB | 25,704 | 79,856 | 54,152 | 1,247 |
-| 1 GiB | 25,692 | 78,328 | 52,636 | 8,261 |
+| 256 MiB | 24,216 | 74,656 | 50,440 | 1,184 |
+| 1 GiB | 24,236 | 82,656 | 58,420 | 7,959 |
 
-The parent memory tests took 22.656 s and 211.841 s, including fixture ingestion.
+The parent memory tests took 22.236 s and 212.140 s, including fixture ingestion.
 The shared host, toolchains and unoptimized build settings match the preceding
-SDK checkpoint. These are regression samples, not measurements of hash-reuse
-throughput or production capacity, and do not explain the historical hosted RSS
-failure. Database and remote-object-storage qualification remain separate.
+SDK checkpoint. These are regression samples, not production capacity
+measurements, and do not explain the historical hosted RSS failure. Database
+and remote-object-storage qualification remain separate.
+
+Earlier source `32bf52ae7adc55949afb81203e2f1868abd27cb9` also passed all 35 E2E
+tests, 322 SDK library tests, 12 mock conformance tests and strict SDK
+library/test Clippy. Its upload changes retain ingestion hashes for immutable
+pending chunks and share one Xorb serializer between prehashed and public
+inputs; repeated reconstruction terms avoid cloning fetch descriptors before
+comparison. The current checkpoint reruns the E2E selection only.
 
 ### PostgreSQL cleanup checkpoint (2026-11-16)
 
