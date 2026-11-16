@@ -378,12 +378,12 @@ pub(crate) const fn is_cgnat(ip: std::net::Ipv4Addr) -> bool {
 }
 
 pub(crate) fn webhook_response_from_hub(
-    webhook: &shardline_index::hub::HubWebhook,
+    webhook: shardline_index::hub::HubWebhook,
 ) -> WebhookResponse {
     WebhookResponse {
-        id: webhook.id.clone(),
-        url: webhook.url.clone(),
-        events: webhook.events.clone(),
+        id: webhook.id,
+        url: webhook.url,
+        events: webhook.events,
         active: webhook.active,
         created_at: webhook.created_at_unix_seconds,
     }
@@ -455,7 +455,7 @@ pub(crate) async fn webhook_create(
     };
     Ok((
         StatusCode::CREATED,
-        Json(webhook_response_from_hub(&webhook)),
+        Json(webhook_response_from_hub(webhook)),
     ))
 }
 
@@ -473,7 +473,7 @@ pub(crate) async fn webhook_list(
         .list_webhooks(&name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     let response = WebhookListResponse {
-        webhooks: webhooks.iter().map(webhook_response_from_hub).collect(),
+        webhooks: webhooks.into_iter().map(webhook_response_from_hub).collect(),
     };
     Ok(Json(response))
 }

@@ -291,7 +291,7 @@ fn webhook_response_from_hub_basic() {
         active: true,
         created_at_unix_seconds: 42,
     };
-    let resp = webhook_response_from_hub(&hook);
+    let resp = webhook_response_from_hub(hook);
     assert_eq!(resp.id, "wh_123");
     assert_eq!(resp.url, "https://example.com/hook");
     assert_eq!(resp.events, vec!["push"]);
@@ -311,7 +311,7 @@ fn webhook_response_from_hub_inactive() {
         active: false,
         created_at_unix_seconds: 99,
     };
-    let resp = webhook_response_from_hub(&hook);
+    let resp = webhook_response_from_hub(hook);
     assert!(!resp.active);
     assert_eq!(resp.events.len(), 2);
 }
