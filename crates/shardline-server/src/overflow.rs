@@ -16,29 +16,32 @@ mod tests {
     use crate::ServerError;
 
     #[test]
-    fn checked_add_zero_zero() {
-        assert!(matches!(super::checked_add(0, 0), Ok(0)));
+    fn checked_add_preserves_values_and_rejects_overflow() {
+        for (left, right, expected) in [
+            (0, 0, Some(0)),
+            (5, 3, Some(8)),
+            (u64::MAX, 0, Some(u64::MAX)),
+            (u64::MAX - 1, 1, Some(u64::MAX)),
+            (u64::MAX, 1, None),
+        ] {
+            let actual = super::checked_add(left, right);
+            match expected {
+                Some(expected) => assert!(matches!(actual, Ok(value) if value == expected)),
+                None => assert!(matches!(actual, Err(ServerError::Overflow))),
+            }
+        }
     }
 
     #[test]
-    fn checked_add_basic() {
-        assert!(matches!(super::checked_add(5, 3), Ok(8)));
-    }
-
-    #[test]
-    fn checked_add_overflow() {
-        let result = super::checked_add(u64::MAX, 1);
-        assert!(matches!(result, Err(ServerError::Overflow)));
-    }
-
-    #[test]
-    fn checked_increment_basic() {
+    fn checked_increment_preserves_values_and_rejects_overflow() {
         assert!(matches!(super::checked_increment(0), Ok(1)));
-    }
-
-    #[test]
-    fn checked_increment_overflow() {
-        let result = super::checked_increment(u64::MAX);
-        assert!(matches!(result, Err(ServerError::Overflow)));
+        assert!(matches!(
+            super::checked_increment(u64::MAX - 1),
+            Ok(u64::MAX)
+        ));
+        assert!(matches!(
+            super::checked_increment(u64::MAX),
+            Err(ServerError::Overflow)
+        ));
     }
 }

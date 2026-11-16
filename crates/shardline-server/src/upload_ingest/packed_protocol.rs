@@ -10,7 +10,12 @@ use super::{
     ingestor::{MAX_SERVER_XORB_RAW_BYTES, MAX_XORB_CHUNKS},
     xorb_packer::RecoverableXorbBatch,
 };
-use crate::{ServerError, model::UploadChunkResult, object_store::ServerObjectStore};
+use crate::{
+    ServerError,
+    model::UploadChunkResult,
+    object_store::ServerObjectStore,
+    overflow::{checked_add, checked_increment},
+};
 
 #[derive(Default)]
 pub(super) struct PackedProtocolResult {
@@ -339,23 +344,11 @@ impl PackedProtocolUpload {
         }
         let length = u64::try_from(bytes.len())?;
         if inserted {
-            self.result.inserted = self
-                .result
-                .inserted
-                .checked_add(1)
-                .ok_or(ServerError::Overflow)?;
-            self.result.stored_bytes = self
-                .result
-                .stored_bytes
-                .checked_add(length)
-                .ok_or(ServerError::Overflow)?;
+            self.result.inserted = checked_increment(self.result.inserted)?;
+            self.result.stored_bytes = checked_add(self.result.stored_bytes, length)?;
             crate::metrics::record_chunk_inserted(length);
         } else {
-            self.result.reused = self
-                .result
-                .reused
-                .checked_add(1)
-                .ok_or(ServerError::Overflow)?;
+            self.result.reused = checked_increment(self.result.reused)?;
             crate::metrics::record_dedup_saves(length);
         }
         self.result.chunks.push(UploadChunkResult {
