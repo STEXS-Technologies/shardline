@@ -28,6 +28,45 @@ use tower::ServiceExt;
 
 use common::setup;
 
+fn text_dataset(path: &str, content: &[u8]) -> common::HubTestContext {
+    let test = setup();
+    let state = test.state();
+    let hash = blake3::hash(content);
+    let sha = hash.to_hex().to_string();
+    state
+        .store
+        .create_repo(HubRepoType::Dataset, "team/dataset", false)
+        .unwrap();
+    state
+        .store
+        .store_files(
+            "text-commit",
+            &[HubFileEntry {
+                path: path.to_owned(),
+                size: content.len() as u64,
+                sha: sha.clone(),
+                is_lfs: false,
+            }],
+        )
+        .unwrap();
+    state
+        .object_store
+        .put_if_absent(
+            &ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap(),
+            ObjectBody::from_slice(content),
+            &ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*hash.as_bytes()),
+                content.len() as u64,
+            ),
+        )
+        .unwrap();
+    state
+        .store
+        .create_revision("team/dataset", None, "text-commit", "main", "init")
+        .unwrap();
+    test
+}
+
 // ---- Dataset viewer tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -89,45 +128,16 @@ async fn dataset_parquet_lists_data_files() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_jsonl_data() {
-    let test = setup();
-    let store = test.state().store.clone();
-
-    store
-        .create_repo(HubRepoType::Dataset, "team/jsonl-dataset", false)
-        .unwrap();
-
     let jsonl_content: String = (1..=20_000)
         .map(|id| format!("{{\"id\":{id},\"name\":\"name-{id}\"}}\n"))
         .collect();
-    let files = vec![HubFileEntry {
-        path: "data.jsonl".to_owned(),
-        size: jsonl_content.len() as u64,
-        sha: "1313131313131313131313131313131313131313131313131313131313131313".to_owned(),
-        is_lfs: false,
-    }];
-    store.store_files("commit_jsonl", &files).unwrap();
-    // Pre-populate ObjectStore
-    let key = ObjectKey::parse("protocols/lfs/global/objects/1313131313131313131313131313131313131313131313131313131313131313").unwrap();
-    let body = ObjectBody::from_slice(jsonl_content.as_bytes());
-    let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(
-            *blake3::hash(jsonl_content.as_bytes()).as_bytes(),
-        ),
-        jsonl_content.len() as u64,
-    );
-    test.state()
-        .object_store
-        .put_if_absent(&key, body, &integrity)
-        .unwrap();
-    store
-        .create_revision("team/jsonl-dataset", None, "commit_jsonl", "main", "init")
-        .unwrap();
+    let test = text_dataset("data.jsonl", jsonl_content.as_bytes());
 
     let response = test
         .app()
         .oneshot(
             Request::builder()
-                .uri("/api/datasets/team/jsonl-dataset/first-rows?split=train&limit=2")
+                .uri("/api/datasets/team/dataset/first-rows?split=train&limit=2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -148,7 +158,7 @@ async fn dataset_first_rows_returns_jsonl_data() {
         .app()
         .oneshot(
             Request::builder()
-                .uri("/api/datasets/team/jsonl-dataset/viewer/train?offset=19999&length=1")
+                .uri("/api/datasets/team/dataset/viewer/train?offset=19999&length=1")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -732,43 +742,14 @@ async fn dataset_query_can_be_disabled_without_disabling_legacy_routes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_csv_data() {
-    let test = setup();
-    let store = test.state().store.clone();
-
-    store
-        .create_repo(HubRepoType::Dataset, "team/csv-dataset", false)
-        .unwrap();
-
     let csv_content = "id,name,value\n1,alice,100\n2,bob,200\n";
-    let files = vec![HubFileEntry {
-        path: "data.csv".to_owned(),
-        size: csv_content.len() as u64,
-        sha: "1414141414141414141414141414141414141414141414141414141414141414".to_owned(),
-        is_lfs: false,
-    }];
-    store.store_files("commit_csv", &files).unwrap();
-    // Pre-populate ObjectStore
-    let key = ObjectKey::parse("protocols/lfs/global/objects/1414141414141414141414141414141414141414141414141414141414141414").unwrap();
-    let body = ObjectBody::from_slice(csv_content.as_bytes());
-    let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(
-            *blake3::hash(csv_content.as_bytes()).as_bytes(),
-        ),
-        csv_content.len() as u64,
-    );
-    test.state()
-        .object_store
-        .put_if_absent(&key, body, &integrity)
-        .unwrap();
-    store
-        .create_revision("team/csv-dataset", None, "commit_csv", "main", "init")
-        .unwrap();
+    let test = text_dataset("data.csv", csv_content.as_bytes());
 
     let response = test
         .app()
         .oneshot(
             Request::builder()
-                .uri("/api/datasets/team/csv-dataset/first-rows")
+                .uri("/api/datasets/team/dataset/first-rows")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -787,45 +768,18 @@ async fn dataset_first_rows_returns_csv_data() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_viewer_returns_paginated_rows() {
-    let test = setup();
-    let store = test.state().store.clone();
-
-    store
-        .create_repo(HubRepoType::Dataset, "team/paginated", false)
-        .unwrap();
-
     let mut jsonl = String::new();
     for i in 0..10 {
         jsonl.push_str(&format!("{{\"index\":{i}}}\n"));
     }
     let jsonl_bytes = jsonl.into_bytes();
-    let files = vec![HubFileEntry {
-        path: "data.jsonl".to_owned(),
-        size: jsonl_bytes.len() as u64,
-        sha: "1515151515151515151515151515151515151515151515151515151515151515".to_owned(),
-        is_lfs: false,
-    }];
-    store.store_files("commit_paginated", &files).unwrap();
-    // Pre-populate ObjectStore
-    let key = ObjectKey::parse("protocols/lfs/global/objects/1515151515151515151515151515151515151515151515151515151515151515").unwrap();
-    let body = ObjectBody::from_slice(&jsonl_bytes);
-    let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&jsonl_bytes).as_bytes()),
-        jsonl_bytes.len() as u64,
-    );
-    test.state()
-        .object_store
-        .put_if_absent(&key, body, &integrity)
-        .unwrap();
-    store
-        .create_revision("team/paginated", None, "commit_paginated", "main", "init")
-        .unwrap();
+    let test = text_dataset("data.jsonl", &jsonl_bytes);
 
     let response = test
         .app()
         .oneshot(
             Request::builder()
-                .uri("/api/datasets/team/paginated/viewer/train?offset=3&length=2")
+                .uri("/api/datasets/team/dataset/viewer/train?offset=3&length=2")
                 .body(Body::empty())
                 .unwrap(),
         )
