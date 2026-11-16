@@ -3844,6 +3844,19 @@ consolidating journal write/sync/length accounting. These tests ran on Linux;
 the portable filesystem branch was not executed. Tests used Rust 1.99 and strict
 Clippy used Rust 1.100. These checks do not measure throughput or build-time gains.
 
+At `b80182540965b1be928a4607990f1423bc42d2e1`, all 105 reliability tests and all 279
+S3/OCI-adapter library tests passed with all features, followed by all 12 selected
+server LFS evidence tests (3,253 server tests filtered out). Reliability
+library/test Clippy passed with warnings denied. This checkpoint covers the
+shared Merkle builders after removing duplicate parent-head state and redundant
+JSON clones. The expanded builder test checks three-event chains, parity between
+typed and discriminator-based builders, and suffix appends linked to an existing
+head. Adapter and LFS tests also exercise tampering rejection, repair, journal
+tails and incremental publication. Tests used Rust 1.99 and Clippy used Rust
+1.100 on Linux. These are local functional checks; they do not qualify
+PostgreSQL/object-storage deployment, portable filesystem behavior, production
+throughput or the historical hosted SDK memory-test failure.
+
 At `c3dc54cd`, all 58 CAS tests passed with all features after simplifying
 upload lifecycle orchestration and raw-blob storage requirements. The raw-blob
 contract uses a unit index to prove that writing an object does not require an
