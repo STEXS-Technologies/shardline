@@ -24,45 +24,28 @@ async fn decode_creation_response(
 }
 
 #[test]
-fn parse_csv_line_simple_fields() {
-    let result = parse_csv_line("a,b,c");
-    assert_eq!(result, vec!["a", "b", "c"]);
-}
-
-#[test]
-fn parse_csv_line_quoted_field_with_comma() {
-    let result = parse_csv_line(r#""hello, world",b"#);
-    assert_eq!(result, vec!["hello, world", "b"]);
-}
-
-#[test]
-fn parse_csv_line_escaped_quote() {
-    let result = parse_csv_line(r#""say ""hello""",done"#);
-    assert_eq!(result, vec![r#"say ""hello"""#, "done"]);
-}
-
-#[test]
-fn parse_csv_line_trailing_comma() {
-    let result = parse_csv_line("a,b,");
-    assert_eq!(result, vec!["a", "b", ""]);
-}
-
-#[test]
-fn parse_csv_line_single_field() {
-    let result = parse_csv_line("only");
-    assert_eq!(result, vec!["only"]);
-}
-
-#[test]
-fn parse_csv_line_empty_field() {
-    let result = parse_csv_line("a,,c");
-    assert_eq!(result, vec!["a", "", "c"]);
-}
-
-#[test]
-fn parse_csv_line_unterminated_quote() {
-    let result = parse_csv_line(r#""unterminated,a"#);
-    assert_eq!(result, vec!["unterminated,a"]);
+fn csv_fields_preserve_quoting_separators_and_unterminated_input() {
+    let cases: &[(&str, &[&str])] = &[
+        ("a,b,c", &["a", "b", "c"]),
+        (r#""hello, world",b"#, &["hello, world", "b"]),
+        (r#""say ""hello""",done"#, &[r#"say ""hello"""#, "done"]),
+        ("a,b,", &["a", "b", ""]),
+        ("only", &["only"]),
+        ("a,,c", &["a", "", "c"]),
+        (r#""unterminated,a"#, &["unterminated,a"]),
+        (r#""a","b","c""#, &["a", "b", "c"]),
+        (r#"a,"say ""hello""",b"#, &["a", r#"say ""hello"""#, "b"]),
+        ("a,,,c", &["a", "", "", "c"]),
+        (",a,b", &["", "a", "b"]),
+        (r#""unterm,,"#, &["unterm,,", ""]),
+        (r#""say ""hi""",done"#, &[r#"say ""hi"""#, "done"]),
+        (r#""a","#, &["a", ""]),
+        (",,", &["", "", ""]),
+        ("\"", &[""]),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(parse_csv_line(input), *expected, "{input:?}");
+    }
 }
 
 // --- repo_delete endpoint logic tests ---
@@ -649,48 +632,6 @@ fn route_authorize_without_auth_is_permissive() {
 // parse_csv_line — additional edge cases
 // -----------------------------------------------------------------------
 
-#[test]
-fn parse_csv_line_multiple_quoted_fields() {
-    let result = parse_csv_line(r#""a","b","c""#);
-    assert_eq!(result, vec!["a", "b", "c"]);
-}
-
-#[test]
-fn parse_csv_line_escaped_quote_middle() {
-    let result = parse_csv_line(r#"a,"say ""hello""",b"#);
-    // The escped quote inside: ""hello"" contains two double-quotes
-    assert_eq!(result[0], "a");
-    assert!(result[1].contains("say"));
-    assert_eq!(result[2], "b");
-}
-
-#[test]
-fn parse_csv_line_consecutive_commas() {
-    let result = parse_csv_line("a,,,c");
-    assert_eq!(result, vec!["a", "", "", "c"]);
-}
-
-#[test]
-fn parse_csv_line_starts_with_comma() {
-    let result = parse_csv_line(",a,b");
-    assert_eq!(result, vec!["", "a", "b"]);
-}
-
-#[test]
-fn parse_csv_line_ends_with_unterminated_quote_comma() {
-    // Input: "unterm,, (starts with quote, no closing quote found, ends with comma)
-    // The unterminated quote branch pushes content after opening quote: "unterm,,"
-    // Then trailing comma adds an extra empty field
-    let result = parse_csv_line(r#""unterm,,"#);
-    assert_eq!(result, vec!["unterm,,", ""]);
-}
-
-#[test]
-fn parse_csv_line_quoted_escaped_quote_at_end() {
-    let result = parse_csv_line(r#""say ""hi""",done"#);
-    assert_eq!(result.len(), 2);
-}
-
 // -----------------------------------------------------------------------
 // is_private_ip — IPv4-mapped IPv6
 // -----------------------------------------------------------------------
@@ -713,25 +654,6 @@ fn hub_state_debug_redacts_auth() {
 // -----------------------------------------------------------------------
 // parse_csv_line — remaining edge cases
 // -----------------------------------------------------------------------
-
-#[test]
-fn parse_csv_line_quoted_field_with_trailing_comma() {
-    // After closing quote, comma should be skipped
-    let result = parse_csv_line(r#""a","#);
-    assert_eq!(result, vec!["a", ""]);
-}
-
-#[test]
-fn parse_csv_line_only_commas() {
-    let result = parse_csv_line(",,");
-    assert_eq!(result, vec!["", "", ""]);
-}
-
-#[test]
-fn parse_csv_line_unterminated_quote_only() {
-    let result = parse_csv_line("\"");
-    assert_eq!(result, vec![""]);
-}
 
 // -----------------------------------------------------------------------
 // parse_yaml_frontmatter — additional edge cases
