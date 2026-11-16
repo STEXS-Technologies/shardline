@@ -4142,6 +4142,39 @@ cap and the strict 65,536 KiB additional-RSS threshold were unchanged.
 Reproduce with the command below plus `--stress-count 3 --test-threads 1`.
 These repeated local passes do not establish the cause of the hosted failure.
 
+Further 256 MiB checks at `f28038e7` restricted the test process and its
+children to CPUs 0–1 using `taskset --cpu-list 0,1`. Each configuration ran
+three sequential iterations; all nine transfers passed byte identity, length
+and the unchanged additional-RSS gate. Other E2E tests were filtered out.
+
+| Compiler | Debug information | Additional RSS by iteration, KiB | Three-test elapsed time |
+| --- | --- | --- | --- |
+| Rust 1.99.0 | Disabled | 46,708 / 57,008 / 49,696 | 68.198 s |
+| Rust 1.100.0 | Disabled | 58,132 / 59,716 / 60,036 | 71.566 s |
+| Rust 1.100.0 | Full; incremental compilation disabled | 45,292 / 49,080 / 54,040 | 80.637 s |
+
+The original hosted job log identifies Rust 1.100.0
+(`0ef1bc386 2026-11-09`) and an unoptimized test build with debug information.
+The final row matches that compiler and those profile settings; earlier local
+Rust 1.99.0 passes did not control for this difference. Reproduce the final row
+with:
+
+```bash
+env RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_TEST_DEBUG=2 \
+  CARGO_PROFILE_DEV_INCREMENTAL=false CARGO_PROFILE_TEST_INCREMENTAL=false \
+  CARGO_BUILD_JOBS=4 taskset --cpu-list 0,1 \
+  cargo +1.100.0 nextest run --offline --locked --manifest-path e2e/Cargo.toml \
+  --all-features --test sdk_client_e2e --run-ignored all --no-fail-fast \
+  --success-output final --stress-count 3 --test-threads 1 \
+  -E 'test(stream_large_file_memory_bounded_cat)'
+```
+
+These checks used the current cleanup source and the shared local host, not
+the historical merge checkout or the hosted runner. CPU affinity also does not
+reproduce a hosted machine's memory limits or scheduling environment. The
+results do not establish a compiler or debug-profile cause, qualify the 1 GiB
+workload under these settings, or resolve the historical failure.
+
 The earlier local passes above do not explain the failure in
 [hosted E2E run 43704721020](https://github.com/STEXS-Technologies/shardline/actions/runs/43704721020).
 Its checkout was PR merge `74444f2`, merging candidate `a0c995f27545a5fdfd277433fc5d238fd7379bc7`
