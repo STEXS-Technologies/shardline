@@ -243,13 +243,11 @@ pub fn group_page(
     let mut contents = Vec::new();
     let mut common_prefixes = Vec::new();
     let mut next_cursor = None;
-    let mut rows = 0_usize;
     let mut remaining = entries.into_iter().peekable();
-    while let Some(entry) = remaining.next() {
-        if rows >= max_keys {
+    for _ in 0..max_keys {
+        let Some(entry) = remaining.next() else {
             break;
-        }
-        rows = rows.saturating_add(1);
+        };
         // Keys outside the index prefix remain ordinary Contents rows.
         let group_prefix = delimiter.and_then(|delimiter| {
             let remainder = entry.object_key.strip_prefix(prefix)?;
