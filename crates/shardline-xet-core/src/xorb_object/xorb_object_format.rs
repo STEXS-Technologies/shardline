@@ -988,6 +988,7 @@ mod tests {
     fn v0_roundtrips_preserve_metadata_and_byte_counts() {
         for (chunks, seed) in [
             (0, b"zero".as_slice()),
+            (1, b"single".as_slice()),
             (2, b"v0test".as_slice()),
             (3, b"v0dir".as_slice()),
         ] {
@@ -1183,28 +1184,34 @@ mod tests {
     }
 
     #[test]
-    fn v1_deserialize_v0_compat() {
-        let v0 = make_v0_info(1, b"compat");
-        let mut v0_buf = Vec::new();
-        #[allow(deprecated)]
-        v0.serialize(&mut v0_buf).unwrap();
-        let mut r = Cursor::new(v0_buf);
-        let (v1, _) = XorbObjectInfoV1::deserialize(&mut r).unwrap();
-        assert_eq!(v1.version, 2);
-        assert_eq!(v1.xorb_hash, v0.xorb_hash);
-        assert_eq!(v1.num_chunks, 1);
-    }
+    fn legacy_conversion_preserves_metadata_and_byte_counts() {
+        for count in [0, 1, 2, 3] {
+            let v0 = make_v0_info(count, b"legacy");
+            let mut expected = XorbObjectInfoV1 {
+                xorb_hash: v0.xorb_hash,
+                num_chunks: u64::from(count),
+                chunk_hashes: v0.chunk_hashes.clone(),
+                chunk_boundary_offsets: v0
+                    .chunk_boundary_offsets
+                    .iter()
+                    .map(|&offset| u64::from(offset))
+                    .collect(),
+                boundaries_version: XORB_OBJECT_FORMAT_BOUNDARIES_VERSION_NO_UNPACKED_INFO,
+                ..Default::default()
+            };
+            expected.fill_in_boundary_offsets();
+            assert_eq!(XorbObjectInfoV1::from_v0(v0.clone()), expected);
 
-    #[test]
-    fn v1_from_v0() {
-        let v0 = make_v0_info(2, b"fromv0");
-        let v1 = XorbObjectInfoV1::from_v0(v0.clone());
-        assert_eq!(v1.version, 2);
-        assert_eq!(v1.xorb_hash, v0.xorb_hash);
-        assert_eq!(v1.num_chunks, 2);
-        assert_eq!(v1.chunk_hashes.len(), 2);
-        assert_eq!(v1.chunk_boundary_offsets.len(), 2);
-        assert!(v1.unpacked_chunk_offsets.is_empty()); // v0 has no unpacked
+            let mut bytes = Vec::new();
+            #[allow(deprecated)]
+            let written = v0.serialize(&mut bytes).unwrap();
+            let mut reader = Cursor::new(&bytes);
+            let (decoded, read) = XorbObjectInfoV1::deserialize(&mut reader).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(written, bytes.len());
+            assert_eq!(read as usize, written);
+            assert_eq!(reader.position() as usize, written);
+        }
     }
 
     // ======= XorbObject =======
