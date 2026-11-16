@@ -580,18 +580,22 @@ fn aggregate_value(
         .column
         .as_deref()
         .ok_or_else(|| HubApiError::PathValidation("aggregate column required".to_owned()))?;
-    let values: Vec<f64> = rows
+    let mut values = rows
         .iter()
         .filter_map(|row| row.columns.get(column).and_then(serde_json::Value::as_f64))
-        .collect();
-    if values.is_empty() {
+        .peekable();
+    if values.peek().is_none() {
         return Ok(serde_json::Value::Null);
     }
     let value = match aggregate.function {
-        AggregateFunction::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
-        AggregateFunction::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        AggregateFunction::Sum => values.iter().sum(),
-        AggregateFunction::Avg => values.iter().sum::<f64>() / values.len() as f64,
+        AggregateFunction::Min => values.fold(f64::INFINITY, f64::min),
+        AggregateFunction::Max => values.fold(f64::NEG_INFINITY, f64::max),
+        AggregateFunction::Sum => values.sum(),
+        AggregateFunction::Avg => {
+            let mut count = 0_usize;
+            let sum: f64 = values.inspect(|_| count = count.saturating_add(1)).sum();
+            sum / count as f64
+        }
         AggregateFunction::Count => 0.0,
     };
     Ok(serde_json::json!(value))
