@@ -797,19 +797,15 @@ impl ServerObjectStore {
                         root.display()
                     ));
                 }
-                // Verify write access by checking we can stat the directory
-                std::fs::metadata(root)
-                    .map(|m| {
-                        if !m.permissions().readonly() {
-                            Ok(())
-                        } else {
-                            Err(format!(
-                                "local storage root is read-only: {}",
-                                root.display()
-                            ))
-                        }
-                    })
-                    .map_err(|e| format!("local storage root inaccessible: {e}"))?
+                let metadata = std::fs::metadata(root)
+                    .map_err(|e| format!("local storage root inaccessible: {e}"))?;
+                if metadata.permissions().readonly() {
+                    return Err(format!(
+                        "local storage root is read-only: {}",
+                        root.display()
+                    ));
+                }
+                Ok(())
             }
             Self::S3(store) => {
                 // Attempt a lightweight list with an empty prefix to verify connectivity
