@@ -4,8 +4,11 @@ use std::mem::size_of;
 use bytes::Bytes;
 use serde::Serialize;
 
+#[cfg(test)]
+use super::MDB_V2_INFO_ENTRY_SIZE;
 use super::shard_file::MDB_FILE_INFO_ENTRY_SIZE;
 use super::xorb_structs::{XorbChunkSequenceEntry, XorbChunkSequenceHeader};
+use super::{MDB_SHARD_FORMAT_V3, read_info_entry, read_info_integer};
 use crate::{merklehash::MerkleHash, utils::serialization_utils::*};
 
 pub const MDB_DEFAULT_FILE_FLAG: u32 = 0;
@@ -15,24 +18,6 @@ pub const MDB_FILE_FLAG_WITH_METADATA_EXT: u32 = 1 << 30;
 pub const MDB_FILE_FLAG_METADATA_EXT_MASK: u32 = 1 << 30;
 
 pub type Sha256 = MerkleHash;
-
-const MDB_SHARD_FORMAT_V3: u64 = 3;
-const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
-
-fn read_file_info_entry<R: Read>(
-    reader: &mut R,
-    version: u64,
-) -> std::io::Result<[u8; MDB_FILE_INFO_ENTRY_SIZE]> {
-    // Legacy records omit the final 16 bytes; decode those fields as zero.
-    let mut bytes = [0; MDB_FILE_INFO_ENTRY_SIZE];
-    let length = if version < MDB_SHARD_FORMAT_V3 {
-        MDB_V2_INFO_ENTRY_SIZE
-    } else {
-        bytes.len()
-    };
-    reader.read_exact(&mut bytes[..length])?;
-    Ok(bytes)
-}
 
 /// Maximum number of file segments (and, when verification is present, the same
 /// number of verification entries) a single file may declare in its shard
@@ -111,17 +96,13 @@ impl FileDataSequenceHeader {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        let bytes = read_file_info_entry(reader, version)?;
+        let bytes = read_info_entry(reader, version)?;
         let reader = &mut Cursor::new(bytes);
         let legacy = version < MDB_SHARD_FORMAT_V3;
         Ok(Self {
             file_hash: read_hash(reader)?,
             file_flags: read_u32(reader)?,
-            num_entries: if legacy {
-                u64::from(read_u32(reader)?)
-            } else {
-                read_u64(reader)?
-            },
+            num_entries: read_info_integer(reader, version)?,
             _unused: read_u64(reader)?,
             _pad: if legacy { 0 } else { read_u64(reader)? },
         })
@@ -221,21 +202,14 @@ impl FileDataSequenceEntry {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        let bytes = read_file_info_entry(reader, version)?;
+        let bytes = read_info_entry(reader, version)?;
         let reader = &mut Cursor::new(bytes);
-        let read_integer = |reader: &mut _| {
-            if version < MDB_SHARD_FORMAT_V3 {
-                read_u32(reader).map(u64::from)
-            } else {
-                read_u64(reader)
-            }
-        };
         Ok(Self {
             xorb_hash: read_hash(reader)?,
             xorb_flags: read_u32(reader)?,
-            unpacked_segment_bytes: read_integer(reader)?,
-            chunk_index_start: read_integer(reader)?,
-            chunk_index_end: read_integer(reader)?,
+            unpacked_segment_bytes: read_info_integer(reader, version)?,
+            chunk_index_start: read_info_integer(reader, version)?,
+            chunk_index_end: read_info_integer(reader, version)?,
         })
     }
 }
@@ -268,7 +242,7 @@ impl FileVerificationEntry {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        let bytes = read_file_info_entry(reader, version)?;
+        let bytes = read_info_entry(reader, version)?;
         let reader = &mut Cursor::new(bytes);
         let mut entry = Self::new(read_hash(reader)?);
         read_u64s(reader, &mut entry._unused)?;
@@ -306,7 +280,7 @@ impl FileMetadataExt {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        let bytes = read_file_info_entry(reader, version)?;
+        let bytes = read_info_entry(reader, version)?;
         let reader = &mut Cursor::new(bytes);
         let mut entry = Self::new(read_hash(reader)?);
         read_u64s(reader, &mut entry._unused)?;

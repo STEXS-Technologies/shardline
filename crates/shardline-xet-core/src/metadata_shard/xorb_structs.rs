@@ -3,14 +3,13 @@ use std::mem::size_of;
 
 use bytes::Bytes;
 
-use super::hash_is_global_dedup_eligible;
+#[cfg(test)]
+use super::MDB_V2_INFO_ENTRY_SIZE;
+use super::{hash_is_global_dedup_eligible, read_info_entry, read_info_integer};
 use crate::{merklehash::MerkleHash, utils::serialization_utils::*};
 
 pub const MDB_DEFAULT_XORB_FLAG: u32 = 0;
 pub const MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG: u32 = 1 << 31;
-
-const MDB_SHARD_FORMAT_V3: u64 = 3;
-const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
 
 /// Maximum number of chunk entries a single xorb may declare in its shard
 /// header (`XorbChunkSequenceHeader::num_entries`). Each entry serializes to
@@ -68,28 +67,14 @@ impl XorbChunkSequenceHeader {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        if version < MDB_SHARD_FORMAT_V3 {
-            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
-            reader.read_exact(&mut v)?;
-            let reader = &mut Cursor::new(v);
-            return Ok(Self {
-                xorb_hash: read_hash(reader)?,
-                xorb_flags: read_u32(reader)?,
-                num_entries: u64::from(read_u32(reader)?),
-                num_bytes_in_xorb: u64::from(read_u32(reader)?),
-                num_bytes_on_disk: u64::from(read_u32(reader)?),
-            });
-        }
-
-        let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v)?;
-        let reader = &mut Cursor::new(v);
+        let bytes = read_info_entry(reader, version)?;
+        let reader = &mut Cursor::new(bytes);
         Ok(Self {
             xorb_hash: read_hash(reader)?,
             xorb_flags: read_u32(reader)?,
-            num_entries: read_u64(reader)?,
-            num_bytes_in_xorb: read_u64(reader)?,
-            num_bytes_on_disk: read_u64(reader)?,
+            num_entries: read_info_integer(reader, version)?,
+            num_bytes_in_xorb: read_info_integer(reader, version)?,
+            num_bytes_on_disk: read_info_integer(reader, version)?,
         })
     }
 }
@@ -153,28 +138,14 @@ impl XorbChunkSequenceEntry {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        if version < MDB_SHARD_FORMAT_V3 {
-            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
-            reader.read_exact(&mut v)?;
-            let reader = &mut Cursor::new(v);
-            return Ok(Self {
-                chunk_hash: read_hash(reader)?,
-                chunk_byte_range_start: u64::from(read_u32(reader)?),
-                unpacked_segment_bytes: u64::from(read_u32(reader)?),
-                flags: read_u32(reader)?,
-                _unused: u64::from(read_u32(reader)?),
-            });
-        }
-
-        let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v)?;
-        let reader = &mut Cursor::new(v);
+        let bytes = read_info_entry(reader, version)?;
+        let reader = &mut Cursor::new(bytes);
         Ok(Self {
             chunk_hash: read_hash(reader)?,
-            chunk_byte_range_start: read_u64(reader)?,
-            unpacked_segment_bytes: read_u64(reader)?,
+            chunk_byte_range_start: read_info_integer(reader, version)?,
+            unpacked_segment_bytes: read_info_integer(reader, version)?,
             flags: read_u32(reader)?,
-            _unused: read_u64(reader)?,
+            _unused: read_info_integer(reader, version)?,
         })
     }
 }
@@ -375,15 +346,15 @@ mod tests {
 
     #[test]
     fn header_serialize_roundtrip() {
-        let h = make_header(2, 300);
+        let mut h = make_header(u64::from(u32::MAX) + 2, u64::from(u32::MAX) + 300);
+        h.xorb_flags = 17;
+        h.num_bytes_on_disk = u64::MAX;
         let mut buf = Vec::new();
         h.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let h2 = XorbChunkSequenceHeader::deserialize(&mut r, 3).unwrap();
-        assert_eq!(h.xorb_hash, h2.xorb_hash);
-        assert_eq!(h.num_entries, h2.num_entries);
-        assert_eq!(h.num_bytes_in_xorb, h2.num_bytes_in_xorb);
-        assert_eq!(h.num_bytes_on_disk, h2.num_bytes_on_disk);
+        assert_eq!(h, h2);
+        assert_eq!(r.position() as usize, buf.len());
     }
 
     #[test]
@@ -400,7 +371,7 @@ mod tests {
         write_u32(&mut bytes, 4_096).unwrap();
         write_u32(&mut bytes, 8_192).unwrap();
         write_u32(&mut bytes, MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG).unwrap();
-        write_u32(&mut bytes, 0).unwrap();
+        write_u32(&mut bytes, u32::MAX).unwrap();
         write_hash(&mut bytes, &[!0_u64; 4].into()).unwrap();
         for _ in 0..4 {
             write_u32(&mut bytes, 0).unwrap();
@@ -418,6 +389,7 @@ mod tests {
         assert_eq!(info.chunks[0].chunk_byte_range_start, 4_096);
         assert_eq!(info.chunks[0].unpacked_segment_bytes, 8_192);
         assert_eq!(info.chunks[0].flags, MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG);
+        assert_eq!(info.chunks[0]._unused, u64::from(u32::MAX));
         assert!(MDBXorbInfo::deserialize(&mut reader, 2).unwrap().is_none());
         assert_eq!(reader.position(), 3 * MDB_V2_INFO_ENTRY_SIZE as u64);
     }
@@ -475,15 +447,15 @@ mod tests {
 
     #[test]
     fn entry_serialize_roundtrip() {
-        let e = make_entry(256, 64);
+        let mut e = make_entry(u64::from(u32::MAX) + 256, u64::from(u32::MAX) + 64);
+        e.flags = MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
+        e._unused = u64::MAX;
         let mut buf = Vec::new();
         e.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let e2 = XorbChunkSequenceEntry::deserialize(&mut r, 3).unwrap();
-        assert_eq!(e.chunk_hash, e2.chunk_hash);
-        assert_eq!(e.unpacked_segment_bytes, e2.unpacked_segment_bytes);
-        assert_eq!(e.chunk_byte_range_start, e2.chunk_byte_range_start);
-        assert_eq!(e.flags, e2.flags);
+        assert_eq!(e, e2);
+        assert_eq!(r.position() as usize, buf.len());
     }
 
     #[test]
