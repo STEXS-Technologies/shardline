@@ -4319,10 +4319,11 @@ RSS failure remain outside these passing checks.
 
 ### Xet core and SDK cleanup checkpoint (2026-11-16)
 
-Source `e7108b4ace1e215089497d38a13a82e390e1ad8e` was held fixed after the
+Source `30b2f585eee90a4cdfa6ff165a251fcece3ffeec` was held fixed after the
 codec, metadata, cache and SDK upload cleanup, including bounded file hashing
-with fixed-size merge buffers. The combined `shardline-xet-core`, `sdx` and
-`shardline-xet-adapter` suites passed 1,186 tests; the adapter's explicitly
+with fixed-size merge buffers, direct single-chunk hashes and removal of the
+extra BG4 slice-output copy. The combined `shardline-xet-core`, `sdx` and
+`shardline-xet-adapter` suites passed 1,086 tests; the adapter's explicitly
 ignored Linux normalization I/O diagnostic remained skipped. The lower test
 count reflects consolidation of duplicated wrappers into the owning modules,
 with complete-record, wire-size, truncation and error-payload assertions.
@@ -4330,15 +4331,15 @@ Strict Clippy passed for these three crates. The same shared-host build settings
 and toolchains described above were used.
 
 The SDK/server E2E command above, with `--run-ignored all`, passed all 35 tests
-with none skipped in 283.752 s. Both isolated clients verified byte identity and
+with none skipped in 282.131 s. Both isolated clients verified byte identity and
 length and met the unchanged 65,536 KiB additional-RSS limit:
 
 | Isolated client workload | Baseline RSS (KiB) | Peak VmHWM (KiB) | Additional RSS (KiB) | Client transfer (ms) |
 | --- | ---: | ---: | ---: | ---: |
-| 256 MiB | 25,816 | 69,424 | 43,608 | 1,171 |
-| 1 GiB | 25,380 | 76,280 | 50,900 | 8,104 |
+| 256 MiB | 25,396 | 76,656 | 51,260 | 1,163 |
+| 1 GiB | 25,444 | 83,296 | 57,852 | 8,215 |
 
-The parent tests took 22.357 s and 210.922 s, including fixture ingestion.
+The parent tests took 22.897 s and 210.467 s, including fixture ingestion.
 These local results do not isolate individual changes, establish production
 throughput, or explain the historical hosted RSS failure. Full server and
 production PostgreSQL/object-store qualification remain outside this checkpoint.
