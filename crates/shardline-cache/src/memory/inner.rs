@@ -6,9 +6,9 @@ use tokio::time::Instant;
 
 use crate::ReconstructionCacheKey;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct MemoryEntry {
-    pub(super) payload: Arc<Vec<u8>>,
+    pub(super) payload: Vec<u8>,
     pub(super) inserted_at: Instant,
     pub(super) seq: u64,
 }
@@ -71,7 +71,7 @@ impl CacheInner {
         self.entries
             .get(key)
             .filter(|entry| entry.is_live(now, ttl))
-            .map(|entry| entry.payload.as_ref().clone())
+            .map(|entry| entry.payload.clone())
     }
 
     pub(super) fn store(
@@ -101,7 +101,7 @@ impl CacheInner {
         self.entries.insert(
             key.clone(),
             MemoryEntry {
-                payload: Arc::new(payload.to_vec()),
+                payload: payload.to_vec(),
                 inserted_at: now,
                 seq,
             },

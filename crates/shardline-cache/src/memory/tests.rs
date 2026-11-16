@@ -1914,7 +1914,7 @@ async fn memory_cache_huge_ttl_waiter_receives_loaded_value() {
 fn memory_entry_age_expiration_preserves_zero_and_exact_boundary() {
     let inserted_at = tokio::time::Instant::now();
     let entry = super::inner::MemoryEntry {
-        payload: std::sync::Arc::new(b"payload".to_vec()),
+        payload: b"payload".to_vec(),
         inserted_at,
         seq: 0,
     };
