@@ -587,76 +587,60 @@ fn temp_key_numeric_fields_require_exactly_three_ascii_decimal_groups() {
 }
 
 #[test]
-fn is_temp_upload_key_rejects_non_temp() {
-    assert!(!is_temp_upload_key("uploads/obj"));
-    assert!(!is_temp_upload_key("obj.tmp."));
-    assert!(!is_temp_upload_key("obj.tmp.abc"));
-    assert!(!is_temp_upload_key("obj.tmpx.42"));
+fn temporary_key_detection_never_shadows_user_objects() {
+    // F-49/F-56/F-80: user keys, including legacy temporary shapes, must remain visible and must never be swept.
+    for key in [
+        "uploads/obj",
+        "obj.tmp.",
+        "obj.tmp.abc",
+        "obj.tmpx.42",
+        "data.tmp.1",
+        "report.tmp.2026.1",
+        "prefix/obj.tmp.123/suffix",
+        "obj.tmp.42extra",
+        "obj.tmp.42.tmp.99",
+        ".tmp.42",
+        "a/.tmp.42",
+        "report.tmp.2026.01.15",
+        "backup.tmp.2026.08.16",
+        "data.tmp.001.002.003",
+        "photos.tmp.1.2.3",
+        "v1.tmp.2026.01.15",
+        "uploads/report.tmp.2026.01.15",
+        "data.tmp.1.1.1750000000000000000",
+        "user/report.tmp.2026.1.1234567890123456",
+        "v1.tmp.123.456.1750000000000000000",
+        "data.tmp.1.4294967296.1750000000000000000",
+        "data.tmp.1.2.999999999999999",
+        "",
+        "obj.tmp.tmp.42",
+        "obj",
+        "obj.temp.42",
+        "obj.tmp.42",
+        "obj.tmp.42.99",
+        "prefix.tmp.",
+    ] {
+        assert!(!is_temp_upload_key(key), "{key}");
+    }
 }
 
 #[test]
-fn is_temp_upload_key_does_not_shadow_user_keys() {
-    // F-49: dots are legal in user keys. `data.tmp.1` is one digit group (not
-    // the generated four-group reserved shape), `report.tmp.2026.1` is two
-    // groups, and a mid-key `.tmp.<digits>` / non-digit tail never matches —
-    // none of these may be filtered from listings or GC enumeration.
-    assert!(!is_temp_upload_key("data.tmp.1"));
-    assert!(!is_temp_upload_key("report.tmp.2026.1"));
-    assert!(!is_temp_upload_key("prefix/obj.tmp.123/suffix"));
-    assert!(!is_temp_upload_key("obj.tmp.42extra"));
-    assert!(!is_temp_upload_key("obj.tmp.42.tmp.99"));
-    assert!(!is_temp_upload_key(".tmp.42"));
-    assert!(!is_temp_upload_key("a/.tmp.42"));
-}
-
-#[test]
-fn is_temp_upload_key_rejects_user_keys_that_look_like_generated_temps() {
-    // F-56/F-80: the pre-fix grammar matched ANY `<base>.tmp.<digits>.<digits>.<digits>`
-    // tail whose groups had the generated numeric shapes, so user keys whose
-    // suffixes are date stamps / version tags / numeric OCI tags collided with
-    // the generated temp grammar — they were shadowed from listings and
-    // deleted by the GC sweep after 1h. The F-80 fix moved the generated temps
-    // into the RESERVED `__tmp/shardline-overwrite/` namespace, so NONE of
-    // these — including keys shaped EXACTLY like the old generated temps — may
-    // be treated as temps.
-    assert!(!is_temp_upload_key("report.tmp.2026.01.15"));
-    assert!(!is_temp_upload_key("backup.tmp.2026.08.16"));
-    assert!(!is_temp_upload_key("data.tmp.001.002.003"));
-    assert!(!is_temp_upload_key("photos.tmp.1.2.3"));
-    assert!(!is_temp_upload_key("v1.tmp.2026.01.15"));
-    assert!(!is_temp_upload_key("uploads/report.tmp.2026.01.15"));
-    // The exact old generated shapes (`<base>.tmp.<u64>.<u32>.<nanos>=10^15..10^20`)
-    // are now indistinguishable from user keys — they must never match.
-    assert!(!is_temp_upload_key("data.tmp.1.1.1750000000000000000"));
-    assert!(!is_temp_upload_key(
-        "user/report.tmp.2026.1.1234567890123456"
-    ));
-    assert!(!is_temp_upload_key("v1.tmp.123.456.1750000000000000000"));
-    // A pid beyond u32 range is never a generated pid (kept as defense).
-    assert!(!is_temp_upload_key(
-        "data.tmp.1.4294967296.1750000000000000000"
-    ));
-    // A 15-digit (sub-10^15) nanos is not a plausible epoch clock value.
-    assert!(!is_temp_upload_key("data.tmp.1.2.999999999999999"));
-}
-
-#[test]
-fn is_temp_upload_key_rejects_overwrite_prefix_with_wrong_shape() {
-    // The reserved overwrite prefix must carry the exact
-    // `<key-digest>.<counter>.<pid>.<nanos>` tail; other names under it (e.g.
-    // a hand-placed lookalike) are not filtered.
-    assert!(!is_temp_upload_key("__tmp/shardline-overwrite/"));
-    assert!(!is_temp_upload_key("__tmp/shardline-overwrite/notes.txt"));
-    // A short / non-hex key digest or a missing digit group never matches.
-    assert!(!is_temp_upload_key("__tmp/shardline-overwrite/abcd.1.2.3"));
-    assert!(!is_temp_upload_key(
-        "__tmp/shardline-overwrite/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.1.2.3"
-    ));
-    assert!(!is_temp_upload_key(
-        "__tmp/shardline-overwrite/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.1.2"
-    ));
-    // A key under a different `__tmp/` sub-namespace never matches.
-    assert!(!is_temp_upload_key("__tmp/other/1.2.3"));
+fn temporary_key_detection_rejects_malformed_reserved_keys() {
+    // A reserved prefix alone is insufficient: only the complete generated grammar may be swept.
+    for key in [
+        "__tmp/shardline-overwrite/",
+        "__tmp/shardline-overwrite/notes.txt",
+        "__tmp/shardline-overwrite/abcd.1.2.3",
+        "__tmp/shardline-overwrite/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.1.2.3",
+        "__tmp/shardline-overwrite/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.1.2",
+        "__tmp/other/1.2.3",
+        "__tmp/shardline-stream-upload/",
+        "__tmp/shardline-stream-upload/notes.txt",
+        "__tmp/shardline-stream-upload/42-abc-7",
+        "__tmp/other/1750000000000000000-42-7",
+    ] {
+        assert!(!is_temp_upload_key(key), "{key}");
+    }
 }
 
 #[test]
@@ -961,62 +945,6 @@ fn validate_config_accepts_valid_config() {
 }
 
 // ── is_temp_upload_key edge cases ──────────────────────────────────────
-
-#[test]
-fn is_temp_upload_key_rejects_empty() {
-    assert!(!is_temp_upload_key(""));
-}
-
-#[test]
-fn is_temp_upload_key_rejects_no_digits_after_tmp() {
-    assert!(!is_temp_upload_key("obj.tmp."));
-    assert!(!is_temp_upload_key("obj.tmp.abc"));
-}
-
-#[test]
-fn is_temp_upload_key_rejects_multiple_tmp_as_middle_segment() {
-    assert!(!is_temp_upload_key("obj.tmp.tmp.42"));
-    assert!(!is_temp_upload_key("obj.tmp.42.tmp.99"));
-}
-
-#[test]
-fn is_temp_upload_key_rejects_without_tmp_suffix() {
-    assert!(!is_temp_upload_key("obj"));
-    assert!(!is_temp_upload_key("obj.tmpx.42"));
-    assert!(!is_temp_upload_key("obj.temp.42"));
-}
-
-#[test]
-fn is_temp_upload_key_rejects_partial_grammar_matches() {
-    // One or two trailing digit groups, a `.tmp.` in the middle of the key, or
-    // a bare `.tmp.<digits>` with no base are NOT the generated three-group
-    // suffix — none may be filtered from listings (F-49).
-    assert!(!is_temp_upload_key("prefix/obj.tmp.123/suffix"));
-    assert!(!is_temp_upload_key(".tmp.42"));
-    assert!(!is_temp_upload_key("a/.tmp.42"));
-    assert!(!is_temp_upload_key("obj.tmp.42extra"));
-    assert!(!is_temp_upload_key("obj.tmp.42"));
-    assert!(!is_temp_upload_key("obj.tmp.42.99"));
-}
-
-#[test]
-fn is_temp_upload_key_rejects_tmp_alone_after_prefix() {
-    assert!(!is_temp_upload_key("prefix.tmp."));
-}
-
-#[test]
-fn is_temp_upload_key_rejects_stream_upload_prefix_with_wrong_shape() {
-    // The reserved prefix must carry the exact `<nanos>-<pid>-<counter>` tail;
-    // other names under it (e.g. a user-created file) are not filtered.
-    assert!(!is_temp_upload_key("__tmp/shardline-stream-upload/"));
-    assert!(!is_temp_upload_key(
-        "__tmp/shardline-stream-upload/notes.txt"
-    ));
-    assert!(!is_temp_upload_key(
-        "__tmp/shardline-stream-upload/42-abc-7"
-    ));
-    assert!(!is_temp_upload_key("__tmp/other/1750000000000000000-42-7"));
-}
 
 // ── S3ObjectStoreConfig Debug with missing credentials ─────────────────
 
