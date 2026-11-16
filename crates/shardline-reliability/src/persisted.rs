@@ -310,7 +310,7 @@ fn verify_persisted_event_merkle_chain_inner(
             operation_kind,
             event,
             commit.clone(),
-            previous.clone(),
+            previous,
         )?;
         previous = commit;
     }
