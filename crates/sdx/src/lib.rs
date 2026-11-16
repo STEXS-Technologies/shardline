@@ -58,70 +58,25 @@
 //! }
 //! ```
 //!
-//! # Design history (milestones)
+//! # Module guide
 //!
-//! The milestone notes below (M0–M4, `docs/SDX_PLAN.md`) are the crate's
-//! design history and are not needed to use the library:
+//! [`client::XetClientBuilder`] configures repository-scoped authentication,
+//! transfer limits, caching and retries. [`auth`] and [`config`] resolve
+//! credentials; [`retry`] owns retry policy.
 //!
-//! M0 provides the hash and hexadecimal primitives the Xet wire protocol
-//! requires: BLAKE3 keyed hashing for chunk data (and term verification) via
-//! the pinned upstream `xet-core-structures` crate, plus strict Xet CAS API
-//! hexadecimal conversion with 8-byte group reversal.
+//! [`stream`] provides ordered and unordered downloads with byte-denominated
+//! buffer reservations. [`cache`] stores verified chunk ranges on disk, and
+//! [`group`] coordinates concurrent transfers and cancellation. The buffer
+//! reservation bounds decoded payloads; it is not a process-RSS limit.
 //!
-//! M1 adds the authentication/token service: [`auth::TokenService`] issues and
-//! caches repo+revision-scoped read/write CAS tokens against the shardline
-//! token-issuance routes (single-flight refresh with a 30-second buffer), with
-//! credential resolution from explicit sources, token files, and the
-//! `SHARDLINE_TOKEN` / `SHARDLINE_API_KEY` / `SHARDLINE_TOKEN_FILE`
-//! environment variables ([`config`]).
+//! [`upload`] manages streaming ingestion and publishes xorbs before their
+//! referencing shards. [`chunker`] uses the shared CDC engine; [`dedup`],
+//! [`xorb_build`] and [`shard`] handle reuse, container packing and metadata.
 //!
-//! M2a adds the core read path: [`client::XetClient`] / [`client::XetClientBuilder`]
-//! map a `xet://` endpoint to a repository and token service;
-//! [`transfer::TransferClient`] issues reconstruction requests and ranged xorb
-//! fetches; [`xorb::XorbReader`] decodes serialized xorb byte ranges (footer-less
-//! tolerant, via the pinned `xet-core-structures` public API);
-//! [`reconstruction::reconstruct`] orchestrates V2→V1 reconstruction, term
-//! resolution, `unpacked_length` validation, and byte-range assembly;
-//! [`session::DownloadSession`] exposes `download_file` / `download_range`.
-//!
-//! M2b1 adds the streaming download core ([`stream`], `docs/SDX_PLAN.md`
-//! §4.4.1): pull-based [`stream::DownloadStream`] /
-//! [`stream::UnorderedDownloadStream`] (`next()`/`blocking_next()`), the
-//! byte-denominated [`stream::BufferSemaphore`] memory bound, and
-//! `download_stream` / `download_unordered_stream` / `download_to_writer` /
-//! `download_bytes` on [`client::XetClient`] and [`session::DownloadSession`].
-//!
-//! M2b2 adds the on-disk chunk cache ([`cache::ChunkCache`],
-//! `docs/SDX_PLAN.md` §4.4.1 step 3) and the stream-group layer
-//! ([`group::XetStreamGroup`], §4.4.3). The cache is content-addressed by the
-//! 64-hex xorb hash, atomic (temp+rename), LRU budget-bounded (default 2 GiB),
-//! and tolerant of corruption (CRC-verified, delete-on-corrupt); every ranged
-//! xorb fetch checks the cache before acquiring the download permit / hitting
-//! the network. The stream group manages concurrent downloads with abort-all
-//! and per-stream [`group::XetTaskState`] status probes; the upload/commit
-//! side of the group layer is M3 and not implemented.
-//!
-//! M3a adds the offline-testable write-path foundation (all of `docs/SDX_PLAN.md`
-//! §4.4.2 / §9-M3): [`chunker::Chunker`] is a streaming CDC chunker
-//! **byte-identical** to the server's `CdcChunker`; [`xorb_build::build_xorb`]
-//! produces serialized xorbs **byte-identical** to the server's
-//! `pack_chunks_into_xorb` (via the pinned upstream `xet-core-structures`
-//! crate, with the shardline format-v2 footer assembled directly — see the
-//! module docs); [`dedup::DedupClient`] implements the global dedup query
-//! (`GET /v1/chunks/default-merkledb/{hash}`, 404 = miss, 429 no-retry) plus
-//! the eligibility and defrag-prevention hysteresis helpers.
-//!
-//! M3b adds the network + session layer on top: [`upload::UploadSession`]
-//! runs the push-style ingest loop (8 MiB blocks, CDC on a compute thread,
-//! session + eligibility-gated global dedup, HEAD-probed idempotent xorb
-//! uploads with streaming bodies from a `JoinSet`, xorbs-before-shard via
-//! fork-format v3 shards serialized by [`shard`]) and the streaming surface
-//! ([`upload::UploadStreamHandle`], [`crate::XetClient::upload_file`] /
-//! `upload_bytes` / `upload_stream`, and the group layer
-//! [`group::XetUploadCommit`]). Retry/backoff/adaptive concurrency is M4.
-//!
-//! Later milestones add retry/adaptive concurrency (M4), chunking, shard, and
-//! path addressing modules from the module map in `docs/SDX_PLAN.md` §4.2.
+//! [`transfer`] owns the HTTP wire protocol, [`reconstruction`] assembles file
+//! ranges, and [`xorb`] decodes serialized chunk ranges through the pinned
+//! upstream Xet implementation. [`tree`] and [`revisions`] expose repository
+//! paths and revisions. Design history lives in `docs/SDX_PLAN.md`.
 
 pub mod auth;
 pub mod cache;
