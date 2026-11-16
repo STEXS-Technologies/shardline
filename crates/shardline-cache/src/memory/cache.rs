@@ -100,7 +100,7 @@ impl MemoryReconstructionCache {
         Self {
             ttl: Duration::from_secs(ttl_seconds.get()),
             max_entries,
-            inner: Arc::new(RwLock::new(CacheInner::new())),
+            inner: Arc::new(RwLock::new(CacheInner::default())),
             loading: Arc::new(Mutex::new(HashMap::new())),
         }
     }

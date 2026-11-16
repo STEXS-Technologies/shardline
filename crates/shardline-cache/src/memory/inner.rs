@@ -44,7 +44,7 @@ impl LoadingEntry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct CacheInner {
     pub(super) entries: HashMap<ReconstructionCacheKey, MemoryEntry>,
     pub(super) eviction_order: BTreeMap<EvictionKey, ReconstructionCacheKey>,
@@ -53,15 +53,6 @@ pub(super) struct CacheInner {
 }
 
 impl CacheInner {
-    pub(super) fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            eviction_order: BTreeMap::new(),
-            next_seq: 0,
-            total_bytes: 0,
-        }
-    }
-
     pub(super) fn live_payload(
         &self,
         key: &ReconstructionCacheKey,

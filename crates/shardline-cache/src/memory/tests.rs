@@ -1764,7 +1764,7 @@ fn cache_inner_eviction_handles_empty_and_stale_state_without_losing_live_entrie
     let stale = ReconstructionCacheKey::latest("stale", None);
     for stale_count in [0, 2] {
         for live in [false, true] {
-            let mut inner = CacheInner::new();
+            let mut inner = CacheInner::default();
             for seq in 0..stale_count {
                 inner
                     .eviction_order
@@ -1792,7 +1792,7 @@ fn cache_inner_eviction_handles_empty_and_stale_state_without_losing_live_entrie
 
 #[test]
 fn cache_inner_replacement_and_removal_preserve_accounting() {
-    let mut inner = super::inner::CacheInner::new();
+    let mut inner = super::inner::CacheInner::default();
     let key = ReconstructionCacheKey::latest("overwrite", None);
     let now = tokio::time::Instant::now();
     for (seq, payload) in [(0, b"first".as_slice()), (1, b"second".as_slice())] {
@@ -1900,7 +1900,7 @@ fn memory_replacement_admission_counts_net_bytes_and_refreshes_fifo() {
     let third = ReconstructionCacheKey::latest("third", None);
     for replacement in [b"a".as_slice(), b"bbbb".as_slice()] {
         for replace_first in [false, true] {
-            let mut inner = super::inner::CacheInner::new();
+            let mut inner = super::inner::CacheInner::default();
             inner.store(&first, b"1111", now, 2, 8);
             inner.store(&second, b"2222", now, 2, 8);
             let target = if replace_first { &first } else { &second };
@@ -1929,7 +1929,7 @@ fn memory_replacement_growing_payload_evicts_only_under_real_byte_pressure() {
     let now = tokio::time::Instant::now();
     let first = ReconstructionCacheKey::latest("first", None);
     let second = ReconstructionCacheKey::latest("second", None);
-    let mut inner = super::inner::CacheInner::new();
+    let mut inner = super::inner::CacheInner::default();
     inner.store(&first, b"1111", now, 2, 8);
     inner.store(&second, b"22", now, 2, 8);
     inner.store(&second, b"4444", now, 2, 8);
@@ -1947,7 +1947,7 @@ fn memory_oversized_replacement_invalidates_old_value_without_other_eviction() {
     let now = tokio::time::Instant::now();
     let first = ReconstructionCacheKey::latest("first", None);
     let second = ReconstructionCacheKey::latest("second", None);
-    let mut inner = super::inner::CacheInner::new();
+    let mut inner = super::inner::CacheInner::default();
     inner.store(&first, b"1111", now, 2, 8);
     inner.store(&second, b"2222", now, 2, 8);
     inner.store(&second, b"oversized", now, 2, 8);
