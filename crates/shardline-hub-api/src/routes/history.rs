@@ -57,11 +57,6 @@ pub(crate) async fn repo_commits(
     let mut result = Vec::new();
     let mut next = Some(head);
     while let Some(sha) = next.take() {
-        if !visited.insert(sha.clone()) {
-            return Err(HubApiError::CasError(
-                "cyclic repository history".to_owned(),
-            ));
-        }
         let revision = state
             .store
             .get_revision(&repo_id, &sha)
@@ -84,6 +79,7 @@ pub(crate) async fn repo_commits(
             "title": title,
             "message": description,
         }));
+        visited.insert(sha);
         next = if snapshot.is_some() {
             None
         } else {
