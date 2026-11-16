@@ -879,14 +879,31 @@ fn storage_errors_preserve_diagnostic_sources() {
         "disconnected"
     );
 
-    for error in [
-        S3ObjectStoreError::InvalidKeyPrefix(crate::ObjectPrefixError::UnsafePath),
-        S3ObjectStoreError::Path(object_store::path::Error::InvalidPath {
-            path: "/bad".into(),
-        }),
-        S3ObjectStoreError::Runtime(std::io::Error::other("thread spawn failed")),
+    let prefix_error = crate::ObjectPrefixError::UnsafePath;
+    let expected_prefix_source = prefix_error.to_string();
+    for (error, expected_detail) in [
+        (
+            S3ObjectStoreError::InvalidKeyPrefix(prefix_error),
+            expected_prefix_source.as_str(),
+        ),
+        (
+            S3ObjectStoreError::Path(object_store::path::Error::InvalidPath {
+                path: "/bad".into(),
+            }),
+            "/bad",
+        ),
+        (
+            S3ObjectStoreError::Runtime(std::io::Error::other("thread spawn failed")),
+            "thread spawn failed",
+        ),
     ] {
-        assert!(error.source().is_some());
+        assert!(
+            error
+                .source()
+                .unwrap()
+                .to_string()
+                .contains(expected_detail)
+        );
     }
     assert!(
         S3ObjectStoreError::ExistingObjectConflict
@@ -1753,20 +1770,6 @@ fn s3_store_debug_shows_runtime_status() {
 }
 
 #[test]
-fn s3_error_source_invalid_key_prefix() {
-    use crate::ObjectPrefixError;
-    let prefix_err = ObjectPrefixError::UnsafePath;
-    let err = S3ObjectStoreError::InvalidKeyPrefix(prefix_err);
-    let source = std::error::Error::source(&err);
-    assert!(source.is_some());
-    let source = source.unwrap();
-    assert_eq!(
-        source.to_string(),
-        ObjectPrefixError::UnsafePath.to_string()
-    );
-}
-
-#[test]
 fn temp_key_for_overflow_key_rejected() {
     // A very long base key no longer overflows: the F-80 temp shape is a fixed
     // reserved-prefix key (`__tmp/shardline-overwrite/<key-digest>.…`),
@@ -1794,53 +1797,6 @@ fn verify_file_length_nonexistent_file() {
     let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
     let result = super::verify_file_length(&path, &integrity);
     assert!(matches!(result, Err(S3ObjectStoreError::Io(_))));
-}
-
-// ── Error variant source() tests ──────────────────────────────────────
-
-#[test]
-fn s3_error_source_io() {
-    let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "test");
-    let err = S3ObjectStoreError::Io(io_err);
-    let source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&err);
-    assert!(source.is_some());
-    let source = source.unwrap();
-    assert_eq!(source.to_string(), "test");
-}
-
-#[test]
-fn s3_error_source_path() {
-    use object_store::path::Error as PathError;
-    let path_err = PathError::InvalidPath {
-        path: "/bad".into(),
-    };
-    let err = S3ObjectStoreError::Path(path_err);
-    let source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&err);
-    assert!(source.is_some());
-    let source = source.unwrap();
-    assert!(source.to_string().contains("/bad"));
-}
-
-#[test]
-fn s3_error_source_runtime() {
-    let io_err = std::io::Error::other("thread spawn failed");
-    let err = S3ObjectStoreError::Runtime(io_err);
-    let source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&err);
-    assert!(source.is_some());
-    let source = source.unwrap();
-    assert_eq!(source.to_string(), "thread spawn failed");
-}
-
-#[test]
-fn s3_error_source_external() {
-    let ext_err = object_store::Error::NotImplemented {
-        operation: "test".to_owned(),
-        implementer: "test".to_owned(),
-    };
-    let err = S3ObjectStoreError::External(ext_err);
-    let source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&err);
-    // External derives source via #[from]
-    assert!(source.is_some());
 }
 
 // ── S3ObjectStore partial config properties ───────────────────────────
