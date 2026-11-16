@@ -705,99 +705,6 @@ fn reconstruct_xorb_with_footer_roundtrip() {
 }
 
 // ============================================================================
-// FileDataSequenceHeader tests
-// ============================================================================
-
-#[test]
-fn file_data_sequence_header_new() {
-    let hash = compute_data_hash(b"file");
-    let header = FileDataSequenceHeader::new(hash, 3u64, false, false);
-    assert_eq!(header.file_hash, hash);
-    assert_eq!(header.num_entries, 3);
-    assert_eq!(header.file_flags, 0);
-}
-
-#[test]
-fn file_data_sequence_header_new_with_verification() {
-    let hash = compute_data_hash(b"file");
-    let header = FileDataSequenceHeader::new(hash, 1u64, true, false);
-    assert!(header.contains_verification());
-    assert!(!header.contains_metadata_ext());
-}
-
-#[test]
-fn file_data_sequence_header_new_with_metadata_ext() {
-    let hash = compute_data_hash(b"file");
-    let header = FileDataSequenceHeader::new(hash, 1u64, false, true);
-    assert!(!header.contains_verification());
-    assert!(header.contains_metadata_ext());
-}
-
-#[test]
-fn file_data_sequence_header_new_with_both() {
-    let hash = compute_data_hash(b"file");
-    let header = FileDataSequenceHeader::new(hash, 2u64, true, true);
-    assert!(header.contains_verification());
-    assert!(header.contains_metadata_ext());
-}
-
-#[test]
-fn file_data_sequence_header_bookend() {
-    let bookend = FileDataSequenceHeader::bookend();
-    assert!(bookend.is_bookend());
-}
-
-#[test]
-fn file_data_sequence_header_not_bookend() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u64, false, false);
-    assert!(!header.is_bookend());
-}
-
-#[test]
-fn file_data_sequence_header_serialize_roundtrip() {
-    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 5u64, true, false);
-    let mut buf = Vec::new();
-    header.serialize(&mut buf).unwrap();
-
-    let mut cursor = Cursor::new(buf);
-    let deserialized = FileDataSequenceHeader::deserialize(&mut cursor, 3).unwrap();
-    assert_eq!(header.file_hash, deserialized.file_hash);
-    assert_eq!(header.num_entries, deserialized.num_entries);
-    assert_eq!(header.file_flags, deserialized.file_flags);
-}
-
-#[test]
-fn file_data_sequence_header_num_info_entry_following_no_flags() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u64, false, false);
-    assert_eq!(header.num_info_entry_following(), 3);
-}
-
-#[test]
-fn file_data_sequence_header_num_info_entry_following_verification() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u64, true, false);
-    assert_eq!(header.num_info_entry_following(), 6); // 3*2 + 0
-}
-
-#[test]
-fn file_data_sequence_header_num_info_entry_following_metadata_ext() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u64, false, true);
-    assert_eq!(header.num_info_entry_following(), 4); // 3 + 1
-}
-
-#[test]
-fn file_data_sequence_header_num_info_entry_following_both() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u64, true, true);
-    assert_eq!(header.num_info_entry_following(), 7); // 3*2 + 1
-}
-
-#[test]
-fn file_data_sequence_header_default() {
-    let header = FileDataSequenceHeader::default();
-    assert_eq!(header.num_entries, 0);
-    assert_eq!(header.file_flags, 0);
-}
-
-// ============================================================================
 // FileDataSequenceEntry tests
 // ============================================================================
 
@@ -3476,27 +3383,6 @@ fn mdb_file_info_num_bytes_with_metadata_ext() {
     };
     let nbytes = info.num_bytes();
     assert!(nbytes > 0);
-}
-
-// ============================================================================
-// FileDataSequenceHeader num_info_entry_following edge cases
-// ============================================================================
-
-#[test]
-fn file_data_sequence_header_num_info_entry_following_zero_entries() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u64, true, true);
-    assert_eq!(header.num_info_entry_following(), 1);
-}
-
-// ============================================================================
-// FileDataSequenceHeader contains_* methods
-// ============================================================================
-
-#[test]
-fn file_data_sequence_header_contains_neither() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u64, false, false);
-    assert!(!header.contains_verification());
-    assert!(!header.contains_metadata_ext());
 }
 
 // ============================================================================

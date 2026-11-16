@@ -490,38 +490,25 @@ mod tests {
     // ======= FileDataSequenceHeader =======
 
     #[test]
-    fn header_new_basic() {
-        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 3, false, false);
-        assert_eq!(h.file_flags, 0);
-        assert_eq!(h.num_entries, 3);
-    }
-
-    #[test]
-    fn header_new_with_verification() {
-        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, false);
-        assert!(h.contains_verification());
-        assert!(!h.contains_metadata_ext());
-    }
-
-    #[test]
-    fn header_new_with_metadata_ext() {
-        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, false, true);
-        assert!(!h.contains_verification());
-        assert!(h.contains_metadata_ext());
-    }
-
-    #[test]
-    fn header_new_with_both() {
-        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 2, true, true);
-        assert!(h.contains_verification());
-        assert!(h.contains_metadata_ext());
-    }
-
-    #[test]
-    fn header_new_with_neither() {
-        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 0, false, false);
-        assert!(!h.contains_verification());
-        assert!(!h.contains_metadata_ext());
+    fn header_flags_determine_following_record_counts() {
+        let hash = compute_data_hash(b"file");
+        for (verification, metadata_ext, flags, following) in [
+            (false, false, 0, [0, 1, 2, 3]),
+            (true, false, 0x80000000, [0, 2, 4, 6]),
+            (false, true, 0x40000000, [1, 2, 3, 4]),
+            (true, true, 0xC0000000, [1, 3, 5, 7]),
+        ] {
+            for (count, expected) in following.into_iter().enumerate() {
+                let header =
+                    FileDataSequenceHeader::new(hash, count as u64, verification, metadata_ext);
+                assert_eq!(header.file_hash, hash);
+                assert_eq!(header.num_entries, count as u64);
+                assert_eq!(header.file_flags, flags);
+                assert_eq!(header.contains_verification(), verification);
+                assert_eq!(header.contains_metadata_ext(), metadata_ext);
+                assert_eq!(header.num_info_entry_following(), expected);
+            }
+        }
     }
 
     #[test]
@@ -591,25 +578,6 @@ mod tests {
         h.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         assert!(MDBFileInfo::deserialize(&mut r, 3).is_err());
-    }
-
-    #[test]
-    fn header_num_info_entry_following_various() {
-        // No flags: just entries
-        let h = FileDataSequenceHeader::new(MerkleHash::default(), 3, false, false);
-        assert_eq!(h.num_info_entry_following(), 3);
-        // Verification: entries * 2
-        let h = FileDataSequenceHeader::new(MerkleHash::default(), 3, true, false);
-        assert_eq!(h.num_info_entry_following(), 6);
-        // Metadata ext: entries + 1
-        let h = FileDataSequenceHeader::new(MerkleHash::default(), 3, false, true);
-        assert_eq!(h.num_info_entry_following(), 4);
-        // Both: entries * 2 + 1
-        let h = FileDataSequenceHeader::new(MerkleHash::default(), 3, true, true);
-        assert_eq!(h.num_info_entry_following(), 7);
-        // Zero entries with both flags: 0 * 2 + 1 = 1
-        let h = FileDataSequenceHeader::new(MerkleHash::default(), 0, true, true);
-        assert_eq!(h.num_info_entry_following(), 1);
     }
 
     #[test]
