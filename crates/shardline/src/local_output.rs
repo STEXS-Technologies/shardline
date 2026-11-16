@@ -788,54 +788,38 @@ mod tests {
     }
 
     #[test]
-    fn print_error_chain_single_error() {
-        let err = TestError("simple error");
-        super::print_error_chain(&err);
-    }
-
-    #[test]
-    fn print_error_chain_chained_error() {
-        let inner = TestError("inner cause");
-        let outer = ChainedError {
+    fn error_chain_writer_formats_single_and_nested_errors() {
+        let single = TestError("simple error");
+        let chained = ChainedError {
             message: "outer error",
-            source: Some(Box::new(inner)),
+            source: Some(Box::new(TestError("inner cause"))),
         };
-        super::print_error_chain(&outer);
-    }
-
-    #[test]
-    fn print_error_chain_deeply_chained() {
-        let level3 = TestError("root cause");
-        let level2 = ChainedError {
-            message: "middle layer",
-            source: Some(Box::new(level3)),
-        };
-        let level1 = ChainedError {
+        let deep = ChainedError {
             message: "outer layer",
-            source: Some(Box::new(level2)),
+            source: Some(Box::new(ChainedError {
+                message: "middle layer",
+                source: Some(Box::new(TestError("root cause"))),
+            })),
         };
-        super::print_error_chain(&level1);
+        let no_source = ChainedError {
+            message: "no source error",
+            source: None,
+        };
+        for (error, expected) in [
+            (&single as &dyn std::error::Error, "simple error\n"),
+            (&chained, "outer error\ncaused by: inner cause\n"),
+            (
+                &deep,
+                "outer layer\ncaused by: middle layer\ncaused by: root cause\n",
+            ),
+            (&no_source, "no source error\n"),
+        ] {
+            let mut bytes = Vec::new();
+            super::write_error_chain(&mut bytes, error).unwrap();
+            assert_eq!(bytes, expected.as_bytes());
+        }
     }
 
-    #[test]
-    fn print_error_chain_no_source() {
-        #[derive(Debug)]
-        struct NoSourceError;
-
-        impl std::fmt::Display for NoSourceError {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("no source error")
-            }
-        }
-
-        impl std::error::Error for NoSourceError {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                None
-            }
-        }
-
-        super::print_error_chain(&NoSourceError);
-    }
     #[test]
     fn uncommitted_stream_preserves_previous_output_and_cleans_temporary_file() {
         use std::io::Write;
