@@ -28,8 +28,7 @@ where
     index_store
         .visit_quarantine_candidates(|candidate| {
             let object_key = candidate.object_key();
-            let object_key_string = object_key.as_str().to_owned();
-            quarantined_object_keys.insert(object_key_string.clone());
+            quarantined_object_keys.insert(object_key.as_str().to_owned());
             let location = object_location_display(object_root, object_store, object_key);
 
             if candidate.delete_after_unix_seconds()
@@ -73,7 +72,7 @@ where
 
             if reachability
                 .referenced_object_keys
-                .contains(&object_key_string)
+                .contains(object_key.as_str())
             {
                 push_issue(
                     report,
@@ -89,7 +88,6 @@ where
     index_store
         .visit_retention_holds(|hold| {
             let object_key = hold.object_key();
-            let object_key_string = object_key.as_str().to_owned();
             let location = object_location_display(object_root, object_store, object_key);
 
             if let Some(release_after_unix_seconds) = hold.release_after_unix_seconds()
@@ -109,7 +107,7 @@ where
             if hold.is_active_at(now_unix_seconds) {
                 // An administrative hold may intentionally precede its object.
                 // Required record bytes are validated by the record scanner.
-                if quarantined_object_keys.contains(&object_key_string) {
+                if quarantined_object_keys.contains(object_key.as_str()) {
                     push_issue(
                         report,
                         FsckIssueKind::HeldQuarantinedObject,
@@ -125,7 +123,6 @@ where
     let max_processed_at_unix_seconds = now_unix_seconds
         .checked_add(WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS)
         .ok_or(FsckError::Overflow)?;
-    let max_provider_state_timestamp = max_processed_at_unix_seconds;
     index_store
         .visit_webhook_deliveries(|delivery| {
             report.inspected_webhook_deliveries =
@@ -167,41 +164,37 @@ where
                     FsckIssueDetail::ProviderRepositoryIdentityInvalid,
                 )?;
             }
-            inspect_provider_state_timestamp(
-                report,
-                &location,
-                ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
-                state.last_access_changed_at_unix_seconds(),
-                max_provider_state_timestamp,
-            )?;
-            inspect_provider_state_timestamp(
-                report,
-                &location,
-                ProviderRepositoryStateTimestampField::LastRevisionPushedAtUnixSeconds,
-                state.last_revision_pushed_at_unix_seconds(),
-                max_provider_state_timestamp,
-            )?;
-            inspect_provider_state_timestamp(
-                report,
-                &location,
-                ProviderRepositoryStateTimestampField::LastCacheInvalidatedAtUnixSeconds,
-                state.last_cache_invalidated_at_unix_seconds(),
-                max_provider_state_timestamp,
-            )?;
-            inspect_provider_state_timestamp(
-                report,
-                &location,
-                ProviderRepositoryStateTimestampField::LastAuthorizationRecheckedAtUnixSeconds,
-                state.last_authorization_rechecked_at_unix_seconds(),
-                max_provider_state_timestamp,
-            )?;
-            inspect_provider_state_timestamp(
-                report,
-                &location,
-                ProviderRepositoryStateTimestampField::LastDriftCheckedAtUnixSeconds,
-                state.last_drift_checked_at_unix_seconds(),
-                max_provider_state_timestamp,
-            )?;
+            use ProviderRepositoryStateTimestampField as TimestampField;
+            for (field, timestamp) in [
+                (
+                    TimestampField::LastAccessChangedAtUnixSeconds,
+                    state.last_access_changed_at_unix_seconds(),
+                ),
+                (
+                    TimestampField::LastRevisionPushedAtUnixSeconds,
+                    state.last_revision_pushed_at_unix_seconds(),
+                ),
+                (
+                    TimestampField::LastCacheInvalidatedAtUnixSeconds,
+                    state.last_cache_invalidated_at_unix_seconds(),
+                ),
+                (
+                    TimestampField::LastAuthorizationRecheckedAtUnixSeconds,
+                    state.last_authorization_rechecked_at_unix_seconds(),
+                ),
+                (
+                    TimestampField::LastDriftCheckedAtUnixSeconds,
+                    state.last_drift_checked_at_unix_seconds(),
+                ),
+            ] {
+                inspect_provider_state_timestamp(
+                    report,
+                    &location,
+                    field,
+                    timestamp,
+                    max_processed_at_unix_seconds,
+                )?;
+            }
             Ok::<(), FsckError>(())
         })
         .await?;
@@ -257,31 +250,19 @@ mod tests {
     // ── inspect_provider_state_timestamp ────────────────────────────────
 
     #[test]
-    fn provider_state_timestamp_none_is_ok() {
-        let mut report = clean_report();
-        inspect_provider_state_timestamp(
-            &mut report,
-            "test/loc",
-            ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
-            None,
-            100,
-        )
-        .unwrap();
-        assert!(report.is_clean());
-    }
-
-    #[test]
-    fn provider_state_timestamp_within_bounds_is_ok() {
-        let mut report = clean_report();
-        inspect_provider_state_timestamp(
-            &mut report,
-            "test/loc",
-            ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
-            Some(50),
-            100,
-        )
-        .unwrap();
-        assert!(report.is_clean());
+    fn provider_state_timestamps_at_or_below_limit_are_valid() {
+        for timestamp in [None, Some(0), Some(50), Some(100)] {
+            let mut report = clean_report();
+            inspect_provider_state_timestamp(
+                &mut report,
+                "test/loc",
+                ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
+                timestamp,
+                100,
+            )
+            .unwrap();
+            assert!(report.is_clean(), "timestamp {timestamp:?}: {report:?}");
+        }
     }
 
     #[allow(clippy::panic, clippy::wildcard_enum_match_arm)]

@@ -270,7 +270,7 @@ fn fsck_reliability_evidence_issue_is_operator_actionable() {
 // ── ProviderRepositoryStateTimestampField::as_str ────────────────────
 
 #[test]
-fn provider_repository_state_timestamp_field_as_str_all_variants() {
+fn provider_repository_state_timestamp_field_names_and_display_all_variants() {
     let cases: &[(ProviderRepositoryStateTimestampField, &str)] = &[
         (
             ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
@@ -295,24 +295,9 @@ fn provider_repository_state_timestamp_field_as_str_all_variants() {
     ];
     for &(field, expected) in cases {
         assert_eq!(field.as_str(), expected, "variant {field:?}");
-    }
-}
-
-// ── ProviderRepositoryStateTimestampField Display ────────────────────
-
-#[test]
-fn provider_repository_state_timestamp_field_display_matches_as_str() {
-    let all_fields = [
-        ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
-        ProviderRepositoryStateTimestampField::LastRevisionPushedAtUnixSeconds,
-        ProviderRepositoryStateTimestampField::LastCacheInvalidatedAtUnixSeconds,
-        ProviderRepositoryStateTimestampField::LastAuthorizationRecheckedAtUnixSeconds,
-        ProviderRepositoryStateTimestampField::LastDriftCheckedAtUnixSeconds,
-    ];
-    for field in all_fields {
         assert_eq!(
             field.to_string(),
-            field.as_str(),
+            expected,
             "Display mismatch for {field:?}"
         );
     }
