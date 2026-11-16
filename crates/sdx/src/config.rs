@@ -356,34 +356,14 @@ pub fn resolve_credential_from_config(
         return Ok(None);
     };
     let auth = &config.auth;
-    if let Some(token) = auth
-        .token
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Ok(Some(Credential::Bearer(token.to_owned())));
-    }
-    if let Some(api_key) = auth
-        .api_key
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Ok(Some(Credential::ProviderKey(api_key.to_owned())));
-    }
-    if let Some(path) = auth
-        .token_file
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        let contents = read_token_file(Path::new(path)).map_err(|source| {
-            CredentialResolutionError::TokenFile {
-                path: PathBuf::from(path),
-                source,
-            }
-        })?;
-        return Ok(Some(Credential::Bearer(contents)));
-    }
-    Ok(None)
+    // Config fields use the same priority, empty-value filtering, and bounded
+    // token-file loading as environment credentials.
+    resolve_credential_from_env(&|name| match name {
+        SHARDLINE_TOKEN_ENV => auth.token.clone(),
+        SHARDLINE_API_KEY_ENV => auth.api_key.clone(),
+        SHARDLINE_TOKEN_FILE_ENV => auth.token_file.clone(),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
@@ -525,9 +505,7 @@ mod tests {
 
     // ── M6a: shardline.toml parsing ────────────────────────────────────────
 
-    use super::{
-        AuthSection, DefaultSection, SdxConfig, SdxConfigError, resolve_credential_from_config,
-    };
+    use super::{SdxConfig, SdxConfigError, resolve_credential_from_config};
 
     const VALID_TOML: &str = r#"
 [default]
@@ -710,19 +688,5 @@ whatever = true
         let config = SdxConfig::default();
         let credential = resolve_credential_from_config(Some(&config), &env_lookup(&env)).unwrap();
         assert!(credential.is_none());
-    }
-
-    #[test]
-    fn config_sections_are_comparable() {
-        let a = DefaultSection {
-            owner: Some("o".to_owned()),
-            ..Default::default()
-        };
-        assert_eq!(a, a.clone());
-        let auth = AuthSection {
-            token: Some("t".to_owned()),
-            ..Default::default()
-        };
-        assert_eq!(auth, auth.clone());
     }
 }
