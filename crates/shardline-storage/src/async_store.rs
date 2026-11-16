@@ -134,8 +134,7 @@ pub trait AsyncObjectStore: Send + Sync {
 /// [`AsyncObjectStore`].
 ///
 /// Each method calls [`tokio::task::spawn_blocking`] to run the sync operation
-/// on a dedicated blocking thread pool. The associated error type is
-/// `Box<dyn std::error::Error + Send + Sync>`.
+/// on a dedicated blocking thread pool. Errors are reported as [`BridgeError`].
 ///
 /// This is intended for gradual migration. Long-term, adapters should implement
 /// [`AsyncObjectStore`] directly.
@@ -212,9 +211,9 @@ where
         let inner = Arc::clone(&self.inner);
         let key = key.clone();
         let integrity = *integrity;
-        let body_bytes = body.as_slice().to_vec();
+        let body_bytes = body.into_bytes();
         tokio::task::spawn_blocking(move || {
-            inner.put_if_absent(&key, ObjectBody::from_vec(body_bytes), &integrity)
+            inner.put_if_absent(&key, ObjectBody::from_bytes(body_bytes), &integrity)
         })
         .await
         .map_err(|join| BridgeError::new(format!("blocking task failed: {join}")))?
@@ -282,11 +281,11 @@ mod tests {
     /// Minimal sync store for testing the bridge.
     #[derive(Clone, Default)]
     struct TestStore {
-        objects: std::sync::Arc<Mutex<HashMap<ObjectKey, Vec<u8>>>>,
+        objects: std::sync::Arc<Mutex<HashMap<ObjectKey, bytes::Bytes>>>,
     }
 
     impl TestStore {
-        fn objects(&self) -> MutexGuard<'_, HashMap<ObjectKey, Vec<u8>>> {
+        fn objects(&self) -> MutexGuard<'_, HashMap<ObjectKey, bytes::Bytes>> {
             self.objects.lock().unwrap_or_else(PoisonError::into_inner)
         }
     }
@@ -303,7 +302,7 @@ mod tests {
             if map.contains_key(key) {
                 return Ok(PutOutcome::AlreadyExists);
             }
-            map.insert(key.clone(), body.as_slice().to_vec());
+            map.insert(key.clone(), body.into_bytes());
             Ok(PutOutcome::Inserted)
         }
         fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
@@ -366,6 +365,30 @@ mod tests {
         let result =
             rt().block_on(bridge.put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity));
         assert!(matches!(result, Ok(PutOutcome::Inserted)));
+    }
+
+    #[tokio::test]
+    async fn bridge_preserves_owned_upload_buffers() {
+        let bridge = SyncObjectStoreBridge::new(TestStore::default());
+        let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
+        for body in [
+            ObjectBody::from_vec(b"data".to_vec()),
+            ObjectBody::from_bytes(bytes::Bytes::copy_from_slice(b"data")),
+        ] {
+            let key = ObjectKey::parse("test/owned").unwrap();
+            let address = body.as_slice().as_ptr() as usize;
+            assert_eq!(
+                bridge.put_if_absent(&key, body, &integrity).await.unwrap(),
+                PutOutcome::Inserted
+            );
+            {
+                let objects = bridge.inner().objects();
+                let stored = objects.get(&key).unwrap();
+                assert_eq!(stored.as_ref(), b"data");
+                assert_eq!(stored.as_ptr() as usize, address);
+            }
+            bridge.delete_if_present(&key).await.unwrap();
+        }
     }
 
     #[test]
