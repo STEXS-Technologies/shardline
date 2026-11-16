@@ -246,17 +246,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     let metadata_path = upload_metadata_path(root, session_id);
     let mut existing = match read_upload_file_async(root, &metadata_path).await {
-        Ok(bytes) => match serde_json::from_slice::<PersistedOciUploadSession>(&bytes) {
-            Ok(persisted) => Some(persisted),
-            Err(error) if reliability_envelope_field_present(&bytes) => {
-                return Err(OciAdapterError::Json(error));
-            }
-            Err(error) => {
-                serde_json::from_slice::<OciUploadSession>(&bytes)
-                    .map_err(|_legacy_error| OciAdapterError::Json(error))?;
-                None
-            }
-        },
+        Ok(bytes) => Some(serde_json::from_slice::<PersistedOciUploadSession>(&bytes)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(OciAdapterError::Io(error)),
     };
@@ -497,13 +487,7 @@ async fn read_persisted_upload_session_head(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(map_not_found(error)),
     };
-    let persisted = match serde_json::from_slice::<PersistedOciUploadSession>(&bytes) {
-        Ok(persisted) => persisted,
-        Err(error) if reliability_envelope_field_present(&bytes) => {
-            return Err(OciAdapterError::Json(error));
-        }
-        Err(_) => return Ok(None),
-    };
+    let persisted = serde_json::from_slice::<PersistedOciUploadSession>(&bytes)?;
     if !persisted.reliability_head_metadata
         || persisted.journal_evidence_head.is_none()
         || persisted.journal_snapshot_head.is_none()
@@ -623,28 +607,13 @@ async fn read_persisted_upload_session_with_snapshot_full(
     let bytes = read_upload_file_async(root, &metadata_path)
         .await
         .map_err(map_not_found)?;
-    let (session, mut stored_evidence, mut stored_snapshot_evidence, journal_head) =
-        match serde_json::from_slice::<PersistedOciUploadSession>(&bytes) {
-            Ok(persisted) => (
-                persisted.session,
-                persisted.evidence,
-                persisted.snapshot_evidence,
-                persisted.journal_head,
-            ),
-            Err(wrapper_error) => {
-                if reliability_envelope_field_present(&bytes) {
-                    return Err(OciAdapterError::Json(wrapper_error));
-                }
-                let session = serde_json::from_slice::<OciUploadSession>(&bytes)
-                    .map_err(|_legacy_error| OciAdapterError::Json(wrapper_error))?;
-                (
-                    session,
-                    SessionEvidenceLog::default(),
-                    SnapshotEvidenceLog::default(),
-                    None,
-                )
-            }
-        };
+    let PersistedOciUploadSession {
+        session,
+        evidence: mut stored_evidence,
+        snapshot_evidence: mut stored_snapshot_evidence,
+        journal_head,
+        ..
+    } = serde_json::from_slice(&bytes)?;
     if let Some(head) = journal_head {
         let records = read_evidence_journal(root, session_id).await?;
         let head = usize::try_from(head).map_err(|_conversion_error| OciAdapterError::Overflow)?;
@@ -686,18 +655,6 @@ async fn read_persisted_upload_session_with_snapshot_full(
     )
     .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     Ok((session, evidence, snapshot_evidence))
-}
-
-fn reliability_envelope_field_present(bytes: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return false;
-    };
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    ["evidence", "snapshot_evidence"]
-        .into_iter()
-        .any(|field| object.contains_key(field))
 }
 
 pub(crate) async fn read_evidence_journal(

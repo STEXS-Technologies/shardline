@@ -444,20 +444,39 @@ async fn read_upload_session_does_not_write_missing_canonical_evidence() {
 
 #[tokio::test]
 async fn malformed_reliability_envelope_is_not_downgraded_to_legacy() {
-    let root = temp_root();
-    let session_id = create_test_session(root.path(), false).await.unwrap();
-    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
-    let mut metadata: serde_json::Value =
-        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
-    metadata["evidence"] = serde_json::json!("corrupt");
-    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
-        .await
-        .unwrap();
+    for field in [
+        "evidence",
+        "snapshot_evidence",
+        "journal_head",
+        "journal_bytes",
+        "journal_evidence_sequence",
+        "journal_snapshot_sequence",
+        "merkle_evidence_sequence",
+        "merkle_snapshot_sequence",
+        "journal_evidence_head",
+        "journal_snapshot_head",
+        "reliability_head_metadata",
+    ] {
+        let root = temp_root();
+        let session_id = create_test_session(root.path(), false).await.unwrap();
+        let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+        metadata.as_object_mut().unwrap().remove("evidence");
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("snapshot_evidence");
+        metadata[field] = serde_json::json!("corrupt");
+        tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
 
-    let error = read_upload_session(root.path(), &session_id, ttl())
-        .await
-        .unwrap_err();
-    assert!(matches!(error, OciAdapterError::Json(_)));
+        let error = read_upload_session(root.path(), &session_id, ttl())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OciAdapterError::Json(_)), "{field}");
+    }
 }
 
 #[tokio::test]
