@@ -169,31 +169,18 @@ pub(crate) fn write_index_rebuild_summary(
     writer: &mut (impl Write + ?Sized),
     report: &LocalIndexRebuildReport,
 ) -> io::Result<()> {
-    writeln!(
-        writer,
-        "scanned_version_records: {}",
-        report.scanned_version_records
-    )?;
-    writeln!(
-        writer,
-        "scanned_retained_shards: {}",
-        report.scanned_retained_shards
-    )?;
-    writeln!(
-        writer,
-        "rebuilt_latest_records: {}",
-        report.rebuilt_latest_records
-    )?;
-    writeln!(
-        writer,
-        "unchanged_latest_records: {}",
-        report.unchanged_latest_records
-    )?;
-    writeln!(
-        writer,
-        "removed_stale_latest_records: {}",
-        report.removed_stale_latest_records
-    )?;
+    for (name, value) in [
+        ("scanned_version_records", report.scanned_version_records),
+        ("scanned_retained_shards", report.scanned_retained_shards),
+        ("rebuilt_latest_records", report.rebuilt_latest_records),
+        ("unchanged_latest_records", report.unchanged_latest_records),
+        (
+            "removed_stale_latest_records",
+            report.removed_stale_latest_records,
+        ),
+    ] {
+        writeln!(writer, "{name}: {value}")?;
+    }
     for location in &report.preserved_latest_records_unreadable_version {
         writeln!(
             writer,
@@ -201,36 +188,31 @@ pub(crate) fn write_index_rebuild_summary(
             location
         )?;
     }
-    writeln!(
-        writer,
-        "scanned_reconstructions: {}",
-        report.scanned_reconstructions
-    )?;
-    writeln!(
-        writer,
-        "unchanged_reconstructions: {}",
-        report.unchanged_reconstructions
-    )?;
-    writeln!(
-        writer,
-        "removed_stale_reconstructions: {}",
-        report.removed_stale_reconstructions
-    )?;
-    writeln!(
-        writer,
-        "rebuilt_dedupe_shard_mappings: {}",
-        report.rebuilt_dedupe_shard_mappings
-    )?;
-    writeln!(
-        writer,
-        "unchanged_dedupe_shard_mappings: {}",
-        report.unchanged_dedupe_shard_mappings
-    )?;
-    writeln!(
-        writer,
-        "removed_stale_dedupe_shard_mappings: {}",
-        report.removed_stale_dedupe_shard_mappings
-    )?;
+    for (name, value) in [
+        ("scanned_reconstructions", report.scanned_reconstructions),
+        (
+            "unchanged_reconstructions",
+            report.unchanged_reconstructions,
+        ),
+        (
+            "removed_stale_reconstructions",
+            report.removed_stale_reconstructions,
+        ),
+        (
+            "rebuilt_dedupe_shard_mappings",
+            report.rebuilt_dedupe_shard_mappings,
+        ),
+        (
+            "unchanged_dedupe_shard_mappings",
+            report.unchanged_dedupe_shard_mappings,
+        ),
+        (
+            "removed_stale_dedupe_shard_mappings",
+            report.removed_stale_dedupe_shard_mappings,
+        ),
+    ] {
+        writeln!(writer, "{name}: {value}")?;
+    }
     writeln!(writer, "issue_count: {}", report.issue_count())?;
 
     writer.flush()
@@ -742,13 +724,44 @@ mod tests {
     }
 
     #[test]
-    fn index_rebuild_summary_runs() {
-        print_index_rebuild_summary(&empty_index_rebuild_report());
-    }
-
-    #[test]
-    fn index_rebuild_cli_summary_runs() {
-        print_index_rebuild_cli_summary(&empty_index_rebuild_report(), Path::new("/root"));
+    fn index_rebuild_summary_preserves_fields_and_order() {
+        let report = LocalIndexRebuildReport {
+            scanned_version_records: 1,
+            scanned_retained_shards: 2,
+            rebuilt_latest_records: 3,
+            unchanged_latest_records: 4,
+            removed_stale_latest_records: 5,
+            preserved_latest_records_unreadable_version: vec!["records/kept".to_owned()],
+            scanned_reconstructions: 6,
+            unchanged_reconstructions: 7,
+            removed_stale_reconstructions: 8,
+            rebuilt_dedupe_shard_mappings: 9,
+            unchanged_dedupe_shard_mappings: 10,
+            removed_stale_dedupe_shard_mappings: 11,
+            ..empty_index_rebuild_report()
+        };
+        let mut bytes = Vec::new();
+        write_index_rebuild_cli_summary(&mut bytes, &report, Path::new("/root")).unwrap();
+        assert_eq!(
+            bytes,
+            concat!(
+                "root: /root\n",
+                "scanned_version_records: 1\n",
+                "scanned_retained_shards: 2\n",
+                "rebuilt_latest_records: 3\n",
+                "unchanged_latest_records: 4\n",
+                "removed_stale_latest_records: 5\n",
+                "kept_latest_record_unreadable_version: records/kept\n",
+                "scanned_reconstructions: 6\n",
+                "unchanged_reconstructions: 7\n",
+                "removed_stale_reconstructions: 8\n",
+                "rebuilt_dedupe_shard_mappings: 9\n",
+                "unchanged_dedupe_shard_mappings: 10\n",
+                "removed_stale_dedupe_shard_mappings: 11\n",
+                "issue_count: 0\n",
+            )
+            .as_bytes()
+        );
     }
 
     #[test]
