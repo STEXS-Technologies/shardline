@@ -352,7 +352,6 @@ pub(super) fn negotiate(
         updates.extend_from_slice(FLUSH.as_bytes());
     }
     let reachable = |roots: &[String], known: bool| -> Result<HashSet<String>, HubApiError> {
-        let mut visited = HashSet::new();
         let mut pending_objects: Vec<_> = roots
             .iter()
             .filter(|id| {
@@ -364,7 +363,6 @@ pub(super) fn negotiate(
             .collect();
         let mut discovered: HashSet<_> = pending_objects.iter().cloned().collect();
         while let Some(id) = pending_objects.pop() {
-            visited.insert(id.clone());
             if let Some(object) = by_id.get(&id) {
                 for child in super::super::projection::object_children(object)? {
                     if let Some(child_object) = by_id.get(&child) {
@@ -384,7 +382,7 @@ pub(super) fn negotiate(
                 }
             }
         }
-        Ok(visited)
+        Ok(discovered)
     };
     let wanted = reachable(wants, false)?;
     let known = reachable(haves, true)?;

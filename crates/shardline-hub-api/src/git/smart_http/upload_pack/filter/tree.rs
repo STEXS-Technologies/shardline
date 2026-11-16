@@ -36,7 +36,6 @@ pub(super) fn depths(
         if depths.get(&id).is_some_and(|previous| *previous <= depth) {
             continue;
         }
-        depths.insert(id.clone(), depth);
         if let Some(object) = by_id.get(&id)
             && object.object_type == ObjectType::Tree
         {
@@ -46,6 +45,7 @@ pub(super) fn depths(
                 }
             }
         }
+        depths.insert(id, depth);
     }
     Ok(depths)
 }
