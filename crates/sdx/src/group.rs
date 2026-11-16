@@ -1542,55 +1542,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_mid_stream_stops_promptly() {
+    async fn abort_stops_running_and_queued_streams_promptly() {
         let server = MockServer::start().await;
         mocks(&server, Some(Duration::from_secs(30))).await;
         let group = client(&server).await.new_download_stream_group();
-
-        let mut stream = group.download_stream(FILE_ID, None).await.unwrap();
-        let id = stream.task_id();
-        // The xorb fetch is delayed, so next() blocks until the group aborts.
-        let abort = {
-            let group = group.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                group.abort();
-            })
-        };
-        let next = timeout(Duration::from_secs(5), stream.next())
-            .await
-            .expect("abort must stop the stream promptly")
-            .unwrap();
-        assert!(next.is_none());
-        abort.await.unwrap();
-        assert!(group.is_aborted());
-        assert!(group.status().contains(&(id, XetTaskState::Cancelled)));
-    }
-
-    #[tokio::test]
-    async fn abort_cancels_queued_streams_too() {
-        let server = MockServer::start().await;
-        mocks(&server, Some(Duration::from_secs(30))).await;
-        let group = client(&server).await.new_download_stream_group();
-
-        // A queued (never started) stream alongside a running one.
         let mut queued = group.download_stream(FILE_ID, None).await.unwrap();
         let queued_id = queued.task_id();
         let mut running = group.download_stream(FILE_ID, None).await.unwrap();
         let running_id = running.task_id();
 
-        group.abort();
+        // next() starts the running stream and blocks on the delayed fetch;
+        // its sibling stays queued until the group is aborted.
+        let abort = {
+            let group = group.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert!(group.status().contains(&(queued_id, XetTaskState::Queued)));
+                assert!(
+                    group
+                        .status()
+                        .contains(&(running_id, XetTaskState::InProgress))
+                );
+                group.abort();
+            })
+        };
         let next = timeout(Duration::from_secs(5), running.next())
             .await
-            .expect("abort must stop the running stream")
+            .expect("abort must stop the running stream promptly")
             .unwrap();
         assert!(next.is_none());
+        abort.await.unwrap();
         let next = timeout(Duration::from_secs(5), queued.next())
             .await
-            .expect("abort must stop the queued stream")
+            .expect("abort must stop the queued stream promptly")
             .unwrap();
         assert!(next.is_none());
-
+        assert!(group.is_aborted());
         let status = group.status();
         assert!(status.contains(&(queued_id, XetTaskState::Cancelled)));
         assert!(status.contains(&(running_id, XetTaskState::Cancelled)));
