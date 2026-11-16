@@ -42,35 +42,27 @@ pub(crate) async fn prepare_native_xorb(
     let mut state = shardline_xet_adapter::IncrementalXorbMemory::new(hash, maximum)?;
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<VerificationInput>(1);
     let receive = async move {
-        while let Some(bytes) = reader.next_bytes().await? {
+        loop {
+            let bytes = reader.next_bytes().await?;
+            let complete = bytes.is_none();
             let worker = pool
                 .acquire()
                 .await
                 .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
-            sender
-                .send(VerificationInput::Frame(bytes, worker))
-                .await
-                .map_err(|_error| {
-                    ServerError::Io(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "native verifier stopped",
-                    ))
-                })?;
-        }
-        let worker = pool
-            .acquire()
-            .await
-            .map_err(|error| ServerError::Io(std::io::Error::other(error)))?;
-        sender
-            .send(VerificationInput::Complete(worker))
-            .await
-            .map_err(|_error| {
+            let input = match bytes {
+                Some(bytes) => VerificationInput::Frame(bytes, worker),
+                None => VerificationInput::Complete(worker),
+            };
+            sender.send(input).await.map_err(|_error| {
                 ServerError::Io(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "native verifier stopped",
                 ))
             })?;
-        Ok::<(), ServerError>(())
+            if complete {
+                return Ok::<(), ServerError>(());
+            }
+        }
     };
     // The fixed aggregate body admission bounds these persistent blocking
     // receivers too. Do not spawn another blocking task for every network frame.
