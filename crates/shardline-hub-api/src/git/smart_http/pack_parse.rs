@@ -23,9 +23,14 @@ enum Base {
     Sha([u8; 20]),
 }
 
+#[derive(Clone, Copy)]
+enum EntryKind {
+    Object(ObjectType),
+    Delta(Base),
+}
+
 struct Entry {
-    object_type: Option<ObjectType>,
-    base: Option<Base>,
+    kind: EntryKind,
     data: Vec<u8>,
 }
 
@@ -96,11 +101,11 @@ pub(super) fn parse_pack_data_with_budget(
             size |= value << shift;
             shift = shift.saturating_add(7);
         }
-        let (object_type, base) = match kind {
-            1 => (Some(ObjectType::Commit), None),
-            2 => (Some(ObjectType::Tree), None),
-            3 => (Some(ObjectType::Blob), None),
-            4 => (Some(ObjectType::Tag), None),
+        let kind = match kind {
+            1 => EntryKind::Object(ObjectType::Commit),
+            2 => EntryKind::Object(ObjectType::Tree),
+            3 => EntryKind::Object(ObjectType::Blob),
+            4 => EntryKind::Object(ObjectType::Tag),
             6 => {
                 let distance = parse_ofs_delta_offset(body, &mut pos)?;
                 if distance == 0 {
@@ -108,7 +113,7 @@ pub(super) fn parse_pack_data_with_budget(
                 }
                 let offset = start.checked_sub(distance).ok_or(PackError::InvalidDelta)?;
                 let base = *offsets.get(&offset).ok_or(PackError::InvalidDelta)?;
-                (None, Some(Base::Offset(base)))
+                EntryKind::Delta(Base::Offset(base))
             }
             7 => {
                 let end = pos.checked_add(20).ok_or(PackError::InvalidDelta)?;
@@ -118,7 +123,7 @@ pub(super) fn parse_pack_data_with_budget(
                     .try_into()
                     .map_err(|_error| PackError::InvalidDelta)?;
                 pos = end;
-                (None, Some(Base::Sha(sha)))
+                EntryKind::Delta(Base::Sha(sha))
             }
             _ => return Err(PackError::InvalidPack),
         };
@@ -139,8 +144,7 @@ pub(super) fn parse_pack_data_with_budget(
         pos = pos.checked_add(used).ok_or(PackError::InvalidPack)?;
         offsets.insert(start, index);
         entries.push(Entry {
-            object_type,
-            base,
+            kind,
             data: inflated,
         });
     }
@@ -154,47 +158,48 @@ pub(super) fn parse_pack_data_with_budget(
     let mut by_offset: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut by_sha: HashMap<[u8; 20], Vec<usize>> = HashMap::new();
     for (index, entry) in entries.iter().enumerate() {
-        match entry.base {
-            None => ready.push_back(index),
-            Some(Base::Offset(base)) => by_offset.entry(base).or_default().push(index),
-            Some(Base::Sha(sha)) if bases.contains_key(&sha) => ready.push_back(index),
-            Some(Base::Sha(sha)) => by_sha.entry(sha).or_default().push(index),
+        match entry.kind {
+            EntryKind::Object(_) => ready.push_back(index),
+            EntryKind::Delta(Base::Offset(base)) => by_offset.entry(base).or_default().push(index),
+            EntryKind::Delta(Base::Sha(sha)) if bases.contains_key(&sha) => ready.push_back(index),
+            EntryKind::Delta(Base::Sha(sha)) => by_sha.entry(sha).or_default().push(index),
         }
     }
     let mut resolved: Vec<Option<GitObject>> = (0..count).map(|_| None).collect();
     let mut sha_index = HashMap::new();
     while let Some(index) = ready.pop_front() {
         let entry = entries.get_mut(index).ok_or(PackError::InvalidDelta)?;
-        let object = if let Some(base) = entry.base {
-            let base = match base {
-                Base::Offset(base_index) => resolved.get(base_index).and_then(Option::as_ref),
-                Base::Sha(sha) => sha_index
-                    .get(&sha)
-                    .and_then(|base_index| resolved.get(*base_index))
-                    .and_then(Option::as_ref)
-                    .or_else(|| bases.get(&sha).copied()),
+        let object = match entry.kind {
+            EntryKind::Delta(base) => {
+                let base = match base {
+                    Base::Offset(base_index) => resolved.get(base_index).and_then(Option::as_ref),
+                    Base::Sha(sha) => sha_index
+                        .get(&sha)
+                        .and_then(|base_index| resolved.get(*base_index))
+                        .and_then(Option::as_ref)
+                        .or_else(|| bases.get(&sha).copied()),
+                }
+                .ok_or(PackError::InvalidDelta)?;
+                let resolved_data = apply_delta_with_limit(
+                    &base.data,
+                    &entry.data,
+                    budget
+                        .checked_sub(total)
+                        .ok_or(PackError::ExcessiveDecompressedSize)?,
+                )?;
+                total = total
+                    .checked_add(resolved_data.len())
+                    .ok_or(PackError::ExcessiveDecompressedSize)?;
+                entry.data.clear();
+                GitObject {
+                    object_type: base.object_type,
+                    data: resolved_data,
+                }
             }
-            .ok_or(PackError::InvalidDelta)?;
-            let resolved_data = apply_delta_with_limit(
-                &base.data,
-                &entry.data,
-                budget
-                    .checked_sub(total)
-                    .ok_or(PackError::ExcessiveDecompressedSize)?,
-            )?;
-            total = total
-                .checked_add(resolved_data.len())
-                .ok_or(PackError::ExcessiveDecompressedSize)?;
-            entry.data.clear();
-            GitObject {
-                object_type: base.object_type,
-                data: resolved_data,
-            }
-        } else {
-            GitObject {
-                object_type: entry.object_type.ok_or(PackError::InvalidPack)?,
+            EntryKind::Object(object_type) => GitObject {
+                object_type,
                 data: std::mem::take(&mut entry.data),
-            }
+            },
         };
         let sha = object.sha1();
         *resolved.get_mut(index).ok_or(PackError::InvalidDelta)? = Some(object);
