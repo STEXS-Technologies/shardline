@@ -605,10 +605,12 @@ mod tests {
     #[test]
     fn webhook_request_const_fields_are_accessible() {
         let request = WebhookRequest::new("push", "delivery-1", Some("sig"), b"{}");
-        assert_eq!(request.event_name(), "push");
-        assert_eq!(request.delivery_id(), "delivery-1");
-        assert_eq!(request.signature(), Some("sig"));
-        assert_eq!(request.body(), b"{}");
+        let copied = request;
+        assert_eq!(copied.event_name(), "push");
+        assert_eq!(copied.delivery_id(), "delivery-1");
+        assert_eq!(copied.signature(), Some("sig"));
+        assert_eq!(copied.body(), b"{}");
+        assert_eq!(request.body(), copied.body());
     }
 
     #[test]
@@ -774,6 +776,7 @@ mod tests {
         assert_eq!(metadata.visibility(), RepositoryVisibility::Public);
         assert_eq!(metadata.default_revision(), &default_revision);
         assert_eq!(metadata.clone_url(), &clone_url);
+        assert_eq!(metadata, metadata.clone());
     }
 
     #[test]
@@ -786,18 +789,6 @@ mod tests {
         );
         let debug = format!("{metadata:?}");
         assert!(debug.contains("RepositoryMetadata"));
-    }
-
-    #[test]
-    fn repository_metadata_clone_eq() {
-        let a = RepositoryMetadata::new(
-            RepositoryRef::new(ProviderKind::GitHub, "t", "r").unwrap(),
-            RepositoryVisibility::Private,
-            RevisionRef::new("main").unwrap(),
-            CanonicalCloneUrl::new("https://x.com").unwrap(),
-        );
-        let b = a.clone();
-        assert_eq!(a, b);
     }
 
     #[test]
@@ -821,6 +812,8 @@ mod tests {
             RepositoryWebhookEventKind::AccessChanged,
         );
         assert_eq!(access.kind(), &RepositoryWebhookEventKind::AccessChanged);
+        assert_eq!(access.delivery_id(), &did);
+        assert_eq!(access, access.clone());
 
         let new_repo = RepositoryRef::new(ProviderKind::GitHub, "t", "r2").unwrap();
         let renamed = RepositoryWebhookEvent::new(
@@ -859,20 +852,6 @@ mod tests {
             RepositoryWebhookEvent::new(repo, did, RepositoryWebhookEventKind::RepositoryDeleted);
         let debug = format!("{event:?}");
         assert!(debug.contains("RepositoryWebhookEvent"));
-    }
-
-    #[test]
-    fn repository_webhook_event_clone_eq() {
-        let repo = RepositoryRef::new(ProviderKind::GitHub, "t", "r").unwrap();
-        let did = WebhookDeliveryId::new("d1").unwrap();
-        let event = RepositoryWebhookEvent::new(
-            repo,
-            did.clone(),
-            RepositoryWebhookEventKind::AccessChanged,
-        );
-        let event2 = event.clone();
-        assert_eq!(event, event2);
-        assert_eq!(event.delivery_id(), &did);
     }
 
     #[test]
@@ -959,28 +938,10 @@ mod tests {
     }
 
     #[test]
-    fn webhook_request_clone_copy() {
-        let request = WebhookRequest::new("ping", "d1", None, b"data");
-        let copied = request;
-        assert_eq!(request.event_name(), copied.event_name());
-        assert_eq!(request.delivery_id(), copied.delivery_id());
-        assert_eq!(request.signature(), copied.signature());
-        assert_eq!(request.body(), copied.body());
-    }
-
-    #[test]
-    fn repository_visibility_is_send_sync() {
-        fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
-        assert_send::<RepositoryVisibility>();
-        assert_sync::<RepositoryVisibility>();
-    }
-
-    #[test]
-    fn provider_subject_is_send_sync() {
-        fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
-        assert_send::<ProviderSubject>();
-        assert_sync::<ProviderSubject>();
+    fn provider_value_types_remain_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AuthorizationRequest>();
+        assert_send_sync::<RepositoryVisibility>();
+        assert_send_sync::<ProviderSubject>();
     }
 }

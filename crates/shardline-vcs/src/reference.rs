@@ -214,6 +214,7 @@ mod tests {
 
         let value = revision.expect("expected valid value");
         assert_eq!(value.as_str(), "refs/heads/main");
+        assert_eq!(value.as_str(), value.clone().as_str());
     }
 
     #[test]
@@ -313,21 +314,8 @@ mod tests {
         let b = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
         let c = RepositoryRef::new(ProviderKind::GitLab, "team", "assets").unwrap();
         assert_eq!(a, b);
+        assert_eq!(a, a.clone());
         assert_ne!(a, c);
-    }
-
-    #[test]
-    fn repository_ref_clone_independent() {
-        let a = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
-        let b = a.clone();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn revision_ref_clone_independent() {
-        let a = RevisionRef::new("refs/heads/main").unwrap();
-        let b = a.clone();
-        assert_eq!(a.as_str(), b.as_str());
     }
 
     #[test]
