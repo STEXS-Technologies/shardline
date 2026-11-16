@@ -11,8 +11,8 @@ fn negotiation_reads_haves_after_want_flush() {
         pktline::encode_line("done\n").unwrap()
     );
     let lines = decode_negotiation(body.as_bytes()).unwrap();
-    assert_eq!(parse_wants(&lines), vec![wanted]);
-    assert_eq!(parse_haves(&lines), vec![known]);
+    assert_eq!(parse_object_ids(&lines, "want "), vec![wanted]);
+    assert_eq!(parse_object_ids(&lines, "have "), vec![known]);
     assert!(decode_negotiation(b"0003").is_err());
     assert!(decode_negotiation(b"0010short").is_err());
 }

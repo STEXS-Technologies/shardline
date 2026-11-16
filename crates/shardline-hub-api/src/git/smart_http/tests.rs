@@ -12,7 +12,7 @@ use super::ref_advertisement::{
     GitRef, authorize_read, authorize_write, collect_refs, is_valid_refname, resolve_repo_id,
 };
 use super::tree_walk::parse_lfs_pointer_field;
-use super::upload_pack::{build_lfs_pointer_blob, parse_haves, parse_wants};
+use super::upload_pack::{build_lfs_pointer_blob, parse_object_ids};
 use super::*;
 use crate::git::pack::{GitObject, ObjectType, apply_delta};
 use crate::git::pktline;
@@ -22,21 +22,24 @@ use axum::response::Response;
 use shardline_index::hub::HubFileEntry;
 
 #[test]
-fn parse_wants_from_request() {
-    let lines = vec![
-        b"want 8ab686eafeb1f44702738c8b0f24f2567c36da6d side-band-64k\n".to_vec(),
-        b"want 0000000000000000000000000000000000000000\n".to_vec(),
-    ];
-    let wants = parse_wants(&lines);
-    assert_eq!(wants.len(), 2);
-    assert_eq!(wants[0], "8ab686eafeb1f44702738c8b0f24f2567c36da6d");
-}
-
-#[test]
-fn parse_haves_from_request() {
-    let lines = vec![b"have 0000000000000000000000000000000000000000\n".to_vec()];
-    let haves = parse_haves(&lines);
-    assert_eq!(haves.len(), 1);
+fn negotiation_object_ids_keep_order_and_ignore_other_or_malformed_lines() {
+    let first = "8ab686eafeb1f44702738c8b0f24f2567c36da6d";
+    let second = "0000000000000000000000000000000000000000";
+    for (prefix, other) in [("want ", "have "), ("have ", "want ")] {
+        let lines = vec![
+            format!("{prefix}{first} side-band-64k\n").into_bytes(),
+            format!("{other}{first}\n").into_bytes(),
+            format!("  {prefix}{second}\n").into_bytes(),
+            prefix.as_bytes().to_vec(),
+            vec![0xff],
+            b"done\n".to_vec(),
+        ];
+        assert_eq!(
+            parse_object_ids(&lines, prefix),
+            [first, second],
+            "{prefix}"
+        );
+    }
 }
 
 #[test]

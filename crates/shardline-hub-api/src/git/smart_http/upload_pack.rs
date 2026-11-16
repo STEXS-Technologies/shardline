@@ -52,8 +52,8 @@ pub async fn upload_pack(
     }
     let object_filter = filter::Filter::parse(&request_lines)?;
     let mut shallow_request = shallow::Request::parse(&request_lines)?;
-    let wants = parse_wants(&request_lines);
-    let mut haves = parse_haves(&request_lines);
+    let wants = parse_object_ids(&request_lines, "want ");
+    let mut haves = parse_object_ids(&request_lines, "have ");
 
     if let Some(request) = v2_ls_refs {
         let capability = match auth_ctx {
@@ -242,28 +242,13 @@ fn negotiated_objects(
 #[cfg(test)]
 mod negotiation_tests;
 
-pub(super) fn parse_wants(lines: &[Vec<u8>]) -> Vec<String> {
+pub(super) fn parse_object_ids(lines: &[Vec<u8>], prefix: &str) -> Vec<String> {
     lines
         .iter()
         .filter_map(|line| {
-            let s = std::str::from_utf8(line).ok()?;
-            let s = s.trim();
-            let hash = s.strip_prefix("want ")?;
-            let hash = hash.split_whitespace().next()?;
-            Some(hash.to_owned())
-        })
-        .collect()
-}
-
-pub(super) fn parse_haves(lines: &[Vec<u8>]) -> Vec<String> {
-    lines
-        .iter()
-        .filter_map(|line| {
-            let s = std::str::from_utf8(line).ok()?;
-            let s = s.trim();
-            let hash = s.strip_prefix("have ")?;
-            let hash = hash.split_whitespace().next()?;
-            Some(hash.to_owned())
+            let text = std::str::from_utf8(line).ok()?.trim();
+            let id = text.strip_prefix(prefix)?.split_whitespace().next()?;
+            Some(id.to_owned())
         })
         .collect()
 }
