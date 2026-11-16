@@ -201,9 +201,6 @@ impl Write for BoundedChunkWriter {
                 "decoded xorb exceeds buffer reservation",
             ));
         }
-        self.data
-            .try_reserve_exact(bytes.len())
-            .map_err(std::io::Error::other)?;
         self.data.extend_from_slice(bytes);
         Ok(bytes.len())
     }
