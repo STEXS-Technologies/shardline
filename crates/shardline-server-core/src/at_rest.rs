@@ -118,11 +118,12 @@ impl AtRestCipher {
         let ciphertext = cipher
             .encrypt(GenericArray::<u8, U12>::from_slice(&nonce_bytes), payload)
             .map_err(|e| CipherError::Encrypt(e.to_string()))?;
-        let mut blob = Vec::with_capacity(NONCE_LEN.saturating_add(ciphertext.len()));
-        blob.extend_from_slice(&nonce_bytes);
-        blob.extend_from_slice(&ciphertext);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&blob);
-        Ok(format!("{MAGIC_PREFIX}{encoded}"))
+        let mut stored = MAGIC_PREFIX.to_owned();
+        // The 12-byte nonce ends on a base64 block boundary, so encoding the
+        // pieces consecutively produces base64(nonce || ciphertext).
+        base64::engine::general_purpose::STANDARD.encode_string(nonce_bytes, &mut stored);
+        base64::engine::general_purpose::STANDARD.encode_string(ciphertext, &mut stored);
+        Ok(stored)
     }
 
     /// Decrypts a stored value bound to `identity`.
@@ -224,11 +225,13 @@ mod tests {
     #[test]
     fn encrypt_round_trips() {
         let cipher = AtRestCipher::new(test_key()).unwrap();
-        let enc = cipher.encrypt("org/model", "s3cr3t").unwrap();
-        assert!(enc.starts_with(MAGIC_PREFIX));
-        let dec = cipher.decrypt("org/model", &enc).unwrap();
-        assert!(!dec.needs_upgrade);
-        assert_eq!(dec.secret.expose_secret(), "s3cr3t");
+        for plaintext in ["", "a", "ab", "abc", "s3cr3t", "é🔑"] {
+            let enc = cipher.encrypt("org/model", plaintext).unwrap();
+            assert!(enc.starts_with(MAGIC_PREFIX));
+            let dec = cipher.decrypt("org/model", &enc).unwrap();
+            assert!(!dec.needs_upgrade);
+            assert_eq!(dec.secret.expose_secret(), plaintext);
+        }
     }
 
     #[test]

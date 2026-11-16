@@ -141,162 +141,85 @@ impl fmt::Debug for SecretString {
 #[cfg(test)]
 mod tests {
     use super::{SecretBytes, SecretString};
+    use zeroize::Zeroize;
 
     #[test]
-    fn secret_bytes_debug_redacts_contents() {
-        let secret = SecretBytes::from_slice(b"test-signing-key-32-bytes-long!!");
-
-        assert_eq!(format!("{secret:?}"), "***");
+    fn byte_secret_constructors_accessors_and_redaction() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b"test-signing-key-32-bytes-long!!",
+            &[1, 2, 3, 4],
+            b"abc",
+            b"hello",
+            b"secret-data",
+            b"same",
+            b"different",
+            b"a",
+            &[0; 100],
+            b"x",
+            b"hunter2-password-12345",
+        ];
+        for value in cases {
+            for secret in [
+                SecretBytes::from_slice(value),
+                SecretBytes::new(value.to_vec()),
+                SecretBytes::from(value.to_vec()),
+            ] {
+                assert_eq!(secret.expose_secret(), *value);
+                assert_eq!(secret.as_ref(), *value);
+                assert_eq!(secret.len(), value.len());
+                assert_eq!(secret.is_empty(), value.is_empty());
+                assert_eq!(secret, secret.clone());
+                assert_eq!(format!("{secret:?}"), "***");
+            }
+        }
+        let same = SecretBytes::from_slice(b"same");
+        assert_ne!(same, SecretBytes::from_slice(b"different"));
+        assert_ne!(same, SecretBytes::from_slice(b"diff"));
     }
 
     #[test]
-    fn secret_bytes_exposes_underlying_bytes() {
-        let secret = SecretBytes::from_slice(b"test-signing-key-32-bytes-long!!");
-
-        assert_eq!(secret.expose_secret(), b"test-signing-key-32-bytes-long!!");
+    fn text_secret_constructors_accessors_and_redaction() {
+        for value in [
+            "",
+            "bootstrap-token",
+            "owned",
+            "data",
+            "text",
+            "secret-text",
+            "same",
+            "different",
+            "my-secret-api-token",
+        ] {
+            for secret in [
+                SecretString::from_secret(value),
+                SecretString::new(value.to_owned()),
+            ] {
+                assert_eq!(secret.expose_secret(), value);
+                assert_eq!(secret.as_ref(), value);
+                assert_eq!(secret.is_empty(), value.is_empty());
+                assert_eq!(secret, secret.clone());
+                assert_eq!(format!("{secret:?}"), "***");
+            }
+        }
+        let same = SecretString::from_secret("same");
+        assert_ne!(same, SecretString::from_secret("different"));
+        assert_ne!(same, SecretString::from_secret("diff"));
     }
 
     #[test]
-    fn secret_string_debug_redacts_contents() {
-        let secret = SecretString::from_secret("bootstrap-token");
+    fn explicit_zeroization_clears_byte_and_text_secrets() {
+        let mut bytes = SecretBytes::from_slice(b"hello-world");
+        assert_eq!(bytes.len(), 11);
+        assert!(!bytes.is_empty());
+        bytes.zeroize();
+        assert!(bytes.is_empty());
+        assert_eq!(bytes.len(), 0);
+        assert!(bytes.expose_secret().is_empty());
 
-        assert_eq!(format!("{secret:?}"), "***");
-    }
-
-    #[test]
-    fn secret_string_exposes_underlying_text() {
-        let secret = SecretString::from_secret("bootstrap-token");
-
-        assert_eq!(secret.expose_secret(), "bootstrap-token");
-    }
-
-    #[test]
-    fn secret_bytes_new_wraps_owned() {
-        let data = vec![1, 2, 3, 4];
-        let secret = SecretBytes::new(data);
-        assert_eq!(secret.expose_secret(), &[1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn secret_bytes_len_and_is_empty() {
-        let empty = SecretBytes::new(Vec::new());
-        assert!(empty.is_empty());
-        assert_eq!(empty.len(), 0);
-
-        let non_empty = SecretBytes::from_slice(b"abc");
-        assert!(!non_empty.is_empty());
-        assert_eq!(non_empty.len(), 3);
-    }
-
-    #[test]
-    fn secret_bytes_as_ref() {
-        use std::convert::AsRef;
-        let secret = SecretBytes::from_slice(b"hello");
-        let bytes: &[u8] = secret.as_ref();
-        assert_eq!(bytes, b"hello");
-    }
-
-    #[test]
-    fn secret_string_new_wraps_owned() {
-        let secret = SecretString::new("owned".to_owned());
-        assert_eq!(secret.expose_secret(), "owned");
-    }
-
-    #[test]
-    fn secret_string_is_empty() {
-        let empty = SecretString::new(String::new());
-        assert!(empty.is_empty());
-
-        let non_empty = SecretString::from_secret("data");
-        assert!(!non_empty.is_empty());
-    }
-
-    #[test]
-    fn secret_string_as_ref() {
-        use std::convert::AsRef;
-        let secret = SecretString::from_secret("text");
-        let s: &str = secret.as_ref();
-        assert_eq!(s, "text");
-    }
-
-    #[test]
-    fn secret_bytes_clone_produces_equal_data() {
-        let a = SecretBytes::from_slice(b"secret-data");
-        let b = a.clone();
-        assert_eq!(a.expose_secret(), b.expose_secret());
-    }
-
-    #[test]
-    fn secret_string_clone_produces_equal_data() {
-        let a = SecretString::from_secret("secret-text");
-        let b = a.clone();
-        assert_eq!(a.expose_secret(), b.expose_secret());
-    }
-
-    #[test]
-    fn secret_bytes_partial_eq_compares_content() {
-        let a = SecretBytes::from_slice(b"same");
-        let b = SecretBytes::from_slice(b"same");
-        let c = SecretBytes::from_slice(b"different");
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn secret_string_partial_eq_compares_content() {
-        let a = SecretString::from_secret("same");
-        let b = SecretString::from_secret("same");
-        let c = SecretString::from_secret("different");
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn secret_bytes_len_various_sizes() {
-        assert_eq!(SecretBytes::new(vec![]).len(), 0);
-        assert_eq!(SecretBytes::from_slice(b"a").len(), 1);
-        assert_eq!(SecretBytes::from_slice(b"hello").len(), 5);
-        assert_eq!(SecretBytes::from_slice(&[0; 100]).len(), 100);
-    }
-
-    #[test]
-    fn secret_string_empty_vs_non_empty() {
-        assert!(SecretString::new(String::new()).is_empty());
-        assert!(!SecretString::from_secret("data").is_empty());
-    }
-
-    #[test]
-    fn secret_bytes_is_empty_various() {
-        assert!(SecretBytes::new(vec![]).is_empty());
-        assert!(!SecretBytes::from_slice(b"x").is_empty());
-    }
-
-    #[test]
-    fn secret_bytes_debug_no_content_leak() {
-        let secret = SecretBytes::from_slice(b"hunter2-password-12345");
-        let debug = format!("{secret:?}");
-        assert_eq!(debug, "***");
-        assert!(!debug.contains("hunter2"));
-    }
-
-    #[test]
-    fn secret_string_debug_no_content_leak() {
-        let secret = SecretString::from_secret("my-secret-api-token");
-        let debug = format!("{secret:?}");
-        assert_eq!(debug, "***");
-        assert!(!debug.contains("api-token"));
-    }
-
-    #[test]
-    fn secret_bytes_zeroize_clears_memory() {
-        use zeroize::Zeroize;
-        let mut secret = SecretBytes::from_slice(b"hello-world");
-        assert!(!secret.is_empty());
-        assert_eq!(secret.len(), 11);
-        // Explicitly zeroize the buffer and verify the underlying Vec is cleared.
-        secret.zeroize();
-        assert!(secret.is_empty());
-        assert_eq!(secret.len(), 0);
-        assert!(secret.expose_secret().is_empty());
+        let mut text = SecretString::from_secret("hello-world");
+        text.zeroize();
+        assert!(text.is_empty());
+        assert!(text.expose_secret().is_empty());
     }
 }
