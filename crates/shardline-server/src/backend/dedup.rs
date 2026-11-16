@@ -207,12 +207,10 @@ impl ServerBackend {
                 {
                     continue;
                 }
-                let mut prepared = vec![(descriptor.clone(), info, visible)];
-                for sibling in cohort::descriptors(self, &descriptor, scope, limits)
-                    .await?
-                    .into_iter()
-                    .skip(1)
-                {
+                let siblings =
+                    cohort::sibling_descriptors(self, &descriptor, scope, limits).await?;
+                let mut prepared = vec![(descriptor, info, visible)];
+                for sibling in siblings {
                     let sibling_info = descriptor_info(&sibling)?;
                     let sibling_visible = match (self, scope) {
                         (Self::Local(backend), scope) => {

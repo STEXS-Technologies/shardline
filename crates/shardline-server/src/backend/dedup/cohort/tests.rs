@@ -195,7 +195,7 @@ async fn related_reply_is_scoped_bounded_and_omits_missing_optional_sources() {
         .unwrap();
     let objects = backend.object_store();
     let backend = ServerBackend::Local(backend);
-    let related = descriptors(
+    let related = sibling_descriptors(
         &backend,
         &primary,
         Some(&scope),
@@ -205,33 +205,31 @@ async fn related_reply_is_scoped_bounded_and_omits_missing_optional_sources() {
     .unwrap();
     assert_eq!(
         related.iter().map(|d| &d.hash).collect::<Vec<_>>(),
-        vec![&hashes[0], &hashes[1]]
+        vec![&hashes[1]]
     );
     let one = NonZeroUsize::new(1).unwrap();
-    assert_eq!(
-        descriptors(
-            &backend,
-            &primary,
+    let defaults = ShardMetadataLimits::default();
+    for (scope, limits) in [
+        (Some(&scope), ShardMetadataLimits::new(one, one, one, one)),
+        (
             Some(&scope),
-            ShardMetadataLimits::new(one, one, one, one)
-        )
-        .await
-        .unwrap()
-        .len(),
-        1
-    );
-    assert_eq!(
-        descriptors(
-            &backend,
-            &primary,
-            Some(&denied),
-            ShardMetadataLimits::default()
-        )
-        .await
-        .unwrap()
-        .len(),
-        1
-    );
+            ShardMetadataLimits::new(
+                defaults.max_files(),
+                defaults.max_xorbs(),
+                defaults.max_reconstruction_terms(),
+                one,
+            ),
+        ),
+        (Some(&denied), defaults),
+        (None, defaults),
+    ] {
+        assert!(
+            sibling_descriptors(&backend, &primary, scope, limits)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
     let member = shardline_xet_core::merklehash::compute_data_hash(b"first member").hex();
     let complete = backend
         .scoped_dedup_shard(&member, Some(&scope), ShardMetadataLimits::default())

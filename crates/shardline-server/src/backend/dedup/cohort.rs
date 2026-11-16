@@ -7,13 +7,14 @@ const MAX_COHORT_CHUNKS: usize = 32_768;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn descriptors(
+/// Returns only siblings; both limits include the caller-owned primary.
+pub(super) async fn sibling_descriptors(
     backend: &ServerBackend,
     primary: &XetXorbDescriptor,
     scope: Option<&RepositoryScope>,
     limits: crate::ShardMetadataLimits,
 ) -> Result<Vec<XetXorbDescriptor>, ServerError> {
-    let mut result = vec![primary.clone()];
+    let mut result = Vec::new();
     let Some(scope) = scope else {
         return Ok(result);
     };
@@ -29,7 +30,7 @@ pub(super) async fn descriptors(
     };
     let mut chunks = primary.chunks.len();
     for hash in siblings {
-        if result.len() >= max_xorbs || chunks >= max_chunks {
+        if result.len() >= max_xorbs.saturating_sub(1) || chunks >= max_chunks {
             break;
         }
         let descriptor = match backend {
