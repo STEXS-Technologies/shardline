@@ -66,152 +66,72 @@ pub(crate) async fn ensure_directory(path: &Path) -> Result<(), ServerError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::ErrorKind, path::Path};
-
-    use tokio::fs::create_dir_all;
-
     use super::{validate_content_hash, validate_identifier};
     use crate::ServerError;
 
     #[test]
-    fn identifier_rejects_dot_alias() {
-        let result = validate_identifier(".");
-
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    fn identifier_validation_preserves_server_error_mapping() {
+        assert!(validate_identifier("my-file_v1.2.bin").is_ok());
+        for value in [
+            ".".to_owned(),
+            "nested/file".to_owned(),
+            "f".repeat(1025),
+            String::new(),
+            "   ".to_owned(),
+            "/etc/passwd".to_owned(),
+            "safe/../etc".to_owned(),
+            "safe\\..\\etc".to_owned(),
+            "test\x00file".to_owned(),
+        ] {
+            assert!(
+                matches!(validate_identifier(&value), Err(ServerError::InvalidFileId)),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
-    fn identifier_rejects_path_separator() {
-        let result = validate_identifier("nested/file");
-
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[test]
-    fn identifier_rejects_oversized_values() {
-        let oversized = "f".repeat(1025);
-        let result = validate_identifier(&oversized);
-
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[test]
-    fn content_hash_accepts_lowercase_hex() {
-        let result = validate_content_hash(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    fn content_hash_validation_preserves_server_error_mapping() {
+        assert!(
+            validate_content_hash(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )
+            .is_ok()
         );
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn content_hash_rejects_uppercase_hex() {
-        let result = validate_content_hash(
-            "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-
-        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
+        assert!(matches!(
+            validate_content_hash(
+                "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
+            Err(ServerError::InvalidContentHash)
+        ));
     }
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ensure_directory_rejects_symlinked_directory() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir();
-        let temp = temp.expect("expected valid temp");
-        let target = temp.path().join("target");
-        let create = create_dir_all(&target).await;
-        assert!(create.is_ok());
+    async fn ensure_directory_accepts_only_existing_non_symlink_directories() {
+        use std::{io::ErrorKind, os::unix::fs::symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        tokio::fs::write(&file, b"content").await.unwrap();
+        let missing = temp.path().join("missing");
         let link = temp.path().join("link");
-        let linked = symlink(Path::new(&target), Path::new(&link));
-        assert!(linked.is_ok());
-
-        let result = super::ensure_directory(&link).await;
-
-        assert!(matches!(
-            result,
-            Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData
-        ));
-    }
-
-    #[test]
-    fn identifier_rejects_empty_string() {
-        let result = validate_identifier("");
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[test]
-    fn identifier_rejects_whitespace() {
-        let result = validate_identifier("   ");
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[test]
-    fn identifier_rejects_absolute_path() {
-        let result = validate_identifier("/etc/passwd");
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[test]
-    fn identifier_rejects_traversal() {
-        let result = validate_identifier("safe/../etc");
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[test]
-    fn identifier_rejects_backslash() {
-        let result = validate_identifier("safe\\..\\etc");
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[test]
-    fn identifier_rejects_control_characters() {
-        let result = validate_identifier("test\x00file");
-        assert!(matches!(result, Err(ServerError::InvalidFileId)));
-    }
-
-    #[test]
-    fn identifier_accepts_valid_filename() {
-        let result = validate_identifier("my-file_v1.2.bin");
-        assert!(result.is_ok());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ensure_directory_accepts_valid_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        let result = super::ensure_directory(temp.path()).await;
-        assert!(result.is_ok());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ensure_directory_rejects_nonexistent_path() {
-        let result = super::ensure_directory(Path::new("/nonexistent_path_12345")).await;
-        assert!(result.is_err());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ensure_directory_rejects_regular_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let file_path = temp.path().join("not_a_dir.txt");
-        tokio::fs::write(&file_path, b"content").await.unwrap();
-        let result = super::ensure_directory(&file_path).await;
-        assert!(matches!(
-            result,
-            Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData
-        ));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ensure_directory_reopens_valid_directory_after_open() {
-        // ensure_directory opens with O_NOFOLLOW, then stats; this test
-        // verifies a valid directory passes.
-        let temp = tempfile::tempdir().unwrap();
-        let result = super::ensure_directory(temp.path()).await;
-        assert!(result.is_ok());
+        symlink(temp.path(), &link).unwrap();
+        for (path, valid) in [
+            (temp.path(), true),
+            (&file, false),
+            (&missing, false),
+            (&link, false),
+        ] {
+            let result = super::ensure_directory(path).await;
+            if valid {
+                assert!(result.is_ok(), "{}: {result:?}", path.display());
+            } else {
+                assert!(
+                    matches!(&result, Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData),
+                    "{}: {result:?}",
+                    path.display()
+                );
+            }
+        }
     }
 }

@@ -44,7 +44,6 @@ pub fn validate_identifier(value: &str) -> Result<(), ValidateIdentifierError> {
     if value.trim().is_empty()
         || value == "."
         || value.len() > MAX_IDENTIFIER_BYTES
-        || value.starts_with('/')
         || value.contains("..")
         || value.contains('\\')
         || value.contains('/')
@@ -99,6 +98,8 @@ mod tests {
             (".".to_owned(), false),
             ("/etc/passwd".to_owned(), false),
             ("foo/../bar".to_owned(), false),
+            ("foo..bar".to_owned(), false),
+            ("nested/file".to_owned(), false),
             ("foo\\bar".to_owned(), false),
             ("foo\tbar".to_owned(), false),
             ("foo\0bar".to_owned(), false),

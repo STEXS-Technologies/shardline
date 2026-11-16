@@ -58,27 +58,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_add_normal() {
-        assert_eq!(checked_add(1, 2).unwrap(), 3);
-    }
-
-    #[test]
-    fn checked_add_zero() {
-        assert_eq!(checked_add(0, 0).unwrap(), 0);
-    }
-
-    #[test]
-    fn checked_add_overflow() {
-        assert!(checked_add(u64::MAX, 1).is_err());
-    }
-
-    #[test]
-    fn checked_increment_normal() {
+    fn checked_arithmetic_preserves_values_and_rejects_overflow() {
+        for (left, right, expected) in [(1, 2, Some(3)), (0, 0, Some(0)), (u64::MAX, 1, None)] {
+            assert_eq!(checked_add(left, right).ok(), expected);
+        }
         assert_eq!(checked_increment(0).unwrap(), 1);
-    }
-
-    #[test]
-    fn checked_increment_overflow() {
         assert!(checked_increment(u64::MAX).is_err());
     }
 
@@ -92,11 +76,5 @@ mod tests {
     fn unix_now_seconds_checked_returns_modern_timestamp() {
         let ts = unix_now_seconds_checked().unwrap();
         assert!(ts >= 1_700_000_000, "timestamp {ts} too small");
-    }
-
-    #[test]
-    fn unix_now_seconds_checked_is_recent() {
-        let ts = unix_now_seconds_checked().unwrap();
-        assert!(ts >= 1_577_836_800, "timestamp {ts} too small for 2020");
     }
 }
