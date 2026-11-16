@@ -768,74 +768,50 @@ mod tests {
     }
 
     #[test]
-    fn file_info_serialize_roundtrip_no_flags() {
-        let info = MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2, false, false),
-            segments: vec![
-                FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25),
-                FileDataSequenceEntry::new(MerkleHash::default(), 75, 25, 50),
-            ],
-            verification: vec![],
-            metadata_ext: None,
-        };
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let info2 = MDBFileInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert_eq!(info, info2);
-        assert_eq!(buf.len() as u64, info.num_bytes());
-        assert_eq!(r.position(), buf.len() as u64);
-    }
-
-    #[test]
-    fn file_info_serialize_with_verification() {
-        let info = MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, false),
-            segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25)],
-            verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
-            metadata_ext: None,
-        };
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let info2 = MDBFileInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert_eq!(info, info2);
-        assert_eq!(buf.len() as u64, info.num_bytes());
-        assert_eq!(r.position(), buf.len() as u64);
-    }
-
-    #[test]
-    fn file_info_serialize_with_metadata_ext() {
-        let info = MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, false, true),
-            segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25)],
-            verification: vec![],
-            metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
-        };
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let info2 = MDBFileInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert_eq!(info, info2);
-        assert_eq!(buf.len() as u64, info.num_bytes());
-        assert_eq!(r.position(), buf.len() as u64);
-    }
-
-    #[test]
-    fn file_info_serialize_with_both() {
-        let info = MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, true),
-            segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25)],
-            verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
-            metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
-        };
-        let mut buf = Vec::new();
-        info.serialize(&mut buf).unwrap();
-        let mut r = Cursor::new(&buf);
-        let info2 = MDBFileInfo::deserialize(&mut r, 3).unwrap().unwrap();
-        assert_eq!(info, info2);
-        assert_eq!(buf.len() as u64, info.num_bytes());
-        assert_eq!(r.position(), buf.len() as u64);
+    fn file_info_roundtrips_every_optional_section_combination() {
+        for (verification, extension) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            for count in [0, 1, 2] {
+                let info = MDBFileInfo {
+                    metadata: FileDataSequenceHeader::new(
+                        compute_data_hash(b"f"),
+                        count,
+                        verification,
+                        extension,
+                    ),
+                    segments: (0..count)
+                        .map(|index| {
+                            FileDataSequenceEntry::new(
+                                compute_data_hash(&[index as u8]),
+                                50 + 25 * index,
+                                25 * index,
+                                25 * (index + 1),
+                            )
+                        })
+                        .collect(),
+                    verification: if verification {
+                        (0..count)
+                            .map(|index| {
+                                FileVerificationEntry::new(compute_data_hash(&[index as u8, 1]))
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    },
+                    metadata_ext: extension
+                        .then(|| FileMetadataExt::new(compute_data_hash(b"ext"))),
+                };
+                let mut bytes = Vec::new();
+                let written = info.serialize(&mut bytes).unwrap();
+                let mut reader = Cursor::new(&bytes);
+                let decoded = MDBFileInfo::deserialize(&mut reader, 3).unwrap().unwrap();
+                assert_eq!(decoded, info);
+                assert_eq!(written, bytes.len());
+                assert_eq!(bytes.len() as u64, info.num_bytes());
+                assert_eq!(reader.position(), bytes.len() as u64);
+            }
+        }
     }
 
     #[test]
