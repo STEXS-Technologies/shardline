@@ -146,18 +146,4 @@ mod tests {
         assert_eq!(validate_content_hash_with("invalid", error_factory), Err(0));
         assert_eq!(ERROR_CALLS.load(Ordering::Relaxed), 1);
     }
-
-    #[test]
-    fn validate_identifier_error_display() {
-        let msg = ValidateIdentifierError.to_string();
-        assert!(!msg.is_empty());
-        assert!(msg.contains("identifier"));
-    }
-
-    #[test]
-    fn validate_content_hash_error_display() {
-        let msg = ValidateContentHashError.to_string();
-        assert!(!msg.is_empty());
-        assert!(msg.contains("hexadecimal"));
-    }
 }

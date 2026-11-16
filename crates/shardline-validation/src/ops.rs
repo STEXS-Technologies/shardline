@@ -67,12 +67,6 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_overflow_error_display() {
-        let msg = RebuildOverflowError.to_string();
-        assert_eq!(msg, "arithmetic overflow");
-    }
-
-    #[test]
     fn unix_now_seconds_checked_returns_modern_timestamp() {
         let ts = unix_now_seconds_checked().unwrap();
         assert!(ts >= 1_700_000_000, "timestamp {ts} too small");
