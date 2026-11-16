@@ -2035,41 +2035,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
         new_state: UploadIntentState,
         event: &LifecycleEvent,
     ) -> Result<bool, Self::Error> {
-        let current = self.intent_by_id(intent_id).await?;
-        let Some(current) = current else {
-            return Ok(false);
-        };
-        if current.state() == new_state {
-            return Ok(true);
-        }
-        if !current.state().can_transition_to(new_state) {
-            return Ok(false);
-        }
-        event.validate_for_transition(intent_id, current.state(), new_state)?;
-        let mut transaction = self.pool.begin().await?;
-        let previous = super::upload_recovery_guard::enter(
-            &mut transaction,
-            intent_id,
-            &event.operation.repository,
-        )
-        .await?;
-        let rows = sqlx::query(
-            "UPDATE shardline_upload_intents SET state = $1, updated_at = now()
-             WHERE intent_id = $2 AND state = $3",
-        )
-        .bind(new_state.as_str())
-        .bind(intent_id)
-        .bind(current.state().as_str())
-        .execute(&mut *transaction)
-        .await?;
-        if rows.rows_affected() == 0 {
-            transaction.rollback().await?;
-            return Ok(false);
-        }
-        insert_reliability_event(transaction.as_mut(), event).await?;
-        super::upload_recovery_guard::leave(&mut transaction, previous.as_deref()).await?;
-        transaction.commit().await?;
-        Ok(true)
+        self.transition_intent_batch_with_events(intent_id, &[(new_state, event.clone())])
+            .await
     }
 
     async fn transition_intent_batch_with_events(
