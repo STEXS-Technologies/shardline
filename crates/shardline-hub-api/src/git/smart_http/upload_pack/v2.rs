@@ -176,14 +176,11 @@ pub(super) fn fetch_response(
             if !updates.is_empty() {
                 body.extend_from_slice(pktline::encode_line("shallow-info\n")?.as_bytes());
                 body.extend_from_slice(updates);
-            }
-            if !updates.is_empty() {
                 body.extend_from_slice(pktline::DELIMITER.as_bytes());
             }
         }
         body.extend_from_slice(pktline::encode_line("packfile\n")?.as_bytes());
         pktline::append_sideband_data(&mut body, pack);
-        body.extend_from_slice(pktline::FLUSH.as_bytes());
     } else {
         body.extend_from_slice(pktline::encode_line("acknowledgments\n")?.as_bytes());
         if acknowledgments.is_empty() {
@@ -195,8 +192,8 @@ pub(super) fn fetch_response(
                 body.extend_from_slice(pktline::encode_line(&format!("ACK {oid}\n"))?.as_bytes());
             }
         }
-        body.extend_from_slice(pktline::FLUSH.as_bytes());
     }
+    body.extend_from_slice(pktline::FLUSH.as_bytes());
     Ok(body)
 }
 
@@ -224,16 +221,15 @@ fn parse_ls_refs(args: &[Vec<u8>]) -> Result<LsRefs, HubApiError> {
 }
 
 fn parse_fetch(args: Vec<Vec<u8>>) -> Result<Fetch, HubApiError> {
-    let mut wants = 0usize;
+    let mut has_wants = false;
     let mut done = false;
     let mut wait_for_done = false;
-    let mut lines = Vec::with_capacity(args.len());
-    for argument in args {
-        let line = std::str::from_utf8(&argument).map_err(|_error| invalid())?;
+    for argument in &args {
+        let line = std::str::from_utf8(argument).map_err(|_error| invalid())?;
         let line = line.strip_suffix('\n').unwrap_or(line);
         let fields = line.split_whitespace().collect::<Vec<_>>();
         match fields.as_slice() {
-            ["want", oid] if valid_oid(oid) => wants = wants.saturating_add(1),
+            ["want", oid] if valid_oid(oid) => has_wants = true,
             ["have", oid] if valid_oid(oid) => {}
             ["done"] if !done => done = true,
             ["wait-for-done"] if !wait_for_done => wait_for_done = true,
@@ -248,12 +244,11 @@ fn parse_fetch(args: Vec<Vec<u8>>) -> Result<Fetch, HubApiError> {
             ["filter", filter] if !filter.is_empty() && filter.len() <= 128 => {}
             _ => return Err(invalid()),
         }
-        lines.push(argument);
     }
-    if wants == 0 {
+    if !has_wants {
         return Err(invalid());
     }
-    Ok(Fetch { lines, done })
+    Ok(Fetch { lines: args, done })
 }
 
 fn validate_capabilities(capabilities: &[&str]) -> Result<(), HubApiError> {
