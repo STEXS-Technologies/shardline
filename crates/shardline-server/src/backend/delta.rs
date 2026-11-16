@@ -82,20 +82,7 @@ impl ServerBackend {
                         )?)
                     })
                     .await?;
-                    match self {
-                        Self::Local(backend) => {
-                            backend
-                                .record_store()
-                                .cache_xet_xorb_descriptors(std::slice::from_ref(&recovered))
-                                .await?
-                        }
-                        Self::Postgres(backend) => {
-                            backend
-                                .record_store()
-                                .cache_xet_xorb_descriptors(std::slice::from_ref(&recovered))
-                                .await?
-                        }
-                    }
+                    self.cache_verified_xorb_descriptor(&recovered).await?;
                     recovered
                 }
             };
