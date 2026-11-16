@@ -756,12 +756,12 @@ impl FileUploadPipeline {
 
         let mut state = self.session.inner.state.lock().await;
         state.xorb_infos.entry(xorb_hash).or_insert(shard_xorb);
-        for (index, (chunk, _offset)) in self.pending.iter().enumerate() {
+        for entry in &built.chunk_entries {
             let location = ChunkLocation {
                 xorb_hash,
-                chunk_index: u32::try_from(index).unwrap_or(u32::MAX),
+                chunk_index: entry.chunk_index,
             };
-            state.chunk_locations.insert(chunk.hash(), location);
+            state.chunk_locations.insert(entry.hash, location);
             self.new_chunk_locations.push(location);
         }
         self.pending.clear();
