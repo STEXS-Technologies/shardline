@@ -568,7 +568,7 @@ impl FileUploadPipeline {
 
         // 2. Eligibility-gated global dedup query.
         if eligible {
-            let session = self.session.clone();
+            let session = &self.session;
             let (base, token) = session.inner.cas_credentials().await?;
             let hash_hex = xet_hash_hex_string(hash);
             // Dedup queries are 429-fail-fast and treat 404 as a miss.
@@ -674,6 +674,7 @@ impl FileUploadPipeline {
         // The worker consumed the raw chunks before credentials, HEAD, or
         // POST can wait on the network.
 
+        let xorb_hash = parse_xet_hash_hex(&built.xorb_hash_hex)?;
         // HEAD-first idempotency probe (retried on transient failures).
         let (base, token) = self.session.inner.cas_credentials().await?;
         let retry = self.session.inner.upload_retry_context();
@@ -692,7 +693,7 @@ impl FileUploadPipeline {
                 .fetch_add(1, Ordering::Relaxed);
         } else {
             let upload_transfer = self.session.inner.transfer.clone();
-            let hash = built.xorb_hash_hex.clone();
+            let hash = built.xorb_hash_hex;
             let body = Bytes::from(built.serialized);
             let mut state = self.session.inner.state.lock().await;
             state.check_background_failure()?;
@@ -726,7 +727,6 @@ impl FileUploadPipeline {
             });
         }
 
-        let xorb_hash = parse_xet_hash_hex(&built.xorb_hash_hex)?;
         let mut chunks = Vec::with_capacity(built.chunk_entries.len());
         let mut unpacked_offset = 0u64;
         for entry in &built.chunk_entries {
