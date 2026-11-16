@@ -6,33 +6,30 @@ use crate::error::HubApiError;
 pub(in crate::git::smart_http) type RefUpdate = (String, String, String);
 
 pub(in crate::git::smart_http) fn parse(
-    body: &[u8],
+    mut body: &[u8],
 ) -> Result<(Vec<RefUpdate>, &[u8]), HubApiError> {
     let invalid = || HubApiError::BadRequest("malformed receive-pack commands".to_owned());
     let mut updates = Vec::new();
     let mut names = HashSet::new();
-    let mut position: usize = 0;
     loop {
-        let header = body
-            .get(position..position.saturating_add(4))
-            .ok_or_else(invalid)?;
+        let (header, payload) = body.split_at_checked(4).ok_or_else(invalid)?;
         if !header.iter().all(u8::is_ascii_hexdigit) {
             return Err(invalid());
         }
         let length =
             usize::from_str_radix(std::str::from_utf8(header).map_err(|_error| invalid())?, 16)
                 .map_err(|_error| invalid())?;
-        position = position.saturating_add(4);
         if length == 0 {
-            return Ok((updates, body.get(position..).ok_or_else(invalid)?));
+            return Ok((updates, payload));
         }
         if !(5..=65520).contains(&length) || updates.len() >= 10_000 {
             return Err(invalid());
         }
-        let end = position.saturating_add(length.saturating_sub(4));
-        let line = std::str::from_utf8(body.get(position..end).ok_or_else(invalid)?)
-            .map_err(|_error| invalid())?;
-        position = end;
+        let (command_bytes, remaining) = payload
+            .split_at_checked(length.saturating_sub(4))
+            .ok_or_else(invalid)?;
+        let line = std::str::from_utf8(command_bytes).map_err(|_error| invalid())?;
+        body = remaining;
         let line = line.strip_suffix('\n').unwrap_or(line);
         let command = if let Some((command, capabilities)) = line.split_once('\0') {
             if !updates.is_empty() || capabilities.bytes().any(|byte| byte < b' ' || byte == 127) {
@@ -52,7 +49,7 @@ pub(in crate::git::smart_http) fn parse(
             || !valid_oid(old)
             || !valid_oid(new)
             || !super::super::ref_advertisement::is_valid_refname(name)
-            || !names.insert(name.to_owned())
+            || !names.insert(name)
         {
             return Err(invalid());
         }
