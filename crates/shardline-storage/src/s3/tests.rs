@@ -1801,75 +1801,44 @@ fn s3_config_debug_without_endpoint_shows_none() {
 // ── metadata_from_external with prefix and without ────────────────────
 
 #[test]
-fn metadata_from_external_strips_prefix() {
-    use object_store::path::Path as ObjectStorePath;
-
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true)
-            .with_key_prefix(Some("tenant-x")),
-    );
-    let store = store.expect("expected valid store");
-
-    let meta = object_store::ObjectMeta {
-        location: ObjectStorePath::from("tenant-x/ns/key.xorb"),
-        last_modified: chrono::Utc::now(),
-        size: 42,
-        e_tag: None,
-        version: None,
-    };
-    let result = store.metadata_from_external(&meta);
-    let metadata = result.expect("expected valid metadata");
-    assert_eq!(metadata.key().as_str(), "ns/key.xorb");
-    assert_eq!(metadata.length(), 42);
-}
-
-#[test]
-fn metadata_from_external_no_prefix() {
-    use object_store::path::Path as ObjectStorePath;
-
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true),
-    );
-    let store = store.expect("expected valid store");
-
-    let meta = object_store::ObjectMeta {
-        location: ObjectStorePath::from("plain/key.xorb"),
-        last_modified: chrono::Utc::now(),
-        size: 100,
-        e_tag: None,
-        version: None,
-    };
-    let result = store.metadata_from_external(&meta);
-    let metadata = result.expect("expected valid metadata");
-    assert_eq!(metadata.key().as_str(), "plain/key.xorb");
-    assert_eq!(metadata.length(), 100);
-}
-
-#[test]
-fn metadata_from_external_rejects_outside_prefix() {
-    use object_store::path::Path as ObjectStorePath;
-
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true)
-            .with_key_prefix(Some("tenant-x")),
-    );
-    let store = store.expect("expected valid store");
-
-    let meta = object_store::ObjectMeta {
-        location: ObjectStorePath::from("other-prefix/key.xorb"),
-        last_modified: chrono::Utc::now(),
-        size: 42,
-        e_tag: None,
-        version: None,
-    };
-    let result = store.metadata_from_external(&meta);
-    assert!(matches!(result, Err(S3ObjectStoreError::InvalidListedKey)));
+fn metadata_conversion_preserves_keys_lengths_and_prefix_boundaries() {
+    for (prefix, location, size, expected) in [
+        (
+            Some("tenant-x"),
+            "tenant-x/ns/key.xorb",
+            42,
+            Some("ns/key.xorb"),
+        ),
+        (None, "plain/key.xorb", 100, Some("plain/key.xorb")),
+        (Some("tenant-x"), "other-prefix/key.xorb", 42, None),
+        (Some("tenant-x"), "tenant-x-other/key.xorb", 42, None),
+        (Some("tenant-x"), "tenant-x", 42, None),
+        (Some("tenant-x"), "tenant-x/", 42, None),
+    ] {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_key_prefix(prefix),
+        )
+        .unwrap();
+        let meta = object_store::ObjectMeta {
+            location: ObjectStorePath::from(location),
+            last_modified: chrono::DateTime::from_timestamp(123, 456).unwrap(),
+            size,
+            e_tag: None,
+            version: None,
+        };
+        let result = store.metadata_from_external(&meta);
+        if let Some(key) = expected {
+            let metadata = result.unwrap();
+            assert_eq!(metadata.key().as_str(), key);
+            assert_eq!(metadata.length(), size);
+            assert_eq!(metadata.modified_unix_nanos(), Some(123_000_000_456));
+        } else {
+            assert!(
+                matches!(result, Err(S3ObjectStoreError::InvalidListedKey)),
+                "{location}"
+            );
+        }
+    }
 }
 
 // ── block_on / block_on_result fallback paths ──────────────────────

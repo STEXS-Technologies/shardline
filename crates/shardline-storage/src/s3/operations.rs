@@ -548,9 +548,9 @@ impl S3ObjectStore {
     ) -> Result<ObjectMetadata, S3ObjectStoreError> {
         let raw_key = metadata.location.as_ref();
         let key = if let Some(prefix) = &self.key_prefix {
-            let prefix = format!("{prefix}/");
             raw_key
-                .strip_prefix(&prefix)
+                .strip_prefix(prefix)
+                .and_then(|suffix| suffix.strip_prefix('/'))
                 .ok_or(S3ObjectStoreError::InvalidListedKey)?
         } else {
             raw_key
