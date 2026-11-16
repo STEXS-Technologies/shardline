@@ -14,7 +14,6 @@ shardline-protocol-adapters = { version = "1.13.0", path = "../shardline-protoco
 tempfile.workspace = true
 blake3.workspace = true
 sha2.workspace = true
-serde = { workspace = true, features = ["derive"] }
 shardline-index.workspace = true
 shardline-metrics.workspace = true
 shardline-protocol.workspace = true

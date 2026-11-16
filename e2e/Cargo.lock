@@ -4005,7 +4005,6 @@ name = "shardline-xet-adapter"
 version = "1.13.0"
 dependencies = [
  "blake3",
- "serde",
  "sha2 0.10.9",
  "shardline-index",
  "shardline-metrics",
