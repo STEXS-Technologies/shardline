@@ -270,7 +270,6 @@ where
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, PoisonError};
-    use tokio::runtime::Runtime;
 
     use crate::{
         AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
@@ -353,20 +352,6 @@ mod tests {
         }
     }
 
-    fn rt() -> Runtime {
-        Runtime::new().expect("tokio runtime")
-    }
-
-    #[test]
-    fn bridge_put_if_absent_inserts_new_object() {
-        let bridge = SyncObjectStoreBridge::new(TestStore::default());
-        let key = ObjectKey::parse("test/key").unwrap();
-        let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
-        let result =
-            rt().block_on(bridge.put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity));
-        assert!(matches!(result, Ok(PutOutcome::Inserted)));
-    }
-
     #[tokio::test]
     async fn bridge_preserves_owned_upload_buffers() {
         let bridge = SyncObjectStoreBridge::new(TestStore::default());
@@ -391,170 +376,115 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bridge_put_if_absent_idempotent() {
+    #[tokio::test]
+    async fn bridge_object_lifecycle_preserves_data_and_reports_absence() {
         let bridge = SyncObjectStoreBridge::new(TestStore::default());
         let key = ObjectKey::parse("test/key").unwrap();
-        let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
-        rt().block_on(bridge.put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity))
-            .unwrap();
-        let second =
-            rt().block_on(bridge.put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity));
-        assert!(matches!(second, Ok(PutOutcome::AlreadyExists)));
-    }
-
-    #[test]
-    fn bridge_contains_returns_true_for_stored_object() {
-        let bridge = SyncObjectStoreBridge::new(TestStore::default());
-        let key = ObjectKey::parse("test/key").unwrap();
-        let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
-        rt().block_on(bridge.put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity))
-            .unwrap();
-        let found = rt().block_on(bridge.contains(&key));
-        assert!(matches!(found, Ok(true)));
-    }
-
-    #[test]
-    fn bridge_contains_returns_false_for_missing() {
-        let bridge = SyncObjectStoreBridge::new(TestStore::default());
-        let key = ObjectKey::parse("test/missing").unwrap();
-        let found = rt().block_on(bridge.contains(&key));
-        assert!(matches!(found, Ok(false)));
-    }
-
-    #[test]
-    fn bridge_delete_if_present_removes_object() {
-        let bridge = SyncObjectStoreBridge::new(TestStore::default());
-        let key = ObjectKey::parse("test/key").unwrap();
-        let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
-        rt().block_on(bridge.put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity))
-            .unwrap();
-        let deleted = rt().block_on(bridge.delete_if_present(&key));
-        assert!(matches!(deleted, Ok(DeleteOutcome::Deleted)));
-        let found = rt().block_on(bridge.contains(&key));
-        assert!(matches!(found, Ok(false)));
-    }
-
-    #[test]
-    fn bridge_delete_if_present_returns_not_found_for_missing() {
-        let bridge = SyncObjectStoreBridge::new(TestStore::default());
-        let key = ObjectKey::parse("test/missing").unwrap();
-        let deleted = rt().block_on(bridge.delete_if_present(&key));
-        assert!(matches!(deleted, Ok(DeleteOutcome::NotFound)));
-    }
-
-    #[test]
-    fn bridge_metadata_returns_length() {
-        let bridge = SyncObjectStoreBridge::new(TestStore::default());
-        let key = ObjectKey::parse("test/key").unwrap();
-        let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 10);
-        rt().block_on(bridge.put_if_absent(
-            &key,
-            ObjectBody::from_slice(b"1234567890"),
-            &integrity,
-        ))
-        .unwrap();
-        let meta = rt().block_on(bridge.metadata(&key));
-        assert!(matches!(meta, Ok(Some(m)) if m.length() == 10));
-    }
-
-    #[test]
-    fn bridge_inner_returns_correct_store() {
-        let store = TestStore::default();
-        let bridge = SyncObjectStoreBridge::new(store);
-        let inner = bridge.inner();
-        assert!(
-            !inner
-                .metadata(&ObjectKey::parse("test/k").unwrap())
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn bridge_read_range_returns_data() {
-        let bridge = SyncObjectStoreBridge::new(TestStore::default());
-        let key = ObjectKey::parse("test/rr").unwrap();
-        let body = b"hello world";
-        let hash = ShardlineHash::from_bytes(*blake3::hash(body).as_bytes());
-        rt().block_on(bridge.put_if_absent(
-            &key,
-            ObjectBody::from_slice(body),
-            &ObjectIntegrity::new(hash, body.len() as u64),
-        ))
-        .unwrap();
         let range = ByteRange::new(0, 4).unwrap();
-        let data = rt().block_on(bridge.read_range(&key, range)).unwrap();
-        assert_eq!(data, b"hello");
+        assert!(!bridge.contains(&key).await.unwrap());
+        assert!(bridge.metadata(&key).await.unwrap().is_none());
+        assert_eq!(
+            bridge
+                .read_range(&key, range)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "missing"
+        );
+        assert_eq!(
+            bridge.delete_if_present(&key).await.unwrap(),
+            DeleteOutcome::NotFound
+        );
+
+        let body = b"hello world";
+        let integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3::hash(body).as_bytes()),
+            body.len() as u64,
+        );
+        for expected in [PutOutcome::Inserted, PutOutcome::AlreadyExists] {
+            assert_eq!(
+                bridge
+                    .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        assert!(bridge.contains(&key).await.unwrap());
+        assert_eq!(bridge.metadata(&key).await.unwrap().unwrap().length(), 11);
+        assert_eq!(bridge.read_range(&key, range).await.unwrap(), b"hello");
+        assert_eq!(
+            bridge
+                .inner()
+                .read_range(&key, ByteRange::new(0, 10).unwrap())
+                .unwrap(),
+            body
+        );
+        assert_eq!(
+            bridge.delete_if_present(&key).await.unwrap(),
+            DeleteOutcome::Deleted
+        );
+        assert!(!bridge.contains(&key).await.unwrap());
+        assert!(bridge.metadata(&key).await.unwrap().is_none());
     }
 
-    #[test]
-    fn suffix_fallback_handles_zero_oversized_missing_and_empty_objects() {
+    #[tokio::test]
+    async fn suffix_fallback_handles_zero_oversized_missing_and_empty_objects() {
         let bridge = SyncObjectStoreBridge::new(TestStore::default());
         let key = ObjectKey::parse("test/suffix").unwrap();
-        assert!(
-            rt().block_on(bridge.read_suffix(&key, 3))
-                .unwrap()
-                .is_none()
-        );
-        rt().block_on(bridge.put_if_absent(
-            &key,
-            ObjectBody::from_slice(b"abcdef"),
-            &ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 6),
-        ))
-        .unwrap();
+        assert!(bridge.read_suffix(&key, 3).await.unwrap().is_none());
+        bridge
+            .put_if_absent(
+                &key,
+                ObjectBody::from_slice(b"abcdef"),
+                &ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 6),
+            )
+            .await
+            .unwrap();
         for (length, expected) in [(0, b"".as_slice()), (3, b"def"), (99, b"abcdef")] {
             assert_eq!(
-                rt().block_on(bridge.read_suffix(&key, length)).unwrap(),
+                bridge.read_suffix(&key, length).await.unwrap(),
                 Some((expected.to_vec(), 6))
             );
         }
         let empty = ObjectKey::parse("test/empty-suffix").unwrap();
-        rt().block_on(bridge.put_if_absent(
-            &empty,
-            ObjectBody::from_slice(b""),
-            &ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 0),
-        ))
-        .unwrap();
+        bridge
+            .put_if_absent(
+                &empty,
+                ObjectBody::from_slice(b""),
+                &ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 0),
+            )
+            .await
+            .unwrap();
         assert_eq!(
-            rt().block_on(bridge.read_suffix(&empty, 3)).unwrap(),
+            bridge.read_suffix(&empty, 3).await.unwrap(),
             Some((Vec::new(), 0))
         );
     }
 
-    #[test]
-    fn bridge_read_range_missing_returns_error() {
-        let bridge = SyncObjectStoreBridge::new(TestStore::default());
-        let key = ObjectKey::parse("test/missing").unwrap();
-        let range = ByteRange::new(0, 0).unwrap();
-        let result = rt().block_on(bridge.read_range(&key, range));
-        assert!(result.is_err(), "read_range on missing key should error");
-    }
-
-    #[test]
-    fn bridge_list_prefix_returns_filtered_keys() {
+    #[tokio::test]
+    async fn bridge_list_prefix_returns_filtered_keys() {
         let bridge = SyncObjectStoreBridge::new(TestStore::default());
         let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
-        rt().block_on(bridge.put_if_absent(
-            &ObjectKey::parse("ns/a").unwrap(),
-            ObjectBody::from_slice(b"data"),
-            &integrity,
-        ))
-        .unwrap();
-        rt().block_on(bridge.put_if_absent(
-            &ObjectKey::parse("ns/b").unwrap(),
-            ObjectBody::from_slice(b"data"),
-            &integrity,
-        ))
-        .unwrap();
-        rt().block_on(bridge.put_if_absent(
-            &ObjectKey::parse("other/c").unwrap(),
-            ObjectBody::from_slice(b"data"),
-            &integrity,
-        ))
-        .unwrap();
+        for key in ["ns/a", "ns/b", "other/c"] {
+            bridge
+                .put_if_absent(
+                    &ObjectKey::parse(key).unwrap(),
+                    ObjectBody::from_slice(b"data"),
+                    &integrity,
+                )
+                .await
+                .unwrap();
+        }
         let prefix = ObjectPrefix::parse("ns/").unwrap();
-        let items = rt().block_on(bridge.list_prefix(&prefix));
-        assert!(matches!(items, Ok(ref v) if v.len() == 2));
+        let items = bridge.list_prefix(&prefix).await;
+        assert_eq!(
+            items
+                .unwrap()
+                .iter()
+                .map(|item| item.key().as_str())
+                .collect::<Vec<_>>(),
+            ["ns/a", "ns/b"]
+        );
     }
 }
