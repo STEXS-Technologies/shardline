@@ -64,7 +64,7 @@ pub(crate) fn pack_owned_chunks_into_xorb(
 
 fn packed_xorb_from_serialized(
     serialized: SerializedXorbObject,
-    chunk_metadata: &[(usize, u64)],
+    chunk_metadata: impl ExactSizeIterator<Item = (usize, u64)>,
 ) -> Result<PackedXorb, ServerError> {
     let xorb_hash_hex = xet_hash_hex_string(ShardlineHash::from_bytes(serialized.hash.into()));
 
@@ -73,7 +73,7 @@ fn packed_xorb_from_serialized(
     let mut cursor = Cursor::new(serialized.serialized_data.as_slice());
     let mut packed_offset: u32 = 0;
 
-    for (i, (raw_length, raw_offset)) in chunk_metadata.iter().enumerate() {
+    for (i, (raw_length, raw_offset)) in chunk_metadata.enumerate() {
         let header: XorbChunkHeader = deserialize_chunk_header(&mut cursor).map_err(|e| {
             ServerError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -106,8 +106,8 @@ fn packed_xorb_from_serialized(
 
         chunk_entries.push(XorbChunkEntry {
             chunk_index: i as u32,
-            raw_offset: *raw_offset,
-            raw_length: u64::try_from(*raw_length)?,
+            raw_offset,
+            raw_length: u64::try_from(raw_length)?,
             packed_offset,
             packed_length: chunk_total_len,
         });

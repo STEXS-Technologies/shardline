@@ -38,14 +38,13 @@ impl RecoverableXorbBatch {
                 format!("xorb serialization failed: {error}"),
             ))
         })?;
-        let metadata: Vec<_> = self
+        let metadata = self
             .raw
             .data
             .iter()
             .zip(&self.offsets)
-            .map(|(data, offset)| (data.len(), *offset))
-            .collect();
-        packed_xorb_from_serialized(serialized, &metadata)
+            .map(|(data, offset)| (data.len(), *offset));
+        packed_xorb_from_serialized(serialized, metadata)
     }
 
     pub(in crate::upload_ingest) fn into_chunks(self) -> Vec<(Vec<u8>, u64)> {

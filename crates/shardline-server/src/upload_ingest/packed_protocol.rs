@@ -6,7 +6,7 @@ use shardline_xet_core::merklehash::compute_data_hash;
 use super::{
     body_reader::ChunkBuffer,
     chunk_store::put_if_absent_pooled_chunk_buffer,
-    durable_chunks::{DurableUploadChunks, ReadCache},
+    durable_chunks::read_chunk,
     ingestor::{MAX_SERVER_XORB_RAW_BYTES, MAX_XORB_CHUNKS},
     xorb_packer::RecoverableXorbBatch,
 };
@@ -321,12 +321,7 @@ impl PackedProtocolUpload {
                 packed_end: outcome.compressed_length,
             };
             if outcome.inserted {
-                let mut reader =
-                    DurableUploadChunks::with_cache(objects.clone(), 1, ReadCache::default());
-                reader
-                    .next(std::slice::from_ref(&record))
-                    .await?
-                    .ok_or(ServerError::Overflow)?;
+                read_chunk(objects.clone(), record.clone()).await?;
             }
             self.record_result(&bytes, offset, outcome.inserted)?;
             self.result.records.push(record);

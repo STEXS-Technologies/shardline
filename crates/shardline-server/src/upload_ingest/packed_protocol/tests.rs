@@ -18,7 +18,10 @@ use shardline_protocol::SecretString;
 use shardline_storage::S3ObjectStoreConfig;
 
 use super::*;
-use crate::upload_ingest::FileUploadIngestor;
+use crate::upload_ingest::{
+    FileUploadIngestor,
+    durable_chunks::{DurableUploadChunks, ReadCache},
+};
 
 #[derive(Default)]
 struct ProviderState {

@@ -111,7 +111,7 @@ impl DurableUploadChunks {
     }
 }
 
-async fn read_chunk(
+pub(super) async fn read_chunk(
     store: ServerObjectStore,
     record: FileChunkRecord,
 ) -> Result<(Vec<u8>, u64), ServerError> {
