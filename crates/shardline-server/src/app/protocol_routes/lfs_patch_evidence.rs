@@ -718,7 +718,7 @@ fn prepare_journal_append(
     journal_path: &Path,
     schema: &str,
 ) -> Result<(), ServerError> {
-    let Some(head) = journal_head(manifest_path, schema)? else {
+    let Some(manifest) = read_journal_manifest(manifest_path, schema)? else {
         if journal_path.exists() && fs::metadata(journal_path)?.len() != 0 {
             return Err(invalid_evidence(
                 "LFS journal is missing its committed head",
@@ -726,18 +726,14 @@ fn prepare_journal_append(
         }
         return Ok(());
     };
-    let manifest_bytes = fs::read(manifest_path).map_err(ServerError::from)?;
-    let manifest: JournalManifest =
-        serde_json::from_slice(&manifest_bytes).map_err(invalid_evidence)?;
-    let bytes = match fs::read(journal_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Err(invalid_evidence("LFS journal is missing its committed log"));
-        }
-        Err(error) => return Err(error.into()),
-    };
     if let Some(expected_bytes) = manifest.bytes {
-        let actual_bytes = bytes.len() as u64;
+        let actual_bytes = match fs::metadata(journal_path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Err(invalid_evidence("LFS journal is missing its committed log"));
+            }
+            Err(error) => return Err(error.into()),
+        };
         if actual_bytes < expected_bytes {
             return Err(invalid_evidence(
                 "LFS journal is shorter than its committed byte length",
@@ -745,19 +741,19 @@ fn prepare_journal_append(
         }
         if actual_bytes > expected_bytes {
             let file = fs::OpenOptions::new().write(true).open(journal_path)?;
-            let expected_bytes = usize::try_from(expected_bytes)
-                .map_err(|_error| invalid_evidence("LFS journal byte length overflow"))?;
-            let committed_prefix = bytes
-                .get(..expected_bytes)
-                .ok_or_else(|| invalid_evidence("LFS journal byte length exceeds its log"))?;
-            file.set_len(
-                u64::try_from(committed_prefix.len())
-                    .map_err(|_error| invalid_evidence("LFS journal byte length overflow"))?,
-            )?;
+            file.set_len(expected_bytes)?;
             file.sync_all()?;
         }
         return Ok(());
     }
+    let bytes = match fs::read(journal_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(invalid_evidence("LFS journal is missing its committed log"));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let head = manifest.head;
     let mut records = 0_u64;
     let mut committed_bytes = 0_usize;
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
