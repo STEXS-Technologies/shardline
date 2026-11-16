@@ -5361,11 +5361,11 @@ information setting was not measured here.
 
 ### Hub cleanup package checkpoint (2026-11-16)
 
-Frozen source `c05a62d2bc8c8d55c8b840c033ebf01e08d8375b` passed the
+Frozen source `73d23cc491253a5112744f5834f05a5acee2c474` passed the
 all-features Hub package suite on the shared development host with Rust 1.99.0,
 four build jobs, four test threads, cached dependencies, no compiler wrapper,
 and disabled dev/test debug information. The current all-features CLI built in
-21.53 seconds and applied migrations to a fresh PostgreSQL 16 Alpine database.
+20.45 seconds and applied migrations to a fresh PostgreSQL 16 Alpine database.
 Both native-client and PostgreSQL fixture requirements were enabled; all seven
 PostgreSQL fixture variables pointed at that disposable database.
 
@@ -5377,7 +5377,7 @@ SHARDLINE_REQUIRE_POSTGRES_TESTS=1 SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 \
   --all-features --no-fail-fast --test-threads 4
 ```
 
-All 781 selected unit and integration tests passed in 47.523 seconds. The four
+All 778 selected unit and integration tests passed in 47.261 seconds. The four
 normally ignored tests were explicitly selected in a separate run against the
 same frozen source and current CLI. The two runs ran sequentially on the shared host;
 the durations are observations, not isolated performance comparisons.
@@ -5389,18 +5389,21 @@ SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 SHARDLINE_BIN="$CARGO_TARGET_DIR/debug/shardl
   --test-threads 1
 ```
 
-All four passed in 37.020 seconds. The clone/fetch and protocol-v2 matrices used
+All four passed in 40.245 seconds. The clone/fetch and protocol-v2 matrices used
 stock Git with disposable PostgreSQL/MinIO; the snapshot-token fixture checked
 confinement on PostgreSQL/MinIO; and the publication fixture checked PostgreSQL
 conflicts, deleted branches, concurrent reads, and corrupt journal rejection.
 The fixture containers were cleaned up; the running-container inventory matched
 the pre-run inventory.
 
-Across the two runs, all 785 Hub tests passed, including the four normally
-ignored tests. This updates the earlier `b16369aa`/`d7bc62c9` checkpoint with
-coverage of delta decoding, consolidated protocol contracts, reference ownership,
-direct sideband output, filter parsing, and shared reachability tracking. Focused
-strict all-features Hub library/test Clippy checks passed during those changes. This is local
-functional qualification; it does not qualify production throughput, establish
+Across the two runs, all 782 Hub tests passed, including the four normally
+ignored tests. This updates the earlier `c05a62d2`/`12dd8bf4` checkpoint with
+coverage of reference-deletion authorization, history-cycle rejection, LFS batch
+selection and upload staging, shared revision responses, streamed object ownership,
+and dataset query ownership and text scan limits. The lower test count reflects
+consolidated cases; the preview contracts now also assert exact row values and
+exercise scan-cap and cross-chunk CRLF boundaries. Strict all-features Hub
+library/test Clippy checks passed during those changes. This is local functional
+qualification; it does not qualify production throughput, establish
 a measured speedup from these changes, or resolve the historical hosted SDK
 memory failure.
