@@ -14,6 +14,7 @@ use shardline_xet_adapter::{XET_REVISION_ROUTE, XET_REVISIONS_ROUTE};
 use crate::{
     client::XetClient,
     error::{SdxError, TransferError},
+    retry::RetryScope,
     tree::MetadataClient,
 };
 
@@ -58,7 +59,7 @@ impl MetadataClient<'_> {
     /// more revisions than one page would silently truncate without this loop
     /// (F-84).
     async fn list_revisions(&self) -> Result<Vec<Revision>, SdxError> {
-        let retry = self.read_retry();
+        let retry = self.retry(RetryScope::Read);
         let token = self.tokens.read_token().await?;
         let route = self.repo_route(XET_REVISIONS_ROUTE);
         let mut revisions = Vec::new();
@@ -91,7 +92,7 @@ impl MetadataClient<'_> {
     }
 
     async fn create_revision(&self, rev: &str) -> Result<Revision, SdxError> {
-        let retry = self.write_retry();
+        let retry = self.retry(RetryScope::Write);
         let token = self.tokens.write_token().await?;
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
@@ -117,7 +118,7 @@ impl MetadataClient<'_> {
     }
 
     async fn delete_revision(&self, rev: &str) -> Result<(), SdxError> {
-        let retry = self.write_retry();
+        let retry = self.retry(RetryScope::Write);
         let token = self.tokens.write_token().await?;
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)

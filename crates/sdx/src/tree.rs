@@ -147,20 +147,11 @@ impl<'session> MetadataClient<'session> {
         }
     }
 
-    pub(crate) fn read_retry(&self) -> RetryContext {
+    pub(crate) fn retry(&self, scope: RetryScope) -> RetryContext {
         RetryContext {
             policy: self.retry_policy.clone(),
             tokens: Some(self.tokens.clone()),
-            scope: RetryScope::Read,
-            refresh_on_forbidden: true,
-        }
-    }
-
-    pub(crate) fn write_retry(&self) -> RetryContext {
-        RetryContext {
-            policy: self.retry_policy.clone(),
-            tokens: Some(self.tokens.clone()),
-            scope: RetryScope::Write,
+            scope,
             refresh_on_forbidden: true,
         }
     }
@@ -210,7 +201,7 @@ impl<'session> MetadataClient<'session> {
     }
 
     async fn resolve_path(&self, path: &str) -> Result<PathEntry, SdxError> {
-        let retry = self.read_retry();
+        let retry = self.retry(RetryScope::Read);
         let token = self.tokens.read_token().await?;
         let route = self.repo_route(XET_TREE_ROUTE);
         let url = build_url(self.api_base, &route, &[("path", path)]);
@@ -231,7 +222,7 @@ impl<'session> MetadataClient<'session> {
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<DirListing, SdxError> {
-        let retry = self.read_retry();
+        let retry = self.retry(RetryScope::Read);
         let token = self.tokens.read_token().await?;
         let route = self.repo_route(XET_TREE_ROUTE);
         let limit_value = limit.map(|limit| limit.to_string());
@@ -260,7 +251,7 @@ impl<'session> MetadataClient<'session> {
         file_id: &str,
     ) -> Result<RegisterResult, SdxError> {
         validate_mutation_path(remote)?;
-        let retry = self.write_retry();
+        let retry = self.retry(RetryScope::Write);
         let token = self.tokens.write_token().await?;
         let route = self.repo_route(XET_PATH_ROUTE);
         let url = build_url(self.api_base, &route, &[]);
@@ -280,7 +271,7 @@ impl<'session> MetadataClient<'session> {
 
     async fn delete_path(&self, remote: &str, recursive: bool) -> Result<u64, SdxError> {
         validate_mutation_path(remote)?;
-        let retry = self.write_retry();
+        let retry = self.retry(RetryScope::Write);
         let token = self.tokens.write_token().await?;
         let route = self.repo_route(XET_PATH_ROUTE);
         let mut url = build_url(self.api_base, &route, &[]);
