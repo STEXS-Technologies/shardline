@@ -273,15 +273,8 @@ pub(crate) fn apply_delta_with_limit(
     delta: &[u8],
     limit: usize,
 ) -> Result<Vec<u8>, PackError> {
-    let mut pos = 0;
-
-    // Parse source size (little-endian varint, 7 bits per byte)
-    let (source_size, after_source) = parse_delta_varint(delta, pos)?;
-    pos = after_source;
-
-    // Parse target size (varint)
-    let (target_size, after_target) = parse_delta_varint(delta, pos)?;
-    pos = after_target;
+    let (source_size, pos) = parse_delta_varint(delta, 0)?;
+    let (target_size, pos) = parse_delta_varint(delta, pos)?;
 
     if source_size != base.len() {
         return Err(PackError::InvalidDelta);
@@ -295,10 +288,8 @@ pub(crate) fn apply_delta_with_limit(
 
     let mut result = Vec::with_capacity(target_size);
 
-    while pos < delta.len() {
-        let cmd = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
-        pos = pos.wrapping_add(1);
-
+    let mut instructions = delta.get(pos..).ok_or(PackError::InvalidDelta)?.iter();
+    while let Some(&cmd) = instructions.next() {
         if cmd & 0x80 != 0 {
             // Copy instruction: copy bytes from the base object.
             // Bits 0-3 indicate which offset bytes are present (LSB first).
@@ -308,21 +299,25 @@ pub(crate) fn apply_delta_with_limit(
 
             for i in 0u32..4 {
                 if cmd & (1 << i) != 0 {
-                    let offset_byte = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
+                    let offset_byte = instructions
+                        .next()
+                        .copied()
+                        .ok_or(PackError::InvalidDelta)?;
                     copy_offset |= (offset_byte as usize)
                         .checked_shl(i.saturating_mul(8))
                         .ok_or(PackError::InvalidDelta)?;
-                    pos = pos.wrapping_add(1);
                 }
             }
 
             for i in 4u32..7 {
                 if cmd & (1 << i) != 0 {
-                    let size_byte = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
+                    let size_byte = instructions
+                        .next()
+                        .copied()
+                        .ok_or(PackError::InvalidDelta)?;
                     copy_size |= (size_byte as usize)
                         .checked_shl(i.saturating_sub(4).saturating_mul(8))
                         .ok_or(PackError::InvalidDelta)?;
-                    pos = pos.wrapping_add(1);
                 }
             }
 
@@ -341,9 +336,9 @@ pub(crate) fn apply_delta_with_limit(
             let copy_end = copy_offset
                 .checked_add(copy_size)
                 .ok_or(PackError::InvalidDelta)?;
-            if copy_end > base.len() {
-                return Err(PackError::InvalidDelta);
-            }
+            let copied = base
+                .get(copy_offset..copy_end)
+                .ok_or(PackError::InvalidDelta)?;
 
             // Bound the running output size *before* extending the buffer. The
             // `with_capacity` cap alone is insufficient: repeated copies can
@@ -358,16 +353,14 @@ pub(crate) fn apply_delta_with_limit(
                 return Err(PackError::ExcessiveDecompressedSize);
             }
 
-            result.extend_from_slice(
-                base.get(copy_offset..copy_end)
-                    .ok_or(PackError::InvalidDelta)?,
-            );
+            result.extend_from_slice(copied);
         } else if cmd != 0 {
             // Insert instruction: copy cmd bytes from the delta stream.
             let insert_size = cmd as usize;
-            if pos.wrapping_add(insert_size) > delta.len() {
-                return Err(PackError::InvalidDelta);
-            }
+            let (inserted, rest) = instructions
+                .as_slice()
+                .split_at_checked(insert_size)
+                .ok_or(PackError::InvalidDelta)?;
             // Bound the running output size before extending the buffer, as
             // with copy instructions above.
             let projected = result
@@ -377,12 +370,8 @@ pub(crate) fn apply_delta_with_limit(
             if projected > target_size {
                 return Err(PackError::ExcessiveDecompressedSize);
             }
-            result.extend_from_slice(
-                delta
-                    .get(pos..pos.wrapping_add(insert_size))
-                    .ok_or(PackError::InvalidDelta)?,
-            );
-            pos = pos.wrapping_add(insert_size);
+            result.extend_from_slice(inserted);
+            instructions = rest.iter();
         } else {
             // cmd == 0 is not valid in the Git delta format.
             return Err(PackError::InvalidDelta);
