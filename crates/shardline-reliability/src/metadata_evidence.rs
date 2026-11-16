@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::operation::length_prefixed_operation_id;
 use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain_for};
 use crate::snapshot_log::SnapshotEvidenceLog;
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
@@ -10,12 +11,7 @@ pub struct MetadataCommitOperationId(String);
 
 impl MetadataCommitOperationId {
     fn new(repository: &str, ref_name: &str) -> Self {
-        [repository, ref_name]
-            .into_iter()
-            .map(|value| format!("{}:{value}", value.len()))
-            .collect::<Vec<_>>()
-            .join("")
-            .into()
+        Self(length_prefixed_operation_id(&[repository, ref_name]))
     }
 
     #[must_use]

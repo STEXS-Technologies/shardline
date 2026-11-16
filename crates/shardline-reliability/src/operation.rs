@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::ReliabilityError;
 
+/// Preserves the persisted byte-length-prefixed encoding, including empty fields.
+pub(crate) fn length_prefixed_operation_id(fields: &[&str]) -> String {
+    let mut encoded = String::new();
+    for field in fields {
+        encoded.push_str(&field.len().to_string());
+        encoded.push(':');
+        encoded.push_str(field);
+    }
+    encoded
+}
+
 /// Durable Shardline operation categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationKind {

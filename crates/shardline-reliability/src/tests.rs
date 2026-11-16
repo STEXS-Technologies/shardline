@@ -4,6 +4,23 @@ use super::*;
 use crate::snapshot_event::{SnapshotEvidenceEvent, verify_snapshot_chain, verify_snapshot_event};
 
 #[test]
+fn operation_ids_preserve_byte_lengths_and_field_boundaries() {
+    for (fields, expected) in [
+        (&[][..], ""),
+        (&[""][..], "0:"),
+        (&["a:b", "c"][..], "3:a:b1:c"),
+        (&["a", "b:c"][..], "1:a3:b:c"),
+        (&["é", "😀", "x:y", ""][..], "2:é4:😀3:x:y0:"),
+        (&["01234567890", "x"][..], "11:012345678901:x"),
+    ] {
+        assert_eq!(
+            crate::operation::length_prefixed_operation_id(fields),
+            expected
+        );
+    }
+}
+
+#[test]
 fn operation_kind_persisted_discriminators_round_trip() {
     for kind in [
         OperationKind::Upload,

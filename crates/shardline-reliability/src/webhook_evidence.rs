@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::operation::length_prefixed_operation_id;
 use crate::snapshot_event::{
     SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain, verify_snapshot_chain_for,
 };
@@ -47,19 +48,12 @@ impl WebhookDeliveryOperationId {
     /// Derives the canonical, unambiguous operation ID for one delivery.
     #[must_use]
     pub fn new(identity: &WebhookDeliveryIdentity) -> Self {
-        let fields = [
+        Self(length_prefixed_operation_id(&[
             identity.provider.as_str(),
             identity.owner.as_str(),
             identity.repo.as_str(),
             identity.delivery_id.as_str(),
-        ];
-        Self(
-            fields
-                .into_iter()
-                .map(|field| format!("{}:{field}", field.len()))
-                .collect::<Vec<_>>()
-                .join(""),
-        )
+        ]))
     }
 
     #[must_use]
