@@ -394,19 +394,18 @@ pub(crate) async fn repo_revisions(
             .list_revisions(&name)
             .map_err(|error| HubApiError::CasError(error.to_string()))?
     };
+    let scoped_revision = _repo
+        .capability()
+        .repository()
+        .and_then(|scope| scope.revision());
     let response = RevisionListResponse {
         revisions: revisions
-            .iter()
-            .map(|r| RevisionResponse {
+            .into_iter()
+            .map(|revision| RevisionResponse {
                 // A reachable commit can originate on a different branch.
                 // Expose it as this credential's history without leaking that name.
-                ref_name: _repo
-                    .capability()
-                    .repository()
-                    .and_then(|scope| scope.revision())
-                    .unwrap_or(&r.ref_name)
-                    .to_owned(),
-                sha: r.sha.clone(),
+                ref_name: scoped_revision.map_or(revision.ref_name, str::to_owned),
+                sha: revision.sha,
             })
             .collect(),
     };
@@ -447,21 +446,17 @@ pub(crate) async fn repo_refs(
         }
         let (items, short_name, full_name) =
             if let Some(short) = reference.ref_name.strip_prefix("refs/tags/") {
-                (&mut tags, short.to_owned(), reference.ref_name.clone())
+                (&mut tags, short, reference.ref_name.clone())
             } else if let Some(short) = reference.ref_name.strip_prefix("refs/heads/") {
-                (&mut branches, short.to_owned(), reference.ref_name.clone())
+                (&mut branches, short, reference.ref_name.clone())
             } else if let Some(short) = reference.ref_name.strip_prefix("refs/pr/") {
-                (
-                    &mut pull_requests,
-                    short.to_owned(),
-                    reference.ref_name.clone(),
-                )
+                (&mut pull_requests, short, reference.ref_name.clone())
             } else if let Some(short) = reference.ref_name.strip_prefix("refs/convert/") {
-                (&mut converts, short.to_owned(), reference.ref_name.clone())
+                (&mut converts, short, reference.ref_name.clone())
             } else if !reference.ref_name.starts_with("refs/") {
                 (
                     &mut branches,
-                    reference.ref_name.clone(),
+                    reference.ref_name.as_str(),
                     format!("refs/heads/{}", reference.ref_name),
                 )
             } else {
