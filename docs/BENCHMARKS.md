@@ -4344,32 +4344,52 @@ These local results do not isolate individual changes, establish production
 throughput, or explain the historical hosted RSS failure. Full server and
 production PostgreSQL/object-store qualification remain outside this checkpoint.
 
-### Server library checkpoint (2026-11-16)
+### PostgreSQL cleanup checkpoint (2026-11-16)
 
-At source `6911a2bd41698da6730d4dfaab64eaee2dda4ff8`, the server library
-suite was run with the same shared-host test build settings:
+Source `bf121d8cfaffa3e8fb0ed3d558d27faeb8cb58e6` passed `scripts/test-postgres.sh`
+against a disposable PostgreSQL 16 Alpine container with local object storage.
+Current migrations were applied using the CLI built from this source before
+starting the gate. `DATABASE_URL`, `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1` and both
+pinned recovery executables were configured; the script sets
+`SHARDLINE_REQUIRE_POSTGRES_TESTS=1` so missing PostgreSQL fixtures fail rather
+than return early. The 1.12.1 and 1.11.3 release archives matched the checksums
+in `scripts/shardline/fetch_compatibility_baseline.sh`.
+
+Use the migration setup in `CONTRIBUTING.md`, then run:
 
 ```bash
-SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 RUSTC_WRAPPER= \
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 RUSTUP_TOOLCHAIN=1.99.0 RUSTC_WRAPPER= \
   CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 \
-  cargo +1.99.0 nextest run --offline --locked \
-  -p shardline-server --lib --no-fail-fast --test-threads 4
+  NEXTEST_TEST_THREADS=4 bash scripts/test-postgres.sh
 ```
 
-The initial run finished in 239.708 s: 3,192 passed, eight failed and 28
-were skipped. All eight failures reported missing released recovery executables.
-After configuring `SHARDLINE_N_MINUS_ONE_BINARY` to the pinned 1.12.1 release
-and `SHARDLINE_LEGACY_RECOVERY_BINARY` to the pinned 1.11.3 release, rerunning
-`test(historical_server_preserves) | test(released_server_recovers)` returned
-success for all eight in 0.891 s. The release archives matched the checksums in
-`scripts/shardline/fetch_compatibility_baseline.sh`.
+| Gate stage | Passed | Test execution time |
+| --- | ---: | ---: |
+| All-features index library | 813 | 142.432 s |
+| PostgreSQL provider-event integration | 2 | 0.123 s |
+| All-features server library | 3,281 | 589.459 s |
+| Explicitly ignored PostgreSQL copy-integrity and cache-revocation checks | 6 | 4.031 s |
+| CLI PostgreSQL migration E2E | 1 | 0.347 s |
 
-This is not a fully qualified server-suite pass: `DATABASE_URL` was unset,
-and optional PostgreSQL fixtures return early in that configuration. In
-particular, only the four local-backend cases in the recovery rerun exercised
-released-server compatibility; the four PostgreSQL cases returned early.
-The 28 ignored tests were not enabled. PostgreSQL/object-store integration,
-full-capacity drills and the historical hosted RSS failure remain outstanding.
+All 4,103 selected tests passed. Strict all-features server library/test Clippy
+also passed with Rust 1.100.0 and `-D warnings`. These are shared-host,
+unoptimized builds with debug information disabled, not throughput measurements.
+
+The first database-backed server run at `b548f594` had 3,280 passes and one
+failure: the corrected LFS PATCH returned HTTP 500 after a digest rejection.
+That case passed alone against a fresh database. Its test name omitted
+`postgres`, excluding it from nextest's existing shared-database coordination
+group. Renaming it places it in `postgres-coordination` (confirmed with
+`nextest show-config test-groups`); the full gate then passed. The assertion now
+includes the error response body if the corrected PATCH fails again. This
+supports fixture interference as the explanation without changing production
+behavior or weakening the repair assertion.
+
+The default stages still exclude ignored tests (six index and 45 server tests);
+only the six explicitly selected server checks above were subsequently enabled.
+The provider stage intentionally selects its two PostgreSQL tests. This gate
+does not qualify MinIO/S3 object storage, full-capacity drills, production
+throughput or the historical hosted SDK RSS failure.
 
 ## Shared protocol chunk reuse qualification
 
