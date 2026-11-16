@@ -306,15 +306,11 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
             let deadline = Instant::now()
                 .checked_add(self.operation_timeout)
                 .ok_or(ReconstructionCacheError::Operation)?;
-            loop {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(ReconstructionCacheError::RedisTimeout);
-                }
-                let (state, payload) = tokio::time::timeout(remaining, async {
+            tokio::time::timeout_at(deadline.into(), async {
+                loop {
                     let mut connection = self.get_connection().await?;
                     let lease_millis = u64::try_from(REDIS_LOADING_LEASE.as_millis())?;
-                    let lookup: (i64, Option<Vec<u8>>) = redis::Script::new(
+                    let (state, payload): (i64, Option<Vec<u8>>) = redis::Script::new(
                         "local value = redis.call('GET', KEYS[1]); \
                          if value then return {1, value} end; \
                          local acquired = redis.call('SET', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]); \
@@ -325,27 +321,22 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
                     .arg(&reservation_token)
                     .arg(lease_millis)
                     .invoke_async(&mut connection)
-                        .await?;
-                    Ok::<_, ReconstructionCacheError>(lookup)
-                })
-                .await
-                .map_err(|_elapsed| ReconstructionCacheError::RedisTimeout)??;
-                if state == 1
-                    && let Some(payload) = payload
-                {
-                    return Ok(ReconstructionCacheLookup::Hit(payload));
+                    .await?;
+                    if state == 1
+                        && let Some(payload) = payload
+                    {
+                        return Ok(ReconstructionCacheLookup::Hit(payload));
+                    }
+                    if state == 2 {
+                        return Ok(ReconstructionCacheLookup::Reserved(
+                            ReconstructionCacheReservation::distributed(reservation_token),
+                        ));
+                    }
+                    tokio::time::sleep(REDIS_LOADING_POLL_INTERVAL).await;
                 }
-                if state == 2 {
-                    return Ok(ReconstructionCacheLookup::Reserved(
-                        ReconstructionCacheReservation::distributed(reservation_token),
-                    ));
-                }
-                let remaining_before_sleep = deadline.saturating_duration_since(Instant::now());
-                if remaining_before_sleep.is_zero() {
-                    return Err(ReconstructionCacheError::RedisTimeout);
-                }
-                tokio::time::sleep(REDIS_LOADING_POLL_INTERVAL.min(remaining_before_sleep)).await;
-            }
+            })
+            .await
+            .map_err(|_elapsed| ReconstructionCacheError::RedisTimeout)?
         })
     }
 

@@ -124,6 +124,41 @@ async fn redis_cache_serializes_cold_loads_across_replicas() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redis_cache_waiter_timeout_preserves_the_active_owners_reservation() {
+    let Some((stack, owner)) = redis_fixture(60) else {
+        return;
+    };
+    let waiter = RedisReconstructionCache::new_with_tls_and_timeout(
+        &stack.redis_url().unwrap(),
+        NonZeroU64::new(60).unwrap(),
+        RedisTlsConfig::default(),
+        Duration::from_millis(60),
+    )
+    .unwrap();
+    waiter.ready().await.unwrap();
+    let key = ReconstructionCacheKey::latest("waiter-timeout", None);
+    let reservation = match owner.get_or_reserve(&key).await.unwrap() {
+        ReconstructionCacheLookup::Reserved(reservation) => reservation,
+        ReconstructionCacheLookup::Hit(_) => panic!("test key must start cold"),
+    };
+    let result = tokio::time::timeout(Duration::from_secs(2), waiter.get_or_reserve(&key))
+        .await
+        .expect("the waiter must obey its operation deadline");
+    assert!(matches!(
+        result,
+        Err(ReconstructionCacheError::RedisTimeout)
+    ));
+    owner
+        .put_reserved(&key, b"owner-result", &reservation)
+        .await
+        .unwrap();
+    assert_eq!(
+        waiter.get(&key).await.unwrap(),
+        Some(b"owner-result".to_vec())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redis_cache_releases_cancelled_load_reservations() {
     let Some(stack) = DockerLocalStack::builder().with_redis().start().unwrap() else {
         eprintln!("skipping: docker not available");
