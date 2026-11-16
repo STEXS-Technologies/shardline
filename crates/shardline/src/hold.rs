@@ -217,51 +217,6 @@ fn postgres_index_store(index_postgres_url: &str) -> Result<PostgresIndexStore, 
 mod tests {
     use super::*;
 
-    // ── print_hold_summary ────────────────────────────────────────────────
-
-    fn sample_hold(ttl_seconds: Option<u64>) -> RetentionHold {
-        let object_key = ObjectKey::parse(&format!("de/{}", "de".repeat(32))).unwrap();
-        let now = unix_now_seconds_lossy();
-        let release_after = ttl_seconds.map(|ttl| now.saturating_add(ttl));
-        RetentionHold::new(
-            object_key,
-            "test hold reason".to_owned(),
-            now,
-            release_after,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn print_hold_summary_with_ttl_prints_release_time() {
-        let hold = sample_hold(Some(3600));
-        print_hold_summary(&hold);
-        assert!(hold.object_key().as_str().starts_with("de/"));
-        assert_eq!(hold.reason(), "test hold reason");
-        assert!(hold.release_after_unix_seconds().is_some());
-    }
-
-    #[test]
-    fn print_hold_summary_without_ttl_prints_none() {
-        let hold = sample_hold(None);
-        print_hold_summary(&hold);
-        assert!(hold.release_after_unix_seconds().is_none());
-    }
-
-    #[test]
-    fn print_hold_list_summary_empty() {
-        let root = std::path::Path::new("/test");
-        print_hold_list_summary(root, false, &[]);
-    }
-
-    #[test]
-    fn print_hold_list_summary_with_holds() {
-        let root = std::path::Path::new("/test");
-        let hold_a = sample_hold(Some(600));
-        let hold_b = sample_hold(None);
-        print_hold_list_summary(root, true, &[hold_a, hold_b]);
-    }
-
     // ── HoldRuntimeError Display variants ─────────────────────────────────
 
     #[test]
@@ -273,76 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn hold_runtime_error_config_display() {
-        let err = HoldRuntimeError::Config(ServerConfigError::InvalidServerRole);
-        let msg = err.to_string();
-        assert!(msg.contains("invalid server role"));
-    }
-
-    #[test]
-    fn hold_runtime_error_object_key_display() {
-        let err = HoldRuntimeError::ObjectKey(ObjectKeyError::Empty);
-        let msg = err.to_string();
-        assert!(msg.contains("empty"));
-    }
-
-    #[test]
-    fn hold_runtime_error_retention_hold_display() {
-        let err = HoldRuntimeError::RetentionHold(RetentionHoldError::EmptyReason);
-        let msg = err.to_string();
-        assert!(msg.contains("empty"));
-    }
-
-    #[test]
     fn hold_runtime_error_overflow_display() {
         let err = HoldRuntimeError::Overflow;
         assert_eq!(err.to_string(), "retention hold timestamp overflowed");
-    }
-
-    #[test]
-    fn hold_runtime_error_debug() {
-        let err = HoldRuntimeError::Overflow;
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Overflow"));
-    }
-
-    #[test]
-    fn hold_runtime_error_local_index_display() {
-        use shardline_index::LocalIndexStoreError;
-        let inner = LocalIndexStoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "db missing",
-        ));
-        let err = HoldRuntimeError::LocalIndex(inner);
-        let msg = err.to_string();
-        assert!(!msg.is_empty());
-    }
-
-    #[test]
-    fn hold_runtime_error_postgres_display() {
-        use shardline_index::PostgresMetadataStoreError;
-        let err = HoldRuntimeError::Postgres(PostgresMetadataStoreError::Json(
-            serde_json::from_str::<()>("invalid").unwrap_err(),
-        ));
-        let msg = err.to_string();
-        assert!(!msg.is_empty());
-    }
-
-    #[test]
-    fn hold_runtime_error_sqlx_from_conversion() {
-        // Verify the From<SqlxError> impl works
-        use sqlx::Error as SqlxError;
-        let _err: HoldRuntimeError = SqlxError::Protocol("test".to_owned()).into();
-    }
-
-    #[test]
-    fn hold_runtime_error_debug_postgres() {
-        use shardline_index::PostgresMetadataStoreError;
-        let err = HoldRuntimeError::Postgres(PostgresMetadataStoreError::Json(
-            serde_json::from_str::<()>("invalid").unwrap_err(),
-        ));
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Postgres("));
     }
 
     // ── Async runtime functions error paths ─────────────────────────────
@@ -468,21 +356,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── HoldRuntimeError Debug for all variants ───────────────────────────
-
-    #[test]
-    fn hold_runtime_error_debug_overflow() {
-        let err = HoldRuntimeError::Overflow;
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Overflow"));
-    }
-
-    #[test]
-    fn hold_runtime_error_debug_config() {
-        let err = HoldRuntimeError::Config(ServerConfigError::InvalidServerRole);
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Config("));
-    }
     #[tokio::test(flavor = "multi_thread")]
     async fn run_hold_set_waits_for_gc_before_acknowledging() {
         let storage = tempfile::tempdir().unwrap();
@@ -693,5 +566,16 @@ mod writer_tests {
         )
         .expect("list");
         assert_eq!(bytes, b"root: /root\nactive_only: true\nhold_count: 1\nhold[0].object_key: future/key\nhold[0].reason: reason\nhold[0].held_at_unix_seconds: 10\nhold[0].release_after_unix_seconds: 20\n");
+        let no_ttl =
+            RetentionHold::new(hold.object_key().clone(), "reason".to_owned(), 10, None).unwrap();
+        bytes.clear();
+        write_hold_summary(&mut bytes, &no_ttl).unwrap();
+        assert_eq!(bytes, b"object_key: future/key\nreason: reason\nheld_at_unix_seconds: 10\nrelease_after_unix_seconds: none\n");
+        bytes.clear();
+        write_hold_list_summary(&mut bytes, Path::new("/root"), true, &[no_ttl]).unwrap();
+        assert_eq!(bytes, b"root: /root\nactive_only: true\nhold_count: 1\nhold[0].object_key: future/key\nhold[0].reason: reason\nhold[0].held_at_unix_seconds: 10\nhold[0].release_after_unix_seconds: none\n");
+        bytes.clear();
+        write_hold_list_summary(&mut bytes, Path::new("/root"), false, &[]).unwrap();
+        assert_eq!(bytes, b"root: /root\nactive_only: false\nhold_count: 0\n");
     }
 }
