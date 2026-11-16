@@ -51,9 +51,7 @@ pub(super) async fn file_stream(
         || record.total_bytes <= 1024 * 1024
         || range.end_inclusive() >= record.total_bytes
         || range
-            .end_inclusive()
-            .checked_sub(range.start())
-            .and_then(|n| n.checked_add(1))
+            .len()
             .is_none_or(|length| length >= record.total_bytes / 2)
         || !record
             .chunks

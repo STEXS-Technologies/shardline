@@ -296,14 +296,7 @@ impl VerifiedXorb {
     }
 }
 
-/// Returns the serialized xorb length when an object is stored under `hash_hex`.
-///
-/// Used by the per-container routing decision in [`file_record_byte_stream`]: a
-/// xorb-backed single-chunk record stores its `hash` as the xorb hash, an
-/// opaque value that is indistinguishable from a plain chunk data hash without
-/// checking storage. A metadata miss (or an error) means the record is treated
-/// as individual-chunk-backed; the subsequent read then surfaces any real
-/// storage failure.
+/// Decodes logical file terms from a fully verified container snapshot.
 struct DecodedXorbStreamState {
     file: XorbReadFile,
     descriptors: Vec<shardline_xet_adapter::ValidatedXorbChunk>,
