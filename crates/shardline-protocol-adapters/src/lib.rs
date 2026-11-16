@@ -11,12 +11,12 @@
     )
 )]
 
-//! Shared protocol adapters for Git LFS, Bazel HTTP cache, and related
+//! Shared Xet wire contracts and protocol adapters for Git LFS, Bazel HTTP cache, and related
 //! object-key mapping.
 //!
-//! This crate owns the small, self-contained functions that map protocol
-//! identifiers to validated [`shardline_storage::ObjectKey`] values. It
-//! avoids pulling in heavy server dependencies such as `axum` or `sqlx`.
+//! Xet wire contracts are available without storage dependencies. The default
+//! `storage` feature additionally maps protocol identifiers to validated
+//! `shardline_storage::ObjectKey` values using server authorization types.
 //!
 //! # Quick start
 //!
@@ -24,6 +24,8 @@
 //! to a storage key:
 //!
 //! ```
+//! # #[cfg(feature = "storage")]
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use shardline_protocol_adapters::{LfsOperation, TransferAdapter, lfs_object_key};
 //! use shardline_server_core::AuthorizedRepository;
 //!
@@ -41,24 +43,44 @@
 //! // Batch operations and transfer adapters round-trip through their wire names.
 //! assert_eq!("download".parse(), Ok(LfsOperation::Download));
 //! assert_eq!(TransferAdapter::Xet.as_str(), "xet");
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! # Ok(())
+//! # }
+//! # #[cfg(not(feature = "storage"))]
+//! # fn main() {}
 //! ```
 //!
-//! See also [`bazel_cache_object_key`] for the Bazel HTTP cache mapping and
-//! [`scope_namespace`] for repository-scoped key prefixes.
+//! See also `bazel_cache_object_key` for the Bazel HTTP cache mapping and
+//! `scope_namespace` for repository-scoped key prefixes.
 
+/// Storage-independent Xet wire contracts.
+pub mod xet;
+pub use xet::{
+    BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
+    ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionMultiRangeFetch,
+    ReconstructionRangeDescriptor, ReconstructionTerm, ReconstructionUrlRange, ShardUploadResponse,
+    XET_METADATA_ACCEPT, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
+    XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XorbUploadResponse,
+    reconstruction_v2_from_v1,
+};
+
+#[cfg(feature = "storage")]
 mod bazel;
+#[cfg(feature = "storage")]
 mod lfs;
 
+#[cfg(feature = "storage")]
 mod mapping;
 
+#[cfg(feature = "storage")]
 pub use bazel::{BazelCacheKind, bazel_cache_object_key};
+#[cfg(feature = "storage")]
 pub use lfs::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectRequest,
     LfsObjectResponse, LfsOperation, LfsValidationError, TransferAdapter, cas_headers,
     lfs_object_key,
 };
+#[cfg(feature = "storage")]
 pub use mapping::{ProtocolError, object_key, scope_namespace, validate_content_hash};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "storage"))]
 mod tests;

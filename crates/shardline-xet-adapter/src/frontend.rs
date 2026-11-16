@@ -2,17 +2,11 @@ use shardline_index::parse_xet_hash_hex;
 
 use crate::error::XetAdapterError;
 
-pub const XORB_TRANSFER_NAMESPACE: &str = "default";
-pub const XORB_TRANSFER_ROUTE: &str = "/transfer/xorb/{prefix}/{hash}";
-pub const XET_READ_TOKEN_ROUTE: &str = "/api/{provider}/{owner}/{repo}/xet-read-token/{rev}";
-pub const XET_WRITE_TOKEN_ROUTE: &str = "/api/{provider}/{owner}/{repo}/xet-write-token/{rev}";
-pub const XET_TREE_ROUTE: &str = "/api/{provider}/{owner}/{repo}/tree/{rev}";
-pub const XET_PATH_ROUTE: &str = "/api/{provider}/{owner}/{repo}/path/{rev}/{*path}";
-pub const XET_REVISIONS_ROUTE: &str = "/api/{provider}/{owner}/{repo}/revisions";
-pub const XET_REVISION_ROUTE: &str = "/api/{provider}/{owner}/{repo}/revisions/{rev}";
-/// Accept media type used by native Xet metadata clients to disambiguate
-/// metadata routes from overlapping Hub API paths when both frontends run.
-pub const XET_METADATA_ACCEPT: &str = "application/vnd.stexs.xet-metadata+json";
+pub use shardline_protocol_adapters::xet::{
+    XET_METADATA_ACCEPT, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
+    XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_NAMESPACE,
+    XORB_TRANSFER_ROUTE,
+};
 
 /// Validates that a hash path is a 64-character lowercase hex digest.
 ///

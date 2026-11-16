@@ -4380,6 +4380,34 @@ the hosted RSS failure, and measure optimized production-topology performance
 and retained storage after retention expiry and GC. These remain open; the SDK
 checkpoint does not establish whole-branch or production qualification.
 
+### SDK wire dependency separation (2026-11-16)
+
+The SDK now consumes Xet wire contracts from `shardline-protocol-adapters` with
+its default `storage` feature disabled. The server Xet adapter re-exports the
+same types, constants and V1-to-V2 conversion, preserving existing server imports
+without maintaining duplicate wire definitions. Existing LFS/Bazel consumers
+retain their default storage feature. The SDK dependency retains its former
+Rust import name through a Cargo package alias.
+
+Compared with source `09f2721d`, the standalone SDK normal dependency graph
+(`cargo tree -p sdx --edges normal`) decreases from **338 to 218 unique packages**.
+SQLx, SQLite, object_store, Prometheus and the Shardline index/server-core chain
+are absent from that graph. This does not shrink server builds or remove any
+server feature.
+
+A sequential before/after sample used separate empty target directories,
+Rust 1.99.0, `RUSTC_WRAPPER=`, `CARGO_BUILD_JOBS=4` and
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` on the same shared Linux
+host. Both ran `cargo test --offline --locked -p sdx --all-features --no-run`:
+**50.850 s before, 22.456 s after** (55.8% less elapsed time). This is one sample,
+with cached dependency sources and separate compilation artifacts; it is not a
+production runtime measurement or a general build-time guarantee.
+
+Validation passed 334 SDK tests, 310 adapter library tests (one default-ignored
+test skipped), 19 selected real-server metadata/range/Xorb interoperability tests
+(16 other E2E tests filtered out), the all-features CLI build, strict Clippy and
+wire-only doctests. The publish-order checker accepted the updated graph.
+
 ### SDK ingestion hash reuse checkpoint (2026-11-16)
 
 Source `32bf52ae7adc55949afb81203e2f1868abd27cb9` passed the complete

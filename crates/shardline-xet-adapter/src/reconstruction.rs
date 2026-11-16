@@ -6,9 +6,8 @@ use shardline_protocol::ByteRange;
 use crate::{
     error::XetAdapterError,
     model::{
-        BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
-        ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionMultiRangeFetch,
-        ReconstructionRangeDescriptor, ReconstructionTerm, ReconstructionUrlRange,
+        BatchReconstructionResponse, FileReconstructionResponse, ReconstructionChunkRange,
+        ReconstructionFetchInfo, ReconstructionTerm, ReconstructionUrlRange,
     },
 };
 
@@ -156,34 +155,7 @@ pub fn build_reconstruction_response_with_metrics(
     result
 }
 
-#[must_use]
-pub fn reconstruction_v2_from_v1(
-    response: FileReconstructionResponse,
-) -> FileReconstructionV2Response {
-    let xorbs = response
-        .fetch_info
-        .into_iter()
-        .map(|(hash, fetch_entries)| {
-            let entries = fetch_entries
-                .into_iter()
-                .map(|entry| ReconstructionMultiRangeFetch {
-                    url: entry.url,
-                    ranges: vec![ReconstructionRangeDescriptor {
-                        chunks: entry.range,
-                        bytes: entry.url_range,
-                    }],
-                })
-                .collect();
-            (hash, entries)
-        })
-        .collect();
-
-    FileReconstructionV2Response {
-        offset_into_first_range: response.offset_into_first_range,
-        terms: response.terms,
-        xorbs,
-    }
-}
+pub use shardline_protocol_adapters::xet::reconstruction_v2_from_v1;
 
 pub fn build_batch_reconstruction_response(
     responses: impl IntoIterator<Item = (String, FileReconstructionResponse)>,

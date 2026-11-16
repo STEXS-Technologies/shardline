@@ -10,6 +10,7 @@ readme = "README.md"
 description = "Xet xorb and shard adapter for the Shardline server ecosystem."
 
 [dependencies]
+shardline-protocol-adapters = { version = "1.13.0", path = "../shardline-protocol-adapters", default-features = false }
 tempfile.workspace = true
 blake3.workspace = true
 sha2.workspace = true

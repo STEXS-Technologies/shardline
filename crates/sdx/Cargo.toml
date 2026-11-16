@@ -27,8 +27,9 @@ httpdate.workspace = true
 http-body = "1"
 percent-encoding = "2.3"
 tracing.workspace = true
-# Shared Xet wire types and routes; currently also pulls in server-core.
-shardline-xet-adapter.workspace = true
+# Shared Xet wire types and routes without server storage dependencies.
+# Retain the existing Rust import name while depending on wire contracts only.
+shardline-xet-adapter = { package = "shardline-protocol-adapters", version = "1.13.0", path = "../shardline-protocol-adapters", default-features = false }
 thiserror.workspace = true
 # Cancellation tokens and abort-on-drop task handles for streaming.
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }

@@ -9,13 +9,17 @@ documentation = "https://docs.rs/shardline-protocol-adapters"
 readme = "README.md"
 description = "Shared protocol adapters for Git LFS, Bazel HTTP cache, and related object-key mapping."
 
+[features]
+default = ["storage"]
+storage = ["dep:serde_json", "dep:shardline-protocol", "dep:shardline-server-core", "dep:shardline-storage", "dep:thiserror"]
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
-shardline-protocol.workspace = true
-shardline-server-core.workspace = true
-shardline-storage.workspace = true
-thiserror.workspace = true
+serde_json = { workspace = true, optional = true }
+shardline-protocol = { workspace = true, optional = true }
+shardline-server-core = { workspace = true, optional = true }
+shardline-storage = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
 
 [lints]
 workspace = true
