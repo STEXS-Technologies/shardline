@@ -214,64 +214,51 @@ fn sanitize_log_url_omits_long_private_paths() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn repo_response_from_hub_model() {
-    use shardline_index::hub::HubRepoType;
-    let hub_repo = HubRepo {
-        repo_id: "org/my-model".to_owned(),
-        repo_type: HubRepoType::Model,
-        private: false,
-        default_branch: "main".to_owned(),
-        created_at_unix_seconds: 1_700_000_000,
-        updated_at_unix_seconds: 1_700_000_001,
-    };
-    let resp = repo_response_from_hub(&hub_repo);
-    assert_eq!(resp.id, "org/my-model");
-    assert_eq!(resp.repo_type, RepoType::Model);
-    assert!(!resp.private);
-    assert_eq!(resp.url, "/org/my-model");
-    assert_eq!(resp.default_branch.as_deref(), Some("main"));
-    let lm = resp
-        .last_modified
-        .as_deref()
-        .expect("last_modified should be Some");
-    // Should be a valid RFC 3339 timestamp around 2023-11-14
-    assert!(
-        lm.contains("2023-11-14T22"),
-        "expected 2023-11-14T22... got {lm}"
-    );
-}
-
-#[test]
-fn repo_response_from_hub_dataset() {
-    use shardline_index::hub::HubRepoType;
-    let hub_repo = HubRepo {
-        repo_id: "org/data".to_owned(),
-        repo_type: HubRepoType::Dataset,
-        private: true,
-        default_branch: "main".to_owned(),
-        created_at_unix_seconds: 0,
-        updated_at_unix_seconds: 0,
-    };
-    let resp = repo_response_from_hub(&hub_repo);
-    assert_eq!(resp.repo_type, RepoType::Dataset);
-    assert!(resp.private);
-    assert_eq!(resp.url, "/datasets/org/data");
-}
-
-#[test]
-fn repo_response_from_hub_space() {
-    use shardline_index::hub::HubRepoType;
-    let hub_repo = HubRepo {
-        repo_id: "org/space1".to_owned(),
-        repo_type: HubRepoType::Space,
-        private: false,
-        default_branch: "main".to_owned(),
-        created_at_unix_seconds: 0,
-        updated_at_unix_seconds: 0,
-    };
-    let resp = repo_response_from_hub(&hub_repo);
-    assert_eq!(resp.repo_type, RepoType::Space);
-    assert_eq!(resp.url, "/spaces/org/space1");
+fn repo_responses_preserve_type_visibility_url_and_timestamp() {
+    for (repo_type, expected_type, id, private, url, updated, timestamp) in [
+        (
+            HubRepoType::Model,
+            RepoType::Model,
+            "org/my-model",
+            false,
+            "/org/my-model",
+            1_700_000_001,
+            "2023-11-14T22:13:21.000Z",
+        ),
+        (
+            HubRepoType::Dataset,
+            RepoType::Dataset,
+            "org/data",
+            true,
+            "/datasets/org/data",
+            0,
+            "1970-01-01T00:00:00.000Z",
+        ),
+        (
+            HubRepoType::Space,
+            RepoType::Space,
+            "org/space1",
+            false,
+            "/spaces/org/space1",
+            0,
+            "1970-01-01T00:00:00.000Z",
+        ),
+    ] {
+        let response = repo_response_from_hub(&HubRepo {
+            repo_id: id.to_owned(),
+            repo_type,
+            private,
+            default_branch: "main".to_owned(),
+            created_at_unix_seconds: 0,
+            updated_at_unix_seconds: updated,
+        });
+        assert_eq!(response.id, id);
+        assert_eq!(response.repo_type, expected_type);
+        assert_eq!(response.private, private);
+        assert_eq!(response.url, url);
+        assert_eq!(response.default_branch.as_deref(), Some("main"));
+        assert_eq!(response.last_modified.as_deref(), Some(timestamp));
+    }
 }
 
 // -----------------------------------------------------------------------
