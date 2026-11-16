@@ -440,7 +440,7 @@ where
     Ok(build_gc_diagnostics(
         report,
         frontends,
-        &orphan_objects,
+        orphan_objects,
         &quarantine_entries,
         now_unix_seconds,
     ))
@@ -809,7 +809,7 @@ pub fn quarantine_record_path(root: &Path, hash: &str) -> PathBuf {
 pub(crate) fn build_gc_diagnostics(
     report: LocalGcReport,
     frontends: &[ServerFrontend],
-    orphan_objects: &HashMap<String, OrphanObject>,
+    orphan_objects: HashMap<String, OrphanObject>,
     quarantine_entries: &HashMap<String, QuarantineCandidate>,
     now_unix_seconds: u64,
 ) -> LocalGcDiagnostics {
@@ -824,9 +824,10 @@ pub(crate) fn build_gc_diagnostics(
     });
 
     let mut orphan_inventory = orphan_objects
-        .iter()
+        .into_iter()
         .map(|(object_key, orphan)| {
-            orphan_inventory_entry(orphan, quarantine_entries.get(object_key))
+            let candidate = quarantine_entries.get(&object_key);
+            orphan_inventory_entry(object_key, orphan, candidate)
         })
         .collect::<Vec<_>>();
     orphan_inventory.sort_by(|left, right| left.object_key.cmp(&right.object_key));
@@ -858,12 +859,13 @@ pub(crate) fn retention_report_entry(
 }
 
 pub(crate) fn orphan_inventory_entry(
-    orphan: &OrphanObject,
+    object_key: String,
+    orphan: OrphanObject,
     candidate: Option<&QuarantineCandidate>,
 ) -> GcOrphanInventoryEntry {
     GcOrphanInventoryEntry {
-        hash: orphan.hash.clone(),
-        object_key: orphan.object_key.as_str().to_owned(),
+        hash: orphan.hash,
+        object_key,
         bytes: orphan.bytes,
         quarantine_state: if candidate.is_some() {
             GcOrphanQuarantineState::Quarantined

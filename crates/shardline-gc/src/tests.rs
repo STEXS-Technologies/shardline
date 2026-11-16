@@ -551,7 +551,7 @@ fn orphan_inventory_entry_untracked() {
         object_key,
         bytes: 256,
     };
-    let entry = orphan_inventory_entry(&orphan, None);
+    let entry = orphan_inventory_entry(orphan.object_key.as_str().to_owned(), orphan, None);
     assert_eq!(entry.hash, hash);
     assert_eq!(entry.object_key, "ab/deadbeef");
     assert_eq!(entry.bytes, 256);
@@ -571,7 +571,11 @@ fn orphan_inventory_entry_quarantined() {
     };
     let now = 1_000_000_u64;
     let candidate = QuarantineCandidate::new(object_key, 512, now, now + 3600).unwrap();
-    let entry = orphan_inventory_entry(&orphan, Some(&candidate));
+    let entry = orphan_inventory_entry(
+        orphan.object_key.as_str().to_owned(),
+        orphan,
+        Some(&candidate),
+    );
     assert_eq!(entry.hash, hash);
     assert_eq!(entry.object_key, "ab/cafebabe");
     assert_eq!(entry.bytes, 512);
@@ -1521,7 +1525,7 @@ fn diagnostics_retention_report_sorted_by_delete_time_then_key() {
 
     let orphan_objects = HashMap::new();
     let report = LocalGcReport::default();
-    let diagnostics = build_gc_diagnostics(report, &[], &orphan_objects, &quarantine_entries, now);
+    let diagnostics = build_gc_diagnostics(report, &[], orphan_objects, &quarantine_entries, now);
 
     assert_eq!(diagnostics.retention_report.len(), 2);
     assert!(
@@ -1559,7 +1563,7 @@ fn diagnostics_orphan_inventory_sorted_by_key() {
 
     let quarantine_entries = HashMap::new();
     let report = LocalGcReport::default();
-    let diagnostics = build_gc_diagnostics(report, &[], &orphan_objects, &quarantine_entries, now);
+    let diagnostics = build_gc_diagnostics(report, &[], orphan_objects, &quarantine_entries, now);
 
     assert_eq!(diagnostics.orphan_inventory.len(), 2);
     // 'aa...' should come before 'zz...'
