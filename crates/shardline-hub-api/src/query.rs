@@ -93,28 +93,19 @@ pub enum AggregateFunction {
     Avg,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum QueryValidationError {
+    #[error("{0} must not be empty")]
     EmptyField(&'static str),
+    #[error("invalid {0} identifier")]
     InvalidIdentifier(&'static str),
+    #[error("too many {0}")]
     TooMany(&'static str),
+    #[error("{0} is out of range")]
     OutOfRange(&'static str),
+    #[error("invalid aggregate")]
     InvalidAggregate,
 }
-
-impl std::fmt::Display for QueryValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyField(field) => write!(f, "{field} must not be empty"),
-            Self::InvalidIdentifier(field) => write!(f, "invalid {field} identifier"),
-            Self::TooMany(field) => write!(f, "too many {field}"),
-            Self::OutOfRange(field) => write!(f, "{field} is out of range"),
-            Self::InvalidAggregate => write!(f, "invalid aggregate"),
-        }
-    }
-}
-
-impl std::error::Error for QueryValidationError {}
 
 impl DatasetQueryRequest {
     /// Validate all fields before handing the request to an isolated worker.

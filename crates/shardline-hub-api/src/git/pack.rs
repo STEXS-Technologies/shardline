@@ -10,21 +10,28 @@ use sha1::{Digest, Sha1};
 use std::io::Write;
 
 /// Pack file generation error.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PackError {
     /// Pack header, entry size, or trailing bytes are malformed.
+    #[error("invalid pack framing or object size")]
     InvalidPack,
     /// Pack SHA-1 trailer does not match its contents.
+    #[error("invalid pack checksum")]
     InvalidChecksum,
     /// Zlib compression failed.
-    Zlib(std::io::Error),
+    #[error("zlib compression failed: {0}")]
+    Zlib(#[source] std::io::Error),
     /// Too many objects to fit in the pack header (exceeds u32::MAX).
+    #[error("too many objects for pack file")]
     TooManyObjects,
     /// Variable-length integer shift exceeds 63 bits.
+    #[error("variable-length integer shift overflow")]
     ShiftOverflow,
     /// Delta data is malformed or references a missing base object.
+    #[error("invalid or missing delta base")]
     InvalidDelta,
     /// Total decompressed size across all objects exceeds the allowed limit.
+    #[error("total decompressed size exceeds allowed limit")]
     ExcessiveDecompressedSize,
 }
 
@@ -46,36 +53,6 @@ const MAX_DELTA_TARGET_SIZE: usize =
 /// (and reject shifts ≥ 64) so the shift never overflows and parsing always
 /// terminates.
 const MAX_DELTA_VARINT_BYTES: usize = 10;
-
-impl std::fmt::Display for PackError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidPack => write!(f, "invalid pack framing or object size"),
-            Self::InvalidChecksum => write!(f, "invalid pack checksum"),
-            Self::Zlib(e) => write!(f, "zlib compression failed: {e}"),
-            Self::TooManyObjects => write!(f, "too many objects for pack file"),
-            Self::ShiftOverflow => write!(f, "variable-length integer shift overflow"),
-            Self::InvalidDelta => write!(f, "invalid or missing delta base"),
-            Self::ExcessiveDecompressedSize => {
-                write!(f, "total decompressed size exceeds allowed limit")
-            }
-        }
-    }
-}
-
-impl std::error::Error for PackError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Zlib(e) => Some(e),
-            Self::InvalidPack
-            | Self::InvalidChecksum
-            | Self::TooManyObjects
-            | Self::ShiftOverflow
-            | Self::InvalidDelta
-            | Self::ExcessiveDecompressedSize => None,
-        }
-    }
-}
 
 /// Git object types used in pack encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

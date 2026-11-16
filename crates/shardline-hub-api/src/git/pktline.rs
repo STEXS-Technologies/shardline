@@ -47,11 +47,13 @@ pub fn encode_line_bytes(data: &[u8]) -> Result<String, PktLineError> {
 }
 
 /// Pkt-line encoding error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum PktLineError {
     /// A string-producing encoder received a payload that is not valid UTF-8.
+    #[error("pkt-line string payload must be valid UTF-8")]
     InvalidUtf8,
     /// Payload exceeds the 65516-byte pkt-line limit.
+    #[error("pkt-line payload too large: {size} bytes (max {max})")]
     PayloadTooLarge {
         /// Actual payload size.
         size: usize,
@@ -59,19 +61,6 @@ pub enum PktLineError {
         max: usize,
     },
 }
-
-impl std::fmt::Display for PktLineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidUtf8 => write!(f, "pkt-line string payload must be valid UTF-8"),
-            Self::PayloadTooLarge { size, max } => {
-                write!(f, "pkt-line payload too large: {size} bytes (max {max})")
-            }
-        }
-    }
-}
-
-impl std::error::Error for PktLineError {}
 
 /// Encodes a flush packet (`0000`).
 pub const FLUSH: &str = "0000";
