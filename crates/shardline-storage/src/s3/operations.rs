@@ -1185,25 +1185,16 @@ async fn read_range_payload(
         .end
         .checked_sub(expected_range.start)
         .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
+    // A buffered result must fit in the platform's address space. Keep this
+    // check before the shared u64 stream budget and do not preallocate from
+    // an untrusted provider's declared length.
+    usize::try_from(expected_length).map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?;
     let mut acc = Vec::new();
-    let mut stream = stream_payload_for_range(result, expected_range)?;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let next_length = acc
-            .len()
-            .checked_add(chunk.len())
-            .and_then(|length| u64::try_from(length).ok())
-            .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
-        if next_length > expected_length {
-            return Err(S3ObjectStoreError::RangeOutOfBounds);
-        }
-        acc.extend_from_slice(&chunk);
-    }
-    if u64::try_from(acc.len()).map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?
-        != expected_length
-    {
-        return Err(S3ObjectStoreError::RangeOutOfBounds);
-    }
+    let stream = stream_payload_for_range(result, expected_range)?;
+    copy_stream_to_writer(stream, expected_length, &mut acc, || {
+        S3ObjectStoreError::RangeOutOfBounds
+    })
+    .await?;
     Ok(acc)
 }
 
