@@ -185,7 +185,7 @@ async fn assemble(
 
     let mut output = Vec::new();
     let mut resolved_terms = Vec::with_capacity(plan.terms.len());
-    for (term_index, term) in plan.terms.iter().enumerate() {
+    for (term_index, term) in plan.terms.into_iter().enumerate() {
         let (fetch, chunks) =
             decoded_fetches
                 .get(term.fetch_index)
@@ -248,7 +248,7 @@ async fn assemble(
         let verification_hash = compute_term_verification_hash(&chunk_hashes);
 
         resolved_terms.push(ResolvedTerm {
-            xorb_hash: term.xorb_hash.clone(),
+            xorb_hash: term.xorb_hash,
             chunk_range: term.chunk_range,
             unpacked_length: term.unpacked_length,
             verification_hash,
@@ -303,7 +303,7 @@ impl Reconstruction {
         }
         Self::build(
             response.offset_into_first_range,
-            &response.terms,
+            response.terms,
             raw_fetches,
         )
     }
@@ -324,14 +324,14 @@ impl Reconstruction {
         }
         Self::build(
             response.offset_into_first_range,
-            &response.terms,
+            response.terms,
             raw_fetches,
         )
     }
 
     fn build(
         offset_into_first_range: u64,
-        terms: &[ReconstructionTerm],
+        terms: Vec<ReconstructionTerm>,
         raw_fetches: Vec<FetchEntry>,
     ) -> Result<Self, SdxError> {
         // Coalesce fetch entries per xorb: shardline's reconstruction emits one
@@ -359,7 +359,7 @@ impl Reconstruction {
         }
 
         let mut planned_terms = Vec::with_capacity(terms.len());
-        for (term_index, term) in terms.iter().enumerate() {
+        for (term_index, term) in terms.into_iter().enumerate() {
             let fetch_index = fetches
                 .iter()
                 .position(|fetch| {
@@ -372,7 +372,7 @@ impl Reconstruction {
                     hash: term.hash.clone(),
                 })?;
             planned_terms.push(TermPlan {
-                xorb_hash: term.hash.clone(),
+                xorb_hash: term.hash,
                 chunk_range: (term.range.start, term.range.end),
                 unpacked_length: term.unpacked_length,
                 fetch_index,
