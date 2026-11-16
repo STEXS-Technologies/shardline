@@ -442,6 +442,27 @@ pub(crate) fn backfill_reliability_merkle_commits(
     let rows = rows.collect::<Result<Vec<_>, _>>()?;
     drop(statement);
 
+    let mut previous_statement = transaction.prepare(
+        "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS missing
+             WHERE missing.operation_kind = ?1 AND missing.operation_id = ?2
+               AND missing.sequence < ?3
+               AND missing.merkle_commit_json IS NULL
+         ) THEN '{\"missing_previous_merkle_commit\":true}' ELSE merkle_commit_json END
+         FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence < ?3
+         ORDER BY sequence DESC LIMIT 1",
+    )?;
+    let mut update_statement = transaction.prepare(
+        "UPDATE shardline_reliability_events
+         SET merkle_commit_json = ?1
+         WHERE operation_kind = ?2
+           AND operation_id = ?3
+           AND sequence = ?4
+           AND (merkle_commit_json IS NULL
+                OR (sequence > 0 AND json_extract(merkle_commit_json, '$.body.parent_commit_id') IS NULL))
+           AND event_json = ?5",
+    )?;
     for (operation_kind_text, operation_id, sequence, event_json_text) in &rows {
         let operation_kind = OperationKind::parse(operation_kind_text).ok_or_else(|| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
@@ -449,17 +470,8 @@ pub(crate) fn backfill_reliability_merkle_commits(
             ))
         })?;
         let event_json = from_str(event_json_text)?;
-        let previous_json: Option<String> = transaction
+        let previous_json: Option<String> = previous_statement
             .query_row(
-                "SELECT CASE WHEN EXISTS (
-                     SELECT 1 FROM shardline_reliability_events AS missing
-                     WHERE missing.operation_kind = ?1 AND missing.operation_id = ?2
-                       AND missing.sequence < ?3
-                       AND missing.merkle_commit_json IS NULL
-                 ) THEN '{\"missing_previous_merkle_commit\":true}' ELSE merkle_commit_json END
-                 FROM shardline_reliability_events
-                 WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence < ?3
-                 ORDER BY sequence DESC LIMIT 1",
                 params![operation_kind.as_str(), operation_id, sequence],
                 |row| row.get(0),
             )
@@ -470,23 +482,13 @@ pub(crate) fn backfill_reliability_merkle_commits(
         let merkle_commit_json =
             build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous_json)
                 .map_err(LocalIndexStoreError::Reliability)?;
-        transaction.execute(
-            "UPDATE shardline_reliability_events
-             SET merkle_commit_json = ?1
-             WHERE operation_kind = ?2
-               AND operation_id = ?3
-               AND sequence = ?4
-               AND (merkle_commit_json IS NULL
-                    OR (sequence > 0 AND json_extract(merkle_commit_json, '$.body.parent_commit_id') IS NULL))
-               AND event_json = ?5",
-            params![
-                merkle_commit_json.to_string(),
-                operation_kind.as_str(),
-                operation_id,
-                sequence,
-                event_json_text,
-            ],
-        )?;
+        update_statement.execute(params![
+            merkle_commit_json.to_string(),
+            operation_kind.as_str(),
+            operation_id,
+            sequence,
+            event_json_text,
+        ])?;
     }
     Ok(rows.len())
 }
@@ -516,6 +518,11 @@ pub(crate) fn repair_reliability_merkle_commits(
 
     let mut previous_operation: Option<(String, String, Value)> = None;
     let mut repaired = 0usize;
+    let mut update_statement = transaction.prepare(
+        "UPDATE shardline_reliability_events
+         SET merkle_commit_json = ?1
+         WHERE operation_kind = ?2 AND operation_id = ?3 AND sequence = ?4",
+    )?;
     for (operation_kind_text, operation_id, sequence, event_json_text) in rows {
         let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
@@ -544,17 +551,12 @@ pub(crate) fn repair_reliability_merkle_commits(
         let merkle_commit_json =
             build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous)
                 .map_err(LocalIndexStoreError::Reliability)?;
-        transaction.execute(
-            "UPDATE shardline_reliability_events
-             SET merkle_commit_json = ?1
-             WHERE operation_kind = ?2 AND operation_id = ?3 AND sequence = ?4",
-            params![
-                merkle_commit_json.to_string(),
-                operation_kind_text,
-                operation_id,
-                sequence,
-            ],
-        )?;
+        update_statement.execute(params![
+            merkle_commit_json.to_string(),
+            operation_kind_text,
+            operation_id,
+            sequence,
+        ])?;
         previous_operation = Some((operation_kind_text, operation_id, merkle_commit_json));
         repaired = repaired.saturating_add(1);
     }
