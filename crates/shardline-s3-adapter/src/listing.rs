@@ -451,11 +451,13 @@ mod tests {
 
     #[test]
     fn group_page_empty_batch() {
-        let page = group_page(Vec::new(), "", None, MAX_LIST_KEYS);
-        assert!(page.contents.is_empty());
-        assert!(page.common_prefixes.is_empty());
-        assert_eq!(page.next_cursor, None);
-        assert!(!page.is_truncated);
+        for (prefix, delimiter) in [("", None), ("dir/very/long", Some('/'))] {
+            let page = group_page(Vec::new(), prefix, delimiter, MAX_LIST_KEYS);
+            assert!(page.contents.is_empty());
+            assert!(page.common_prefixes.is_empty());
+            assert_eq!(page.next_cursor, None);
+            assert!(!page.is_truncated);
+        }
     }
 
     #[test]
@@ -520,22 +522,29 @@ mod tests {
     }
 
     #[test]
-    fn group_page_max_keys_truncation() {
-        let entries = vec![entry("a.txt"), entry("b.txt"), entry("c.txt")];
-        let page = group_page(entries, "", None, 2);
-        let (contents, _prefixes) = keys(&page);
-        assert_eq!(contents, vec!["a.txt", "b.txt"]);
-        assert_eq!(page.next_cursor.as_deref(), Some("b.txt"));
-        assert!(page.is_truncated);
-    }
-
-    #[test]
-    fn group_page_not_truncated_when_batch_fits() {
-        let entries = vec![entry("a.txt"), entry("b.txt")];
-        let page = group_page(entries, "", None, 2);
-        let (contents, _prefixes) = keys(&page);
-        assert_eq!(contents, vec!["a.txt", "b.txt"]);
-        assert!(!page.is_truncated);
+    fn group_page_flat_limits_and_cursors() {
+        for (input, limit, expected, truncated) in [
+            (
+                vec!["a.txt", "b.txt", "c.txt"],
+                2,
+                vec!["a.txt", "b.txt"],
+                true,
+            ),
+            (vec!["a.txt", "b.txt"], 2, vec!["a.txt", "b.txt"], false),
+            (
+                vec!["a.txt", "b.txt", "c.txt"],
+                MAX_LIST_KEYS,
+                vec!["a.txt", "b.txt", "c.txt"],
+                false,
+            ),
+        ] {
+            let page = group_page(input.into_iter().map(entry).collect(), "", None, limit);
+            let (contents, prefixes) = keys(&page);
+            assert_eq!(contents, expected);
+            assert!(prefixes.is_empty());
+            assert_eq!(page.next_cursor.as_deref(), expected.last().copied());
+            assert_eq!(page.is_truncated, truncated);
+        }
     }
 
     #[test]
@@ -588,16 +597,6 @@ mod tests {
     }
 
     #[test]
-    fn group_page_flat_set_no_delimiter() {
-        let entries = vec![entry("a.txt"), entry("b.txt"), entry("c.txt")];
-        let page = group_page(entries, "", None, MAX_LIST_KEYS);
-        let (contents, prefixes) = keys(&page);
-        assert_eq!(contents, vec!["a.txt", "b.txt", "c.txt"]);
-        assert!(prefixes.is_empty());
-        assert_eq!(page.next_cursor.as_deref(), Some("c.txt"));
-    }
-
-    #[test]
     fn format_iso8601_known_timestamp() {
         assert_eq!(format_iso8601(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_iso8601(1_785_110_400), "2026-07-27T00:00:00Z");
@@ -619,16 +618,6 @@ mod tests {
         assert_eq!(contents, vec!["a/b/f.txt"]);
         assert_eq!(prefixes, vec!["a/b/c/"]);
         assert_eq!(page.next_cursor.as_deref(), Some("a/b/f.txt"));
-    }
-
-    #[test]
-    fn group_page_prefix_matching_nothing_is_empty() {
-        // A prefix longer than any key (a superset) matches no rows.
-        let page = group_page(Vec::new(), "dir/very/long", Some('/'), MAX_LIST_KEYS);
-        assert!(page.contents.is_empty());
-        assert!(page.common_prefixes.is_empty());
-        assert_eq!(page.next_cursor, None);
-        assert!(!page.is_truncated);
     }
 
     #[test]
