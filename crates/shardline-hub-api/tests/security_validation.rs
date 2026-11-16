@@ -82,35 +82,6 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
 // FINDING 3: Body Size Limits — FIXED
 // ============================================================================
 
-/// Confirms that hub_routes() now applies a DefaultBodyLimit layer.
-///
-/// **[FIXED]**: The hub API router now applies `DefaultBodyLimit::max(64MB)`.
-#[test]
-fn validate_hub_router_has_body_limit() {
-    let router_source = include_str!("../src/router.rs");
-
-    assert!(
-        router_source.contains("DefaultBodyLimit::max"),
-        "Hub API router now applies DefaultBodyLimit::max"
-    );
-}
-
-/// Confirms the commit handler accepts the entire body as a String (bounded by
-/// the router-level body limit).
-///
-/// **[MITIGATED]**: The router's `DefaultBodyLimit::max(64MB)` bounds the body
-/// size. The handler still takes `body: String` but the outer layer rejects
-/// oversized requests before they reach the handler.
-#[test]
-fn validate_commit_handler_body_bounded_by_router() {
-    let router_source = include_str!("../src/router.rs");
-
-    assert!(
-        router_source.contains("DefaultBodyLimit::max"),
-        "Hub API router enforces body size limit at the layer level"
-    );
-}
-
 /// Confirms the LFS upload handler consumes the request body as a stream.
 ///
 /// **[FIXED]**: The handler accepts `axum::body::Body` and applies the explicit
@@ -301,13 +272,10 @@ fn validate_ndjson_has_instruction_count_limit() {
 // FINDING 9: Commit handler body size — MITIGATED
 // ============================================================================
 
-/// Validates the full commit request path is bounded by router body limit.
-///
-/// **[MITIGATED]**: The hub API router's `DefaultBodyLimit::max(64MB)` bounds
-/// all request bodies. A body exceeding 64MB is rejected before reaching the
-/// commit handler.
+/// JSON extractors enforce the router cap; streamed commits enforce a separate
+/// per-line cap without advancing the branch when parsing fails.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn validate_commit_body_bounded_by_router() {
+async fn hub_request_limits_reject_oversized_json_and_commit_lines() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use shardline_hub_api::routes::HubState;
@@ -339,22 +307,14 @@ async fn validate_commit_body_bounded_by_router() {
         .create_revision("team/body-limit-test", None, "sha1", "main", "init")
         .unwrap();
 
-    let mut ndjson_body =
-        String::from(r#"{"header":{"message":"large commit","parentCommit":"sha1"}}"#);
-    ndjson_body.push('\n');
-    for i in 0..100 {
-        let content = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            format!("file content {i}").as_bytes(),
-        );
-        ndjson_body.push_str(&format!(
-            r#"{{"file":{{"path":"dir/file{i}.txt","content":"{content}"}}}}"#
-        ));
-        ndjson_body.push('\n');
-    }
+    let ndjson_body = concat!(
+        "{\"header\":{\"message\":\"small commit\",\"parentCommit\":\"sha1\"}}\n",
+        "{\"file\":{\"path\":\"file.txt\",\"content\":\"aGVsbG8=\"}}\n",
+    );
 
     let app = shardline_hub_api::hub_routes(state, true);
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -373,7 +333,51 @@ async fn validate_commit_body_bounded_by_router() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "Small commit body accepted within64MB limit: {}",
+        "small streamed commit should succeed: {}",
         String::from_utf8_lossy(&response_body)
     );
+    let head = store
+        .resolve_revision("team/body-limit-test", "main")
+        .unwrap();
+    for (endpoint, size, expected_status, expected_message) in [
+        (
+            "commit/main",
+            16 * 1024 * 1024 + 1,
+            StatusCode::BAD_REQUEST,
+            "commit line exceeds 16 MiB limit; use LFS for large files",
+        ),
+        (
+            "preupload/main",
+            64 * 1024 * 1024 + 1,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "length limit exceeded",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/models/team/body-limit-test/{endpoint}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(vec![b' '; size]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status, "{endpoint}");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains(expected_message),
+            "{endpoint}: {body:?}"
+        );
+        assert_eq!(
+            store
+                .resolve_revision("team/body-limit-test", "main")
+                .unwrap(),
+            head
+        );
+    }
 }
