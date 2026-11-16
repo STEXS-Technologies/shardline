@@ -16,9 +16,9 @@
 //! safety cap, default [`SERIALIZED_XORB_SAFETY_CAP_BYTES`] = 60 MiB).
 
 use bytes::Bytes;
+use shardline_xet_core::merklehash::aggregated_hashes::xorb_hash_from_owned;
 use shardline_xet_core::xorb_object::{XorbObject, XorbObjectInfoV1};
 use xet_core_structures::merklehash::MerkleHash;
-use xet_core_structures::merklehash::xorb_hash;
 use xet_core_structures::xorb_object::CompressionScheme;
 use xet_core_structures::xorb_object::serialize_chunk;
 
@@ -141,13 +141,16 @@ pub fn build_xorb(chunks: &[(Bytes, u64)]) -> Result<BuiltXorb, SdxError> {
     }
 
     // Reuse the hashes computed while serializing each chunk.
-    let xorb_hash = xorb_hash(
-        &chunk_entries
+    let xorb_hash = xorb_hash_from_owned(
+        footer
+            .chunk_hashes
             .iter()
-            .map(|entry| (entry.hash, entry.raw_length))
-            .collect::<Vec<_>>(),
+            .copied()
+            .zip(chunk_entries.iter().map(|entry| entry.raw_length))
+            .collect(),
     );
-    footer.xorb_hash = <[u8; 32]>::from(xorb_hash).into();
+    footer.xorb_hash = xorb_hash;
+    let xorb_hash = <[u8; 32]>::from(xorb_hash).into();
     footer.num_chunks = u64::try_from(chunk_entries.len()).unwrap_or(u64::MAX);
     footer.fill_in_boundary_offsets();
     let footer_start = payload.len();

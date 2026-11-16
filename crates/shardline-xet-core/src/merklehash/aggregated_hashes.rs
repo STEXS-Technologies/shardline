@@ -84,7 +84,7 @@ fn merged_hash_of_sequence(hash: &[(MerkleHash, u64)]) -> (MerkleHash, u64) {
 
 /// Consumes an existing member buffer as scratch space for tree reduction.
 #[inline]
-pub(crate) fn xorb_hash_from_owned(mut hashes: Vec<(MerkleHash, u64)>) -> MerkleHash {
+pub fn xorb_hash_from_owned(mut hashes: Vec<(MerkleHash, u64)>) -> MerkleHash {
     if hashes.is_empty() {
         return MerkleHash::default();
     }
