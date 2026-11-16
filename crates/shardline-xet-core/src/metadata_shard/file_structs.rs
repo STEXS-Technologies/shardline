@@ -19,6 +19,21 @@ pub type Sha256 = MerkleHash;
 const MDB_SHARD_FORMAT_V3: u64 = 3;
 const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
 
+fn read_file_info_entry<R: Read>(
+    reader: &mut R,
+    version: u64,
+) -> std::io::Result<[u8; MDB_FILE_INFO_ENTRY_SIZE]> {
+    // Legacy records omit the final 16 bytes; decode those fields as zero.
+    let mut bytes = [0; MDB_FILE_INFO_ENTRY_SIZE];
+    let length = if version < MDB_SHARD_FORMAT_V3 {
+        MDB_V2_INFO_ENTRY_SIZE
+    } else {
+        bytes.len()
+    };
+    reader.read_exact(&mut bytes[..length])?;
+    Ok(bytes)
+}
+
 /// Maximum number of file segments (and, when verification is present, the same
 /// number of verification entries) a single file may declare in its shard
 /// header (`FileDataSequenceHeader::num_entries`). Each entry serializes to
@@ -96,28 +111,19 @@ impl FileDataSequenceHeader {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        if version < MDB_SHARD_FORMAT_V3 {
-            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
-            reader.read_exact(&mut v)?;
-            let reader = &mut Cursor::new(v);
-            return Ok(Self {
-                file_hash: read_hash(reader)?,
-                file_flags: read_u32(reader)?,
-                num_entries: u64::from(read_u32(reader)?),
-                _unused: read_u64(reader)?,
-                _pad: 0,
-            });
-        }
-
-        let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v)?;
-        let reader = &mut Cursor::new(v);
+        let bytes = read_file_info_entry(reader, version)?;
+        let reader = &mut Cursor::new(bytes);
+        let legacy = version < MDB_SHARD_FORMAT_V3;
         Ok(Self {
             file_hash: read_hash(reader)?,
             file_flags: read_u32(reader)?,
-            num_entries: read_u64(reader)?,
+            num_entries: if legacy {
+                u64::from(read_u32(reader)?)
+            } else {
+                read_u64(reader)?
+            },
             _unused: read_u64(reader)?,
-            _pad: read_u64(reader)?,
+            _pad: if legacy { 0 } else { read_u64(reader)? },
         })
     }
 
@@ -215,28 +221,21 @@ impl FileDataSequenceEntry {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        if version < MDB_SHARD_FORMAT_V3 {
-            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
-            reader.read_exact(&mut v)?;
-            let reader = &mut Cursor::new(v);
-            return Ok(Self {
-                xorb_hash: read_hash(reader)?,
-                xorb_flags: read_u32(reader)?,
-                unpacked_segment_bytes: u64::from(read_u32(reader)?),
-                chunk_index_start: u64::from(read_u32(reader)?),
-                chunk_index_end: u64::from(read_u32(reader)?),
-            });
-        }
-
-        let mut v = [0u8; size_of::<FileDataSequenceEntry>()];
-        reader.read_exact(&mut v)?;
-        let reader = &mut Cursor::new(v);
+        let bytes = read_file_info_entry(reader, version)?;
+        let reader = &mut Cursor::new(bytes);
+        let read_integer = |reader: &mut _| {
+            if version < MDB_SHARD_FORMAT_V3 {
+                read_u32(reader).map(u64::from)
+            } else {
+                read_u64(reader)
+            }
+        };
         Ok(Self {
             xorb_hash: read_hash(reader)?,
             xorb_flags: read_u32(reader)?,
-            unpacked_segment_bytes: read_u64(reader)?,
-            chunk_index_start: read_u64(reader)?,
-            chunk_index_end: read_u64(reader)?,
+            unpacked_segment_bytes: read_integer(reader)?,
+            chunk_index_start: read_integer(reader)?,
+            chunk_index_end: read_integer(reader)?,
         })
     }
 }
@@ -269,37 +268,12 @@ impl FileVerificationEntry {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        if version < MDB_SHARD_FORMAT_V3 {
-            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
-            reader.read_exact(&mut v)?;
-            let reader = &mut Cursor::new(v);
-            let mut unused = [0u64; 2];
-            return Ok(Self {
-                range_hash: read_hash(reader)?,
-                _unused: {
-                    read_u64s(reader, &mut unused)?;
-                    unused
-                },
-                _pad: [0; 2],
-            });
-        }
-
-        let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v)?;
-        let reader = &mut Cursor::new(v);
-        let mut unused = [0u64; 2];
-        let mut pad = [0u64; 2];
-        Ok(Self {
-            range_hash: read_hash(reader)?,
-            _unused: {
-                read_u64s(reader, &mut unused)?;
-                unused
-            },
-            _pad: {
-                read_u64s(reader, &mut pad)?;
-                pad
-            },
-        })
+        let bytes = read_file_info_entry(reader, version)?;
+        let reader = &mut Cursor::new(bytes);
+        let mut entry = Self::new(read_hash(reader)?);
+        read_u64s(reader, &mut entry._unused)?;
+        read_u64s(reader, &mut entry._pad)?;
+        Ok(entry)
     }
 }
 
@@ -332,37 +306,12 @@ impl FileMetadataExt {
     }
 
     pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
-        if version < MDB_SHARD_FORMAT_V3 {
-            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
-            reader.read_exact(&mut v)?;
-            let reader = &mut Cursor::new(v);
-            let mut unused = [0u64; 2];
-            return Ok(Self {
-                sha256: read_hash(reader)?,
-                _unused: {
-                    read_u64s(reader, &mut unused)?;
-                    unused
-                },
-                _pad: [0; 2],
-            });
-        }
-
-        let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v)?;
-        let reader = &mut Cursor::new(v);
-        let mut unused = [0u64; 2];
-        let mut pad = [0u64; 2];
-        Ok(Self {
-            sha256: read_hash(reader)?,
-            _unused: {
-                read_u64s(reader, &mut unused)?;
-                unused
-            },
-            _pad: {
-                read_u64s(reader, &mut pad)?;
-                pad
-            },
-        })
+        let bytes = read_file_info_entry(reader, version)?;
+        let reader = &mut Cursor::new(bytes);
+        let mut entry = Self::new(read_hash(reader)?);
+        read_u64s(reader, &mut entry._unused)?;
+        read_u64s(reader, &mut entry._pad)?;
+        Ok(entry)
     }
 }
 
@@ -709,7 +658,12 @@ mod tests {
 
     #[test]
     fn entry_serialize_roundtrip() {
-        let e = FileDataSequenceEntry::new(compute_data_hash(b"e"), 200, 10, 20);
+        let e = FileDataSequenceEntry::new(
+            compute_data_hash(b"e"),
+            u64::from(u32::MAX) + 200,
+            u64::from(u32::MAX) + 10,
+            u64::from(u32::MAX) + 20,
+        );
         let mut buf = Vec::new();
         e.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
@@ -768,6 +722,56 @@ mod tests {
     fn verification_entry_default() {
         let v = FileVerificationEntry::default();
         assert_eq!(v.range_hash, MerkleHash::default());
+    }
+
+    #[test]
+    fn hash_records_preserve_reserved_fields_and_record_boundaries() {
+        let hash = compute_data_hash(b"record-layout");
+        let unused = [0x0123456789ABCDEF, u64::MAX];
+        let pad = [7, 0xFEDCBA9876543210];
+        let mut bytes = Vec::new();
+        write_hash(&mut bytes, &hash).unwrap();
+        write_u64s(&mut bytes, &unused).unwrap();
+        write_u64s(&mut bytes, &pad).unwrap();
+        for (version, length) in [(0, 48), (2, 48), (3, 64), (4, 64)] {
+            let expected_pad = if version < 3 { [0; 2] } else { pad };
+            let mut reader = Cursor::new(&bytes);
+            let entry = FileVerificationEntry::deserialize(&mut reader, version).unwrap();
+            assert_eq!(
+                entry,
+                FileVerificationEntry {
+                    range_hash: hash,
+                    _unused: unused,
+                    _pad: expected_pad
+                }
+            );
+            assert_eq!(reader.position(), length as u64);
+            reader.set_position(0);
+            let entry = FileMetadataExt::deserialize(&mut reader, version).unwrap();
+            assert_eq!(
+                entry,
+                FileMetadataExt {
+                    sha256: hash,
+                    _unused: unused,
+                    _pad: expected_pad
+                }
+            );
+            assert_eq!(reader.position(), length as u64);
+            for prefix in 0..length {
+                assert_eq!(
+                    FileVerificationEntry::deserialize(&mut &bytes[..prefix], version)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                );
+                assert_eq!(
+                    FileMetadataExt::deserialize(&mut &bytes[..prefix], version)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                );
+            }
+        }
     }
 
     // ======= FileMetadataExt =======
