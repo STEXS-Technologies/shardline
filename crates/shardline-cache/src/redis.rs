@@ -709,16 +709,6 @@ mod tests {
     }
 
     #[test]
-    fn redis_cache_rejects_empty_url() {
-        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
-        let result = RedisReconstructionCache::new("", ttl_seconds);
-        assert!(matches!(
-            result,
-            Err(crate::ReconstructionCacheError::EmptyRedisUrl)
-        ));
-    }
-
-    #[test]
     fn redis_cache_rejects_zero_operation_timeout() {
         let result = RedisReconstructionCache::new_with_tls_and_timeout(
             "redis://127.0.0.1:6379",
@@ -924,96 +914,52 @@ mod tests {
         }
     }
 
-    // ── Redis URL validation ─────────────────────────────────────────────
-
     #[test]
-    fn redis_cache_rejects_missing_scheme() {
-        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
-        let result = RedisReconstructionCache::new("localhost:6379", ttl_seconds);
-        assert!(result.is_err());
+    fn redis_url_validation_preserves_empty_and_parse_errors() {
+        for url in [
+            "",
+            "   ",
+            "\n",
+            "\t\t",
+            "localhost:6379",
+            "redis://localhost:abc",
+        ] {
+            let error = RedisReconstructionCache::new(url, NonZeroU64::MIN).unwrap_err();
+            if url.trim().is_empty() {
+                assert!(matches!(
+                    error,
+                    crate::ReconstructionCacheError::EmptyRedisUrl
+                ));
+            } else {
+                assert!(matches!(error, crate::ReconstructionCacheError::Redis(_)));
+            }
+        }
+        for url in [
+            "redis://127.0.0.1:6379",
+            "redis://localhost",
+            "redis+unix:///tmp/redis.sock",
+            "redis+unix:///run/redis.sock",
+        ] {
+            assert!(RedisReconstructionCache::new(url, NonZeroU64::MIN).is_ok());
+        }
     }
 
     #[test]
-    fn redis_cache_rejects_invalid_port() {
-        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
-        let result = RedisReconstructionCache::new("redis://localhost:abc", ttl_seconds);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn redis_cache_rejects_whitespace_only_url() {
-        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
-        let result = RedisReconstructionCache::new("   ", ttl_seconds);
-        assert!(matches!(
-            result,
-            Err(crate::ReconstructionCacheError::EmptyRedisUrl)
-        ));
-    }
-
-    #[test]
-    fn redis_cache_rejects_url_with_only_newline() {
-        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
-        let result = RedisReconstructionCache::new("\n", ttl_seconds);
-        assert!(matches!(
-            result,
-            Err(crate::ReconstructionCacheError::EmptyRedisUrl)
-        ));
-    }
-
-    #[test]
-    fn redis_cache_rejects_url_with_tabs() {
-        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
-        let result = RedisReconstructionCache::new("\t\t", ttl_seconds);
-        assert!(matches!(
-            result,
-            Err(crate::ReconstructionCacheError::EmptyRedisUrl)
-        ));
-    }
-
-    #[test]
-    fn redis_cache_accepts_valid_redis_url() {
-        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
-        let result = RedisReconstructionCache::new("redis://127.0.0.1:6379", ttl_seconds);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn redis_cache_accepts_unix_socket_url() {
-        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
-        let result = RedisReconstructionCache::new("redis+unix:///tmp/redis.sock", ttl_seconds);
-        assert!(result.is_ok());
-    }
-
-    // ── Clone ────────────────────────────────────────────────────────────
-
-    #[allow(clippy::unwrap_used)]
-    #[test]
-    fn redis_cache_clone_produces_independent_cache() {
-        let ttl = NonZeroU64::new(60).unwrap();
-        let cache = RedisReconstructionCache::new("redis://localhost", ttl).unwrap();
+    fn redis_cache_clones_share_connection_initialization_and_preserve_settings() {
+        let cache = RedisReconstructionCache::new_with_tls_and_timeout(
+            "redis://localhost",
+            NonZeroU64::new(60).unwrap(),
+            RedisTlsConfig::default(),
+            Duration::from_millis(250),
+        )
+        .unwrap();
         let cloned = cache.clone();
-        // Both should have the same client URL (redacted in Debug)
-        let debug_original = format!("{cache:?}");
-        let debug_cloned = format!("{cloned:?}");
-        assert_eq!(debug_original, debug_cloned);
-        // Verify ttl is preserved
+        assert!(std::sync::Arc::ptr_eq(
+            &cache.connection,
+            &cloned.connection
+        ));
         assert_eq!(cache.ttl_seconds, cloned.ttl_seconds);
-    }
-
-    // ── RedisReconstructionCache::new edge cases ─────────────────────────
-
-    #[allow(clippy::unwrap_used)]
-    #[test]
-    fn redis_cache_new_with_redis_scheme() {
-        let ttl = NonZeroU64::new(60).unwrap();
-        assert!(RedisReconstructionCache::new("redis://localhost", ttl).is_ok());
-    }
-
-    #[allow(clippy::unwrap_used)]
-    #[test]
-    fn redis_cache_new_with_unix_scheme() {
-        let ttl = NonZeroU64::new(60).unwrap();
-        assert!(RedisReconstructionCache::new("redis+unix:///run/redis.sock", ttl).is_ok());
+        assert_eq!(cache.operation_timeout, cloned.operation_timeout);
     }
 
     // ── More redis_key format edge cases ──────────────────────────────────
