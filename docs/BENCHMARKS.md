@@ -3750,7 +3750,7 @@ metadata.
 
 The November 16, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`c2ea96a678ca81c76e0d8691f13e0df1bcb1a086`. It counts all tracked `.rs`
+`e2ae9658db69210f3e60b86fa103c5f25a655a80`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
@@ -3760,25 +3760,25 @@ checked against the line count of every Rust blob in each Git snapshot.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 572,106 | 31,543 (5.23%) |
-| Server | 220,570 | 210,282 | 10,288 (4.66%) |
+| Entire repository | 603,649 | 568,942 | 34,707 (5.75%) |
+| Server | 220,570 | 209,867 | 10,703 (4.85%) |
 | Server core | 6,454 | 5,334 | 1,120 (17.35%) |
-| Hub API | 43,749 | 42,664 | 1,085 (2.48%) |
-| Storage | 20,373 | 18,416 | 1,957 (9.61%) |
+| Hub API | 43,749 | 41,070 | 2,679 (6.12%) |
+| Storage | 20,373 | 18,427 | 1,946 (9.55%) |
 | S3 adapter | 10,954 | 9,938 | 1,016 (9.28%) |
-| Xet adapter | 17,801 | 15,866 | 1,935 (10.87%) |
-| Xet core | 14,456 | 11,352 | 3,104 (21.47%) |
+| Xet adapter | 17,801 | 15,730 | 2,071 (11.63%) |
+| Xet core | 14,456 | 11,220 | 3,236 (22.39%) |
 | OCI adapter | 7,700 | 6,629 | 1,071 (13.91%) |
-| Cache | 6,573 | 5,380 | 1,193 (18.15%) |
+| Cache | 6,573 | 5,268 | 1,305 (19.85%) |
 | Index | 71,472 | 68,508 | 2,964 (4.15%) |
-| CAS | 3,447 | 2,858 | 589 (17.09%) |
-| GC | 10,954 | 10,110 | 844 (7.70%) |
+| CAS | 3,447 | 2,622 | 825 (23.93%) |
+| GC | 10,954 | 9,949 | 1,005 (9.17%) |
 | Fsck | 8,989 | 8,493 | 496 (5.52%) |
-| Rebuild | 4,326 | 3,558 | 768 (17.75%) |
-| CLI | 37,677 | 37,264 | 413 (1.10%) |
-| SDK | 26,965 | 24,421 | 2,544 (9.43%) |
+| Rebuild | 4,326 | 3,519 | 807 (18.65%) |
+| CLI | 37,677 | 36,876 | 801 (2.13%) |
+| SDK | 26,965 | 24,285 | 2,680 (9.94%) |
 | Protocol | 4,076 | 3,502 | 574 (14.08%) |
-| Protocol adapters | 1,670 | 1,240 | 430 (25.75%) |
+| Protocol adapters | 1,670 | 1,414 | 256 (15.33%) |
 | Provider events | 5,283 | 4,905 | 378 (7.16%) |
 | VCS | 9,393 | 8,228 | 1,165 (12.40%) |
 | Validation | 977 | 628 | 349 (35.72%) |
