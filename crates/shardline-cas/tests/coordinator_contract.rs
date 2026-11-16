@@ -351,223 +351,107 @@ fn local_object_store_metadata_returns_none_for_missing_key() {
     assert_eq!(store.metadata(&key).unwrap(), None);
 }
 
-// ── DedupeStore trait methods ─────────────────────────────────────────
+// ── Index adapter record lifecycles ──────────────────────────────────
 
 #[test]
-fn dedupe_shard_mapping_persists_and_retrieves_mapping() {
+fn dedupe_shard_mappings_preserve_lookup_listing_and_deletion() {
     let index = MemoryIndexStore::default();
-    let chunk_hash = ShardlineHash::from_bytes([4; 32]);
-    let shard_key = ObjectKey::parse("shards/aa/example.shard").unwrap();
-    let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
+    assert!(index.list_dedupe_shard_mappings().unwrap().is_empty());
+    for byte in [5, 7] {
+        let missing = ShardlineHash::from_bytes([byte; 32]);
+        assert_eq!(index.dedupe_shard_mapping(&missing).unwrap(), None);
+        assert!(!index.delete_dedupe_shard_mapping(&missing).unwrap());
+    }
 
-    index.upsert_dedupe_shard_mapping(&mapping).unwrap();
-
-    assert_eq!(
-        index.dedupe_shard_mapping(&chunk_hash).unwrap(),
-        Some(mapping)
-    );
+    let mut mappings = Vec::new();
+    for (byte, key) in [
+        (4, "shards/aa/example.shard"),
+        (1, "shards/aa/a.shard"),
+        (2, "shards/bb/b.shard"),
+        (6, "shards/aa/del.shard"),
+    ] {
+        let hash = ShardlineHash::from_bytes([byte; 32]);
+        let mapping = DedupeShardMapping::new(hash, ObjectKey::parse(key).unwrap());
+        index.upsert_dedupe_shard_mapping(&mapping).unwrap();
+        assert_eq!(
+            index.dedupe_shard_mapping(&hash).unwrap(),
+            Some(mapping.clone())
+        );
+        mappings.push(mapping);
+    }
+    mappings.sort_by_key(|mapping| xet_hash_hex_string(mapping.chunk_hash()));
+    while !mappings.is_empty() {
+        let mut listed = index.list_dedupe_shard_mappings().unwrap();
+        listed.sort_by_key(|mapping| xet_hash_hex_string(mapping.chunk_hash()));
+        assert_eq!(listed, mappings);
+        let deleted = mappings.remove(0);
+        assert!(
+            index
+                .delete_dedupe_shard_mapping(&deleted.chunk_hash())
+                .unwrap()
+        );
+        assert_eq!(
+            index.dedupe_shard_mapping(&deleted.chunk_hash()).unwrap(),
+            None
+        );
+        assert!(
+            !index
+                .delete_dedupe_shard_mapping(&deleted.chunk_hash())
+                .unwrap()
+        );
+    }
+    assert!(index.list_dedupe_shard_mappings().unwrap().is_empty());
 }
 
 #[test]
-fn dedupe_shard_mapping_returns_none_for_missing_hash() {
+fn webhook_deliveries_preserve_idempotency_ordering_and_deletion() {
     let index = MemoryIndexStore::default();
-    let chunk_hash = ShardlineHash::from_bytes([5; 32]);
-
-    assert_eq!(index.dedupe_shard_mapping(&chunk_hash).unwrap(), None);
-}
-
-#[test]
-fn list_dedupe_shard_mappings_empty_initially() {
-    let index = MemoryIndexStore::default();
-    assert_eq!(index.list_dedupe_shard_mappings().unwrap(), vec![]);
-}
-
-#[test]
-fn list_dedupe_shard_mappings_returns_inserted_mappings() {
-    let index = MemoryIndexStore::default();
-    let hash_a = ShardlineHash::from_bytes([1; 32]);
-    let hash_b = ShardlineHash::from_bytes([2; 32]);
-    let key_a = ObjectKey::parse("shards/aa/a.shard").unwrap();
-    let key_b = ObjectKey::parse("shards/bb/b.shard").unwrap();
-    let map_a = DedupeShardMapping::new(hash_a, key_a);
-    let map_b = DedupeShardMapping::new(hash_b, key_b);
-
-    index.upsert_dedupe_shard_mapping(&map_a).unwrap();
-    index.upsert_dedupe_shard_mapping(&map_b).unwrap();
-
-    let mut all = index.list_dedupe_shard_mappings().unwrap();
-    all.sort_by(|left, right| {
-        xet_hash_hex_string(left.chunk_hash()).cmp(&xet_hash_hex_string(right.chunk_hash()))
-    });
-    assert_eq!(all, vec![map_a, map_b]);
-}
-
-#[test]
-fn delete_dedupe_shard_mapping_removes_existing() {
-    let index = MemoryIndexStore::default();
-    let chunk_hash = ShardlineHash::from_bytes([6; 32]);
-    let key = ObjectKey::parse("shards/aa/del.shard").unwrap();
-    index
-        .upsert_dedupe_shard_mapping(&DedupeShardMapping::new(chunk_hash, key))
+    assert!(index.list_webhook_deliveries().unwrap().is_empty());
+    let mut deliveries = Vec::new();
+    // Insert in reverse provider order to exercise the store's ordering contract.
+    for (provider, id, timestamp) in [
+        (RepositoryProvider::GitLab, "delivery-2", 2000),
+        (RepositoryProvider::GitHub, "delivery-1", 1000),
+    ] {
+        let delivery = WebhookDelivery::new(
+            provider,
+            "owner".to_owned(),
+            "repo".to_owned(),
+            id.to_owned(),
+            timestamp,
+        )
         .unwrap();
-
-    assert!(index.delete_dedupe_shard_mapping(&chunk_hash).unwrap());
-    assert_eq!(index.dedupe_shard_mapping(&chunk_hash).unwrap(), None);
+        assert!(!index.delete_webhook_delivery(&delivery).unwrap());
+        assert!(index.record_webhook_delivery(&delivery).unwrap());
+        assert!(!index.record_webhook_delivery(&delivery).unwrap());
+        deliveries.insert(0, delivery);
+    }
+    while !deliveries.is_empty() {
+        assert_eq!(index.list_webhook_deliveries().unwrap(), deliveries);
+        let deleted = deliveries.remove(0);
+        assert!(index.delete_webhook_delivery(&deleted).unwrap());
+        assert!(!index.delete_webhook_delivery(&deleted).unwrap());
+    }
+    assert!(index.list_webhook_deliveries().unwrap().is_empty());
 }
 
 #[test]
-fn delete_dedupe_shard_mapping_returns_false_for_missing() {
+fn provider_repository_states_preserve_upserts_ordering_and_deletion() {
     let index = MemoryIndexStore::default();
-    let chunk_hash = ShardlineHash::from_bytes([7; 32]);
-
-    assert!(!index.delete_dedupe_shard_mapping(&chunk_hash).unwrap());
-}
-
-// ── LifecycleStore webhook methods ────────────────────────────────────
-
-#[test]
-fn record_webhook_delivery_inserts_new_delivery() {
-    let index = MemoryIndexStore::default();
-    let delivery = WebhookDelivery::new(
-        RepositoryProvider::GitHub,
-        "owner".to_owned(),
-        "repo".to_owned(),
-        "delivery-1".to_owned(),
-        1000,
-    )
-    .unwrap();
-
-    assert!(index.record_webhook_delivery(&delivery).unwrap());
-}
-
-#[test]
-fn record_webhook_delivery_returns_false_on_duplicate() {
-    let index = MemoryIndexStore::default();
-    let delivery = WebhookDelivery::new(
-        RepositoryProvider::GitHub,
-        "owner".to_owned(),
-        "repo".to_owned(),
-        "delivery-1".to_owned(),
-        1000,
-    )
-    .unwrap();
-
-    index.record_webhook_delivery(&delivery).unwrap();
-    assert!(!index.record_webhook_delivery(&delivery).unwrap());
-}
-
-#[test]
-fn list_webhook_deliveries_empty_initially() {
-    let index = MemoryIndexStore::default();
-    assert_eq!(index.list_webhook_deliveries().unwrap(), vec![]);
-}
-
-#[test]
-fn list_webhook_deliveries_returns_recorded_deliveries_sorted() {
-    let index = MemoryIndexStore::default();
-    let gitlab_delivery = WebhookDelivery::new(
-        RepositoryProvider::GitLab,
-        "owner".to_owned(),
-        "repo".to_owned(),
-        "delivery-2".to_owned(),
-        2000,
-    )
-    .unwrap();
-    let github_delivery = WebhookDelivery::new(
-        RepositoryProvider::GitHub,
-        "owner".to_owned(),
-        "repo".to_owned(),
-        "delivery-1".to_owned(),
-        1000,
-    )
-    .unwrap();
-
-    index.record_webhook_delivery(&gitlab_delivery).unwrap();
-    index.record_webhook_delivery(&github_delivery).unwrap();
-
-    let deliveries = index.list_webhook_deliveries().unwrap();
-    assert_eq!(deliveries.len(), 2);
-    // Sorted by provider (GitHub before GitLab in Debug formatting)
-    assert_eq!(deliveries[0], github_delivery);
-    assert_eq!(deliveries[1], gitlab_delivery);
-}
-
-#[test]
-fn delete_webhook_delivery_removes_existing() {
-    let index = MemoryIndexStore::default();
-    let delivery = WebhookDelivery::new(
-        RepositoryProvider::GitHub,
-        "owner".to_owned(),
-        "repo".to_owned(),
-        "delivery-1".to_owned(),
-        1000,
-    )
-    .unwrap();
-
-    index.record_webhook_delivery(&delivery).unwrap();
-    assert!(index.delete_webhook_delivery(&delivery).unwrap());
-    assert_eq!(index.list_webhook_deliveries().unwrap(), vec![]);
-}
-
-#[test]
-fn delete_webhook_delivery_returns_false_for_missing() {
-    let index = MemoryIndexStore::default();
-    let delivery = WebhookDelivery::new(
-        RepositoryProvider::GitHub,
-        "owner".to_owned(),
-        "repo".to_owned(),
-        "delivery-1".to_owned(),
-        1000,
-    )
-    .unwrap();
-
-    assert!(!index.delete_webhook_delivery(&delivery).unwrap());
-}
-
-// ── LifecycleStore provider repository state methods ─────────────────
-
-#[test]
-fn upsert_provider_repository_state_inserts_and_can_be_retrieved() {
-    let index = MemoryIndexStore::default();
-    let state = ProviderRepositoryState::new(
-        RepositoryProvider::GitHub,
-        "owner".to_owned(),
-        "repo".to_owned(),
-        Some(1000),
-        Some(2000),
-        Some("rev".to_owned()),
-    );
-
-    index.upsert_provider_repository_state(&state).unwrap();
-    assert_eq!(
-        index
-            .provider_repository_state(RepositoryProvider::GitHub, "owner", "repo")
-            .unwrap(),
-        Some(state)
-    );
-}
-
-#[test]
-fn provider_repository_state_returns_none_for_missing() {
-    let index = MemoryIndexStore::default();
+    assert!(index.list_provider_repository_states().unwrap().is_empty());
     assert_eq!(
         index
             .provider_repository_state(RepositoryProvider::GitHub, "missing", "repo")
             .unwrap(),
         None
     );
-}
+    assert!(
+        !index
+            .delete_provider_repository_state(RepositoryProvider::GitHub, "missing", "repo")
+            .unwrap()
+    );
 
-#[test]
-fn list_provider_repository_states_empty_initially() {
-    let index = MemoryIndexStore::default();
-    assert_eq!(index.list_provider_repository_states().unwrap(), vec![]);
-}
-
-#[test]
-fn list_provider_repository_states_returns_all_states_sorted() {
-    let index = MemoryIndexStore::default();
-    let gitlab_state = ProviderRepositoryState::new(
+    let gitlab = ProviderRepositoryState::new(
         RepositoryProvider::GitLab,
         "owner-b".to_owned(),
         "repo-b".to_owned(),
@@ -575,7 +459,7 @@ fn list_provider_repository_states_returns_all_states_sorted() {
         Some(400),
         Some("rev".to_owned()),
     );
-    let github_state = ProviderRepositoryState::new(
+    let github = ProviderRepositoryState::new(
         RepositoryProvider::GitHub,
         "owner-a".to_owned(),
         "repo-a".to_owned(),
@@ -583,25 +467,24 @@ fn list_provider_repository_states_returns_all_states_sorted() {
         Some(200),
         None,
     );
-
-    index
-        .upsert_provider_repository_state(&gitlab_state)
-        .unwrap();
-    index
-        .upsert_provider_repository_state(&github_state)
-        .unwrap();
-
-    let states = index.list_provider_repository_states().unwrap();
-    assert_eq!(states.len(), 2);
-    // Sorted by provider key (GitHub < GitLab), then owner, then repo
-    assert_eq!(states[0], github_state);
-    assert_eq!(states[1], gitlab_state);
-}
-
-#[test]
-fn delete_provider_repository_state_removes_existing() {
-    let index = MemoryIndexStore::default();
-    let state = ProviderRepositoryState::new(
+    let current = ProviderRepositoryState::new(
+        RepositoryProvider::GitHub,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        Some(1000),
+        Some(2000),
+        Some("rev".to_owned()),
+    );
+    for state in [&gitlab, &github, &current] {
+        index.upsert_provider_repository_state(state).unwrap();
+    }
+    assert_eq!(
+        index
+            .provider_repository_state(RepositoryProvider::GitHub, "owner", "repo")
+            .unwrap(),
+        Some(current.clone())
+    );
+    let stale = ProviderRepositoryState::new(
         RepositoryProvider::GitHub,
         "owner".to_owned(),
         "repo".to_owned(),
@@ -609,29 +492,38 @@ fn delete_provider_repository_state_removes_existing() {
         Some(200),
         None,
     );
-
-    index.upsert_provider_repository_state(&state).unwrap();
-    assert!(
-        index
-            .delete_provider_repository_state(RepositoryProvider::GitHub, "owner", "repo")
-            .unwrap()
-    );
-    assert_eq!(
-        index
-            .provider_repository_state(RepositoryProvider::GitHub, "owner", "repo")
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
-fn delete_provider_repository_state_returns_false_for_missing() {
-    let index = MemoryIndexStore::default();
-    assert!(
-        !index
-            .delete_provider_repository_state(RepositoryProvider::GitHub, "missing", "repo")
-            .unwrap()
-    );
+    // Older observations must not roll back the stored provider state.
+    index.upsert_provider_repository_state(&stale).unwrap();
+    let mut states = vec![current, github, gitlab];
+    while !states.is_empty() {
+        assert_eq!(index.list_provider_repository_states().unwrap(), states);
+        let deleted = states.remove(0);
+        assert!(
+            index
+                .delete_provider_repository_state(
+                    deleted.provider(),
+                    deleted.owner(),
+                    deleted.repo()
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            index
+                .provider_repository_state(deleted.provider(), deleted.owner(), deleted.repo())
+                .unwrap(),
+            None
+        );
+        assert!(
+            !index
+                .delete_provider_repository_state(
+                    deleted.provider(),
+                    deleted.owner(),
+                    deleted.repo()
+                )
+                .unwrap()
+        );
+    }
+    assert!(index.list_provider_repository_states().unwrap().is_empty());
 }
 
 // ── CasLimits constructors and accessors ──────────────────────────────
