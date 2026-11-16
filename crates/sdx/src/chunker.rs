@@ -504,14 +504,27 @@ mod tests {
     }
 
     #[test]
-    fn chunker_streaming_matches_batch() {
-        let mut data = Vec::with_capacity(256 * 1024);
-        data.extend_from_slice(&lcg_data(256 * 1024, 42));
-        let target = 1024;
-        let batch = my_batch_boundaries(&data, target);
-        for frame_size in [1, 17, 64, 128, 512, 1024, 4096] {
-            let stream = my_stream_boundaries(&data, target, frame_size);
-            assert_eq!(stream, batch, "frame size {frame_size} differs from batch");
+    fn chunker_streaming_surfaces_match_batch_and_server_across_frames() {
+        for (seed, length, target, frames) in [
+            (42, 256 * 1024, 1024, &[1, 17, 64, 128, 512, 1024, 4096][..]),
+            (7, 256 * 1024, 1024, &[1, 37, 255, 2048][..]),
+            (99, 64 * 1024, 256, &[1, 17, 32, 64, 128, 256, 512][..]),
+        ] {
+            let data = lcg_data(length, seed);
+            let expected = server_batch_boundaries(&data, target);
+            assert_eq!(my_batch_boundaries(&data, target), expected);
+            for &frame in frames {
+                assert_eq!(
+                    my_stream_boundaries(&data, target, frame),
+                    expected,
+                    "Bytes input: seed={seed}, target={target}, frame={frame}",
+                );
+                assert_eq!(
+                    my_next_block_boundaries(&data, target, frame),
+                    expected,
+                    "slice input: seed={seed}, target={target}, frame={frame}",
+                );
+            }
         }
     }
 
@@ -533,17 +546,6 @@ mod tests {
     }
 
     #[test]
-    fn chunker_next_contract_matches_batch() {
-        let data = lcg_data(256 * 1024, 7);
-        let target = 1024;
-        let batch = my_batch_boundaries(&data, target);
-        for frame_size in [1, 37, 255, 2048] {
-            let boundaries = my_next_block_boundaries(&data, target, frame_size);
-            assert_eq!(boundaries, batch, "next() frame size {frame_size} differs");
-        }
-    }
-
-    #[test]
     fn chunker_boundaries_byte_identical_to_server_across_inputs_and_targets() {
         let cases: Vec<(&str, Vec<u8>)> = vec![
             ("lcg", lcg_data(256 * 1024, 42)),
@@ -562,20 +564,6 @@ mod tests {
                     assert_eq!(actual, expected, "{name} target {target}");
                 }
             }
-        }
-    }
-
-    #[test]
-    fn chunker_determinism_across_frame_sizes_matches_server() {
-        let data = lcg_data(64 * 1024, 99);
-        let target = 256;
-        let ref_stream = server_batch_boundaries(&data, target);
-        for frame_size in [1, 17, 32, 64, 128, 256, 512] {
-            let mine = my_stream_boundaries(&data, target, frame_size);
-            assert_eq!(
-                mine, ref_stream,
-                "frame size {frame_size} produced different boundaries"
-            );
         }
     }
 
