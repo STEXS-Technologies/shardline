@@ -1016,13 +1016,23 @@ async fn handler_health_returns_ok() {
 // ------------------------------------------------------------------
 
 #[tokio::test]
-async fn handler_whoami_anonymous_without_auth() {
-    let (_td, state) = make_test_state();
-    let result = whoami(State(state), default_headers()).await;
-    assert!(result.is_ok());
-    let resp = result.unwrap();
-    assert_eq!(resp.name, "anonymous");
-    assert!(!resp.is_admin);
+async fn handler_whoami_returns_identity_without_admin_privileges() {
+    for (authenticated, expected_name) in [(false, "anonymous"), (true, "alice")] {
+        let (_td, state) = if authenticated {
+            make_alice_auth_state()
+        } else {
+            make_test_state()
+        };
+        let headers = if authenticated {
+            alice_headers()
+        } else {
+            default_headers()
+        };
+        let response = whoami(State(state), headers).await.unwrap();
+        assert_eq!(response.name, expected_name);
+        assert_eq!(response.auth.identity.account.name, expected_name);
+        assert!(!response.is_admin);
+    }
 }
 
 // ------------------------------------------------------------------

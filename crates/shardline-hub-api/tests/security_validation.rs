@@ -135,25 +135,6 @@ fn validate_commit_rejects_absolute_paths() {
     );
 }
 
-/// Validates that commit.rs has path validation.
-///
-/// **[FIXED]**: `validate_commit_path` function now exists and checks for
-/// `..` components, absolute paths, null bytes, control characters, and
-/// max length.
-#[test]
-fn validate_commit_has_path_validation() {
-    let commit_source = include_str!("../src/commit.rs");
-
-    assert!(
-        commit_source.contains("fn validate_commit_path("),
-        "commit.rs contains validate_commit_path function"
-    );
-    assert!(
-        commit_source.contains("MAX_COMMIT_PATH_LEN"),
-        "commit.rs enforces max path length"
-    );
-}
-
 // ============================================================================
 // FINDING 5: Decompression Bomb — FIXED
 // ============================================================================
@@ -203,26 +184,6 @@ fn validate_pack_parser_shift_overflow_protected() {
             Err(shardline_hub_api::git::pack::PackError::ShiftOverflow)
         ),
         "malicious pack size must be rejected before shifting past integer width"
-    );
-}
-
-// ============================================================================
-// FINDING 6: whoami endpoint hardcodes is_admin: true
-// ============================================================================
-
-/// Validates the whoami endpoint no longer hardcodes is_admin: true.
-///
-/// **[FIXED]**: The whoami handler now returns `is_admin: false` (not hardcoded true).
-#[test]
-fn validate_whoami_hardcoded_admin() {
-    let handlers_source = include_str!("../src/routes/handlers.rs");
-
-    let whoami_start = handlers_source.find("async fn whoami(").unwrap();
-    let whoami_fn = &handlers_source[whoami_start..whoami_start + 800];
-
-    assert!(
-        whoami_fn.contains("is_admin: false"),
-        "whoami endpoint should not hardcode is_admin: true"
     );
 }
 

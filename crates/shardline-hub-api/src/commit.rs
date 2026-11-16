@@ -369,59 +369,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_commit_path_accepts_simple_file() {
-        assert!(validate_commit_path("README.md").is_ok());
-    }
-
-    #[test]
-    fn validate_commit_path_accepts_nested_path() {
-        assert!(validate_commit_path("src/main.rs").is_ok());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_absolute() {
-        assert!(validate_commit_path("/etc/passwd").is_err());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_dotdot() {
-        assert!(validate_commit_path("../secret").is_err());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_dotdot_in_middle() {
-        assert!(validate_commit_path("src/../../secret").is_err());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_null_byte() {
-        assert!(validate_commit_path("file\0.rs").is_err());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_control_char() {
-        assert!(validate_commit_path("file\n.rs").is_err());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_tab() {
-        assert!(validate_commit_path("file\t.rs").is_err());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_delete_char() {
-        assert!(validate_commit_path("file\x7f.rs").is_err());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_too_long() {
-        let long = "a".repeat(2000);
-        assert!(validate_commit_path(&long).is_err());
-    }
-
-    #[test]
-    fn validate_commit_path_rejects_single_dotdot() {
-        assert!(validate_commit_path("..").is_err());
+    fn commit_paths_accept_valid_names_and_reject_unsafe_names() {
+        let maximum = "a".repeat(MAX_COMMIT_PATH_LEN);
+        for path in ["README.md", "src/main.rs", maximum.as_str()] {
+            assert!(validate_commit_path(path).is_ok(), "{path:?}");
+        }
+        let oversized = "a".repeat(MAX_COMMIT_PATH_LEN + 1);
+        for path in [
+            "",
+            "/etc/passwd",
+            "../secret",
+            "src/../../secret",
+            "file\0.rs",
+            "file\n.rs",
+            "file\t.rs",
+            "file\x7f.rs",
+            "..",
+            oversized.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    validate_commit_path(path),
+                    Err(HubApiError::PathValidation(_))
+                ),
+                "{path:?}"
+            );
+        }
     }
 
     // --- parse_ndjson_commit tests ---
