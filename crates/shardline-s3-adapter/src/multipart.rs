@@ -1690,15 +1690,12 @@ async fn prepare_journal_append(
         ));
     }
     if records > committed_head {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .await?;
+        let file = fs::OpenOptions::new().write(true).open(path).await?;
         let committed = bytes.get(..committed_bytes).ok_or_else(|| {
             S3SessionError::Reliability("journal committed byte head is invalid".into())
         })?;
-        file.write_all(committed).await?;
+        file.set_len(u64::try_from(committed.len()).map_err(|_error| S3SessionError::Overflow)?)
+            .await?;
         file.sync_all().await?;
     }
     u64::try_from(committed_bytes).map_err(|_error| S3SessionError::Overflow)
@@ -2485,6 +2482,15 @@ mod tests {
         );
         let (_session, advanced_evidence) = load_session(&dir).await.unwrap();
         assert_eq!(advanced_evidence.events().len(), 2);
+
+        let path = dir.join(SESSION_MERKLE_JOURNAL);
+        let committed = fs::read(&path).await.unwrap();
+        append_journal(&dir, 2, None, &record).await.unwrap();
+        assert_eq!(
+            prepare_journal_append(&path, 2, None).await.unwrap(),
+            u64::try_from(committed.len()).unwrap()
+        );
+        assert_eq!(fs::read(&path).await.unwrap(), committed);
     }
 
     #[test]

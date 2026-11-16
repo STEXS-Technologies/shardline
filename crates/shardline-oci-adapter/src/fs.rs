@@ -859,23 +859,24 @@ fn prepare_journal_append(
             "journal head exceeds its log",
         ));
     }
+    let committed_length = u64::try_from(committed_bytes).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("journal byte length overflow: {error}"),
+        )
+    })?;
     if records > committed_head {
-        let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
-        let committed_prefix = bytes.get(..committed_bytes).ok_or_else(|| {
+        let file = OpenOptions::new().write(true).open(path)?;
+        let _committed_prefix = bytes.get(..committed_bytes).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "committed journal byte length exceeds journal",
             )
         })?;
-        file.write_all(committed_prefix)?;
+        file.set_len(committed_length)?;
         file.sync_all()?;
     }
-    u64::try_from(committed_bytes).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("journal byte length overflow: {error}"),
-        )
-    })
+    Ok(committed_length)
 }
 
 // ── Error mapping ────────────────────────────────────────────────────────────
