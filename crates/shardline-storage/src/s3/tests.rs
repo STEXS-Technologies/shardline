@@ -1,4 +1,5 @@
 use bytes::Bytes;
+mod provider_failures;
 mod range_bounds;
 use futures_util::StreamExt;
 use object_store::{
@@ -1841,69 +1842,6 @@ fn metadata_conversion_preserves_keys_lengths_and_prefix_boundaries() {
     }
 }
 
-// ── copy_object_if_absent edge cases ──────────────────────────────
-
-#[test]
-fn s3_copy_object_if_absent_source_eq_destination_with_source_exists() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18991".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    // source == destination with missing source — should Err because metadata returns None
-    // (the head() call fails with connection error, which is mapped through)
-    let key = ObjectKey::parse("test/key").unwrap();
-    let result = store.copy_object_if_absent(&key, &key);
-    // Without a connection, metadata() fails, so this should be an error
-    assert!(
-        result.is_err(),
-        "expected error from unreachable S3: {result:?}"
-    );
-}
-
-// ── put_if_absent error path (connection error) ────────────────────
-
-#[test]
-fn s3_put_if_absent_connection_error() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18990".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let body = ObjectBody::from_slice(b"hello world");
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello world"), 11);
-    let result = store.put_if_absent(&key, body, &integrity);
-    // verify_integrity passes, then metadata() fails with connection error
-    assert!(
-        result.is_err(),
-        "expected error from unreachable S3: {result:?}"
-    );
-}
-
-// ── put_overwrite error path ───────────────────────────────────────
-
-#[test]
-fn s3_put_overwrite_connection_error() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18989".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let body = ObjectBody::from_slice(b"hello world");
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello world"), 11);
-    let result = store.put_overwrite(&key, body, &integrity);
-    // verify_integrity passes, then put_opts fails with connection error
-    assert!(
-        result.is_err(),
-        "expected error from unreachable S3: {result:?}"
-    );
-}
-
 // ── existing_object_outcome_from_file edge case ────────────────────
 
 #[test]
@@ -1925,64 +1863,6 @@ fn existing_object_outcome_from_file_verify_file_length_fails() {
         result,
         Err(S3ObjectStoreError::IntegrityLengthMismatch)
     ));
-}
-
-// ── existing_copy_outcome edge case ────────────────────────────────
-
-#[test]
-fn existing_copy_outcome_missing_destination() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18984".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let src = ObjectKey::parse("test/src").unwrap();
-    let dst = ObjectKey::parse("test/dst").unwrap();
-    // destination metadata() will fail with connection error
-    let result = super::existing_copy_outcome(&store, &src, &dst, 10);
-    assert!(
-        result.is_err(),
-        "expected error from unreachable S3: {result:?}"
-    );
-}
-
-// ── delete_location_if_present ─────────────────────────────────────
-
-#[test]
-fn s3_delete_location_if_present_connection_error() {
-    use object_store::path::Path as ObjectStorePath;
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18983".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let location = ObjectStorePath::from("test/key");
-    let result = store.delete_location_if_present(&location);
-    assert!(
-        result.is_err(),
-        "expected error from unreachable S3: {result:?}"
-    );
-}
-
-// ── list_prefix on empty prefix ────────────────────────────────────
-
-#[test]
-fn s3_list_prefix_empty_prefix_with_connection() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18982".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let prefix = ObjectPrefix::parse("").unwrap();
-    // visit_prefix will fail with connection error
-    let result = store.list_prefix(&prefix);
-    assert!(
-        result.is_err(),
-        "expected error from unreachable S3: {result:?}"
-    );
 }
 
 // ── put_file_if_absent with non-existent file ──────────────────────
