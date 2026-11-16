@@ -388,12 +388,12 @@ async fn lfs_batch_inner(
     let action_header = lfs_action_auth_header(state, capability)?;
     let mut published = None;
     let mut objects = Vec::with_capacity(request.objects.len());
-    for obj in &request.objects {
+    for obj in request.objects {
         let key = match crate::object_locations::file_key(state, &obj.oid, capability) {
             Ok(k) => k,
             Err(e) => {
                 objects.push(LfsObjectResponse {
-                    oid: obj.oid.clone(),
+                    oid: obj.oid,
                     size: obj.size,
                     actions: None,
                     error: Some(LfsObjectError {
@@ -432,76 +432,49 @@ async fn lfs_batch_inner(
                     .map_err(|error| HubApiError::CasError(error.to_string()))?;
             }
         }
-        let actions = match request.operation {
-            LfsBatchOperation::Download => {
-                if exists {
-                    Some(LfsObjectActions {
-                        download: Some(LfsObjectAction {
-                            href: format!(
-                                "{}/lfs/objects/{}",
-                                state.public_base_url.trim_end_matches('/'),
-                                obj.oid
-                            ),
-                            header: action_header.clone(),
-                            ssh: None,
-                        }),
-                        upload: None,
-                        verify: None,
-                    })
-                } else {
-                    None
-                }
-            }
-            LfsBatchOperation::Upload => {
-                if exists {
-                    // Standard clients treat an object without actions as
-                    // already uploaded and skip it. A verify-only action
-                    // is invalid for their upload flow because it still
-                    // requires an upload action.
-                    None
-                } else {
-                    Some(LfsObjectActions {
-                        download: None,
-                        upload: Some(LfsObjectAction {
-                            href: lfs_upload_action_url(state, capability, &obj.oid)?,
-                            // huggingface_hub's single-part LFS uploader
-                            // does not forward action headers. The short-
-                            // lived, object-scoped upload URL carries its
-                            // own capability instead.
-                            header: None,
-                            ssh: None,
-                        }),
-                        verify: Some(LfsObjectAction {
-                            href: format!(
-                                "{}/lfs/objects/{}/verify",
-                                state.public_base_url.trim_end_matches('/'),
-                                obj.oid
-                            ),
-                            header: action_header.clone(),
-                            ssh: None,
-                        }),
-                    })
-                }
-            }
-            LfsBatchOperation::Verify => {
-                if exists {
-                    Some(LfsObjectActions {
-                        download: None,
-                        upload: None,
-                        verify: Some(LfsObjectAction {
-                            href: format!(
-                                "{}/lfs/objects/{}/verify",
-                                state.public_base_url.trim_end_matches('/'),
-                                obj.oid
-                            ),
-                            header: action_header.clone(),
-                            ssh: None,
-                        }),
-                    })
-                } else {
-                    None
-                }
-            }
+        let verify_action = || LfsObjectAction {
+            href: format!(
+                "{}/lfs/objects/{}/verify",
+                state.public_base_url.trim_end_matches('/'),
+                obj.oid
+            ),
+            header: action_header.clone(),
+            ssh: None,
+        };
+        let actions = match (request.operation, exists) {
+            (LfsBatchOperation::Download, true) => Some(LfsObjectActions {
+                download: Some(LfsObjectAction {
+                    href: format!(
+                        "{}/lfs/objects/{}",
+                        state.public_base_url.trim_end_matches('/'),
+                        obj.oid
+                    ),
+                    header: action_header.clone(),
+                    ssh: None,
+                }),
+                upload: None,
+                verify: None,
+            }),
+            (LfsBatchOperation::Upload, false) => Some(LfsObjectActions {
+                download: None,
+                upload: Some(LfsObjectAction {
+                    href: lfs_upload_action_url(state, capability, &obj.oid)?,
+                    // huggingface_hub does not forward action headers for
+                    // single-part uploads; the URL carries an object capability.
+                    header: None,
+                    ssh: None,
+                }),
+                verify: Some(verify_action()),
+            }),
+            (LfsBatchOperation::Verify, true) => Some(LfsObjectActions {
+                download: None,
+                upload: None,
+                verify: Some(verify_action()),
+            }),
+            // Existing uploads have no actions so standard clients skip them.
+            // Missing downloads/verifications receive the per-object 404 below.
+            (LfsBatchOperation::Upload, true)
+            | (LfsBatchOperation::Download | LfsBatchOperation::Verify, false) => None,
         };
 
         let error = if !exists
@@ -517,7 +490,7 @@ async fn lfs_batch_inner(
         };
 
         objects.push(LfsObjectResponse {
-            oid: obj.oid.clone(),
+            oid: obj.oid,
             size: obj.size,
             actions,
             error,
