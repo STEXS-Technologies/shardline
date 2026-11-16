@@ -107,17 +107,9 @@ pub(super) async fn file_tree_for_path(
                     oid: None,
                     lfs: None,
                 },
-                HubTreePageEntry::File(file) => TreeEntry {
-                    entry_type: "file".to_owned(),
-                    path: format!("{prefix}{}", file.path),
-                    size: Some(file.size),
-                    oid: Some(file.sha.clone()),
-                    lfs: file.is_lfs.then_some(TreeEntryLfs {
-                        oid: file.sha.clone(),
-                        size: file.size,
-                        pointer_size: lfs_pointer_size(&file.sha, file.size),
-                    }),
-                },
+                HubTreePageEntry::File(file) => {
+                    file_tree_entry(&file, format!("{prefix}{}", file.path))
+                }
             })
             .collect();
         return Ok(TreeListing {
@@ -216,13 +208,12 @@ pub(crate) fn tree_entries_at_path(files: &[HubFileEntry], path: &str) -> Vec<Tr
     let mut seen_dirs = std::collections::HashSet::new();
 
     for file in files {
-        if !prefix.is_empty() && !file.path.starts_with(&prefix) {
+        let Some(relative) = file.path.strip_prefix(&prefix) else {
             continue;
-        }
-        let relative = file.path.strip_prefix(&prefix).unwrap_or(&file.path);
+        };
 
         if let Some((dir, _rest)) = relative.split_once('/') {
-            if seen_dirs.insert(dir.to_owned()) {
+            if seen_dirs.insert(dir) {
                 entries.push(TreeEntry {
                     entry_type: "directory".to_owned(),
                     path: format!("{prefix}{dir}"),
@@ -232,22 +223,7 @@ pub(crate) fn tree_entries_at_path(files: &[HubFileEntry], path: &str) -> Vec<Tr
                 });
             }
         } else {
-            let lfs = if file.is_lfs {
-                Some(TreeEntryLfs {
-                    oid: file.sha.clone(),
-                    size: file.size,
-                    pointer_size: lfs_pointer_size(&file.sha, file.size),
-                })
-            } else {
-                None
-            };
-            entries.push(TreeEntry {
-                entry_type: "file".to_owned(),
-                path: file.path.clone(),
-                size: Some(file.size),
-                oid: Some(file.sha.clone()),
-                lfs,
-            });
+            entries.push(file_tree_entry(file, file.path.clone()));
         }
     }
 
@@ -275,10 +251,9 @@ pub(crate) fn tree_entries_recursive(
     let mut directories = std::collections::BTreeSet::new();
 
     for file in files {
-        if !prefix.is_empty() && !file.path.starts_with(&prefix) {
+        let Some(relative) = file.path.strip_prefix(&prefix) else {
             continue;
-        }
-        let relative = file.path.strip_prefix(&prefix).unwrap_or(&file.path);
+        };
         if relative.is_empty() {
             continue;
         }
@@ -291,22 +266,7 @@ pub(crate) fn tree_entries_recursive(
             }
         }
 
-        let lfs = if file.is_lfs {
-            Some(TreeEntryLfs {
-                oid: file.sha.clone(),
-                size: file.size,
-                pointer_size: lfs_pointer_size(&file.sha, file.size),
-            })
-        } else {
-            None
-        };
-        entries.push(TreeEntry {
-            entry_type: "file".to_owned(),
-            path: file.path.clone(),
-            size: Some(file.size),
-            oid: Some(file.sha.clone()),
-            lfs,
-        });
+        entries.push(file_tree_entry(file, file.path.clone()));
     }
 
     entries.extend(directories.into_iter().map(|directory| TreeEntry {
@@ -318,6 +278,20 @@ pub(crate) fn tree_entries_recursive(
     }));
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(entries)
+}
+
+fn file_tree_entry(file: &HubFileEntry, path: String) -> TreeEntry {
+    TreeEntry {
+        entry_type: "file".to_owned(),
+        path,
+        size: Some(file.size),
+        oid: Some(file.sha.clone()),
+        lfs: file.is_lfs.then(|| TreeEntryLfs {
+            oid: file.sha.clone(),
+            size: file.size,
+            pointer_size: lfs_pointer_size(&file.sha, file.size),
+        }),
+    }
 }
 
 fn lfs_pointer_size(oid: &str, size: u64) -> u64 {
