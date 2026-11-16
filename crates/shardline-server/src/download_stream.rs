@@ -701,25 +701,6 @@ struct LocalObjectByteStreamState {
     remaining: u64,
 }
 
-#[cfg(test)]
-pub(crate) async fn local_object_byte_stream(
-    object_store: LocalObjectStore,
-    object_key: ObjectKey,
-    length: u64,
-) -> Result<ServerByteStream, ServerError> {
-    local_store_byte_stream(object_store, object_key, length).await
-}
-
-#[cfg(test)]
-pub(crate) async fn local_object_byte_range_stream(
-    object_store: LocalObjectStore,
-    object_key: ObjectKey,
-    total_length: u64,
-    range: ByteRange,
-) -> Result<ServerByteStream, ServerError> {
-    local_store_byte_range_stream(object_store, object_key, total_length, range).await
-}
-
 pub(crate) async fn object_byte_range_stream(
     object_store: ServerObjectStore,
     object_key: ObjectKey,
@@ -759,29 +740,6 @@ pub(crate) async fn object_byte_stream(
     let end_inclusive = total_length.checked_sub(1).ok_or(ServerError::Overflow)?;
     let range = ByteRange::new(0, end_inclusive).map_err(|_error| ServerError::Overflow)?;
     object_byte_range_stream(object_store, object_key, total_length, range).await
-}
-
-#[cfg(test)]
-async fn local_store_byte_stream(
-    object_store: LocalObjectStore,
-    object_key: ObjectKey,
-    length: u64,
-) -> Result<ServerByteStream, ServerError> {
-    if length == 0 {
-        let file = object_store.open_object_file(&object_key)?;
-        let metadata = file.metadata()?;
-        if metadata.len() != 0 {
-            return Err(ServerError::ObjectStore(
-                ObjectStoreError::StoredLengthMismatch,
-            ));
-        }
-
-        return Ok(Box::pin(stream::empty()));
-    }
-
-    let end_inclusive = length.checked_sub(1).ok_or(ServerError::Overflow)?;
-    let range = ByteRange::new(0, end_inclusive).map_err(|_error| ServerError::Overflow)?;
-    local_store_byte_range_stream(object_store, object_key, length, range).await
 }
 
 async fn local_store_byte_range_stream(
@@ -883,7 +841,7 @@ mod tests {
     use tokio::fs;
 
     use super::{
-        MaterializedObject, local_object_byte_range_stream, local_object_byte_stream,
+        MaterializedObject, local_store_byte_range_stream,
         retain_memory_permit_for_materialized_object,
     };
     use crate::ServerError;
@@ -917,46 +875,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn local_object_byte_stream_reads_object_in_segments() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/object").unwrap();
-        let bytes = vec![7_u8; 64 * 1024 + 3];
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, &bytes).await;
-
-        let mut byte_stream = local_object_byte_stream(
-            object_store,
-            object_key,
-            u64::try_from(bytes.len()).unwrap_or(0),
-        )
-        .await
-        .unwrap();
-        let mut observed = Vec::with_capacity(bytes.len());
-        while let Some(item) = byte_stream.next().await {
-            let chunk = item.unwrap();
-            observed.extend_from_slice(&chunk);
+    async fn full_object_streams_preserve_bytes_and_bound_each_read() {
+        for (key, bytes) in [
+            ("ab/object", vec![7; 64 * 1024 + 3]),
+            ("ab/stream-nonzero", b"stream-me".to_vec()),
+            ("ab/stream-full-2", b"stream-payload-data".to_vec()),
+            (
+                "ab/multi-chunk",
+                vec![0x42; super::STREAM_READ_BUFFER_BYTES as usize * 2 + 50],
+            ),
+            ("ab/empty", Vec::new()),
+            ("ab/existing-empty", Vec::new()),
+            ("ab/store-empty", Vec::new()),
+            ("ab/zero-stream", Vec::new()),
+        ] {
+            let storage = shardline_test_support::TempStorage::new();
+            let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+            let key = ObjectKey::parse(key).unwrap();
+            write_fixture_file(&store.path_for_key(&key), &bytes).await;
+            let mut stream = super::object_byte_stream(
+                ServerObjectStore::Local(store),
+                key.clone(),
+                bytes.len() as u64,
+            )
+            .await
+            .unwrap();
+            let mut observed = Vec::new();
+            while let Some(chunk) = stream.try_next().await.unwrap() {
+                assert!(!chunk.is_empty(), "{key:?}");
+                assert!(
+                    chunk.len() as u64 <= super::STREAM_READ_BUFFER_BYTES,
+                    "{key:?}"
+                );
+                observed.extend_from_slice(&chunk);
+            }
+            assert_eq!(observed, bytes, "{key:?}");
         }
-
-        assert_eq!(observed, bytes);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn local_object_byte_stream_rejects_index_length_mismatch() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/object").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"short").await;
-
-        let byte_stream = local_object_byte_stream(object_store, object_key, 100).await;
-
-        assert!(matches!(
-            byte_stream,
-            Err(ServerError::ObjectStore(
-                ObjectStoreError::StoredLengthMismatch
-            ))
-        ));
+    async fn full_object_streams_reject_incorrect_stored_lengths() {
+        for (key, bytes, claimed) in [
+            ("ab/object", b"short".as_slice(), 100),
+            ("ab/nonempty-claimed-zero", b"data".as_slice(), 0),
+            ("ab/not-empty", b"data".as_slice(), 0),
+            ("ab/nonempty-claimed-zero-v2", b"data".as_slice(), 0),
+            ("ab/zero-claim-nonzero", b"content".as_slice(), 0),
+        ] {
+            let storage = shardline_test_support::TempStorage::new();
+            let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+            let key = ObjectKey::parse(key).unwrap();
+            write_fixture_file(&store.path_for_key(&key), bytes).await;
+            let result =
+                super::object_byte_stream(ServerObjectStore::Local(store), key.clone(), claimed)
+                    .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(ServerError::ObjectStore(
+                        ObjectStoreError::StoredLengthMismatch
+                    ))
+                ),
+                "{key:?}, claimed length {claimed}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -982,7 +964,7 @@ mod tests {
             let _ = writer.sync_all();
         });
 
-        let byte_stream = local_object_byte_range_stream(
+        let byte_stream = local_store_byte_range_stream(
             object_store,
             object_key,
             4, // total_length = 4, but file will grow to 9 after hook fires
@@ -1008,7 +990,7 @@ mod tests {
         write_fixture_file(&path, &bytes).await;
         let range = ByteRange::new(2, 7).unwrap();
 
-        let mut byte_stream = local_object_byte_range_stream(
+        let mut byte_stream = local_store_byte_range_stream(
             object_store,
             object_key,
             u64::try_from(bytes.len()).unwrap_or(0),
@@ -1070,39 +1052,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn local_store_byte_stream_zero_length_empty_object() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/empty").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"").await;
-
-        let result = local_object_byte_stream(object_store, object_key, 0).await;
-        // Zero-length object → empty stream
-        let mut stream = result.unwrap();
-        use futures_util::StreamExt;
-        let next = stream.next().await;
-        assert!(next.is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn local_store_byte_stream_rejects_zero_length_with_nonempty_file() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/nonempty-claimed-zero").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"data").await;
-
-        let result = local_object_byte_stream(object_store, object_key, 0).await;
-        assert!(matches!(
-            result,
-            Err(ServerError::ObjectStore(
-                ObjectStoreError::StoredLengthMismatch
-            ))
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_range_stream_rejects_range_exceeding_length() {
         let storage = shardline_test_support::TempStorage::new();
         let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
@@ -1112,64 +1061,8 @@ mod tests {
 
         // range.end_inclusive = 10, total_length = 4 → RangeNotSatisfiable
         let range = ByteRange::new(0, 10).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, 4, range).await;
         assert!(matches!(result, Err(ServerError::RangeNotSatisfiable)));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_stream_nonzero_length_with_local_store() {
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/stream-nonzero").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        write_fixture_file(&path, b"stream-me").await;
-
-        let store = ServerObjectStore::Local(object_store);
-        let result = super::object_byte_stream(store, object_key, 9).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn zero_length_object_streams_exhaust_existing_empty_files() {
-        for key in ["ab/existing-empty", "ab/store-empty", "ab/zero-stream"] {
-            let storage = shardline_test_support::TempStorage::new();
-            let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-            let object_key = ObjectKey::parse(key).unwrap();
-            let path = object_store.path_for_key(&object_key);
-            write_fixture_file(&path, b"").await;
-            let mut stream =
-                super::object_byte_stream(ServerObjectStore::Local(object_store), object_key, 0)
-                    .await
-                    .unwrap();
-            assert!(stream.next().await.is_none(), "{key}");
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn zero_length_object_streams_reject_nonempty_files() {
-        for (key, bytes) in [
-            ("ab/not-empty", b"data".as_slice()),
-            ("ab/nonempty-claimed-zero-v2", b"data".as_slice()),
-            ("ab/zero-claim-nonzero", b"content".as_slice()),
-        ] {
-            let storage = shardline_test_support::TempStorage::new();
-            let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-            let object_key = ObjectKey::parse(key).unwrap();
-            let path = object_store.path_for_key(&object_key);
-            write_fixture_file(&path, bytes).await;
-            let result =
-                super::object_byte_stream(ServerObjectStore::Local(object_store), object_key, 0)
-                    .await;
-            assert!(
-                matches!(
-                    result,
-                    Err(ServerError::ObjectStore(
-                        ObjectStoreError::StoredLengthMismatch
-                    ))
-                ),
-                "{key}"
-            );
-        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1187,43 +1080,13 @@ mod tests {
 
         let total = data.len() as u64;
         let range = ByteRange::new(0, total - 1).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, total, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, total, range).await;
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
             observed.extend_from_slice(&item.unwrap());
         }
         assert_eq!(observed.len(), data.len());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_byte_stream_via_public_fn_with_local_store() {
-        // Test the public object_byte_stream function via the localstore path.
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/stream-full-2").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        let content = b"stream-payload-data";
-        tokio::fs::write(&path, content).await.unwrap();
-
-        let store = ServerObjectStore::Local(object_store);
-        let result =
-            super::object_byte_stream(store.clone(), object_key.clone(), content.len() as u64)
-                .await;
-        assert!(
-            result.is_ok(),
-            "object_byte_stream failed: {:?}",
-            result.err()
-        );
-        let mut stream = result.unwrap();
-        let mut observed = Vec::new();
-        while let Some(item) = stream.next().await {
-            observed.extend_from_slice(&item.unwrap());
-        }
-        assert_eq!(observed, content);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1236,7 +1099,7 @@ mod tests {
         write_fixture_file(&path, b"abcd").await;
 
         let range = ByteRange::new(0, 3).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, 4, range).await;
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1244,32 +1107,6 @@ mod tests {
         }
         assert_eq!(observed, b"abcd");
     }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn local_object_byte_stream_reads_multiple_chunks_correctly() {
-        // Create a large enough object to require multiple read iterations.
-        let storage = shardline_test_support::TempStorage::new();
-        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
-        let object_key = ObjectKey::parse("ab/multi-chunk").unwrap();
-        let path = object_store.path_for_key(&object_key);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        let data = vec![0x42u8; (super::STREAM_READ_BUFFER_BYTES as usize) * 2 + 50];
-        tokio::fs::write(&path, &data).await.unwrap();
-
-        let result = local_object_byte_stream(object_store, object_key, data.len() as u64).await;
-        let mut stream = result.unwrap();
-        let mut observed = Vec::new();
-        while let Some(item) = stream.next().await {
-            observed.extend_from_slice(&item.unwrap());
-        }
-        assert_eq!(observed.len(), data.len());
-    }
-
-    // ── object_byte_stream — zero-length metadata scenarios ──────────────
-
-    // ── local_store_byte_range_stream — truncated file during read ───────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_store_byte_range_stream_read_returns_zero() {
@@ -1298,7 +1135,7 @@ mod tests {
         // total_length = 24, range covers all — after truncation, the read
         // will get 0 bytes and should return StoredLengthMismatch.
         let range = ByteRange::new(0, 23).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 24, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, 24, range).await;
         assert!(matches!(
             result,
             Err(ServerError::ObjectStore(
@@ -1306,8 +1143,6 @@ mod tests {
             ))
         ));
     }
-
-    // ── object_byte_range_stream — various range configurations ──────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_range_stream_via_local_store_start_only() {
@@ -1319,7 +1154,7 @@ mod tests {
         write_fixture_file(&path, b"abcdefghij").await;
 
         let range = ByteRange::new(3, 9).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 10, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, 10, range).await;
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1343,7 +1178,7 @@ mod tests {
 
         let total = content.len() as u64;
         let range = ByteRange::new(0, total - 1).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, total, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, total, range).await;
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1362,7 +1197,7 @@ mod tests {
         write_fixture_file(&path, b"abcdef").await;
 
         let range = ByteRange::new(2, 2).unwrap(); // just 'c'
-        let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, 6, range).await;
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1370,10 +1205,6 @@ mod tests {
         }
         assert_eq!(observed, b"c");
     }
-
-    // ── object_byte_stream via ServerObjectStore::Local ──────────────────
-
-    // ── object_byte_range_stream with length mismatch ────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_range_stream_rejects_length_mismatch() {
@@ -1384,7 +1215,7 @@ mod tests {
         write_fixture_file(&path, b"short").await;
 
         let range = ByteRange::new(0, 3).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 100, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, 100, range).await;
         assert!(matches!(
             result,
             Err(ServerError::ObjectStore(
@@ -1392,8 +1223,6 @@ mod tests {
             ))
         ));
     }
-
-    // ── object_byte_range_stream — invalid range ─────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_range_stream_range_end_exceeds_length() {
@@ -1405,11 +1234,9 @@ mod tests {
 
         // Range end_inclusive (10) >= total_length (4) → RangeNotSatisfiable
         let range = ByteRange::new(0, 10).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, 4, range).await;
         assert!(matches!(result, Err(ServerError::RangeNotSatisfiable)));
     }
-
-    // ── object_byte_range_stream — range end equals total_length ─────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_range_stream_range_end_equals_length_errors() {
@@ -1421,15 +1248,9 @@ mod tests {
 
         // range.end_inclusive() == total_length → >= check triggers RangeNotSatisfiable
         let range = ByteRange::new(0, 4).unwrap();
-        let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
+        let result = local_store_byte_range_stream(object_store, object_key, 4, range).await;
         assert!(matches!(result, Err(ServerError::RangeNotSatisfiable)));
     }
-
-    // ── object_byte_stream — 404 via blackhole metadata check ────────────
-
-    // ── overflow edge cases ──────────────────────────────────────────────
-
-    // ── file_record_byte_stream decompression round-trip ─────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn file_record_byte_stream_decompresses_lz4_chunks() {
@@ -1617,7 +1438,7 @@ mod tests {
                     )
                     .await
                 } else {
-                    local_object_byte_range_stream(store.clone(), key.clone(), length, range).await
+                    local_store_byte_range_stream(store.clone(), key.clone(), length, range).await
                 }
                 .unwrap();
                 let observed: Vec<u8> = stream
@@ -1634,8 +1455,6 @@ mod tests {
             }
         }
     }
-
-    // ── xorb-backed file record tests ────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn xorb_range_rejects_corruption_outside_requested_bytes() {
