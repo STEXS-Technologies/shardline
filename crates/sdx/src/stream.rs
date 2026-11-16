@@ -2170,16 +2170,66 @@ impl FileReconstructor {
     /// reconstruction task on the client's dedicated blocking runtime.
     pub(crate) fn reconstruct_to_stream(self) -> DownloadStream {
         let run_state = RunState::new(self.cancellation_token.clone());
+        #[cfg(not(target_family = "wasm"))]
         let runtime = self.ctx.blocking_runtime.clone();
-        DownloadStream::new(self, run_state, runtime)
+        let (data_writer, receiver) = SequentialWriter::new_streaming(run_state.clone());
+        let start_signal = Arc::new(Notify::new());
+        let signal = start_signal.clone();
+        let rs = run_state.clone();
+        let task = async move {
+            signal.notified().await;
+            drop(self.run(data_writer, rs).await);
+        };
+        #[cfg(not(target_family = "wasm"))]
+        {
+            runtime.spawn(task);
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            tokio::task::spawn(task);
+        }
+        DownloadStream {
+            receiver,
+            pending_data: None,
+            finished: false,
+            run_state,
+            start_signal: Some(start_signal),
+            #[cfg(not(target_family = "wasm"))]
+            runtime,
+        }
     }
 
     /// Reconstructs the file as an unordered stream, yielding `(offset, Bytes)`
     /// in completion order.
     pub(crate) fn reconstruct_to_unordered_stream(self) -> UnorderedDownloadStream {
         let run_state = RunState::new(self.cancellation_token.clone());
+        #[cfg(not(target_family = "wasm"))]
         let runtime = self.ctx.blocking_runtime.clone();
-        UnorderedDownloadStream::new(self, run_state, runtime)
+        let (writer, receiver, progress) = UnorderedWriter::new_streaming(run_state.clone());
+        let start_signal = Arc::new(Notify::new());
+        let signal = start_signal.clone();
+        let rs = run_state.clone();
+        let task = async move {
+            signal.notified().await;
+            drop(self.run(writer, rs).await);
+        };
+        #[cfg(not(target_family = "wasm"))]
+        {
+            runtime.spawn(task);
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            tokio::task::spawn(task);
+        }
+        UnorderedDownloadStream {
+            progress,
+            receiver,
+            finished: false,
+            run_state,
+            start_signal: Some(start_signal),
+            #[cfg(not(target_family = "wasm"))]
+            runtime,
+        }
     }
 
     async fn run(
@@ -2368,40 +2418,6 @@ pub struct DownloadStream {
 }
 
 impl DownloadStream {
-    /// Creates a new `DownloadStream`, spawning the (paused) reconstruction
-    /// task on the client's dedicated runtime.
-    pub(crate) fn new(
-        reconstructor: FileReconstructor,
-        run_state: Arc<RunState>,
-        #[cfg(not(target_family = "wasm"))] runtime: Arc<tokio::runtime::Runtime>,
-    ) -> Self {
-        let (data_writer, receiver) = SequentialWriter::new_streaming(run_state.clone());
-        let start_signal = Arc::new(Notify::new());
-        let signal = start_signal.clone();
-        let rs = run_state.clone();
-        let task = async move {
-            signal.notified().await;
-            drop(reconstructor.run(data_writer, rs).await);
-        };
-        #[cfg(not(target_family = "wasm"))]
-        {
-            runtime.spawn(task);
-        }
-        #[cfg(target_family = "wasm")]
-        {
-            tokio::task::spawn(task);
-        }
-        Self {
-            receiver,
-            pending_data: None,
-            finished: false,
-            run_state,
-            start_signal: Some(start_signal),
-            #[cfg(not(target_family = "wasm"))]
-            runtime,
-        }
-    }
-
     /// Unblocks the reconstruction task so it begins producing data.
     ///
     /// If already started, this is a no-op. Called automatically on the first
@@ -2607,40 +2623,6 @@ pub struct UnorderedDownloadStream {
 }
 
 impl UnorderedDownloadStream {
-    /// Creates a new `UnorderedDownloadStream`, spawning the (paused)
-    /// reconstruction task on the client's dedicated runtime.
-    pub(crate) fn new(
-        reconstructor: FileReconstructor,
-        run_state: Arc<RunState>,
-        #[cfg(not(target_family = "wasm"))] runtime: Arc<tokio::runtime::Runtime>,
-    ) -> Self {
-        let (writer, receiver, progress) = UnorderedWriter::new_streaming(run_state.clone());
-        let start_signal = Arc::new(Notify::new());
-        let signal = start_signal.clone();
-        let rs = run_state.clone();
-        let task = async move {
-            signal.notified().await;
-            drop(reconstructor.run(writer, rs).await);
-        };
-        #[cfg(not(target_family = "wasm"))]
-        {
-            runtime.spawn(task);
-        }
-        #[cfg(target_family = "wasm")]
-        {
-            tokio::task::spawn(task);
-        }
-        Self {
-            progress,
-            receiver,
-            finished: false,
-            run_state,
-            start_signal: Some(start_signal),
-            #[cfg(not(target_family = "wasm"))]
-            runtime,
-        }
-    }
-
     /// Unblocks the reconstruction task so it begins producing data.
     ///
     /// If already started, this is a no-op. Called automatically on the first
