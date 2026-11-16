@@ -194,6 +194,23 @@ impl From<String> for BridgeError {
     }
 }
 
+impl<S: Send + Sync + 'static> SyncObjectStoreBridge<S> {
+    async fn run_blocking<T, E>(
+        &self,
+        operation: impl FnOnce(&S) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, BridgeError>
+    where
+        T: Send + 'static,
+        E: std::error::Error + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || operation(&inner))
+            .await
+            .map_err(|join| BridgeError::new(format!("blocking task failed: {join}")))?
+            .map_err(|error| BridgeError::new(error.to_string()))
+    }
+}
+
 #[async_trait]
 impl<S, E> AsyncObjectStore for SyncObjectStoreBridge<S>
 where
@@ -208,61 +225,41 @@ where
         body: ObjectBody<'_>,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, Self::Error> {
-        let inner = Arc::clone(&self.inner);
         let key = key.clone();
         let integrity = *integrity;
         let body_bytes = body.into_bytes();
-        tokio::task::spawn_blocking(move || {
+        self.run_blocking(move |inner| {
             inner.put_if_absent(&key, ObjectBody::from_bytes(body_bytes), &integrity)
         })
         .await
-        .map_err(|join| BridgeError::new(format!("blocking task failed: {join}")))?
-        .map_err(|e| BridgeError::new(format!("{e}")))
     }
 
     async fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
-        let inner = Arc::clone(&self.inner);
         let key = key.clone();
-        tokio::task::spawn_blocking(move || inner.read_range(&key, range))
+        self.run_blocking(move |inner| inner.read_range(&key, range))
             .await
-            .map_err(|join| BridgeError::new(format!("blocking task failed: {join}")))?
-            .map_err(|e| BridgeError::new(format!("{e}")))
     }
 
     async fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-        let inner = Arc::clone(&self.inner);
         let key = key.clone();
-        tokio::task::spawn_blocking(move || inner.contains(&key))
-            .await
-            .map_err(|join| BridgeError::new(format!("blocking task failed: {join}")))?
-            .map_err(|e| BridgeError::new(format!("{e}")))
+        self.run_blocking(move |inner| inner.contains(&key)).await
     }
 
     async fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
-        let inner = Arc::clone(&self.inner);
         let key = key.clone();
-        tokio::task::spawn_blocking(move || inner.metadata(&key))
-            .await
-            .map_err(|join| BridgeError::new(format!("blocking task failed: {join}")))?
-            .map_err(|e| BridgeError::new(format!("{e}")))
+        self.run_blocking(move |inner| inner.metadata(&key)).await
     }
 
     async fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
-        let inner = Arc::clone(&self.inner);
         let prefix = prefix.clone();
-        tokio::task::spawn_blocking(move || inner.list_prefix(&prefix))
+        self.run_blocking(move |inner| inner.list_prefix(&prefix))
             .await
-            .map_err(|join| BridgeError::new(format!("blocking task failed: {join}")))?
-            .map_err(|e| BridgeError::new(format!("{e}")))
     }
 
     async fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
-        let inner = Arc::clone(&self.inner);
         let key = key.clone();
-        tokio::task::spawn_blocking(move || inner.delete_if_present(&key))
+        self.run_blocking(move |inner| inner.delete_if_present(&key))
             .await
-            .map_err(|join| BridgeError::new(format!("blocking task failed: {join}")))?
-            .map_err(|e| BridgeError::new(format!("{e}")))
     }
 }
 
@@ -350,6 +347,20 @@ mod tests {
                 DeleteOutcome::NotFound
             })
         }
+    }
+
+    #[tokio::test]
+    async fn bridge_reports_blocking_task_panics() {
+        let bridge = SyncObjectStoreBridge::new(TestStore::default());
+        let error = bridge
+            .run_blocking(|_| -> Result<(), std::io::Error> {
+                std::panic::resume_unwind(Box::new("bridge worker failed"))
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("blocking task failed:"));
+        assert!(error.contains("bridge worker failed"));
     }
 
     #[tokio::test]
