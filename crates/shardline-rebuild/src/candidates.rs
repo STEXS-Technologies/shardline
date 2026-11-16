@@ -66,7 +66,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
         bytes,
         modified_since_epoch,
     } = entry;
-    let location = record_store.locator_display(&path);
+    let location = || record_store.locator_display(&path);
     let record = match parse_stored_file_record_bytes(&bytes) {
         Ok(record) => record,
         Err(shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
@@ -75,7 +75,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
             return reject_version(
                 report,
                 IndexRebuildIssueKind::OversizedVersionRecordMetadata,
-                location,
+                location(),
                 IndexRebuildIssueDetail::OversizedVersionRecordMetadata,
             );
         }
@@ -91,7 +91,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
                     IndexRebuildIssueDetail::RecordJsonInvalid,
                 )
             };
-            return reject_version(report, kind, location, detail);
+            return reject_version(report, kind, location(), detail);
         }
     };
 
@@ -106,7 +106,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
         return reject_version(
             report,
             IndexRebuildIssueKind::InvalidVersionFileId,
-            location,
+            location(),
             IndexRebuildIssueDetail::InvalidFileId {
                 file_id: record.file_id,
             },
@@ -117,7 +117,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
         return reject_version(
             report,
             IndexRebuildIssueKind::InvalidVersionContentHash,
-            location,
+            location(),
             IndexRebuildIssueDetail::InvalidContentHash {
                 content_hash: record.content_hash,
             },
@@ -129,7 +129,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
         return reject_version(
             report,
             IndexRebuildIssueKind::VersionPathMismatch,
-            location,
+            location(),
             IndexRebuildIssueDetail::VersionPathMismatch {
                 expected_locator: record_store.locator_display(&expected_path),
             },
@@ -140,7 +140,7 @@ pub(super) fn collect_candidate<RecordAdapter>(
         return reject_version(
             report,
             IndexRebuildIssueKind::InvalidVersionReconstructionPlan,
-            location,
+            location(),
             reconstruction_plan_error_detail(&error),
         );
     }
