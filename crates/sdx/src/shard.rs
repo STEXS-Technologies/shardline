@@ -217,15 +217,7 @@ pub fn parse_shard_xorbs(body: &[u8]) -> Result<Vec<ShardXorb>, SdxError> {
         if file_header.is_bookend() {
             break;
         }
-        let records_per_segment = if file_header.contains_verification() {
-            2
-        } else {
-            1
-        };
-        let records = file_header
-            .num_entries
-            .saturating_mul(records_per_segment)
-            .saturating_add(u64::from(file_header.contains_metadata_ext()));
+        let records = file_header.num_info_entry_following();
         skip_shard_bytes(&mut reader, records.saturating_mul(entry_size(version)))?;
     }
 

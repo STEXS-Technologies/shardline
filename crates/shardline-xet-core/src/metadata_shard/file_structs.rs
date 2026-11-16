@@ -114,12 +114,9 @@ impl FileDataSequenceHeader {
     }
 
     pub fn num_info_entry_following(&self) -> u64 {
-        let num_metadata_ext = if self.contains_metadata_ext() { 1 } else { 0 };
-        if self.contains_verification() {
-            self.num_entries * 2 + num_metadata_ext
-        } else {
-            self.num_entries + num_metadata_ext
-        }
+        self.num_entries
+            .saturating_mul(if self.contains_verification() { 2 } else { 1 })
+            .saturating_add(u64::from(self.contains_metadata_ext()))
     }
 
     fn checked_num_entries(&self) -> std::io::Result<usize> {
@@ -475,6 +472,28 @@ mod tests {
 
     use super::*;
     use crate::merklehash::compute_data_hash;
+
+    #[test]
+    fn optional_record_counts_saturate_without_overflow() {
+        for verification in [false, true] {
+            for extension in [false, true] {
+                for count in [0, 1, u64::MAX / 2, u64::MAX] {
+                    let header = FileDataSequenceHeader::new(
+                        MerkleHash::default(),
+                        count,
+                        verification,
+                        extension,
+                    );
+                    let exact = u128::from(count) * if verification { 2 } else { 1 }
+                        + u128::from(extension);
+                    assert_eq!(
+                        header.num_info_entry_following(),
+                        exact.min(u128::from(u64::MAX)) as u64
+                    );
+                }
+            }
+        }
+    }
 
     // ======= FileDataSequenceHeader =======
 
