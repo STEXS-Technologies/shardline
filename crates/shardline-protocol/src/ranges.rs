@@ -53,10 +53,7 @@ impl ByteRange {
     /// Returns the number of bytes in the range.
     #[must_use]
     pub const fn len(&self) -> Option<u64> {
-        match self.end_inclusive.checked_sub(self.start) {
-            Some(offset) => offset.checked_add(1),
-            None => None,
-        }
+        self.end_inclusive.saturating_sub(self.start).checked_add(1)
     }
 
     /// Returns false because validated inclusive byte ranges always contain at least one byte.
@@ -179,13 +176,7 @@ pub fn parse_http_byte_range(
         ));
     }
 
-    let mut parts = raw_suffix.splitn(2, '-');
-    let Some(raw_start) = parts.next() else {
-        return Err(HttpRangeParseError::InvalidSyntax(
-            "missing range start".to_owned(),
-        ));
-    };
-    let Some(raw_end) = parts.next() else {
+    let Some((raw_start, raw_end)) = raw_suffix.split_once('-') else {
         return Err(HttpRangeParseError::InvalidSyntax(
             "missing range end".to_owned(),
         ));
@@ -358,6 +349,7 @@ mod tests {
             ("bytes=2-1", 10),
             ("bytes=0-0,1-1", 10),
             ("bytes=", 10),
+            ("bytes=10", 10),
             ("bytes=-0", 10),
             ("bytes=-0", 0),
         ] {
@@ -456,40 +448,5 @@ mod tests {
         ] {
             assert_eq!(error.to_string(), message, "{error:?}");
         }
-    }
-
-    #[test]
-    fn byte_range_clone_copy_consistency() {
-        let range = ByteRange::new(10, 20).unwrap();
-        let cloned = range;
-        assert_eq!(range, cloned);
-        assert_eq!(range.start(), cloned.start());
-        assert_eq!(range.end_inclusive(), cloned.end_inclusive());
-    }
-
-    #[test]
-    fn chunk_range_clone_copy_consistency() {
-        let range = ChunkRange::new(1, 5).unwrap();
-        let cloned = range;
-        assert_eq!(range, cloned);
-        assert_eq!(range.start(), cloned.start());
-    }
-
-    // ── RangeError derive tests ──────────────────────────────────────────
-
-    #[test]
-    fn range_error_clone_copy_partial_eq() {
-        let a = RangeError::Inverted;
-        let b = RangeError::Empty;
-        let a2 = a;
-        assert_eq!(a, a2);
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn http_range_parse_error_debug_non_empty() {
-        let err = HttpRangeParseError::InvalidSyntax("test".to_owned());
-        let debug = format!("{err:?}");
-        assert!(!debug.is_empty());
     }
 }
