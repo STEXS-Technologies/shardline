@@ -499,12 +499,12 @@ impl TransferClient {
         &self,
         base_url: &str,
         token: &str,
-        body: Vec<u8>,
+        body: impl Into<Bytes>,
     ) -> Result<ShardUploadResponse, TransferError> {
         let url = format!("{}/v1/shards", base_url.trim_end_matches('/'));
         let response = self
             .with_session(self.client.post(&url).bearer_auth(token))
-            .body(body)
+            .body(body.into())
             .send()
             .await?;
         let response = ensure_success(response).await?;

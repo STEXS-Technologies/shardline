@@ -1073,7 +1073,7 @@ impl UploadSession {
         };
 
         if !file_infos.is_empty() {
-            let shard = serialize_shard(&file_infos, &xorb_infos);
+            let shard = Bytes::from(serialize_shard(&file_infos, &xorb_infos));
             let (base, token) = self.inner.cas_credentials().await?;
             let _permit = self
                 .inner
@@ -2343,10 +2343,10 @@ mod tests {
         );
     }
 
-    /// The xorb POST 503s twice (retryable admission), then succeeds; the M4
-    /// retry layer must replay the in-memory xorb and complete the upload.
+    /// Xorb and shard POSTs each fail twice before succeeding. Both bodies
+    /// must replay byte-for-byte before the upload can complete.
     #[tokio::test]
-    async fn upload_retries_xorb_post_on_503() {
+    async fn upload_retries_xorb_and_shard_posts_with_identical_bodies() {
         use std::time::Duration;
 
         let server = MockServer::start().await;
@@ -2386,6 +2386,13 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/shards"))
             .and(header("authorization", format!("Bearer {WRITE_TOKEN}")))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({"error": "admitted"})))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/shards"))
+            .and(header("authorization", format!("Bearer {WRITE_TOKEN}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": 1})))
             .mount(&server)
             .await;
@@ -2417,15 +2424,20 @@ mod tests {
         let report = session.finalize().await.unwrap();
         assert_eq!(report.xorb_posts, 1);
         assert_eq!(report.shard_posts, 1);
-        let xorb_posts = server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|request| {
-                request.method.as_str() == "POST" && request.url.path().starts_with("/v1/xorbs/")
-            })
-            .count();
-        assert_eq!(xorb_posts, 3); // 2×503 + 1×200
+        let requests = server.received_requests().await.unwrap();
+        for prefix in ["/v1/xorbs/", "/v1/shards"] {
+            let posts: Vec<_> = requests
+                .iter()
+                .filter(|request| {
+                    request.method.as_str() == "POST" && request.url.path().starts_with(prefix)
+                })
+                .collect();
+            assert_eq!(posts.len(), 3, "{prefix}: 2×503 + 1×200");
+            let first = posts.first().unwrap();
+            assert!(
+                posts.iter().all(|request| request.body == first.body),
+                "{prefix}"
+            );
+        }
     }
 }
