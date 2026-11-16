@@ -1857,10 +1857,8 @@ async fn persist_session_with_evidence(
                 record.snapshot_evidence.last(),
                 record.snapshot_merkle_commits.last(),
             ) {
-                last_merkle_snapshot_sequence = Some(
-                    serde_json::from_value::<SnapshotEvidenceEvent<DigestSnapshot>>(event.clone())?
-                        .sequence,
-                );
+                last_merkle_snapshot_sequence =
+                    Some(SnapshotEvidenceEvent::<DigestSnapshot>::deserialize(event)?.sequence);
                 previous_merkle_snapshot = Some(commit.clone());
             }
         }

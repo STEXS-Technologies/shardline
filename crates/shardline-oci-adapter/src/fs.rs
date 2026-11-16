@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, LazyLock, Weak},
 };
 
+use serde::Deserialize;
 use shardline_reliability::{
     DigestSnapshot, PersistedMerkleJournalRecord, ResumableSessionSnapshotDomain,
     SessionEvidenceLog, SnapshotEvidenceEvent, SnapshotEvidenceLog, StateTransitionEvent,
@@ -600,10 +601,9 @@ fn verify_oci_merkle_heads(
     .ok_or_else(|| OciAdapterError::Reliability("OCI snapshot commitment is missing".into()))?;
     let observed = persisted
         .merkle_snapshot_commit
-        .clone()
+        .as_ref()
         .ok_or_else(|| OciAdapterError::Reliability("OCI snapshot commitment is missing".into()))?;
-    let observed =
-        serde_json::from_value::<shardline_reliability::ReliabilityMerkleCommit>(observed)?;
+    let observed = shardline_reliability::ReliabilityMerkleCommit::deserialize(observed)?;
     let expected =
         serde_json::from_value::<shardline_reliability::ReliabilityMerkleCommit>(expected)?;
     if !observed.matches_expected(&expected) {
@@ -653,13 +653,13 @@ async fn read_persisted_upload_session_with_snapshot_full(
         })?;
         let evidence_events = committed
             .iter()
-            .flat_map(|record| record.evidence.iter().cloned())
-            .map(serde_json::from_value::<StateTransitionEvent>)
+            .flat_map(|record| record.evidence.iter())
+            .map(StateTransitionEvent::deserialize)
             .collect::<Result<Vec<_>, _>>()?;
         let snapshot_events = committed
             .iter()
-            .flat_map(|record| record.snapshot_evidence.iter().cloned())
-            .map(serde_json::from_value::<SnapshotEvidenceEvent<DigestSnapshot>>)
+            .flat_map(|record| record.snapshot_evidence.iter())
+            .map(SnapshotEvidenceEvent::<DigestSnapshot>::deserialize)
             .collect::<Result<Vec<_>, _>>()?;
         stored_evidence = SessionEvidenceLog::from_events(evidence_events)
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
