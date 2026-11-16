@@ -1,6 +1,9 @@
 //! Bounded first-parent last-change history for requested repository paths.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use shardline_index::hub::{HubFileEntry, HubRevision};
 use shardline_server_core::AuthorizedRepository;
@@ -80,7 +83,7 @@ fn find_last_changes(
     files: &[HubFileEntry],
     paths: &[String],
     auth: &AuthorizedRepository,
-) -> Result<HashMap<String, HubRevision>, HubApiError> {
+) -> Result<HashMap<String, Arc<HubRevision>>, HubApiError> {
     let snapshot = crate::revision_access::snapshot_commit(state, repo, auth)?;
     if snapshot.as_deref().is_some_and(|allowed| allowed != head) {
         return Err(HubApiError::Forbidden);
@@ -100,13 +103,15 @@ fn find_last_changes(
         if !seen.insert(next.clone()) || seen.len() > 10_000 {
             return Err(failure("path history is cyclic or exceeds 10000 revisions"));
         }
-        let revision = state
-            .store
-            .get_revision(repo, &next)
-            .map_err(failure)?
-            .ok_or_else(|| failure("incomplete repository path history"))?;
+        let revision = Arc::new(
+            state
+                .store
+                .get_revision(repo, &next)
+                .map_err(failure)?
+                .ok_or_else(|| failure("incomplete repository path history"))?,
+        );
         let Some(parent) = revision.parent_sha.as_deref() else {
-            result.extend(wanted.into_keys().map(|path| (path, revision.clone())));
+            result.extend(wanted.into_keys().map(|path| (path, Arc::clone(&revision))));
             break;
         };
         let parent_files = state
@@ -119,7 +124,7 @@ fn find_last_changes(
             if previous.get(path) == Some(signature) {
                 true
             } else {
-                result.insert(path.clone(), revision.clone());
+                result.insert(path.clone(), Arc::clone(&revision));
                 false
             }
         });
