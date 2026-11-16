@@ -227,7 +227,7 @@ impl ChunkCache {
         }
         validate_key(xorb_hash)?;
         let key = cache_key(xorb_hash, chunk_range);
-        let path = self.item_path(&key)?;
+        let path = item_path(&self.cache_dir, &key)?;
 
         let permit = self
             .io_slots
@@ -316,7 +316,7 @@ impl ChunkCache {
             return Ok(());
         }
         let key = cache_key(xorb_hash, chunk_range);
-        let path = self.item_path(&key)?;
+        let path = item_path(&self.cache_dir, &key)?;
         // Admission precedes the owned copy, bounding queued payloads. The
         // worker retains its permit if its awaiting caller is cancelled.
         let permit = self
@@ -377,12 +377,7 @@ impl ChunkCache {
                 state.total_bytes = state.total_bytes.saturating_sub(oldest_size);
                 // Keep physical eviction under the same lock as publication:
                 // another writer must not recreate a file before its deletion.
-                let (hash, ..) = &oldest_key;
-                if let Some(prefix) = hash.get(..2) {
-                    let evicted_path = cache_dir
-                        .join("xorbs")
-                        .join(prefix)
-                        .join(entry_file_name(&oldest_key));
+                if let Ok(evicted_path) = item_path(&cache_dir, &oldest_key) {
                     drop(remove_entry_file(&evicted_path));
                 }
             }
@@ -391,20 +386,19 @@ impl ChunkCache {
         .await
         .map_err(|error| SdxError::StreamInternal(format!("cache write worker failed: {error}")))?
     }
+}
 
-    /// Resolves the on-disk path for a cache key
-    /// (`{cache_dir}/xorbs/{prefix2}/{hash}.{start}-{end}`).
-    fn item_path(&self, key: &CacheKey) -> Result<PathBuf, SdxError> {
-        let (xorb_hash, ..) = key;
-        let prefix2 = xorb_hash.get(..2).ok_or_else(|| {
-            SdxError::StreamInternal("cache key shorter than two characters".to_owned())
-        })?;
-        Ok(self
-            .cache_dir
-            .join("xorbs")
-            .join(prefix2)
-            .join(entry_file_name(key)))
-    }
+/// Resolves the on-disk path for a cache key
+/// (`{cache_dir}/xorbs/{prefix2}/{hash}.{start}-{end}`).
+fn item_path(cache_dir: &Path, key: &CacheKey) -> Result<PathBuf, SdxError> {
+    let (xorb_hash, ..) = key;
+    let prefix2 = xorb_hash.get(..2).ok_or_else(|| {
+        SdxError::StreamInternal("cache key shorter than two characters".to_owned())
+    })?;
+    Ok(cache_dir
+        .join("xorbs")
+        .join(prefix2)
+        .join(entry_file_name(key)))
 }
 
 // A per-instance test gate makes executor progress and cancelled-worker
@@ -804,11 +798,7 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
             }
             state.entries.remove(&key);
             state.total_bytes = state.total_bytes.saturating_sub(entry.size);
-            if let Some(prefix) = key.0.get(..2) {
-                let path = cache_dir
-                    .join("xorbs")
-                    .join(prefix)
-                    .join(entry_file_name(&key));
+            if let Ok(path) = item_path(cache_dir, &key) {
                 drop(std::fs::remove_file(path));
             }
         }
@@ -911,7 +901,7 @@ mod tests {
             let cache = ChunkCache::new(directory.path(), 1024).unwrap();
             cache.put(&key, (0, 1), &[0, 5], b"wrong").await.unwrap();
             cache.put(&key, (1, 2), &[0, 5], b"valid").await.unwrap();
-            let malformed_path = cache.item_path(&cache_key(&key, (0, 1))).unwrap();
+            let malformed_path = item_path(&cache.cache_dir, &cache_key(&key, (0, 1))).unwrap();
             // A structurally valid header with unchanged payload CRC must
             // still match the filename's identity.
             overwrite_header_range(&malformed_path, (2, 3));
@@ -967,8 +957,7 @@ mod tests {
             Err(SdxError::StreamInternal(_))
         ));
         assert!(
-            !cache
-                .item_path(&cache_key(&key, (0, 8193)))
+            !item_path(&cache.cache_dir, &cache_key(&key, (0, 8193)))
                 .unwrap()
                 .exists()
         );
@@ -997,7 +986,7 @@ mod tests {
         put(&cache, &hash('c'), b"third").await;
         put(&cache, &hash('d'), b"fourth").await;
         for (digit, seconds) in [('a', 1), ('b', 2), ('c', 3), ('d', 4)] {
-            let path = cache.item_path(&cache_key(&hash(digit), (0, 1))).unwrap();
+            let path = item_path(&cache.cache_dir, &cache_key(&hash(digit), (0, 1))).unwrap();
             let times = std::fs::FileTimes::new()
                 .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds));
             File::options()
@@ -1103,7 +1092,7 @@ mod tests {
         let key = hash('1');
         for forged_header in [false, true] {
             put(&cache, &key, b"valid").await;
-            let path = cache.item_path(&cache_key(&key, (0, 1))).unwrap();
+            let path = item_path(&cache.cache_dir, &cache_key(&key, (0, 1))).unwrap();
             let mut file = File::options().read(true).write(true).open(&path).unwrap();
             if forged_header {
                 use std::io::{Seek, SeekFrom};
@@ -1177,7 +1166,7 @@ mod tests {
         assert_eq!(cached.chunk_offsets, vec![0, 11]);
         assert_eq!(cached.data.as_ref(), b"hello world");
         assert_eq!(cached.chunk_range, (0, 1));
-        let path = cache.item_path(&cache_key(&key, (0, 1))).unwrap();
+        let path = item_path(&cache.cache_dir, &cache_key(&key, (0, 1))).unwrap();
         assert_eq!(
             std::fs::read(path).unwrap(),
             b"SDXCHNK1\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x0b\x00\x00\x00\x00\x00\x00\x00\xf8\xcf\x31\x62\x00\x00\x00\x00\x0b\x00\x00\x00hello world"
@@ -1265,7 +1254,7 @@ mod tests {
         assert!(get(&cache, &key).await.is_some());
 
         // Overwrite the entry with garbage.
-        let path = cache.item_path(&cache_key(&key, (0, 1))).unwrap();
+        let path = item_path(&cache.cache_dir, &cache_key(&key, (0, 1))).unwrap();
         std::fs::write(&path, b"garbage that is not a cache entry").unwrap();
 
         // get must report a miss and delete the corrupt file.
@@ -1280,7 +1269,7 @@ mod tests {
         let key = hash('e');
         put(&cache, &key, b"truncate me later").await;
 
-        let path = cache.item_path(&cache_key(&key, (0, 1))).unwrap();
+        let path = item_path(&cache.cache_dir, &cache_key(&key, (0, 1))).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len().saturating_sub(10)]).unwrap();
 
@@ -1369,7 +1358,7 @@ mod tests {
         let newest = hash('c');
         for key in [&first, &second] {
             put(&cache, key, &[7; 16]).await;
-            let path = cache.item_path(&cache_key(key, (0, 1))).unwrap();
+            let path = item_path(&cache.cache_dir, &cache_key(key, (0, 1))).unwrap();
             File::options()
                 .write(true)
                 .open(path)
