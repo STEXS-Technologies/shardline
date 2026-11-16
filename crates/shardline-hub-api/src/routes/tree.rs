@@ -294,7 +294,7 @@ fn file_tree_entry(file: &HubFileEntry, path: String) -> TreeEntry {
     }
 }
 
-fn lfs_pointer_size(oid: &str, size: u64) -> u64 {
+pub(super) fn lfs_pointer_size(oid: &str, size: u64) -> u64 {
     format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n").len()
         as u64
 }
