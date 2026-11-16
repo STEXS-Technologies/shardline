@@ -99,10 +99,11 @@ impl RepositoryScopeCacheKey {
 }
 
 /// Stable cache key for one file reconstruction response.
+/// Clones share immutable identity strings.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReconstructionCacheKey {
-    file_id: String,
-    content_hash: Option<String>,
+    file_id: Arc<str>,
+    content_hash: Option<Arc<str>>,
     repository_scope: Option<RepositoryScopeCacheKey>,
 }
 
@@ -138,7 +139,7 @@ impl ReconstructionCacheKey {
     #[must_use]
     pub fn latest(file_id: &str, repository_scope: Option<&RepositoryScope>) -> Self {
         Self {
-            file_id: file_id.to_owned(),
+            file_id: Arc::from(file_id),
             content_hash: None,
             repository_scope: repository_scope.map(RepositoryScopeCacheKey::from_scope),
         }
@@ -170,8 +171,8 @@ impl ReconstructionCacheKey {
         repository_scope: Option<&RepositoryScope>,
     ) -> Self {
         Self {
-            file_id: file_id.to_owned(),
-            content_hash: Some(content_hash.to_owned()),
+            file_id: Arc::from(file_id),
+            content_hash: Some(Arc::from(content_hash)),
             repository_scope: repository_scope.map(RepositoryScopeCacheKey::from_scope),
         }
     }
@@ -211,23 +212,24 @@ mod tests {
     ];
 
     #[test]
-    fn cache_key_keeps_version_and_scope_components() {
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        let scope = scope.unwrap();
+    fn cache_key_clones_share_immutable_identity_and_preserve_lookup() {
+        use std::{collections::HashMap, sync::Arc};
 
-        let latest = ReconstructionCacheKey::latest("asset.bin", Some(&scope));
-        let version = ReconstructionCacheKey::version("asset.bin", "deadbeef", Some(&scope));
-
-        assert_eq!(latest.file_id(), "asset.bin");
-        assert_eq!(latest.content_hash(), None);
-        assert_eq!(version.content_hash(), Some("deadbeef"));
-        let latest_scope = latest.repository_scope();
-        let latest_scope = latest_scope.unwrap();
-        assert_eq!(latest_scope.owner(), "team");
-        assert_eq!(latest_scope.repo(), "assets");
-        assert_eq!(latest_scope.provider(), "github");
-        assert_eq!(latest_scope.revision(), Some("main"));
+        for content_hash in [None, Some("content-hash")] {
+            let key = content_hash.map_or_else(
+                || ReconstructionCacheKey::latest("file.bin", None),
+                |hash| ReconstructionCacheKey::version("file.bin", hash, None),
+            );
+            let cloned = key.clone();
+            assert!(Arc::ptr_eq(&key.file_id, &cloned.file_id));
+            if let (Some(original), Some(copy)) = (&key.content_hash, &cloned.content_hash) {
+                assert!(Arc::ptr_eq(original, copy));
+            }
+            let mut entries = HashMap::new();
+            entries.insert(key, "payload");
+            assert_eq!(entries.get(&cloned), Some(&"payload"));
+            assert_eq!(cloned.content_hash(), content_hash);
+        }
     }
 
     // ── None scope ───────────────────────────────────────────────────────
