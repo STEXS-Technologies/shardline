@@ -4428,10 +4428,10 @@ and the historical hosted SDK RSS failure remain outside these checks.
 
 ### PostgreSQL cleanup recheck (2026-11-16)
 
-Source `b08f8cc83e79fe92e685a141c668dad7a81cbc1a` passed the complete
+Source `c20dd457` passed the complete
 `scripts/test-postgres.sh` gate against a fresh, migrated PostgreSQL 16 Alpine
-container. This rechecks the subsequent ingestion, deduplication, download and
-CAS cleanup together. It used the same required-fixture settings, cached
+container. This rechecks the accumulated ingestion, deduplication, download,
+cache and CAS cleanup together. It used the same required-fixture settings, cached
 checksum-verified recovery executables and Rust 1.99.0 build settings as the
 checkpoint above, with nextest's default test concurrency rather than an explicit
 `NEXTEST_TEST_THREADS` override. The existing PostgreSQL coordination group still
@@ -4439,25 +4439,32 @@ serializes tests that share database-wide maintenance locks.
 
 | Gate stage | Passed | Test execution time |
 | --- | ---: | ---: |
-| All-features index library | 813 | 114.695 s |
-| PostgreSQL provider-event integration | 2 | 0.115 s |
-| All-features server library | 3,223 | 472.835 s |
-| Explicitly ignored PostgreSQL copy-integrity and cache-revocation checks | 6 | 3.476 s |
-| CLI PostgreSQL migration E2E | 1 | 0.255 s |
+| All-features index library | 813 | 112.070 s |
+| PostgreSQL provider-event integration | 2 | 0.106 s |
+| All-features server library | 3,223 | 537.775 s |
+| Explicitly ignored PostgreSQL copy-integrity and cache-revocation checks | 6 | 3.450 s |
+| CLI PostgreSQL migration E2E | 1 | 0.276 s |
 
-All 4,045 selected tests passed. Strict all-features server library/test Clippy
+All 4,045 selected tests passed. Strict all-features server and CLI library/test Clippy
 also passed with Rust 1.100.0 and `-D warnings`. The default index and server
 stages excluded six and 45 ignored tests respectively; the subsequent stage
 enabled only the six specified server checks. The provider stage selected its
 two PostgreSQL tests. These runs do not cover every ignored test or replace the
 separate integration targets.
 
-The snapshot contains 571,722 tracked Rust lines, down 31,927 (5.29%) from
+The snapshot contains 571,099 tracked Rust lines, down 32,550 (5.39%) from
 the 603,649-line baseline. `git grep` counts were independently checked against
 each tracked Rust blob. Counts include tests, comments and blank lines, and
 exclude uncommitted files. Fewer tests after consolidation do not by themselves
 establish equivalent coverage; the focused contracts and integration checks
 remain necessary.
+
+An explicit `cargo +1.99.0 build --offline --locked -p shardline --all-features`
+also passed. Before this checkpoint, the same command at `b9c6cdd5` failed with
+a compiler query-depth overflow in the concurrent-upload benchmark. Restoring
+the boxed protocol-reuse future fixed that build without increasing compiler
+limits or changing lookup behavior. The prior server tests and Clippy run had
+not detected the downstream code-generation failure.
 
 These are local functional checks on a shared development host. The timings
 are not a controlled performance comparison. Production throughput, unit costs,
