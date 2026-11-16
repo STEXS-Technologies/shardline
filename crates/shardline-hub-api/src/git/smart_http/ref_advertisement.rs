@@ -159,28 +159,18 @@ fn collect_refs_sync(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, Hub
     let mut seen_refs = std::collections::HashSet::new();
 
     for store_ref in &store_refs {
-        if store_ref.ref_name == "HEAD" || store_ref.ref_name.is_empty() {
-            if seen_refs.insert("HEAD".to_owned()) {
-                refs.push(GitRef {
-                    name: "HEAD".to_owned(),
-                    sha1: store_ref.sha.clone(),
-                });
-            }
+        let name = if store_ref.ref_name == "HEAD" || store_ref.ref_name.is_empty() {
+            "HEAD".to_owned()
         } else if store_ref.ref_name.starts_with("refs/") {
-            if seen_refs.insert(store_ref.ref_name.clone()) {
-                refs.push(GitRef {
-                    name: store_ref.ref_name.clone(),
-                    sha1: store_ref.sha.clone(),
-                });
-            }
+            store_ref.ref_name.clone()
         } else {
-            let full_ref = format!("refs/heads/{}", store_ref.ref_name);
-            if seen_refs.insert(full_ref.clone()) {
-                refs.push(GitRef {
-                    name: full_ref,
-                    sha1: store_ref.sha.clone(),
-                });
-            }
+            format!("refs/heads/{}", store_ref.ref_name)
+        };
+        if seen_refs.insert(name.clone()) {
+            refs.push(GitRef {
+                name,
+                sha1: store_ref.sha.clone(),
+            });
         }
     }
 
@@ -197,13 +187,8 @@ fn collect_refs_sync(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, Hub
         );
     }
 
+    // Normalized names are HEAD or refs/*, so this also places HEAD first.
     refs.sort_by(|a, b| a.name.cmp(&b.name));
-
-    // Ensure HEAD is first.
-    if let Some(pos) = refs.iter().position(|r| r.name == "HEAD") {
-        let head = refs.remove(pos);
-        refs.insert(0, head);
-    }
 
     Ok(refs)
 }
