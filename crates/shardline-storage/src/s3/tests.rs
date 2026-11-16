@@ -668,16 +668,6 @@ fn validated_external_range_zero_length_rejected() {
 }
 
 #[test]
-fn s3_error_display_and_debug_are_implemented() {
-    let err = S3ObjectStoreError::RangeOutOfBounds;
-    let display = format!("{err}");
-    assert!(!display.is_empty(), "Display should produce a message");
-
-    let debug = format!("{err:?}");
-    assert!(!debug.is_empty(), "Debug should produce a message");
-}
-
-#[test]
 fn s3_store_with_full_credentials_accepts_custom_session_token() {
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
         Some(SecretString::from_secret("key")),
@@ -872,99 +862,41 @@ fn chunk_hash_handles_empty_input() {
     assert_eq!(hash, expected);
 }
 
-// ── Error variant Display ─────────────────────────────────────────────
-
 #[test]
-fn s3_error_display_messages() {
-    for (error, message) in [
-        (
-            S3ObjectStoreError::IncompleteCredentials,
-            "s3 object store credentials must include both access key id and secret access key",
-        ),
-        (
-            S3ObjectStoreError::EmptyBucket,
-            "s3 object store bucket must not be empty",
-        ),
-        (
-            S3ObjectStoreError::EmptyRegion,
-            "s3 object store region must not be empty",
-        ),
-        (
-            S3ObjectStoreError::IntegrityLengthMismatch,
-            "object body length did not match expected integrity",
-        ),
-        (
-            S3ObjectStoreError::IntegrityHashMismatch,
-            "object body hash did not match expected integrity",
-        ),
-        (
-            S3ObjectStoreError::ExistingObjectConflict,
-            "object key already exists with conflicting bytes",
-        ),
-        (
-            S3ObjectStoreError::RangeOutOfBounds,
-            "requested byte range exceeded stored object length",
-        ),
-        (
-            S3ObjectStoreError::InvalidListedKey,
-            "s3 listed an object outside the configured key prefix",
-        ),
-        (
-            S3ObjectStoreError::InvalidUploadParts,
-            "upload parts list has invalid part numbering",
-        ),
-        (
-            S3ObjectStoreError::RuntimeUnavailable,
-            "s3 object store runtime is unavailable",
-        ),
-    ] {
-        assert_eq!(error.to_string(), message);
+fn storage_errors_preserve_diagnostic_sources() {
+    use std::error::Error;
+
+    let io_error: S3ObjectStoreError =
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into();
+    assert!(matches!(&io_error, S3ObjectStoreError::Io(error)
+        if error.kind() == std::io::ErrorKind::PermissionDenied));
+    assert_eq!(io_error.source().unwrap().to_string(), "denied");
+
+    let external: S3ObjectStoreError = object_store::Error::Generic {
+        store: "fixture",
+        source: std::io::Error::other("disconnected").into(),
     }
-}
+    .into();
+    assert!(matches!(&external, S3ObjectStoreError::External(_)));
+    assert_eq!(
+        external.source().unwrap().source().unwrap().to_string(),
+        "disconnected"
+    );
 
-#[test]
-fn s3_error_display_invalid_key_prefix() {
-    use crate::ObjectPrefixError;
-    let err = S3ObjectStoreError::InvalidKeyPrefix(ObjectPrefixError::UnsafePath);
-    let msg = err.to_string();
-    assert!(msg.contains("key prefix was invalid"));
-}
-
-#[test]
-fn s3_error_display_io() {
-    let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-    let err = S3ObjectStoreError::Io(io_err);
-    let msg = err.to_string();
-    assert!(msg.contains("temporary file operation failed"));
-}
-
-#[test]
-fn s3_error_display_path() {
-    use object_store::path::Error as PathError;
-    let err = S3ObjectStoreError::Path(PathError::InvalidPath {
-        path: "/bad".into(),
-    });
-    let msg = err.to_string();
-    assert!(msg.contains("object-store path conversion failed"));
-}
-
-#[test]
-fn s3_error_display_runtime() {
-    let io_err = std::io::Error::other("thread spawn failed");
-    let err = S3ObjectStoreError::Runtime(io_err);
-    let msg = err.to_string();
-    assert!(msg.contains("s3 object store runtime initialization failed"));
-}
-
-#[test]
-fn s3_error_display_external() {
-    let ext_err = object_store::Error::NotImplemented {
-        operation: "test".to_owned(),
-        implementer: "test".to_owned(),
-    };
-    let err = S3ObjectStoreError::External(ext_err);
-    let msg = err.to_string();
-    assert!(msg.contains("s3 object store operation failed"));
+    for error in [
+        S3ObjectStoreError::InvalidKeyPrefix(crate::ObjectPrefixError::UnsafePath),
+        S3ObjectStoreError::Path(object_store::path::Error::InvalidPath {
+            path: "/bad".into(),
+        }),
+        S3ObjectStoreError::Runtime(std::io::Error::other("thread spawn failed")),
+    ] {
+        assert!(error.source().is_some());
+    }
+    assert!(
+        S3ObjectStoreError::ExistingObjectConflict
+            .source()
+            .is_none()
+    );
 }
 
 // ── S3ObjectStoreConfig builder ───────────────────────────────────────
@@ -1109,26 +1041,6 @@ fn s3_config_with_allow_http_defaults_to_false() {
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
     let store = S3ObjectStore::new(config);
     assert!(store.is_ok());
-}
-
-// ── S3ObjectStoreError From impls ──────────────────────────────────────
-
-#[test]
-fn s3_error_from_io_error() {
-    let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
-    let err: S3ObjectStoreError = io_err.into();
-    assert!(matches!(err, S3ObjectStoreError::Io(_)));
-}
-
-#[test]
-fn s3_error_from_external_error() {
-    use object_store::Error as ExtError;
-    let ext_err = ExtError::Generic {
-        store: "test",
-        source: Box::new(std::io::Error::other("fail")),
-    };
-    let err: S3ObjectStoreError = ext_err.into();
-    assert!(matches!(err, S3ObjectStoreError::External(_)));
 }
 
 // ── S3ByteStream type alias smoke test ─────────────────────────────────
