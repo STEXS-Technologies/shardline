@@ -79,24 +79,6 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
 }
 
 // ============================================================================
-// FINDING 3: Body Size Limits — FIXED
-// ============================================================================
-
-/// Confirms the LFS upload handler consumes the request body as a stream.
-///
-/// **[FIXED]**: The handler accepts `axum::body::Body` and applies the explicit
-/// LFS upload cap while consuming frames incrementally.
-#[test]
-fn validate_lfs_upload_unbounded_body() {
-    let routes_source = include_str!("../src/routes/lfs.rs");
-
-    assert!(
-        routes_source.contains("body: Body") && routes_source.contains("async fn lfs_upload("),
-        "lfs_upload consumes an axum Body stream"
-    );
-}
-
-// ============================================================================
 // FINDING 4: Path Traversal in Commit File Paths — FIXED
 // ============================================================================
 

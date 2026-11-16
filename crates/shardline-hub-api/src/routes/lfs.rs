@@ -63,12 +63,12 @@ struct LfsUploadStaging {
 }
 
 impl LfsUploadStaging {
-    async fn new(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
+    fn new(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
         let permit = LFS_UPLOAD_MEMORY_ADMISSION.try_acquire().ok();
-        Self::with_permit(permit, local_root).await
+        Self::with_permit(permit, local_root)
     }
 
-    async fn with_permit(
+    fn with_permit(
         permit: Option<SemaphorePermit<'static>>,
         local_root: Option<&FsPath>,
     ) -> Result<Self, HubApiError> {
@@ -82,10 +82,10 @@ impl LfsUploadStaging {
             });
         }
 
-        Self::file_backed(local_root).await
+        Self::file_backed(local_root)
     }
 
-    async fn file_backed(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
+    fn file_backed(local_root: Option<&FsPath>) -> Result<Self, HubApiError> {
         let temporary = new_lfs_temporary_file(local_root)
             .map_err(|error| HubApiError::CasError(error.to_string()))?;
         let output = staging_output(&temporary)?;
@@ -681,7 +681,7 @@ pub(crate) async fn lfs_upload(
         return Ok(StatusCode::OK);
     }
 
-    let mut staging = LfsUploadStaging::new(state.object_store.local_root()).await?;
+    let mut staging = LfsUploadStaging::new(state.object_store.local_root())?;
     let mut length = 0_usize;
     let mut hasher = blake3::Hasher::new();
     let mut sha256 = Sha256::new();
@@ -1257,7 +1257,7 @@ mod upload_staging_tests {
 
     #[tokio::test]
     async fn small_upload_stays_in_memory() {
-        let mut staging = LfsUploadStaging::new(None).await.unwrap();
+        let mut staging = LfsUploadStaging::new(None).unwrap();
         staging.write_chunk(b"small content").await.unwrap();
         assert_eq!(staging.memory.as_deref(), Some(b"small content".as_slice()));
         assert!(staging.temporary.is_none());
@@ -1265,7 +1265,7 @@ mod upload_staging_tests {
 
     #[tokio::test]
     async fn crossing_the_limit_spills_all_bytes_and_releases_memory_admission() {
-        let mut staging = LfsUploadStaging::new(None).await.unwrap();
+        let mut staging = LfsUploadStaging::new(None).unwrap();
         let prefix = vec![b'a'; LFS_UPLOAD_MEMORY_THRESHOLD];
         staging.write_chunk(&prefix).await.unwrap();
         staging.write_chunk(b"b").await.unwrap();
@@ -1284,16 +1284,16 @@ mod upload_staging_tests {
         assert_eq!(stored[LFS_UPLOAD_MEMORY_THRESHOLD], b'b');
     }
 
-    #[tokio::test]
-    async fn unavailable_memory_admission_uses_tempfile_staging() {
-        let staging = LfsUploadStaging::with_permit(None, None).await.unwrap();
+    #[test]
+    fn unavailable_memory_admission_uses_tempfile_staging() {
+        let staging = LfsUploadStaging::with_permit(None, None).unwrap();
         assert!(staging.memory.is_none());
         assert!(staging.temporary.as_ref().unwrap().path().exists());
     }
 
     #[tokio::test]
     async fn dropping_cancelled_file_backed_upload_removes_partial_staging_file() {
-        let mut staging = LfsUploadStaging::with_permit(None, None).await.unwrap();
+        let mut staging = LfsUploadStaging::with_permit(None, None).unwrap();
         staging.write_chunk(b"partial upload").await.unwrap();
         let temporary_path = staging.temporary.as_ref().unwrap().path().to_owned();
         assert!(temporary_path.exists());
@@ -1311,9 +1311,7 @@ mod upload_staging_tests {
         let parent = tempfile::tempdir().unwrap();
         let local_root = parent.path().join("objects");
         std::fs::create_dir(&local_root).unwrap();
-        let mut staging = LfsUploadStaging::with_permit(None, Some(&local_root))
-            .await
-            .unwrap();
+        let mut staging = LfsUploadStaging::with_permit(None, Some(&local_root)).unwrap();
         staging.write_chunk(b"local LFS payload").await.unwrap();
 
         let temporary_path = staging.temporary.as_ref().unwrap().path();
