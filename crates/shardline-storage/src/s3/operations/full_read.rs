@@ -1,7 +1,7 @@
 //! Discover length and stream a complete object with one GET.
 use std::fs::File;
 
-use object_store::{GetResult, ObjectStoreExt};
+use object_store::GetResult;
 
 use super::{S3ObjectStore, S3ObjectStoreError, copy_snapshot_to_writer};
 use crate::ObjectKey;
@@ -19,10 +19,8 @@ impl S3ObjectStore {
     ) -> Result<Option<Vec<u8>>, S3ObjectStoreError> {
         let location = self.location_for_key(key)?;
         self.block_on_result(async {
-            let result = match self.inner.get(&location).await {
-                Ok(result) => result,
-                Err(object_store::Error::NotFound { .. }) => return Ok(None),
-                Err(error) => return Err(S3ObjectStoreError::External(error)),
+            let Some(result) = self.get_if_present(&location).await? else {
+                return Ok(None);
             };
             read_payload_bytes(result, maximum_bytes).await.map(Some)
         })
@@ -45,10 +43,8 @@ impl S3ObjectStore {
     ) -> Result<Option<u64>, S3ObjectStoreError> {
         let location = self.location_for_key(key)?;
         self.block_on_result(async {
-            let result = match self.inner.get(&location).await {
-                Ok(result) => result,
-                Err(object_store::Error::NotFound { .. }) => return Ok(None),
-                Err(error) => return Err(S3ObjectStoreError::External(error)),
+            let Some(result) = self.get_if_present(&location).await? else {
+                return Ok(None);
             };
             copy_payload_to_writer(result, output).await.map(Some)
         })

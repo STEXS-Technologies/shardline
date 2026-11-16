@@ -458,6 +458,17 @@ impl S3ObjectStore {
         })
     }
 
+    async fn get_if_present(
+        &self,
+        location: &ObjectStorePath,
+    ) -> Result<Option<GetResult>, S3ObjectStoreError> {
+        match self.inner.get(location).await {
+            Ok(result) => Ok(Some(result)),
+            Err(ExternalObjectStoreError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(S3ObjectStoreError::External(error)),
+        }
+    }
+
     /// Copies a complete object into a file with one GET, returning `None` when
     /// the key does not exist. The response metadata and bytes belong to the
     /// same GET, so callers do not need a separate HEAD that could observe a
@@ -490,10 +501,8 @@ impl S3ObjectStore {
     ) -> Result<Option<u64>, S3ObjectStoreError> {
         let location = self.location_for_key(key)?;
         self.block_on_result(async {
-            let result = match self.inner.get(&location).await {
-                Ok(result) => result,
-                Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
-                Err(error) => return Err(S3ObjectStoreError::External(error)),
+            let Some(result) = self.get_if_present(&location).await? else {
+                return Ok(None);
             };
             copy_snapshot_to_writer(result, output, || {
                 S3ObjectStoreError::IntegrityLengthMismatch
@@ -518,12 +527,8 @@ impl S3ObjectStore {
     ) -> Result<Option<(Vec<u8>, u64)>, S3ObjectReadError> {
         let location = self.location_for_key(key)?;
         self.block_on_result(async {
-            let result = match self.inner.get(&location).await {
-                Ok(result) => result,
-                Err(ExternalObjectStoreError::NotFound { .. }) => return Ok(None),
-                Err(error) => {
-                    return Err(S3ObjectStoreError::External(error).into());
-                }
+            let Some(result) = self.get_if_present(&location).await? else {
+                return Ok(None);
             };
             let expected_length = result.meta.size;
             if expected_length > maximum_length {
@@ -1267,12 +1272,8 @@ pub(crate) fn existing_object_outcome_from_file(
     let location = store.location_for_key(key)?;
     // Compare the complete response with the verified local file, retaining
     // the released single full-GET path even for providers without range support.
-    let result = match store.block_on(store.inner.get(&location)) {
-        Ok(result) => result,
-        Err(S3ObjectStoreError::External(ExternalObjectStoreError::NotFound { .. })) => {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
+    let Some(result) = store.block_on_result(store.get_if_present(&location))? else {
+        return Ok(None);
     };
     file_compare::compare_existing_file(store, result, path, integrity).map(Some)
 }
