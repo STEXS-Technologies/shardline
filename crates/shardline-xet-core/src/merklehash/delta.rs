@@ -79,16 +79,13 @@ pub fn file_chunk_hashes(
         return Err(InvalidDelta);
     }
     windows.sort_unstable_by_key(|range| range.start);
-    let mut merged = Vec::<Range<usize>>::new();
-    for window in windows {
-        if let Some(previous) = merged.last_mut()
-            && window.start <= previous.end
-        {
-            previous.end = previous.end.max(window.end);
-            continue;
+    windows.dedup_by(|next, previous| {
+        let overlaps = next.start <= previous.end;
+        if overlaps {
+            previous.end = previous.end.max(next.end);
         }
-        merged.push(window);
-    }
+        overlaps
+    });
     let wire: Vec<_> = chunks
         .iter()
         .map(|(hash, size)| {
@@ -96,9 +93,9 @@ pub fn file_chunk_hashes(
             (WireHash::from(bytes), *size)
         })
         .collect();
-    let mut gaps = Vec::with_capacity(merged.len() + 1);
+    let mut gaps = Vec::with_capacity(windows.len() + 1);
     let mut start = 0;
-    for window in &merged {
+    for window in &windows {
         gaps.push(start..window.start);
         start = window.end;
     }
@@ -133,7 +130,7 @@ pub fn file_chunk_hashes(
     Ok(FileChunkHashesResponse {
         total_chunks: chunks.len(),
         file_size,
-        windows: merged
+        windows: windows
             .iter()
             .map(|window| DeltaWindow {
                 dirty_byte_range: [boundaries[window.start], boundaries[window.end]],
@@ -199,9 +196,22 @@ mod tests {
     fn overlap_clamping_and_empty_gap_contract() {
         let chunks = chunks();
         let segments = std::slice::from_ref(&(0..80)).to_vec();
-        let response = file_chunk_hashes(&chunks, &segments, &[7999..9000, 0..10, 8..150]).unwrap();
+        let response = file_chunk_hashes(
+            &chunks,
+            &segments,
+            &[
+                7999..9000,
+                201..300,
+                0..10,
+                8..150,
+                100..120,
+                299..400,
+                0..10,
+            ],
+        )
+        .unwrap();
         assert_eq!(response.windows.len(), 2);
-        assert_eq!(response.windows[0].dirty_byte_range, [0, 200]);
+        assert_eq!(response.windows[0].dirty_byte_range, [0, 400]);
         assert_eq!(response.windows[1].dirty_byte_range, [7900, 8000]);
         assert!(response.hash_ranges[0].is_none());
         assert!(response.hash_ranges[2].is_none());
