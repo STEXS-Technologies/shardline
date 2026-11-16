@@ -62,6 +62,18 @@ impl CacheInner {
         }
     }
 
+    pub(super) fn live_payload(
+        &self,
+        key: &ReconstructionCacheKey,
+        now: Instant,
+        ttl: std::time::Duration,
+    ) -> Option<Vec<u8>> {
+        self.entries
+            .get(key)
+            .filter(|entry| entry.is_live(now, ttl))
+            .map(|entry| entry.payload.as_ref().clone())
+    }
+
     pub(super) fn store(
         &mut self,
         key: &ReconstructionCacheKey,

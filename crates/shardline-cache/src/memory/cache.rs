@@ -127,10 +127,8 @@ impl MemoryReconstructionCache {
         {
             let inner = self.inner.read().await;
             let now = Instant::now();
-            if let Some(entry) = inner.entries.get(key)
-                && entry.is_live(now, self.ttl)
-            {
-                return Ok(Some(entry.payload.as_ref().clone()));
+            if let Some(payload) = inner.live_payload(key, now, self.ttl) {
+                return Ok(Some(payload));
             }
         }
 
@@ -140,10 +138,8 @@ impl MemoryReconstructionCache {
             let now = Instant::now();
 
             // Re-check after acquiring the write lock.
-            if let Some(entry) = inner.entries.get(key)
-                && entry.is_live(now, self.ttl)
-            {
-                return Ok(Some(entry.payload.as_ref().clone()));
+            if let Some(payload) = inner.live_payload(key, now, self.ttl) {
+                return Ok(Some(payload));
             }
 
             // Check if someone else is already loading this key. The loading
@@ -240,10 +236,8 @@ impl MemoryReconstructionCache {
             {
                 let inner = self.inner.read().await;
                 let now = Instant::now();
-                if let Some(entry) = inner.entries.get(key)
-                    && entry.is_live(now, self.ttl)
-                {
-                    return Some(entry.payload.as_ref().clone());
+                if let Some(payload) = inner.live_payload(key, now, self.ttl) {
+                    return Some(payload);
                 }
                 if !self
                     .loading
@@ -269,10 +263,8 @@ impl MemoryReconstructionCache {
                     // wakeup).
                     let inner = self.inner.read().await;
                     let now = Instant::now();
-                    if let Some(entry) = inner.entries.get(key)
-                        && entry.is_live(now, self.ttl)
-                    {
-                        return Some(entry.payload.as_ref().clone());
+                    if let Some(payload) = inner.live_payload(key, now, self.ttl) {
+                        return Some(payload);
                     }
                     // Aliveness re-check: a running loader refreshes its stamp
                     // at intervals, so a fresh stamp means it is slow but alive.
@@ -449,22 +441,14 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             loop {
                 {
                     let inner = self.inner.read().await;
-                    if let Some(entry) = inner.entries.get(key)
-                        && entry.is_live(Instant::now(), self.ttl)
-                    {
-                        return Ok(ReconstructionCacheLookup::Hit(
-                            entry.payload.as_ref().clone(),
-                        ));
+                    if let Some(payload) = inner.live_payload(key, Instant::now(), self.ttl) {
+                        return Ok(ReconstructionCacheLookup::Hit(payload));
                     }
                 }
                 let notify = {
                     let mut inner = self.inner.write().await;
-                    if let Some(entry) = inner.entries.get(key)
-                        && entry.is_live(Instant::now(), self.ttl)
-                    {
-                        return Ok(ReconstructionCacheLookup::Hit(
-                            entry.payload.as_ref().clone(),
-                        ));
+                    if let Some(payload) = inner.live_payload(key, Instant::now(), self.ttl) {
+                        return Ok(ReconstructionCacheLookup::Hit(payload));
                     }
                     let mut loading = self
                         .loading
@@ -557,10 +541,8 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             // Fast path: serve a live cached entry without a write lock.
             {
                 let inner = self.inner.read().await;
-                if let Some(entry) = inner.entries.get(key)
-                    && entry.is_live(now, self.ttl)
-                {
-                    return Ok(Some(entry.payload.as_ref().clone()));
+                if let Some(payload) = inner.live_payload(key, now, self.ttl) {
+                    return Ok(Some(payload));
                 }
                 // No early return on a miss: a cold miss (or an expired entry)
                 // falls through to the write-lock path, which registers a
@@ -570,10 +552,8 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
 
             let mut inner = self.inner.write().await;
 
-            if let Some(entry) = inner.entries.get(key)
-                && entry.is_live(now, self.ttl)
-            {
-                return Ok(Some(entry.payload.as_ref().clone()));
+            if let Some(payload) = inner.live_payload(key, now, self.ttl) {
+                return Ok(Some(payload));
             }
 
             let existing_notify = {
