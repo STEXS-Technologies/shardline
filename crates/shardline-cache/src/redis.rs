@@ -213,23 +213,23 @@ impl RedisReconstructionCache {
             |scope| {
                 let revision = scope
                     .revision()
-                    .map_or_else(|| "head".to_owned(), encode_component);
+                    .map_or_else(|| "head".to_owned(), hex::encode);
                 format!(
                     "{}:{}:{}:{}",
                     scope.provider(),
-                    encode_component(scope.owner()),
-                    encode_component(scope.repo()),
+                    hex::encode(scope.owner()),
+                    hex::encode(scope.repo()),
                     revision
                 )
             },
         );
         let content = key
             .content_hash()
-            .map_or_else(|| "latest".to_owned(), encode_component);
+            .map_or_else(|| "latest".to_owned(), hex::encode);
 
         format!(
             "{RECONSTRUCTION_CACHE_PREFIX}:{scope}:{content}:{}",
-            encode_component(key.file_id())
+            hex::encode(key.file_id())
         )
     }
 
@@ -527,10 +527,6 @@ fn expiration_error(error: redis::RedisError) -> ReconstructionCacheError {
     } else {
         ReconstructionCacheError::Redis(error)
     }
-}
-
-fn encode_component(value: &str) -> String {
-    hex::encode(value.as_bytes())
 }
 
 #[cfg(test)]
@@ -995,42 +991,6 @@ mod tests {
         let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
         let result = RedisReconstructionCache::new("redis+unix:///tmp/redis.sock", ttl_seconds);
         assert!(result.is_ok());
-    }
-
-    // ── encode_component ───────────────────────────────────────────────────
-
-    #[test]
-    fn encode_component_hex_encodes_input() {
-        assert_eq!(super::encode_component("hello"), hex::encode("hello"));
-    }
-
-    #[test]
-    fn encode_component_handles_special_characters() {
-        assert_eq!(
-            super::encode_component("file name!"),
-            hex::encode("file name!")
-        );
-        assert_eq!(super::encode_component("a/b:c"), hex::encode("a/b:c"));
-    }
-
-    #[test]
-    fn encode_component_handles_unicode() {
-        assert_eq!(super::encode_component("héllo"), hex::encode("héllo"));
-    }
-
-    #[test]
-    fn encode_component_empty_string() {
-        assert_eq!(super::encode_component(""), hex::encode(""));
-    }
-
-    #[test]
-    fn encode_component_handles_control_characters_in_string() {
-        // encode_component takes &str so we can pass strings with escaped chars
-        assert_eq!(super::encode_component("a\tb"), hex::encode("a\tb"));
-        assert_eq!(
-            super::encode_component("line1\nline2"),
-            hex::encode("line1\nline2")
-        );
     }
 
     // ── Clone ────────────────────────────────────────────────────────────
