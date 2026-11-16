@@ -241,29 +241,7 @@ mod tests {
 
     #[test]
     fn gitea_adapter_repository_access_changes() {
-        for (action, delivery_id) in [
-            ("transferred", "delivery-4"),
-            ("edited", "delivery-edit"),
-            ("archived", "delivery-arch"),
-            ("unarchived", "delivery-unarch"),
-            ("privatized", "delivery-priv"),
-            ("publicized", "delivery-pub"),
-        ] {
-            let adapter = adapter().unwrap();
-            let body = serde_json::to_vec(&serde_json::json!({
-                "action": action,
-                "repository": {"full_name": "team/assets"},
-            }))
-            .unwrap();
-            let signature = signature(&body);
-            let request =
-                WebhookRequest::new("repository", delivery_id, signature.as_deref(), &body);
-            let result = adapter.parse_webhook(request);
-            assert!(
-                matches!(&result, Ok(Some(event)) if event.kind() == &RepositoryWebhookEventKind::AccessChanged),
-                "action {action}: {result:?}"
-            );
-        }
+        crate::provider::test_support::assert_repository_access_changes(&adapter().unwrap());
     }
 
     #[test]
@@ -391,53 +369,7 @@ mod tests {
 
     #[test]
     fn gitea_repository_invalid_payloads() {
-        for (case, delivery, body) in [
-            (
-                "repository_name_only_missing_owner",
-                "delivery-noowner",
-                br#"{
-            "ref":"refs/heads/main",
-            "repository":{"name":"assets"}
-        }"#
-                .as_slice(),
-            ),
-            (
-                "repository_missing_full_name_and_name",
-                "delivery-noname",
-                br#"{
-            "ref":"refs/heads/main",
-            "repository":{"owner":{"username":"team"}}
-        }"#
-                .as_slice(),
-            ),
-            (
-                "repository_missing_owner_fields",
-                "delivery-nofields",
-                br#"{
-            "ref":"refs/heads/main",
-            "repository":{"name":"assets","owner":{}}
-        }"#
-                .as_slice(),
-            ),
-            (
-                "adapter_push_with_ref_but_no_repository_name",
-                "delivery-norepo",
-                br#"{
-            "ref":"refs/heads/main",
-            "repository":{"owner":{"username":"team"}}
-        }"#
-                .as_slice(),
-            ),
-        ] {
-            let adapter = adapter().unwrap();
-            let signature = signature(body);
-            let request = WebhookRequest::new("push", delivery, signature.as_deref(), body);
-            let result = adapter.parse_webhook(request);
-            assert!(
-                matches!(result, Err(BuiltInProviderError::InvalidRepositoryPayload)),
-                "case {case}: {result:?}"
-            );
-        }
+        crate::provider::test_support::assert_invalid_repository_payloads(&adapter().unwrap());
     }
 
     #[test]

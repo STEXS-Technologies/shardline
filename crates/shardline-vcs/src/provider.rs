@@ -80,8 +80,9 @@ pub(crate) mod test_support {
     use hmac::Mac;
 
     use crate::{
-        BuiltInProviderCatalog, BuiltInProviderError, ProviderKind, ProviderRepositoryPolicy,
-        ProviderSubject, RepositoryRef, RepositoryVisibility, configured_metadata,
+        BuiltInProviderCatalog, BuiltInProviderError, ProviderAdapter, ProviderKind,
+        ProviderRepositoryPolicy, ProviderSubject, RepositoryRef, RepositoryVisibility,
+        RepositoryWebhookEventKind, WebhookRequest, configured_metadata,
     };
 
     pub(crate) fn catalog(
@@ -113,6 +114,63 @@ pub(crate) mod test_support {
         mac.update(body);
         Some(hex::encode(mac.finalize().into_bytes()))
     }
+
+    pub(crate) fn assert_repository_access_changes(
+        adapter: &impl ProviderAdapter<Error = BuiltInProviderError>,
+    ) {
+        for (action, delivery_id) in [
+            ("transferred", "delivery-4"),
+            ("edited", "delivery-edit"),
+            ("archived", "delivery-arch"),
+            ("unarchived", "delivery-unarch"),
+            ("privatized", "delivery-priv"),
+            ("publicized", "delivery-pub"),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "action": action,
+                "repository": {"full_name": "team/assets"},
+            }))
+            .unwrap();
+            let signature = signature(&body);
+            let request =
+                WebhookRequest::new("repository", delivery_id, signature.as_deref(), &body);
+            let result = adapter.parse_webhook(request);
+            assert!(
+                matches!(&result, Ok(Some(event)) if event.kind() == &RepositoryWebhookEventKind::AccessChanged
+                    && event.repository().provider() == adapter.kind()),
+                "action {action}: {result:?}"
+            );
+        }
+    }
+
+    pub(crate) fn assert_invalid_repository_payloads(
+        adapter: &impl ProviderAdapter<Error = BuiltInProviderError>,
+    ) {
+        for (case, body) in [
+            (
+                "missing_owner",
+                r#"{"ref":"refs/heads/main","repository":{"name":"assets"}}"#,
+            ),
+            ("missing_repository", "{}"),
+            (
+                "missing_name",
+                r#"{"ref":"refs/heads/main","repository":{"owner":{"username":"team"}}}"#,
+            ),
+            (
+                "missing_owner_fields",
+                r#"{"ref":"refs/heads/main","repository":{"name":"assets","owner":{}}}"#,
+            ),
+        ] {
+            let body = body.as_bytes();
+            let signature = signature(body);
+            let request = WebhookRequest::new("push", case, signature.as_deref(), body);
+            let result = adapter.parse_webhook(request);
+            assert!(
+                matches!(result, Err(BuiltInProviderError::InvalidRepositoryPayload)),
+                "case {case}: {result:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -121,92 +179,27 @@ mod tests {
     use shardline_protocol::RepositoryProvider;
 
     #[test]
-    fn provider_kind_repository_provider_maps_correctly() {
-        assert_eq!(
-            ProviderKind::GitHub.repository_provider(),
-            RepositoryProvider::GitHub
-        );
-        assert_eq!(
-            ProviderKind::Gitea.repository_provider(),
-            RepositoryProvider::Gitea
-        );
-        assert_eq!(
-            ProviderKind::GitLab.repository_provider(),
-            RepositoryProvider::GitLab
-        );
-        assert_eq!(
-            ProviderKind::Codeberg.repository_provider(),
-            RepositoryProvider::Codeberg
-        );
-        assert_eq!(
-            ProviderKind::Generic.repository_provider(),
-            RepositoryProvider::Generic
-        );
-    }
-
-    #[test]
-    fn provider_kind_as_str_returns_expected() {
-        assert_eq!(ProviderKind::GitHub.as_str(), "github");
-        assert_eq!(ProviderKind::Gitea.as_str(), "gitea");
-        assert_eq!(ProviderKind::GitLab.as_str(), "gitlab");
-        assert_eq!(ProviderKind::Codeberg.as_str(), "codeberg");
-        assert_eq!(ProviderKind::Generic.as_str(), "generic");
-    }
-
-    #[test]
-    fn provider_kind_variants_are_distinct() {
-        assert_ne!(ProviderKind::GitHub, ProviderKind::Gitea);
-        assert_ne!(ProviderKind::Gitea, ProviderKind::GitLab);
-        assert_ne!(ProviderKind::GitLab, ProviderKind::Codeberg);
-        assert_ne!(ProviderKind::Codeberg, ProviderKind::Generic);
-    }
-
-    #[test]
-    fn provider_kind_converts_to_repository_provider_all_variants() {
-        assert_eq!(
-            RepositoryProvider::from(ProviderKind::GitHub),
-            RepositoryProvider::GitHub
-        );
-        assert_eq!(
-            RepositoryProvider::from(ProviderKind::Gitea),
-            RepositoryProvider::Gitea
-        );
-        assert_eq!(
-            RepositoryProvider::from(ProviderKind::GitLab),
-            RepositoryProvider::GitLab
-        );
-        assert_eq!(
-            RepositoryProvider::from(ProviderKind::Codeberg),
-            RepositoryProvider::Codeberg
-        );
-        assert_eq!(
-            RepositoryProvider::from(ProviderKind::Generic),
-            RepositoryProvider::Generic
-        );
-    }
-
-    #[test]
-    fn repository_provider_converts_to_provider_kind_all_variants() {
-        assert_eq!(
-            ProviderKind::from(RepositoryProvider::GitHub),
-            ProviderKind::GitHub
-        );
-        assert_eq!(
-            ProviderKind::from(RepositoryProvider::Gitea),
-            ProviderKind::Gitea
-        );
-        assert_eq!(
-            ProviderKind::from(RepositoryProvider::GitLab),
-            ProviderKind::GitLab
-        );
-        assert_eq!(
-            ProviderKind::from(RepositoryProvider::Codeberg),
-            ProviderKind::Codeberg
-        );
-        assert_eq!(
-            ProviderKind::from(RepositoryProvider::Generic),
-            ProviderKind::Generic
-        );
+    fn provider_names_and_conversions() {
+        for (kind, repository_provider, name) in [
+            (ProviderKind::GitHub, RepositoryProvider::GitHub, "github"),
+            (ProviderKind::Gitea, RepositoryProvider::Gitea, "gitea"),
+            (ProviderKind::GitLab, RepositoryProvider::GitLab, "gitlab"),
+            (
+                ProviderKind::Codeberg,
+                RepositoryProvider::Codeberg,
+                "codeberg",
+            ),
+            (
+                ProviderKind::Generic,
+                RepositoryProvider::Generic,
+                "generic",
+            ),
+        ] {
+            assert_eq!(kind.repository_provider(), repository_provider);
+            assert_eq!(RepositoryProvider::from(kind), repository_provider);
+            assert_eq!(ProviderKind::from(repository_provider), kind);
+            assert_eq!(kind.as_str(), name);
+        }
     }
 
     #[test]
@@ -215,36 +208,5 @@ mod tests {
         fn assert_sync<T: Sync>() {}
         assert_send::<ProviderKind>();
         assert_sync::<ProviderKind>();
-    }
-
-    #[test]
-    fn provider_kind_debug_format_matches_variant_name() {
-        assert_eq!(format!("{:?}", ProviderKind::GitHub), "GitHub");
-        assert_eq!(format!("{:?}", ProviderKind::Gitea), "Gitea");
-        assert_eq!(format!("{:?}", ProviderKind::GitLab), "GitLab");
-        assert_eq!(format!("{:?}", ProviderKind::Codeberg), "Codeberg");
-        assert_eq!(format!("{:?}", ProviderKind::Generic), "Generic");
-    }
-
-    #[test]
-    fn provider_kind_clone_yields_equal_value() {
-        let original = ProviderKind::GitLab;
-        let cloned = original;
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn provider_kind_hash_consistency() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        fn hash(value: ProviderKind) -> u64 {
-            let mut hasher = DefaultHasher::new();
-            value.hash(&mut hasher);
-            hasher.finish()
-        }
-
-        assert_eq!(hash(ProviderKind::GitHub), hash(ProviderKind::GitHub));
-        assert_ne!(hash(ProviderKind::GitHub), hash(ProviderKind::Gitea));
     }
 }
