@@ -27,6 +27,7 @@ use super::{
     default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
+    jwt_keys::is_secure_url as is_secure_jwks_url,
     reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
     server_role::ServerRole,
 };
@@ -708,30 +709,6 @@ pub(crate) fn deployment_mode_from_env() -> Result<Option<DeploymentMode>, Serve
 /// exemption): production OIDC issuers must always be https.
 fn is_https_url(value: &str) -> bool {
     url::Url::parse(value).is_ok_and(|parsed| parsed.scheme() == "https")
-}
-
-/// Returns true when `value` is an https URL, or an http URL whose host is
-/// loopback (`127.0.0.1`, `::1`, or `localhost`).
-///
-/// JWKS key transport must be encrypted (RFC 8414 §2); plain-http is
-/// tolerated only for loopback hosts so local development and test tooling
-/// (which cannot serve TLS) keep working. Non-loopback http is rejected.
-fn is_secure_jwks_url(value: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(value) else {
-        return false;
-    };
-    if parsed.scheme() == "https" {
-        return true;
-    }
-    if parsed.scheme() != "http" {
-        return false;
-    }
-    match parsed.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        None => false,
-    }
 }
 
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {
