@@ -520,40 +520,18 @@ mod tests {
         matchers::{method, path},
     };
 
-    /// Issues one probe GET to `/probe` with `token`, mapping the status to a
-    /// [`TransferError`] (including `Retry-After`).
+    /// Uses the real bounded transport, status mapping, and Retry-After parser.
     async fn probe(server: &MockServer, token: &str) -> Result<(), TransferError> {
-        let response = reqwest::Client::new()
-            .get(format!("{}/probe", server.uri()))
-            .bearer_auth(token)
-            .send()
-            .await?;
-        if response.status().is_success() {
-            return Ok(());
-        }
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok());
-        let status = response.status();
-        let message = response.text().await.unwrap_or_default();
-        Err(match status.as_u16() {
-            400 => TransferError::BadRequest(message),
-            401 => TransferError::Unauthorized(message),
-            403 => TransferError::Forbidden(message),
-            404 => TransferError::NotFound(message),
-            416 => TransferError::RangeNotSatisfiable(message),
-            429 => TransferError::TooManyRequests {
-                message,
-                retry_after,
-            },
-            code => TransferError::HttpStatus {
-                status: code,
-                message,
-                retry_after,
-            },
-        })
+        crate::transfer::TransferClient::new(reqwest::Client::new())
+            .request_raw(
+                &reqwest::Method::GET,
+                &format!("{}/probe", server.uri()),
+                token,
+                None,
+                1024,
+            )
+            .await
+            .map(|_response| ())
     }
 
     fn retry_context(policy: RetryPolicy, tokens: Option<TokenService>) -> RetryContext {
