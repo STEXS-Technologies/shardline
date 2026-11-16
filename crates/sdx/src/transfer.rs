@@ -304,10 +304,10 @@ impl TransferClient {
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_owned();
+            .filter(|value| value.starts_with("multipart/byteranges"))
+            .map(str::to_owned);
 
-        if content_type.starts_with("multipart/byteranges") {
+        if let Some(content_type) = content_type {
             let body = read_response_bounded(response, body_limit).await?;
             let parts = multipart_slices(&content_type, &body)?;
             let (first_range, _) = parts.first().ok_or_else(|| {
