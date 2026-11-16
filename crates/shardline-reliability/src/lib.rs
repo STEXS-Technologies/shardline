@@ -142,7 +142,7 @@ pub use task_artifact::{
     MaintenanceArtifactProof, sign_maintenance_artifact, verify_maintenance_artifact,
 };
 #[cfg(feature = "task-journal")]
-pub use task_journal::SqliteTaskJournal;
+pub use task_journal::{SqliteTaskJournal, task_record_blob};
 #[cfg(feature = "task-journal")]
 pub use task_supervision::{LocalTaskSupervisor, restore_local_task_supervisor};
 pub use webhook_evidence::{

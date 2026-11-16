@@ -569,22 +569,7 @@ impl TaskEvidenceStore {
             projection
                 .apply(&record)
                 .map_err(|_error| invalid("task history failed semantic verification"))?;
-            let reference = match record.event {
-                TaskExecutionEvent::IntentCommitted { input, .. } => Some(input),
-                TaskExecutionEvent::CheckpointCommitted { checkpoint }
-                | TaskExecutionEvent::CheckpointMigrated { checkpoint, .. } => Some(checkpoint),
-                TaskExecutionEvent::Completed { output }
-                | TaskExecutionEvent::Reconciled {
-                    result: penelope::core::task::Reconciliation::Completed { output, .. },
-                } => Some(output),
-                TaskExecutionEvent::Started
-                | TaskExecutionEvent::FaultObserved { .. }
-                | TaskExecutionEvent::ReconciliationRequired
-                | TaskExecutionEvent::Reconciled { .. }
-                | TaskExecutionEvent::RecoveryPlanned { .. }
-                | TaskExecutionEvent::Restarted
-                | TaskExecutionEvent::RecoveryExhausted => None,
-            };
+            let reference = shardline_reliability::task_record_blob(&record);
             if let Some(reference) = reference {
                 let body = self.blob(identity, reference, &mut blobs)?;
                 if !matches!(record.event, TaskExecutionEvent::IntentCommitted { .. }) {

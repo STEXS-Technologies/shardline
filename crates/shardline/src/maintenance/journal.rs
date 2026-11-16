@@ -206,22 +206,7 @@ pub(super) fn retry_exports(
                 &serde_json::to_vec(&identity)?,
             )?;
             for record in records {
-                let reference = match record.event {
-                    TaskExecutionEvent::IntentCommitted { input, .. } => Some(input),
-                    TaskExecutionEvent::CheckpointCommitted { checkpoint }
-                    | TaskExecutionEvent::CheckpointMigrated { checkpoint, .. } => Some(checkpoint),
-                    TaskExecutionEvent::Completed { output }
-                    | TaskExecutionEvent::Reconciled {
-                        result: penelope::core::task::Reconciliation::Completed { output, .. },
-                    } => Some(output),
-                    TaskExecutionEvent::Started
-                    | TaskExecutionEvent::FaultObserved { .. }
-                    | TaskExecutionEvent::ReconciliationRequired
-                    | TaskExecutionEvent::Reconciled { .. }
-                    | TaskExecutionEvent::RecoveryPlanned { .. }
-                    | TaskExecutionEvent::Restarted
-                    | TaskExecutionEvent::RecoveryExhausted => None,
-                };
+                let reference = shardline_reliability::task_record_blob(&record);
                 let mut buffer = vec![0; 65536];
                 let bytes = if let Some(reference) = reference {
                     let length = journal.read_blob(identity.scope, reference, &mut buffer)?;

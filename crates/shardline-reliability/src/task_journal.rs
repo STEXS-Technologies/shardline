@@ -38,7 +38,11 @@ pub(crate) fn decode(bytes: &[u8], checksum: &[u8]) -> Result<TaskRecord, TaskPo
     serde_json::from_slice(bytes).map_err(|_error| TaskPortError::Corrupt)
 }
 
-const fn reference(record: &TaskRecord) -> Option<BlobRef> {
+/// Returns the input, checkpoint, or completed-output blob referenced by a task record.
+///
+/// This only selects the reference; callers must still verify the record and blob.
+#[must_use]
+pub const fn task_record_blob(record: &TaskRecord) -> Option<BlobRef> {
     match record.event {
         TaskExecutionEvent::IntentCommitted { input, .. } => Some(input),
         TaskExecutionEvent::CheckpointCommitted { checkpoint }
@@ -247,7 +251,7 @@ impl TaskJournal for SqliteTaskJournal {
                 .apply(record)
                 .map_err(|_error| TaskPortError::Conflict)?;
         }
-        match (reference(record), blob) {
+        match (task_record_blob(record), blob) {
             (Some(reference), supplied) => {
                 if let Some(bytes) = supplied {
                     verify_blob(reference, bytes)?;
