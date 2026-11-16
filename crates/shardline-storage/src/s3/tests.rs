@@ -400,14 +400,6 @@ fn synchronous_s3_listing_keeps_non_send_callbacks_on_caller_thread() {
 }
 
 #[test]
-fn s3_config_normalizes_key_prefix() {
-    let config = S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
-        .with_key_prefix(Some("/tenant-a/"));
-
-    assert_eq!(config.key_prefix(), Some("tenant-a"));
-}
-
-#[test]
 fn s3_location_applies_key_prefix() {
     let store = S3ObjectStore::new(
         S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
@@ -429,33 +421,17 @@ fn s3_location_applies_key_prefix() {
 }
 
 #[test]
-fn s3_store_rejects_traversal_key_prefix() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true)
-            .with_key_prefix(Some("../tenant-b")),
-    );
-
-    assert!(matches!(
-        store,
-        Err(super::S3ObjectStoreError::InvalidKeyPrefix(_))
-    ));
-}
-
-#[test]
-fn s3_store_rejects_dot_segment_key_prefix_after_normalization() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true)
-            .with_key_prefix(Some("/tenant-a/./objects/")),
-    );
-
-    assert!(matches!(
-        store,
-        Err(super::S3ObjectStoreError::InvalidKeyPrefix(_))
-    ));
+fn s3_store_rejects_unsafe_prefixes_after_normalization() {
+    for prefix in ["../tenant-b", "/tenant-a/./objects/"] {
+        let config = S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
+            .with_key_prefix(Some(prefix));
+        assert!(matches!(
+            S3ObjectStore::new(config),
+            Err(S3ObjectStoreError::InvalidKeyPrefix(
+                crate::ObjectPrefixError::UnsafePath
+            ))
+        ));
+    }
 }
 
 #[test]
@@ -536,13 +512,6 @@ async fn stream_payload_for_range_preserves_streamed_bytes() {
     }
 
     assert_eq!(observed, b"abcd");
-}
-
-#[test]
-fn s3_store_rejects_empty_bucket() {
-    let config = S3ObjectStoreConfig::new(String::new(), "us-east-1".to_owned());
-    let result = S3ObjectStore::new(config);
-    assert!(matches!(result, Err(S3ObjectStoreError::EmptyBucket)));
 }
 
 #[test]
@@ -789,38 +758,47 @@ fn normalize_prefix_contract() {
 // ── validate_config ───────────────────────────────────────────────────
 
 #[test]
-fn validate_config_rejects_empty_region() {
-    let config = S3ObjectStoreConfig::new("bucket".to_owned(), String::new());
-    let result = S3ObjectStore::new(config);
-    assert!(matches!(result, Err(S3ObjectStoreError::EmptyRegion)));
-}
-
-#[test]
-fn validate_config_rejects_empty_bucket() {
-    let config = S3ObjectStoreConfig::new(String::new(), "region".to_owned());
-    let result = S3ObjectStore::new(config);
-    assert!(matches!(result, Err(S3ObjectStoreError::EmptyBucket)));
+fn s3_store_rejects_blank_bucket_and_region() {
+    for blank in ["", "   ", "\t\n"] {
+        assert!(matches!(
+            S3ObjectStore::new(S3ObjectStoreConfig::new(
+                blank.to_owned(),
+                "us-east-1".to_owned()
+            )),
+            Err(S3ObjectStoreError::EmptyBucket)
+        ));
+        assert!(matches!(
+            S3ObjectStore::new(S3ObjectStoreConfig::new(
+                "bucket".to_owned(),
+                blank.to_owned()
+            )),
+            Err(S3ObjectStoreError::EmptyRegion)
+        ));
+    }
+    assert!(matches!(
+        S3ObjectStore::new(S3ObjectStoreConfig::new(String::new(), String::new())),
+        Err(S3ObjectStoreError::EmptyBucket)
+    ));
 }
 
 // ── S3ObjectStoreConfig accessors ──────────────────────────────────────
 
 #[test]
-fn s3_config_bucket_accessor() {
+fn s3_config_defaults_and_prefix_accessors() {
     let config = S3ObjectStoreConfig::new("my-bucket".to_owned(), "us-east-1".to_owned());
     assert_eq!(config.bucket(), "my-bucket");
-}
-
-#[test]
-fn s3_config_bucket_accessor_with_prefix() {
-    let config =
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_key_prefix(Some("pfx"));
-    assert_eq!(config.key_prefix(), Some("pfx"));
-}
-
-#[test]
-fn s3_config_bucket_accessor_no_prefix() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
     assert_eq!(config.key_prefix(), None);
+    assert!(!config.allow_http);
+    assert!(!config.virtual_hosted_style_request);
+    for (prefix, expected) in [
+        (Some("pfx"), Some("pfx")),
+        (Some("/tenant-a/"), Some("tenant-a")),
+        (None, None),
+    ] {
+        let configured = config.clone().with_key_prefix(prefix);
+        assert_eq!(configured.bucket(), "my-bucket");
+        assert_eq!(configured.key_prefix(), expected);
+    }
 }
 
 // ── S3ObjectStoreConfig Debug redaction ────────────────────────────────
@@ -946,20 +924,6 @@ fn temp_key_for_differs_on_subsequent_calls() {
 // ── validate_config whitespace edge cases ──────────────────────────────
 
 #[test]
-fn validate_config_rejects_whitespace_bucket() {
-    let config = S3ObjectStoreConfig::new("   ".to_owned(), "us-east-1".to_owned());
-    let result = S3ObjectStore::new(config);
-    assert!(matches!(result, Err(S3ObjectStoreError::EmptyBucket)));
-}
-
-#[test]
-fn validate_config_rejects_whitespace_region() {
-    let config = S3ObjectStoreConfig::new("bucket".to_owned(), "   ".to_owned());
-    let result = S3ObjectStore::new(config);
-    assert!(matches!(result, Err(S3ObjectStoreError::EmptyRegion)));
-}
-
-#[test]
 fn validate_config_accepts_valid_config() {
     let config = S3ObjectStoreConfig::new("bucket".to_owned(), "region".to_owned());
     let result = S3ObjectStore::new(config);
@@ -1034,13 +998,6 @@ fn s3_config_debug_without_credentials() {
     assert!(rendered.contains("allow_http"));
     assert!(rendered.contains("region"));
     assert!(rendered.contains("key_prefix"));
-}
-
-#[test]
-fn s3_config_with_allow_http_defaults_to_false() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
-    let store = S3ObjectStore::new(config);
-    assert!(store.is_ok());
 }
 
 // ── S3ByteStream type alias smoke test ─────────────────────────────────
