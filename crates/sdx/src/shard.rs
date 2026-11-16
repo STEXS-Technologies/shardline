@@ -217,20 +217,16 @@ pub fn parse_shard_xorbs(body: &[u8]) -> Result<Vec<ShardXorb>, SdxError> {
         if file_header.is_bookend() {
             break;
         }
-        let entry_size = entry_size(version);
-        skip_shard_bytes(
-            &mut reader,
-            file_header.num_entries.saturating_mul(entry_size),
-        )?;
-        if file_header.contains_verification() {
-            skip_shard_bytes(
-                &mut reader,
-                file_header.num_entries.saturating_mul(entry_size),
-            )?;
-        }
-        if file_header.contains_metadata_ext() {
-            skip_shard_bytes(&mut reader, entry_size)?;
-        }
+        let records_per_segment = if file_header.contains_verification() {
+            2
+        } else {
+            1
+        };
+        let records = file_header
+            .num_entries
+            .saturating_mul(records_per_segment)
+            .saturating_add(u64::from(file_header.contains_metadata_ext()));
+        skip_shard_bytes(&mut reader, records.saturating_mul(entry_size(version)))?;
     }
 
     let mut xorbs = Vec::new();
@@ -536,6 +532,50 @@ mod tests {
                 chunks: vec![expected],
             }]
         );
+    }
+
+    #[test]
+    fn shard_parser_skips_optional_file_records_in_both_layouts() {
+        for version in [2_u64, 3] {
+            let width = super::entry_size(version) as usize;
+            for (flags, records_per_segment, extension) in [
+                (0_u32, 1, 0),
+                (1 << 31, 2, 0),
+                (1 << 30, 1, 1),
+                ((1 << 31) | (1 << 30), 2, 1),
+            ] {
+                for count in [0, 2] {
+                    let mut bytes = Vec::from(SHARD_HEADER_TAG);
+                    bytes.extend_from_slice(&version.to_le_bytes());
+                    bytes.extend_from_slice(&SHARD_FOOTER_SIZE.to_le_bytes());
+                    let header_start = bytes.len();
+                    bytes.extend_from_slice(&[1; 32]);
+                    bytes.extend_from_slice(&flags.to_le_bytes());
+                    if version == 2 {
+                        bytes.extend_from_slice(&(count as u32).to_le_bytes());
+                    } else {
+                        bytes.extend_from_slice(&(count as u64).to_le_bytes());
+                    }
+                    bytes.resize(header_start + width, 0);
+                    bytes.resize(
+                        bytes.len() + (count * records_per_segment + extension) * width,
+                        0,
+                    );
+                    // File and xorb bookends follow the complete optional body.
+                    for _ in 0..2 {
+                        bytes.extend_from_slice(&[255; 32]);
+                        bytes.resize(bytes.len() + width - 32, 0);
+                    }
+                    assert!(parse_shard_xorbs(&bytes).unwrap().is_empty());
+                    for prefix in 0..bytes.len() {
+                        assert!(parse_shard_xorbs(&bytes[..prefix]).is_err());
+                    }
+                    let count_end = if version == 2 { 40 } else { 44 };
+                    bytes[header_start + 36..header_start + count_end].fill(255);
+                    assert!(parse_shard_xorbs(&bytes).is_err());
+                }
+            }
+        }
     }
 
     #[test]
