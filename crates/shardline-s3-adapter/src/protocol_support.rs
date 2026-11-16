@@ -25,6 +25,7 @@ pub fn parse_content_md5(headers: &HeaderMap) -> Result<Option<[u8; 16]>, S3Erro
     if values.next().is_some() || value.as_bytes().len() != 24 {
         return Err(invalid());
     }
+    // STANDARD requires canonical padding and zero trailing bits.
     // decode_slice needs room for its conservative decoded-length estimate.
     let mut decoded = [0_u8; 18];
     let length = STANDARD
@@ -35,13 +36,6 @@ pub fn parse_content_md5(headers: &HeaderMap) -> Result<Option<[u8; 16]>, S3Erro
         .ok_or_else(invalid)?
         .try_into()
         .map_err(|_error| invalid())?;
-    let mut canonical = [0_u8; 24];
-    STANDARD
-        .encode_slice(digest, &mut canonical)
-        .map_err(|_error| invalid())?;
-    if canonical.as_slice() != value.as_bytes() {
-        return Err(invalid());
-    }
     Ok(Some(digest))
 }
 
@@ -396,6 +390,16 @@ mod tests {
             let error = parse_content_md5(&headers).unwrap_err();
             assert_eq!(error.code, "InvalidDigest", "{value}");
             assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        }
+        // A 16-byte digest uses only the high two bits of its final sextet.
+        for last in b"hijklmnopqrstuv" {
+            let value = format!("1B2M2Y8AsgTpgAmY7PhCf{}==", char::from(*last));
+            let mut headers = HeaderMap::new();
+            headers.insert("content-md5", value.parse().unwrap());
+            assert_eq!(
+                parse_content_md5(&headers).unwrap_err().code,
+                "InvalidDigest"
+            );
         }
         let mut headers = HeaderMap::new();
         headers.append("content-md5", "1B2M2Y8AsgTpgAmY7PhCfg==".parse().unwrap());
