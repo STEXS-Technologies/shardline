@@ -330,7 +330,6 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::merklehash::MerkleHash;
     use crate::merklehash::compute_data_hash;
 
     fn make_file_info(num_entries: u64) -> MDBFileInfo {
@@ -488,61 +487,31 @@ mod tests {
 
     #[test]
     fn shard_info_counts() {
-        let info = MDBShardInfo {
-            header: MDBShardFileHeader::default(),
-            footer: MDBShardFileFooter::default(),
-            file_infos: vec![make_file_info(1), make_file_info(0)],
-            xorb_infos: vec![make_xorb_info(1, 100)],
-        };
-        assert_eq!(info.num_file_entries(), 2);
-        assert_eq!(info.num_xorb_entries(), 1);
-        assert_eq!(info.total_num_chunks(), 1);
-        assert_eq!(info.stored_bytes(), 100);
-        assert_eq!(info.materialized_bytes(), 100);
+        for count in [0, 1] {
+            let mut xorb = make_xorb_info(count, 100);
+            xorb.metadata.num_bytes_in_xorb = 100;
+            let info = MDBShardInfo {
+                file_infos: vec![make_file_info(count), make_file_info(0)],
+                xorb_infos: vec![xorb],
+                ..Default::default()
+            };
+            assert_eq!(info.num_file_entries(), 2);
+            assert_eq!(info.num_xorb_entries(), 1);
+            assert_eq!(info.total_num_chunks(), count as usize);
+            assert_eq!(info.stored_bytes(), 100);
+            assert_eq!(info.materialized_bytes(), count * 100);
+        }
     }
 
     #[test]
     fn shard_info_materialized_bytes_multiple() {
-        let info = MDBShardInfo {
-            header: MDBShardFileHeader::default(),
-            footer: MDBShardFileFooter::default(),
-            file_infos: vec![
-                MDBFileInfo {
-                    metadata: FileDataSequenceHeader::new(
-                        MerkleHash::default(),
-                        1u64,
-                        false,
-                        false,
-                    ),
-                    segments: vec![FileDataSequenceEntry::new(
-                        MerkleHash::default(),
-                        500u64,
-                        0u64,
-                        0u64,
-                    )],
-                    verification: vec![],
-                    metadata_ext: None,
-                },
-                MDBFileInfo {
-                    metadata: FileDataSequenceHeader::new(
-                        MerkleHash::default(),
-                        1u64,
-                        false,
-                        false,
-                    ),
-                    segments: vec![FileDataSequenceEntry::new(
-                        MerkleHash::default(),
-                        300u64,
-                        0u64,
-                        0u64,
-                    )],
-                    verification: vec![],
-                    metadata_ext: None,
-                },
-            ],
-            xorb_infos: vec![],
-        };
-        assert_eq!(info.materialized_bytes(), 800);
+        let mut info = MDBShardInfo::default();
+        for (length, total) in [(500, 500), (300, 800)] {
+            let mut file = make_file_info(1);
+            file.segments[0].unpacked_segment_bytes = length;
+            info.file_infos.push(file);
+            assert_eq!(info.materialized_bytes(), total);
+        }
     }
 
     // ======= read_all_file_info_sections =======

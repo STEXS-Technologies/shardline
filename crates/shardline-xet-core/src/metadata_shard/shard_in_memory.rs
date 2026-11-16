@@ -168,15 +168,19 @@ mod tests {
 
     #[test]
     fn add_xorb_and_file_then_to_bytes() {
-        let mut shard = MDBInMemoryShard::default();
-        shard.add_xorb_block(make_xorb_info(b"x", 1, 100)).unwrap();
-        shard
-            .add_file_reconstruction_info(make_file_info(1, 50))
-            .unwrap();
-        let bytes = shard.to_bytes().unwrap();
-        assert!(!bytes.is_empty());
-        // Should contain header, xorb info, file info, bookends
-        assert!(bytes.len() > 100);
+        for count in [0, 1] {
+            let mut shard = MDBInMemoryShard::default();
+            let xorb = make_xorb_info(b"x", count, 100);
+            shard.add_xorb_block(xorb.clone()).unwrap();
+            let files: Vec<_> = (0..count).map(|_| make_file_info(1, 50)).collect();
+            for file in &files {
+                shard.add_file_reconstruction_info(file.clone()).unwrap();
+            }
+            let bytes = shard.to_bytes().unwrap();
+            let parsed = MDBShardInfo::load_from_reader(&mut std::io::Cursor::new(bytes)).unwrap();
+            assert_eq!(parsed.xorb_infos, vec![xorb]);
+            assert_eq!(parsed.file_infos, files);
+        }
     }
 
     #[test]
