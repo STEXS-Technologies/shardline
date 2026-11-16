@@ -1134,9 +1134,10 @@ fn parse_part_content_range(headers: &[u8]) -> Result<ByteRange, TransferError> 
         TransferError::MalformedMultipart(format!("invalid part headers: {error}"))
     })?;
     for line in headers_text.split("\r\n") {
-        let lower = line.to_ascii_lowercase();
-        if let Some(value) = lower.strip_prefix("content-range:") {
-            return parse_content_range(value);
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-range")
+        {
+            return parse_content_range(&value.to_ascii_lowercase());
         }
     }
     Err(TransferError::MalformedMultipart(
@@ -1949,16 +1950,45 @@ mod tests {
     }
 
     #[test]
-    fn parse_multipart_single_part() {
-        let boundary = "abc123";
-        let body = format!(
-            "--{boundary}\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 0-99/1000\r\n\r\nHello World\r\n--{boundary}--\r\n"
-        );
-        let content_type = format!("multipart/byteranges; boundary={boundary}");
-        let parts = parse_multipart_byteranges(&content_type, body.as_bytes()).unwrap();
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].range, super::ByteRange::new(0, 99));
-        assert_eq!(parts[0].data, b"Hello World");
+    fn parse_multipart_single_part_preserves_headers_and_boundary_forms() {
+        for (boundary, quoted, headers, range, data) in [
+            (
+                "abc123",
+                false,
+                "Content-Type: application/octet-stream\r\nContent-Range: bytes 0-99/1000",
+                super::ByteRange::new(0, 99),
+                "Hello World",
+            ),
+            (
+                "quoted-boundary",
+                true,
+                "Content-Range: bytes 0-1/2",
+                super::ByteRange::new(0, 1),
+                "ab",
+            ),
+            (
+                "mixed",
+                false,
+                "X-Ignored: unrelated:value\r\ncOnTeNt-RaNgE: BYTES 0-1/2",
+                super::ByteRange::new(0, 1),
+                "ab",
+            ),
+        ] {
+            let body = format!("--{boundary}\r\n{headers}\r\n\r\n{data}\r\n--{boundary}--\r\n");
+            let parameter = if quoted {
+                format!("\"{boundary}\"")
+            } else {
+                boundary.to_owned()
+            };
+            let content_type = format!("multipart/byteranges; boundary={parameter}");
+            assert_eq!(
+                parse_multipart_byteranges(&content_type, body.as_bytes()).unwrap(),
+                vec![super::MultipartPart {
+                    range,
+                    data: data.as_bytes().to_vec()
+                }]
+            );
+        }
     }
 
     #[test]
@@ -1988,31 +2018,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_multipart_empty_body_missing_boundary() {
-        let content_type = "multipart/byteranges; boundary=xyz";
-        let result = parse_multipart_byteranges(content_type, b"");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_multipart_part_missing_header_separator() {
-        let boundary = "xyz";
-        let body = format!(
-            "--{boundary}\r\nContent-Range: bytes 0-9/100\r\nMISSING_SEPARATOR\r\n--{boundary}--\r\n"
-        );
-        let content_type = format!("multipart/byteranges; boundary={boundary}");
-        let result = parse_multipart_byteranges(&content_type, body.as_bytes());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_multipart_quoted_boundary() {
-        let boundary = "quoted-boundary";
-        let body =
-            format!("--{boundary}\r\nContent-Range: bytes 0-1/2\r\n\r\nab\r\n--{boundary}--\r\n");
-        let content_type = format!("multipart/byteranges; boundary=\"{boundary}\"");
-        let parts = parse_multipart_byteranges(&content_type, body.as_bytes()).unwrap();
-        assert_eq!(parts[0].data, b"ab");
+    fn parse_multipart_rejects_missing_boundary_or_header_separator() {
+        for body in [
+            "",
+            "--xyz\r\nContent-Range: bytes 0-9/100\r\nMISSING_SEPARATOR\r\n--xyz--\r\n",
+        ] {
+            assert!(matches!(
+                parse_multipart_byteranges("multipart/byteranges; boundary=xyz", body.as_bytes()),
+                Err(super::TransferError::MalformedMultipart(_))
+            ));
+        }
     }
 
     #[test]
