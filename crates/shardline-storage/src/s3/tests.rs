@@ -557,6 +557,36 @@ fn is_temp_upload_key_matches_generated_stream_upload_temp_prefix() {
 }
 
 #[test]
+fn temp_key_numeric_fields_require_exactly_three_ascii_decimal_groups() {
+    for (tail, valid) in [
+        ("0,1,2", true),
+        ("001,002,003", true),
+        ("", false),
+        ("1,2", false),
+        ("1,2,3,4", false),
+        (",2,3", false),
+        ("1,,3", false),
+        ("1,2,", false),
+        ("x,2,3", false),
+        ("1,x,3", false),
+        ("1,2,x", false),
+        ("１,2,3", false),
+        ("1, 2,3", false),
+        ("1,2,3/", false),
+    ] {
+        let overwrite = format!(
+            "__tmp/shardline-overwrite/{}.{}",
+            "a".repeat(64),
+            tail.replace(',', ".")
+        );
+        let stream = format!("__tmp/shardline-stream-upload/{}", tail.replace(',', "-"));
+        for key in [overwrite, stream] {
+            assert_eq!(is_temp_upload_key(&key), valid, "{key}");
+        }
+    }
+}
+
+#[test]
 fn is_temp_upload_key_rejects_non_temp() {
     assert!(!is_temp_upload_key("uploads/obj"));
     assert!(!is_temp_upload_key("obj.tmp."));

@@ -167,25 +167,9 @@ pub(crate) fn is_temp_upload_key(key: &str) -> bool {
 /// tail check only tightens the match against hand-placed lookalikes; it never
 /// classifies a user key.
 fn is_overwrite_temp_key(key: &str) -> bool {
-    let Some(rest) = key.strip_prefix(OVERWRITE_TEMP_KEY_PREFIX) else {
-        return false;
-    };
-    let mut groups = rest.split('.');
-    let key_digest = groups.next();
-    let counter = groups.next();
-    let pid = groups.next();
-    let nanos = groups.next();
-    if groups.next().is_some() {
-        return false;
-    }
-    matches!(
-        (key_digest, counter, pid, nanos),
-        (Some(key_digest), Some(counter), Some(pid), Some(nanos))
-            if is_64_hex(key_digest)
-                && is_all_digits(counter)
-                && is_all_digits(pid)
-                && is_all_digits(nanos)
-    )
+    key.strip_prefix(OVERWRITE_TEMP_KEY_PREFIX)
+        .and_then(|tail| tail.split_once('.'))
+        .is_some_and(|(digest, tail)| is_64_hex(digest) && has_three_decimal_groups(tail, '.'))
 }
 
 /// True when `value` is exactly 64 ASCII hex characters — the shape
@@ -198,22 +182,13 @@ fn is_64_hex(value: &str) -> bool {
 /// followed by `<nanos>-<pid>-<counter>` (three decimal-digit groups separated
 /// by single `-`).
 fn is_stream_upload_temp_key(key: &str) -> bool {
-    const PREFIX: &str = "__tmp/shardline-stream-upload/";
-    let Some(rest) = key.strip_prefix(PREFIX) else {
-        return false;
-    };
-    let mut groups = rest.split('-');
-    let nanos = groups.next();
-    let pid = groups.next();
-    let counter = groups.next();
-    if groups.next().is_some() {
-        return false;
-    }
-    matches!(
-        (nanos, pid, counter),
-        (Some(nanos), Some(pid), Some(counter))
-            if is_all_digits(nanos) && is_all_digits(pid) && is_all_digits(counter)
-    )
+    key.strip_prefix("__tmp/shardline-stream-upload/")
+        .is_some_and(|tail| has_three_decimal_groups(tail, '-'))
+}
+
+fn has_three_decimal_groups(value: &str, separator: char) -> bool {
+    let mut groups = value.split(separator);
+    (0..3).all(|_| groups.next().is_some_and(is_all_digits)) && groups.next().is_none()
 }
 
 fn is_all_digits(value: &str) -> bool {
