@@ -172,6 +172,15 @@ impl StreamRegistration {
     }
 }
 
+fn active_registration_count<T>(active: &Mutex<HashMap<u64, Weak<T>>>) -> usize {
+    active
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .filter(|registration| registration.strong_count() != 0)
+        .count()
+}
+
 /// Collect live registrations while holding the registry lock, then order by id.
 fn group_status<T>(
     aborted: &AtomicBool,
@@ -351,15 +360,7 @@ impl XetStreamGroup {
     /// Number of live (not-yet-dropped) streams registered with this group.
     #[must_use]
     pub fn active_stream_count(&self) -> usize {
-        let active = self
-            .inner
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active
-            .values()
-            .filter(|weak| weak.upgrade().is_some())
-            .count()
+        active_registration_count(&self.inner.active)
     }
 }
 
@@ -696,15 +697,7 @@ impl XetUploadCommit {
     /// group.
     #[must_use]
     pub fn active_upload_count(&self) -> usize {
-        let active = self
-            .inner
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active
-            .values()
-            .filter(|weak| weak.upgrade().is_some())
-            .count()
+        active_registration_count(&self.inner.active)
     }
 }
 
