@@ -182,7 +182,7 @@ impl ChunkReader for RangeReader {
         Ok(RangedRead {
             reader: self.clone(),
             position: start,
-            buffer: Cursor::new(Vec::new()),
+            buffer: Cursor::new(bytes::Bytes::new()),
         })
     }
 
@@ -254,7 +254,7 @@ impl ChunkReader for RangeReader {
 struct RangedRead {
     reader: RangeReader,
     position: u64,
-    buffer: Cursor<Vec<u8>>,
+    buffer: Cursor<bytes::Bytes>,
 }
 
 impl Read for RangedRead {
@@ -272,7 +272,7 @@ impl Read for RangedRead {
                 .reader
                 .get_bytes(self.position, count)
                 .map_err(|e| io::Error::other(e.to_string()))?;
-            self.buffer = Cursor::new(bytes.to_vec());
+            self.buffer = Cursor::new(bytes);
             self.position = self.position.saturating_add(count as u64);
         }
         self.buffer.read(output)
