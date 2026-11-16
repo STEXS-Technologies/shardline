@@ -38,49 +38,29 @@ pub fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn parse_true_strings() {
-        assert_eq!(super::parse_bool("true"), Some(true));
-        assert_eq!(super::parse_bool("1"), Some(true));
-        assert_eq!(super::parse_bool("yes"), Some(true));
-        assert_eq!(super::parse_bool("on"), Some(true));
-    }
-
-    #[test]
-    fn parse_false_strings() {
-        assert_eq!(super::parse_bool("false"), Some(false));
-        assert_eq!(super::parse_bool("0"), Some(false));
-        assert_eq!(super::parse_bool("no"), Some(false));
-        assert_eq!(super::parse_bool("off"), Some(false));
-    }
-
-    #[test]
-    fn case_insensitive_true() {
-        assert_eq!(super::parse_bool("True"), Some(true));
-        assert_eq!(super::parse_bool("YES"), Some(true));
-        assert_eq!(super::parse_bool("On"), Some(true));
-    }
-
-    #[test]
-    fn case_insensitive_false() {
-        assert_eq!(super::parse_bool("False"), Some(false));
-        assert_eq!(super::parse_bool("NO"), Some(false));
-        assert_eq!(super::parse_bool("Off"), Some(false));
-    }
-
-    #[test]
-    fn parse_empty() {
-        assert_eq!(super::parse_bool(""), None);
-    }
-
-    #[test]
-    fn parse_invalid() {
-        assert_eq!(super::parse_bool("invalid"), None);
-    }
-
-    #[test]
-    fn parse_surrounding_whitespace() {
-        assert_eq!(super::parse_bool(" yes "), Some(true));
-        assert_eq!(super::parse_bool("\ttrue\n"), Some(true));
-        assert_eq!(super::parse_bool(" off "), Some(false));
+    fn boolean_spellings_case_whitespace_and_invalid_values() {
+        for (value, expected) in [
+            ("true", Some(true)),
+            ("1", Some(true)),
+            ("yes", Some(true)),
+            ("on", Some(true)),
+            ("false", Some(false)),
+            ("0", Some(false)),
+            ("no", Some(false)),
+            ("off", Some(false)),
+            ("True", Some(true)),
+            ("YES", Some(true)),
+            ("On", Some(true)),
+            ("False", Some(false)),
+            ("NO", Some(false)),
+            ("Off", Some(false)),
+            ("", None),
+            ("invalid", None),
+            (" yes ", Some(true)),
+            ("\ttrue\n", Some(true)),
+            (" off ", Some(false)),
+        ] {
+            assert_eq!(super::parse_bool(value), expected, "{value:?}");
+        }
     }
 }

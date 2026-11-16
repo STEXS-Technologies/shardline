@@ -102,25 +102,12 @@ mod tests {
     use super::{HashParseError, ShardlineHash};
 
     #[test]
-    fn canonical_hash_hex_round_trips_raw_bytes() {
-        let hash = ShardlineHash::from_bytes([
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-            24, 25, 26, 27, 28, 29, 30, 31,
-        ]);
-
-        let hex = hash.hex_string();
-
-        assert_eq!(
-            hex,
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-        );
-        let parsed = ShardlineHash::parse_hex(&hex);
-        assert_eq!(parsed.unwrap(), hash);
-    }
-
-    #[test]
     fn canonical_hash_vectors_round_trip() {
         let cases = [
+            (
+                std::array::from_fn(|index| u8::try_from(index).unwrap()),
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            ),
             (
                 [
                     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
@@ -142,6 +129,7 @@ mod tests {
         for (bytes, hex) in cases {
             let hash = ShardlineHash::from_bytes(bytes);
 
+            assert_eq!(hash.as_bytes(), &bytes);
             assert_eq!(hash.hex_string(), hex);
             let parsed = ShardlineHash::parse_hex(hex);
             assert_eq!(parsed.unwrap(), hash);
@@ -149,45 +137,36 @@ mod tests {
     }
 
     #[test]
-    fn canonical_hash_rejects_uppercase_hex() {
-        let hash = ShardlineHash::from_bytes([31; 32]);
-        let invalid = hash.hex_string().replacen('f', "F", 1);
-        let result = ShardlineHash::parse_hex(&invalid);
-
-        assert!(matches!(result, Err(HashParseError::InvalidCharacter(_))));
-    }
-
-    #[test]
-    fn canonical_hash_rejects_short_hex() {
-        let result = ShardlineHash::parse_hex("abc");
-
-        assert!(matches!(result, Err(HashParseError::InvalidLength)));
-    }
-
-    #[test]
-    fn canonical_hash_rejects_long_hex() {
-        let result = ShardlineHash::parse_hex(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
-
-        assert!(matches!(result, Err(HashParseError::InvalidLength)));
-    }
-
-    #[test]
-    fn canonical_hash_rejects_non_hex_character() {
-        let result = ShardlineHash::parse_hex(
-            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-        );
-
-        assert!(matches!(result, Err(HashParseError::InvalidCharacter(_))));
-    }
-
-    #[test]
-    fn raw_bytes_are_preserved() {
-        let bytes = [9; 32];
-        let hash = ShardlineHash::from_bytes(bytes);
-
-        assert_eq!(hash.as_bytes(), &bytes);
+    fn canonical_hash_rejects_invalid_length_and_characters() {
+        for value in [
+            "abc".to_owned(),
+            "a".repeat(66),
+            format!("{}zz", "a".repeat(64)),
+        ] {
+            assert!(
+                matches!(
+                    ShardlineHash::parse_hex(&value),
+                    Err(HashParseError::InvalidLength)
+                ),
+                "{value:?}"
+            );
+        }
+        for value in [
+            ShardlineHash::from_bytes([31; 32])
+                .hex_string()
+                .replacen('f', "F", 1),
+            "z".repeat(64),
+            format!("A{}", "a".repeat(63)),
+            format!("{}F{}", "a".repeat(32), "a".repeat(31)),
+        ] {
+            assert!(
+                matches!(
+                    ShardlineHash::parse_hex(&value),
+                    Err(HashParseError::InvalidCharacter(_))
+                ),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
@@ -195,6 +174,7 @@ mod tests {
         let cases = [
             [0u8; 32],
             [1u8; 32],
+            [9u8; 32],
             [0xffu8; 32],
             [
                 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
@@ -213,93 +193,18 @@ mod tests {
     }
 
     #[test]
-    fn hash_parse_error_display_invalid_length() {
-        let error = HashParseError::InvalidLength;
-        let msg = error.to_string();
-        assert!(!msg.is_empty());
-        assert!(
-            msg.contains("64"),
-            "expected mention of 64 in display, got: {msg}"
-        );
-        assert!(
-            msg.contains("lowercase"),
-            "expected mention of lowercase in display, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn hash_parse_error_display_invalid_character() {
-        let error = HashParseError::InvalidCharacter("bad char".to_owned());
-        let msg = error.to_string();
-        assert!(!msg.is_empty());
-        assert!(
-            msg.contains("bad char"),
-            "expected 'bad char' in display, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn hash_copy_and_clone_work() {
-        let hash = ShardlineHash::from_bytes([42; 32]);
-        let cloned = hash;
-        assert_eq!(hash, cloned);
-        let copied = hash;
-        assert_eq!(hash, copied);
-    }
-
-    #[test]
-    fn hash_partial_eq_compares_bytes() {
-        let a = ShardlineHash::from_bytes([1; 32]);
-        let b = ShardlineHash::from_bytes([1; 32]);
-        let c = ShardlineHash::from_bytes([2; 32]);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn hash_parse_hex_rejects_garbage_after_valid_prefix() {
-        let result = ShardlineHash::parse_hex(&format!("{}zz", "a".repeat(64)));
-        assert!(matches!(result, Err(HashParseError::InvalidLength)));
-    }
-
-    #[test]
-    fn hash_hex_string_all_byte_values() {
-        let mut bytes = [0u8; 32];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = i as u8;
+    fn hash_parse_errors_preserve_messages() {
+        for (error, expected) in [
+            (
+                HashParseError::InvalidLength,
+                "hash must contain exactly 64 lowercase hexadecimal characters",
+            ),
+            (
+                HashParseError::InvalidCharacter("bad char".to_owned()),
+                "invalid hash character: bad char",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
         }
-        let hash = ShardlineHash::from_bytes(bytes);
-        let hex = hash.hex_string();
-        let expected = (0..32u8)
-            .map(|b| format!("{b:02x}"))
-            .collect::<Vec<_>>()
-            .concat();
-        assert_eq!(hex, expected);
-    }
-
-    #[test]
-    fn hash_parse_hex_rejects_uppercase_at_start() {
-        // Exactly 64 chars, first char uppercase => InvalidCharacter
-        let mixed = format!("A{}", "a".repeat(63));
-        let result = ShardlineHash::parse_hex(&mixed);
-        assert!(matches!(result, Err(HashParseError::InvalidCharacter(_))));
-    }
-
-    #[test]
-    fn hash_parse_hex_rejects_uppercase_in_middle() {
-        // Exactly 64 chars, one char in middle uppercase => InvalidCharacter
-        let mut bytes = "a".repeat(32);
-        bytes.push('F');
-        bytes.push_str(&"a".repeat(31));
-        assert_eq!(bytes.len(), 64);
-        let result = ShardlineHash::parse_hex(&bytes);
-        assert!(matches!(result, Err(HashParseError::InvalidCharacter(_))));
-    }
-
-    #[test]
-    fn hash_error_derive_impls() {
-        // HashParseError implements Clone
-        let _a = HashParseError::InvalidLength;
-        let _b = HashParseError::InvalidCharacter("msg".to_owned());
     }
 }
