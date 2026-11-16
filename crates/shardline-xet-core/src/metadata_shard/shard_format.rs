@@ -275,12 +275,8 @@ impl MDBShardInfo {
         version: u64,
     ) -> std::result::Result<Vec<MDBFileInfo>, CoreError> {
         let mut file_infos = Vec::new();
-        loop {
-            match MDBFileInfo::deserialize(reader, version) {
-                Ok(Some(file_info)) => file_infos.push(file_info),
-                Ok(None) => break,
-                Err(_) => break,
-            }
+        while let Ok(Some(file_info)) = MDBFileInfo::deserialize(reader, version) {
+            file_infos.push(file_info);
         }
         Ok(file_infos)
     }
@@ -291,12 +287,8 @@ impl MDBShardInfo {
         version: u64,
     ) -> std::result::Result<Vec<MDBXorbInfo>, CoreError> {
         let mut xorb_infos = Vec::new();
-        loop {
-            match MDBXorbInfo::deserialize(reader, version) {
-                Ok(Some(xorb_info)) => xorb_infos.push(xorb_info),
-                Ok(None) => break,
-                Err(_) => break,
-            }
+        while let Ok(Some(xorb_info)) = MDBXorbInfo::deserialize(reader, version) {
+            xorb_infos.push(xorb_info);
         }
         Ok(xorb_infos)
     }
@@ -543,7 +535,7 @@ mod tests {
         let files = info
             .read_all_file_info_sections(&mut Cursor::new(&buf), 3)
             .unwrap();
-        assert_eq!(files.len(), 2);
+        assert_eq!(files, vec![file1, file2]);
     }
 
     #[test]
@@ -556,7 +548,7 @@ mod tests {
         let files = info
             .read_all_file_info_sections(&mut Cursor::new(&buf), 3)
             .unwrap();
-        assert_eq!(files.len(), 1);
+        assert_eq!(files, vec![file1]);
     }
 
     // ======= read_all_xorb_blocks_full =======
@@ -588,8 +580,7 @@ mod tests {
         let x = info
             .read_all_xorb_blocks_full(&mut Cursor::new(&buf), 3)
             .unwrap();
-        assert_eq!(x.len(), 2);
-        assert_eq!(x[0].chunks.len(), 1);
+        assert_eq!(x, vec![x1, x2]);
     }
 
     #[test]
@@ -602,7 +593,7 @@ mod tests {
         let x = info
             .read_all_xorb_blocks_full(&mut Cursor::new(&buf), 3)
             .unwrap();
-        assert_eq!(x.len(), 1);
+        assert_eq!(x, vec![x1]);
     }
 
     // ======= load_from_reader =======
