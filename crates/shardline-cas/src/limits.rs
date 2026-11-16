@@ -71,13 +71,20 @@ mod tests {
 
     #[test]
     fn limits_preserve_configured_bounds() {
-        let max_xorb_bytes = NonZeroU64::MIN;
-        let max_shard_bytes = NonZeroU64::MAX;
-        let max_object_bytes = NonZeroU64::new(3).unwrap();
-        let limits = CasLimits::new(max_xorb_bytes, max_shard_bytes, max_object_bytes);
-
-        assert_eq!(limits.max_xorb_bytes(), max_xorb_bytes);
-        assert_eq!(limits.max_shard_bytes(), max_shard_bytes);
-        assert_eq!(limits.max_object_bytes(), max_object_bytes);
+        for (xorb, shard, object) in [
+            (1, u64::MAX, 3),
+            (4096, 8192, 16384),
+            (1, 1, 1),
+            (u64::MAX, u64::MAX, u64::MAX),
+        ] {
+            let limits = CasLimits::new(
+                NonZeroU64::new(xorb).unwrap(),
+                NonZeroU64::new(shard).unwrap(),
+                NonZeroU64::new(object).unwrap(),
+            );
+            assert_eq!(limits.max_xorb_bytes().get(), xorb);
+            assert_eq!(limits.max_shard_bytes().get(), shard);
+            assert_eq!(limits.max_object_bytes().get(), object);
+        }
     }
 }

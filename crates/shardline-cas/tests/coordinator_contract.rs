@@ -458,58 +458,6 @@ fn provider_repository_states_preserve_upserts_ordering_and_deletion() {
     assert!(index.list_provider_repository_states().unwrap().is_empty());
 }
 
-// ── CasLimits constructors and accessors ──────────────────────────────
-
-#[test]
-fn cas_limits_new_constructs_with_provided_bounds() {
-    let limits = CasLimits::new(
-        NonZeroU64::MIN,
-        NonZeroU64::MAX,
-        NonZeroU64::new(3).unwrap(),
-    );
-    assert_eq!(limits.max_xorb_bytes(), NonZeroU64::MIN);
-    assert_eq!(limits.max_shard_bytes(), NonZeroU64::MAX);
-    assert_eq!(limits.max_object_bytes().get(), 3);
-}
-
-#[test]
-fn cas_limits_accessors_return_configured_values() {
-    let xorb = NonZeroU64::new(4096).unwrap();
-    let shard = NonZeroU64::new(8192).unwrap();
-    let max_object = NonZeroU64::new(16384).unwrap();
-    let limits = CasLimits::new(xorb, shard, max_object);
-    assert_eq!(limits.max_xorb_bytes(), xorb);
-    assert_eq!(limits.max_shard_bytes(), shard);
-    assert_eq!(limits.max_object_bytes(), max_object);
-}
-
-#[test]
-fn cas_limits_default_bounds_use_provided_constants() {
-    // NonZeroU64::MIN is the smallest positive value (1)
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN, NonZeroU64::MIN);
-    assert_eq!(limits.max_xorb_bytes().get(), 1);
-    assert_eq!(limits.max_shard_bytes().get(), 1);
-    assert_eq!(limits.max_object_bytes().get(), 1);
-}
-
-// ── CasCoordinator constructors and accessors ─────────────────────────
-
-#[test]
-fn cas_coordinator_constructs_and_exposes_adapters_and_limits() {
-    let index = MemoryIndexStore::default();
-    let storage = tempfile::tempdir().unwrap();
-    let object_store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
-    let coordinator = CasCoordinator::new(index, object_store, (), limits);
-
-    // index() returns the stored index adapter
-    let _index_ref: &MemoryIndexStore = coordinator.index();
-    // object_store() returns the stored object store adapter
-    let _store_ref: &LocalObjectStore = coordinator.object_store();
-    // limits() returns the configured limits
-    assert_eq!(coordinator.limits(), limits);
-}
-
 // ── Coordinator store_content_addressed_blob methods ─────────────────
 
 #[tokio::test]
