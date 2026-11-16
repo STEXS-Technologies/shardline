@@ -149,27 +149,31 @@ fn find_lfs_blob_none_when_no_matching_object() {
     );
 }
 
-// --- is_valid_refname tests ---
-
 #[test]
-fn is_valid_refname_valid() {
-    assert!(is_valid_refname("refs/heads/main"));
-    assert!(is_valid_refname("refs/tags/v1.0"));
-    assert!(is_valid_refname("refs/heads/feature/foo"));
-    assert!(is_valid_refname("refs/heads/feature/foo/bar"));
-    assert!(is_valid_refname("refs/pull/42/head"));
-    assert!(is_valid_refname("refs/heads/foo./bar"));
-    assert!(is_valid_refname("refs/heads/@"));
-}
-
-#[test]
-fn is_valid_refname_empty() {
-    assert!(!is_valid_refname(""));
-}
-
-#[test]
-fn is_valid_refname_rejects_git_reserved_spellings() {
+fn is_valid_refname_accepts_git_reference_names() {
     for reference in [
+        "refs/heads/main",
+        "refs/tags/v1.0",
+        "refs/heads/feature/foo",
+        "refs/heads/feature/foo/bar",
+        "refs/pull/42/head",
+        "refs/heads/foo./bar",
+        "refs/heads/@",
+    ] {
+        assert!(
+            is_valid_refname(reference),
+            "rejected valid Git ref: {reference:?}"
+        );
+    }
+}
+
+#[test]
+fn is_valid_refname_rejects_reserved_paths_and_characters() {
+    for reference in [
+        "",
+        "heads/main",
+        "tags/v1.0",
+        "main",
         "refs/heads/a..b",
         "refs/heads/.hidden",
         "refs/heads/a.lock",
@@ -184,34 +188,26 @@ fn is_valid_refname_rejects_git_reserved_spellings() {
         "refs/heads/a*b",
         "refs/heads/a[b",
         "refs/heads/a\\b",
+        "refs/heads/../secret",
+        "refs/heads/feature/..",
+        "refs/heads/../../etc/passwd",
+        "refs/heads/a/../../../x",
+        "refs/heads/my branch",
+        "refs/heads/feature ",
+        " refs/heads/feature",
     ] {
         assert!(
             !is_valid_refname(reference),
-            "invalid Git ref accepted: {reference}"
+            "accepted invalid Git ref: {reference:?}"
         );
     }
-}
-
-#[test]
-fn is_valid_refname_no_refs_prefix() {
-    assert!(!is_valid_refname("heads/main"));
-    assert!(!is_valid_refname("tags/v1.0"));
-    assert!(!is_valid_refname("main"));
-}
-
-#[test]
-fn is_valid_refname_control_chars() {
-    assert!(!is_valid_refname("refs/heads/main\n"));
-    assert!(!is_valid_refname("refs/heads/main\t"));
-    assert!(!is_valid_refname("refs/heads/main\x00"));
-    assert!(!is_valid_refname("refs/heads/main\x7f"));
-}
-
-#[test]
-fn is_valid_refname_dotdot() {
-    assert!(!is_valid_refname("refs/heads/../secret"));
-    assert!(!is_valid_refname("refs/heads/feature/.."));
-    assert!(!is_valid_refname("refs/heads/../../etc/passwd"));
+    for control in (0u8..=31).chain([127]) {
+        let reference = format!("refs/heads/main{}", char::from(control));
+        assert!(
+            !is_valid_refname(&reference),
+            "accepted control byte {control}"
+        );
+    }
 }
 
 // --- parse_commit_object tests ---
@@ -451,23 +447,6 @@ fn walk_git_tree_exceeds_max_depth() {
             .contains("exceeds maximum depth"),
         "error message should mention depth"
     );
-}
-
-// --- is_valid_refname edge cases ---
-
-#[test]
-fn is_valid_refname_with_spaces() {
-    assert!(!is_valid_refname("refs/heads/my branch"));
-    assert!(!is_valid_refname("refs/heads/feature "));
-    assert!(!is_valid_refname(" refs/heads/feature"));
-}
-
-#[test]
-fn is_valid_refname_with_dotdot() {
-    assert!(!is_valid_refname("refs/heads/../secret"));
-    assert!(!is_valid_refname("refs/heads/feature/.."));
-    assert!(!is_valid_refname("refs/heads/../../etc/passwd"));
-    assert!(!is_valid_refname("refs/heads/a/../../../x"));
 }
 
 // --- collect_refs dedup/HEAD logic tests ---
