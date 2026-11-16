@@ -1,46 +1,31 @@
-//! Upload session layer (M3b, `docs/SDX_PLAN.md` §4.4.2 / §9-M3).
+//! Streaming uploads with session deduplication and bounded Xorb admission.
 //!
-//! [`UploadSession`] owns the write-path transport (the M2a
-//! [`TransferClient`], write-scoped token resolution, the M3a
-//! [`DedupClient`], and a fixed upload-permit semaphore — adaptive concurrency
-//! is M4) and coordinates the push-style ingest loop:
+//! [`UploadSession`] coordinates chunking, deduplication, Xorb uploads, and
+//! final shard publication:
 //!
-//! 1. Data is fed as 8 MiB [`INGESTION_BLOCK_SIZE`] blocks (files/readers via
-//!    a `spawn_blocking` compute thread that also runs the CDC chunker, so the
-//!    blocking task emits zero-copy [`Bytes`] chunk slices).
-//! 2. Each chunk is checked against the **session dedup store**, then against
-//!    the eligibility-gated **global dedup query** (`GET
-//!    /v1/chunks/default-merkledb/{hash}`, 404 = miss, 429 surfaced without
-//!    retry). A hit imports the returned shard's xorb reference and skips the
-//!    chunk upload; a miss stages the chunk into the pending xorb buffer.
-//! 3. A xorb is cut when the 64 MiB / 8192 condition or the
-//!    [`SERIALIZED_XORB_SAFETY_CAP_BYTES`] worst-case serialized guard binds.
-//!    Cut xorbs are uploaded with a **HEAD-first idempotency probe**
-//!    (`HEAD /v1/xorbs/default/{hash}`) and a **streaming-body POST** (512 KiB
-//!    progress blocks, explicit `Content-Length`) from a [`JoinSet`] of
-//!    parallel tasks, one upload permit each.
-//! 4. At [`UploadSession::finalize`] every xorb upload is joined, then a
-//!    session shard is serialized (fork-format v3, [`crate::shard`]) and
-//!    POSTed to `/v1/shards` — **xorbs-before-shard ordering is mandatory** and
-//!    enforced by the server (it rejects shards referencing absent xorbs).
+//! 1. Files and readers feed [`INGESTION_BLOCK_SIZE`] blocks from a blocking
+//!    compute worker. Push-style handles process owned [`Bytes`] incrementally.
+//!    Both use the shared CDC chunker and preserve chunk boundaries across writes.
+//! 2. Each chunk checks session-local locations, then an eligibility-gated global
+//!    lookup. Reused chunks reference their existing Xorb; new chunks enter the
+//!    current file's pending buffer. Global lookup misses include HTTP 404;
+//!    HTTP 429 is surfaced without retry.
+//! 3. Pending chunks are packed when the 64 MiB, 8192-chunk, or
+//!    [`SERIALIZED_XORB_SAFETY_CAP_BYTES`] bound requires a cut. Serialization
+//!    workers and queued/running POST bodies share one upload semaphore. Each
+//!    upload probes with HEAD first and retries transient transport failures.
+//! 4. [`UploadSession::finalize`] joins every Xorb upload before publishing the
+//!    session shard. Path registrations follow the shard, so referenced data is
+//!    available before metadata becomes visible. The server also rejects shards
+//!    referencing absent Xorbs.
 //!
-//! Serialization workers and queued/running xorb POST payloads share the
-//! configured upload concurrency bound. Each file also retains its bounded
-//! pending xorb tail, ingest buffers, and metadata; caller-owned input bytes
-//! and the number of simultaneously open files are separate from that bound.
+//! Each open file retains its own bounded pending tail, ingest buffers, and
+//! metadata. Caller-owned bytes and the number of open files are separate from
+//! the upload concurrency bound. Duplicate Xorbs can avoid POST through the HEAD
+//! probe; the pending tail is not aggregated across files.
 //!
-//! # Deltas vs upstream / plan
-//!
-//! - Path addressing (`remote`) is M5; the uploaded file's identity is its
-//!   content hash (`merklehash::file_hash`), returned as [`UploadFileInfo::file_id`].
-//! - The plan's session-tail `DataAggregator` is realized as a per-file
-//!   pending tail (each file's chunks are cut and uploaded on its own
-//!   boundary); the RAM bound and xorb-cut semantics are identical, and
-//!   duplicate xorbs across files are uploaded at most once via the HEAD
-//!   probe. A session-wide aggregator is a future refinement.
-//! - Uploads apply the M4 retry policy (xorb/shard POSTs retry transient
-//!   failures; dedup queries are 429-fail-fast). Upload permits are a fixed
-//!   semaphore (adaptive concurrency is a future default seam).
+//! Upload concurrency is fixed; adaptive concurrency is not implemented. See
+//! `docs/SDX_PLAN.md` for the design history.
 
 use std::collections::HashMap;
 use std::io::Read;
