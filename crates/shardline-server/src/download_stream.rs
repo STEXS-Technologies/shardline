@@ -297,9 +297,8 @@ impl VerifiedXorb {
 /// Decodes logical file terms from a fully verified container snapshot.
 struct DecodedXorbStreamState {
     file: XorbReadFile,
-    descriptors: Vec<shardline_xet_adapter::ValidatedXorbChunk>,
-    chunks: Vec<shardline_index::FileChunkRecord>,
-    next_chunk_index: usize,
+    validated: shardline_xet_adapter::ValidatedXorb,
+    chunks: std::iter::Peekable<std::vec::IntoIter<shardline_index::FileChunkRecord>>,
     next_descriptor_index: Option<usize>,
     requested_start: u64,
     requested_end: u64,
@@ -437,9 +436,8 @@ async fn read_xorb_backed_chunks(
     }
     let state = DecodedXorbStreamState {
         file,
-        descriptors: validated.chunks().to_vec(),
-        chunks: std::mem::take(&mut record.chunks),
-        next_chunk_index: 0,
+        validated,
+        chunks: std::mem::take(&mut record.chunks).into_iter().peekable(),
         next_descriptor_index: None,
         requested_start,
         requested_end,
@@ -448,16 +446,17 @@ async fn read_xorb_backed_chunks(
     Ok(Some(Box::pin(stream::try_unfold(
         state,
         |mut state| async move {
-            if state.next_chunk_index >= state.chunks.len() {
+            if state.chunks.peek().is_none() {
                 return Ok(None);
             }
             let work_pool = state.pool.clone();
             blocking_stream_work(&work_pool, move || {
-                while let Some(chunk) = state.chunks.get(state.next_chunk_index) {
+                while let Some(chunk) = state.chunks.peek() {
                     let first = usize::try_from(chunk.range_start)?;
                     let limit = usize::try_from(chunk.range_end)?;
                     let selected = state
-                        .descriptors
+                        .validated
+                        .chunks()
                         .get(first..limit)
                         .ok_or(ServerError::Overflow)?;
                     let first_descriptor = selected.first().ok_or(ServerError::Overflow)?;
@@ -474,7 +473,11 @@ async fn read_xorb_backed_chunks(
                         ));
                     }
                     let index = state.next_descriptor_index.unwrap_or(first);
-                    let descriptor = state.descriptors.get(index).ok_or(ServerError::Overflow)?;
+                    let descriptor = state
+                        .validated
+                        .chunks()
+                        .get(index)
+                        .ok_or(ServerError::Overflow)?;
                     let chunk_offset = chunk
                         .offset
                         .checked_add(
@@ -490,10 +493,7 @@ async fn read_xorb_backed_chunks(
                         .ok_or(ServerError::Overflow)?;
                     let next = index.checked_add(1).ok_or(ServerError::Overflow)?;
                     if next == limit {
-                        state.next_chunk_index = state
-                            .next_chunk_index
-                            .checked_add(1)
-                            .ok_or(ServerError::Overflow)?;
+                        state.chunks.next();
                         state.next_descriptor_index = None;
                     } else {
                         state.next_descriptor_index = Some(next);
