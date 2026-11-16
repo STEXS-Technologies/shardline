@@ -870,21 +870,55 @@ mod tests {
     }
 
     #[test]
+    fn text_preview_pagination_skips_blank_lines_for_both_formats() {
+        for (path, text) in [
+            ("data.csv", "n\n1\n\n2\n3\n \t\n4\n5"),
+            (
+                "data.jsonl",
+                "{\"n\":1}\n\n{\"n\":2}\n{\"n\":3}\n \t\n{\"n\":4}\n{\"n\":5}",
+            ),
+        ] {
+            for (offset, limit, expected) in [
+                (0, 10, &[1, 2, 3, 4, 5][..]),
+                (2, 2, &[3, 4][..]),
+                (0, 0, &[][..]),
+                (5, 10, &[][..]),
+            ] {
+                let rows = read_preview(text.as_bytes(), path, offset, limit).unwrap();
+                let values: Vec<_> = rows.iter().map(|row| row.columns["n"].clone()).collect();
+                assert_eq!(
+                    values,
+                    expected
+                        .iter()
+                        .map(|n| serde_json::json!(n))
+                        .collect::<Vec<_>>(),
+                    "{path}, offset={offset}, limit={limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_preview_empty_inputs_preserve_format_contracts() {
+        assert!(read_preview(b"", "data.jsonl", 0, 10).unwrap().is_empty());
+        assert!(matches!(
+            read_preview(b"", "data.csv", 0, 10),
+            Err(HubApiError::PathValidation(message)) if message == "empty CSV file"
+        ));
+        assert!(
+            read_preview(b"a,b,c", "data.csv", 0, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn parse_jsonl_rows_simple() {
         let text = "{\"a\":1,\"b\":2}\n{\"a\":3,\"b\":4}";
         let rows = read_preview(text.as_bytes(), "data.jsonl", 0, 10).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].columns.get("a"), Some(&serde_json::json!(1)));
         assert_eq!(rows[1].columns.get("b"), Some(&serde_json::json!(4)));
-    }
-
-    #[test]
-    fn parse_jsonl_rows_with_offset_and_limit() {
-        let text = "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n{\"n\":5}";
-        let rows = read_preview(text.as_bytes(), "data.jsonl", 2, 2).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].columns.get("n"), Some(&serde_json::json!(3)));
-        assert_eq!(rows[1].columns.get("n"), Some(&serde_json::json!(4)));
     }
 
     #[test]
@@ -904,30 +938,10 @@ null
     }
 
     #[test]
-    fn parse_jsonl_rows_empty_lines() {
-        let text = "{\"a\":1}\n\n{\"a\":2}\n";
-        let rows = read_preview(text.as_bytes(), "data.jsonl", 0, 10).unwrap();
-        assert_eq!(rows.len(), 2);
-    }
-
-    #[test]
     fn parse_jsonl_rows_invalid_json() {
         let text = "{\"a\":1}\nnot_json\n{\"a\":2}";
         let result = read_preview(text.as_bytes(), "data.jsonl", 0, 10);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_jsonl_rows_empty_input() {
-        let rows = read_preview("".as_bytes(), "data.jsonl", 0, 10).unwrap();
-        assert!(rows.is_empty());
-    }
-
-    #[test]
-    fn parse_jsonl_rows_limit_bounds() {
-        let text = "{\"x\":1}\n{\"x\":2}\n{\"x\":3}";
-        let rows = read_preview(text.as_bytes(), "data.jsonl", 0, 0).unwrap();
-        assert!(rows.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -947,15 +961,6 @@ null
     }
 
     #[test]
-    fn parse_csv_rows_with_offset_and_limit() {
-        let text = "n\n1\n2\n3\n4\n5";
-        let rows = read_preview(text.as_bytes(), "data.csv", 2, 2).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].columns.get("n"), Some(&serde_json::json!(3)));
-        assert_eq!(rows[1].columns.get("n"), Some(&serde_json::json!(4)));
-    }
-
-    #[test]
     fn parse_csv_rows_quoted_fields() {
         let text = r#"name,description
 Alice,"hello, world"
@@ -966,24 +971,5 @@ Bob,"say ""hi"""#;
             rows[0].columns.get("description"),
             Some(&serde_json::json!("hello, world"))
         );
-    }
-
-    #[test]
-    fn parse_csv_rows_empty_input() {
-        let result = read_preview("".as_bytes(), "data.csv", 0, 10);
-        assert!(result.is_err()); // no header
-    }
-
-    #[test]
-    fn parse_csv_rows_header_only() {
-        let rows = read_preview("a,b,c".as_bytes(), "data.csv", 0, 10).unwrap();
-        assert!(rows.is_empty());
-    }
-
-    #[test]
-    fn parse_csv_rows_skip_empty() {
-        let text = "a\n1\n\n2\n";
-        let rows = read_preview(text.as_bytes(), "data.csv", 0, 10).unwrap();
-        assert_eq!(rows.len(), 2);
     }
 }
