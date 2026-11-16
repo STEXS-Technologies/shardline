@@ -3750,7 +3750,7 @@ metadata.
 
 The November 16, 2026 inventory compares baseline
 `e53a33e00a3c2feae4ee8e2417927763663421c7` with cleanup commit
-`e2ae9658db69210f3e60b86fa103c5f25a655a80`. It counts all tracked `.rs`
+`3417c244c32cedecd1f1ded64292d8380c90d970`. It counts all tracked `.rs`
 lines, including tests, comments and blank lines. Uncommitted work and generated
 untracked files are excluded. These counts measure source size, not runtime cost
 or the amount of additional code that can safely be removed.
@@ -3760,23 +3760,23 @@ checked against the line count of every Rust blob in each Git snapshot.
 
 | Scope | Baseline lines | Cleanup lines | Net reduction |
 | --- | ---: | ---: | ---: |
-| Entire repository | 603,649 | 568,942 | 34,707 (5.75%) |
-| Server | 220,570 | 209,867 | 10,703 (4.85%) |
+| Entire repository | 603,649 | 568,434 | 35,215 (5.83%) |
+| Server | 220,570 | 209,561 | 11,009 (4.99%) |
 | Server core | 6,454 | 5,334 | 1,120 (17.35%) |
 | Hub API | 43,749 | 41,070 | 2,679 (6.12%) |
 | Storage | 20,373 | 18,427 | 1,946 (9.55%) |
-| S3 adapter | 10,954 | 9,938 | 1,016 (9.28%) |
+| S3 adapter | 10,954 | 9,928 | 1,026 (9.37%) |
 | Xet adapter | 17,801 | 15,730 | 2,071 (11.63%) |
 | Xet core | 14,456 | 11,220 | 3,236 (22.39%) |
-| OCI adapter | 7,700 | 6,629 | 1,071 (13.91%) |
+| OCI adapter | 7,700 | 6,575 | 1,125 (14.61%) |
 | Cache | 6,573 | 5,268 | 1,305 (19.85%) |
-| Index | 71,472 | 68,508 | 2,964 (4.15%) |
+| Index | 71,472 | 68,417 | 3,055 (4.27%) |
 | CAS | 3,447 | 2,622 | 825 (23.93%) |
 | GC | 10,954 | 9,949 | 1,005 (9.17%) |
 | Fsck | 8,989 | 8,493 | 496 (5.52%) |
 | Rebuild | 4,326 | 3,519 | 807 (18.65%) |
-| CLI | 37,677 | 36,876 | 801 (2.13%) |
-| SDK | 26,965 | 24,285 | 2,680 (9.94%) |
+| CLI | 37,677 | 36,861 | 816 (2.17%) |
+| SDK | 26,965 | 24,219 | 2,746 (10.18%) |
 | Protocol | 4,076 | 3,502 | 574 (14.08%) |
 | Protocol adapters | 1,670 | 1,414 | 256 (15.33%) |
 | Provider events | 5,283 | 4,905 | 378 (7.16%) |
@@ -5578,3 +5578,54 @@ replicas does not establish efficient scale-out. Release-profile results cannot
 be compared with the earlier development-profile samples as a cleanup speedup.
 The output retains per-phase latency, backend requests/bytes, database query
 counts, and connection/lock observations for follow-up analysis.
+
+
+### Frozen cleanup qualification checkpoint (2026-11-16)
+
+Source `3417c244c32cedecd1f1ded64292d8380c90d970` was held fixed for a
+fresh all-features release build and integrated correctness checks. The optimized
+CLI used Rust 1.99.0 and the repository's release profile (optimization level 3,
+thin LTO, one codegen unit, abort on panic). Its frozen executable SHA-256 was
+`3ca4255174564e4cbf845a3869d32fa3a741d599dd89ba5700a888737cce8d84`,
+unchanged after both gates. Uncommitted main-worktree changes were excluded.
+
+The PostgreSQL gate used `scripts/test-postgres.sh`, a fresh PostgreSQL 16 Alpine
+database migrated by the frozen CLI, required PostgreSQL/native-client fixture
+settings, and the pinned 1.12.1 and 1.11.3 recovery executables. The distributed
+checks used the same frozen CLI, the pinned 1.12.1 executable, `libfaketime`,
+`huggingface_hub==2.2.0` and `hf_xet==1.7.0`. Every deployment and multi-node
+case was enabled with `--run-ignored all --test-threads 1`; their logs contained
+no runtime skips or task panics.
+
+| Gate stage | Passed | Test execution time |
+| --- | ---: | ---: |
+| All-features index library | 813 | 125.084 s |
+| PostgreSQL provider-event integration | 2 | 0.114 s |
+| All-features server library | 3,220 | 468.121 s |
+| Explicit PostgreSQL copy-integrity and cache-revocation contracts | 6 | 3.264 s |
+| CLI PostgreSQL migration E2E | 1 | 0.115 s |
+| Deployment faults and released-binary compatibility | 51 | 448.087 s |
+| Multi-node role faults | 8 | 22.738 s |
+
+All 4,101 selected tests passed. The PostgreSQL gate's default stages still
+exclude six normally ignored index cases and 45 normally ignored server cases;
+only its six explicitly selected PostgreSQL contracts were subsequently enabled.
+This checkpoint does not claim every ignored workspace test was qualified.
+
+The first disposable PostgreSQL setup attempt returned a connection reset during
+migration, before any tests ran. A fresh fixture using TCP readiness completed
+the gate; no production code was changed for that setup retry. Owned test
+fixtures were cleaned up. Tests used unoptimized builds with debug information
+disabled and four build jobs; the two gates ran concurrently on the shared Linux
+host. Their execution times are not throughput or before/after performance
+measurements.
+
+The source inventory above was refreshed for this snapshot. Every tracked Rust
+blob was counted independently and checked against `git grep -I -c '^'` for both
+snapshots: 603,649 baseline lines and 568,434 candidate lines, a net decrease of
+35,215 (5.83%), including comments, tests and blank lines.
+
+The historical hosted SDK RSS failure remains unexplained. This checkpoint does
+not establish hosted-CI success, production-scale capacity, cloud costs or unit
+economics. Existing versioned performance and cross-protocol deduplication
+measurements retain their original source and workload limitations.
