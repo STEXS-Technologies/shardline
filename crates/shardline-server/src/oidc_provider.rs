@@ -1280,8 +1280,6 @@ mod tests {
 
     #[test]
     fn verify_token_requires_matching_issuer_and_string_subject() {
-        use jsonwebtoken::{EncodingKey, Header, encode};
-
         let provider = make_provider(
             "https://issuer.example.com",
             None,
@@ -1290,52 +1288,10 @@ mod tests {
                 fetched_at: Instant::now(),
             }),
         );
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some("test-key-1".to_owned());
-        let key = EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
-        let valid = serde_json::json!({
-            "iss": "https://issuer.example.com",
-            "sub": "test-user",
-            "scope": "write",
-            "exp": 9999999999u64,
-        });
-
-        // All cases have a valid signature and expiry. Rejection must come
-        // from the identity claims rather than signature verification.
-        for (claim, invalid_value) in [
-            ("iss", None),
-            ("iss", Some(serde_json::json!("https://wrong.example.com"))),
-            ("iss", Some(serde_json::json!(42))),
-            ("sub", None),
-            ("sub", Some(serde_json::Value::Null)),
-            ("sub", Some(serde_json::json!(42))),
-            ("sub", Some(serde_json::json!(["test-user"]))),
-            ("sub", Some(serde_json::json!(""))),
-            ("sub", Some(serde_json::json!("  "))),
-        ] {
-            let mut claims = valid.clone();
-            let object = claims.as_object_mut().expect("claims object");
-            if let Some(value) = invalid_value {
-                object.insert(claim.to_owned(), value);
-            } else {
-                object.remove(claim);
-            }
-            let token = encode(&header, &claims, &key).expect("signed test token");
-            assert!(
-                provider.verify_token(&token).is_err(),
-                "must reject invalid {claim}: {claims}"
-            );
-        }
-
-        for subject in ["test-user", "anonymous", "subject with spaces", "δοκιμή"] {
-            let mut claims = valid.clone();
-            claims["sub"] = serde_json::json!(subject);
-            let token = encode(&header, &claims, &key).expect("signed test token");
-            let verified = provider.verify_token(&token).expect("valid identity");
-            assert_eq!(verified.subject(), subject);
-            assert_eq!(verified.repository().name(), subject);
-            assert_eq!(verified.scope(), TokenScope::Write);
-        }
+        crate::jwt_keys::test_support::assert_identity_claims(
+            "https://issuer.example.com",
+            |token| provider.verify_token(token),
+        );
     }
 
     #[test]
