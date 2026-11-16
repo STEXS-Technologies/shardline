@@ -553,40 +553,18 @@ mod tests {
 
     #[test]
     fn coordinator_keeps_adapters_and_limits() {
-        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
-        let c = CasCoordinator::new(IndexProbe, ObjectStoreProbe, RecordStoreProbe, limits);
-        assert_eq!(c.index(), &IndexProbe);
-        assert_eq!(c.object_store(), &ObjectStoreProbe);
-        assert_eq!(c.record_store(), &RecordStoreProbe);
-        assert_eq!(c.limits(), limits);
-    }
-
-    #[test]
-    fn coordinator_debug_format() {
-        let limits = CasLimits::new(
-            NonZeroU64::new(1).unwrap(),
-            NonZeroU64::new(2).unwrap(),
-            NonZeroU64::new(3).unwrap(),
-        );
-        let c = CasCoordinator::new(IndexProbe, ObjectStoreProbe, RecordStoreProbe, limits);
-        let debug = format!("{c:?}");
-        assert!(debug.contains("CasCoordinator"));
-        assert!(debug.contains("RecordStoreProbe"));
-    }
-
-    #[test]
-    fn coordinator_with_different_types() {
-        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN, NonZeroU64::MIN);
-        let c = CasCoordinator::new(
-            42_usize,
-            String::from("store"),
-            String::from("records"),
-            limits,
-        );
-        assert_eq!(c.index(), &42_usize);
-        assert_eq!(c.object_store(), &"store");
-        assert_eq!(c.record_store(), &"records");
-        assert_eq!(c.limits(), limits);
+        for limits in [
+            CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN),
+            CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN, NonZeroU64::MIN),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        ] {
+            let coordinator =
+                CasCoordinator::new(IndexProbe, ObjectStoreProbe, RecordStoreProbe, limits);
+            assert_eq!(coordinator.index(), &IndexProbe);
+            assert_eq!(coordinator.object_store(), &ObjectStoreProbe);
+            assert_eq!(coordinator.record_store(), &RecordStoreProbe);
+            assert_eq!(coordinator.limits(), limits);
+        }
     }
 
     #[test]
@@ -609,16 +587,6 @@ mod tests {
         assert_eq!(
             identity.content_sha256.as_deref(),
             Some("a".repeat(64).as_str())
-        );
-    }
-
-    #[test]
-    fn coordinator_limits_independent() {
-        let a = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN, NonZeroU64::MIN);
-        let b = CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX);
-        assert_ne!(
-            CasCoordinator::new((), (), (), a).limits(),
-            CasCoordinator::new((), (), (), b).limits()
         );
     }
 

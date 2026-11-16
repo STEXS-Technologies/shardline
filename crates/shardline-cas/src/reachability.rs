@@ -69,20 +69,19 @@ mod tests {
     use shardline_protocol::ShardlineHash;
 
     #[tokio::test]
-    async fn reachability_returns_false_for_unknown() {
-        let store = MemoryIndexStore::new();
-        let id = StoredObjectId::new(ShardlineHash::from_bytes([1; 32]));
-        let reachable = ObjectReachability::is_object_reachable(&store, &id).await;
-        assert!(matches!(reachable, Ok(false)));
-    }
-
-    #[tokio::test]
-    async fn reachability_returns_true_for_registered() {
-        let store = MemoryIndexStore::new();
-        let hash = ShardlineHash::from_bytes([2; 32]);
-        let id = StoredObjectId::new(hash);
-        store.insert_object(&id).unwrap();
-        let reachable = ObjectReachability::is_object_reachable(&store, &id).await;
-        assert!(matches!(reachable, Ok(true)));
+    async fn reachability_changes_only_after_registration() {
+        for byte in [1, 2] {
+            let store = MemoryIndexStore::new();
+            let id = StoredObjectId::new(ShardlineHash::from_bytes([byte; 32]));
+            assert!(matches!(
+                ObjectReachability::is_object_reachable(&store, &id).await,
+                Ok(false)
+            ));
+            store.insert_object(&id).unwrap();
+            assert!(matches!(
+                ObjectReachability::is_object_reachable(&store, &id).await,
+                Ok(true)
+            ));
+        }
     }
 }
