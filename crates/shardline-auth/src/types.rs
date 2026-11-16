@@ -151,25 +151,18 @@ mod tests {
     }
 
     #[test]
-    fn auth_error_display_invalid_token() {
-        assert_eq!(AuthError::InvalidToken.to_string(), "invalid token");
-    }
-
-    #[test]
-    fn auth_error_display_expired_token() {
-        assert_eq!(AuthError::ExpiredToken.to_string(), "expired token");
-    }
-
-    #[test]
-    fn auth_error_display_insufficient_scope() {
-        let msg = AuthError::InsufficientScope.to_string();
-        assert_eq!(msg, "insufficient scope");
-    }
-
-    #[test]
-    fn auth_error_display_provider_error() {
-        let msg = AuthError::ProviderError("oops".to_owned()).to_string();
-        assert_eq!(msg, "provider error: oops");
+    fn auth_error_display_preserves_public_messages() {
+        for (error, expected) in [
+            (AuthError::InvalidToken, "invalid token"),
+            (AuthError::ExpiredToken, "expired token"),
+            (AuthError::InsufficientScope, "insufficient scope"),
+            (
+                AuthError::ProviderError("oops".to_owned()),
+                "provider error: oops",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]
@@ -179,47 +172,27 @@ mod tests {
     }
 
     #[test]
-    fn auth_error_from_token_codec_error_invalid_signature() {
-        let err: AuthError = TokenCodecError::InvalidSignature.into();
-        assert!(matches!(err, AuthError::InvalidToken));
+    fn malformed_credentials_become_invalid_token_errors() {
+        for error in [
+            TokenCodecError::InvalidSignature,
+            TokenCodecError::InvalidFormat,
+            TokenCodecError::InvalidHex(hex::FromHexError::InvalidStringLength),
+            TokenCodecError::Claims(shardline_protocol::TokenClaimsError::EmptyIssuer),
+        ] {
+            let err = AuthError::from(error);
+            assert!(matches!(err, AuthError::InvalidToken), "{err:?}");
+        }
     }
 
     #[test]
-    fn auth_error_from_token_codec_error_invalid_format() {
-        let err: AuthError = TokenCodecError::InvalidFormat.into();
-        assert!(matches!(err, AuthError::InvalidToken));
-    }
-
-    #[test]
-    fn auth_error_from_token_codec_error_invalid_hex() {
-        let hex_err = hex::FromHexError::InvalidStringLength;
-        let err: AuthError = TokenCodecError::InvalidHex(hex_err).into();
-        assert!(matches!(err, AuthError::InvalidToken));
-    }
-
-    #[test]
-    fn auth_error_from_token_codec_error_claims() {
-        let err: AuthError =
-            TokenCodecError::Claims(shardline_protocol::TokenClaimsError::EmptyIssuer).into();
-        assert!(matches!(err, AuthError::InvalidToken));
-    }
-
-    #[test]
-    fn auth_error_from_token_codec_error_empty_key() {
-        let err: AuthError = TokenCodecError::EmptySigningKey("test".to_owned()).into();
-        assert!(matches!(err, AuthError::ProviderError(_)));
-    }
-
-    #[test]
-    fn auth_error_from_token_codec_error_key_too_short() {
-        let err: AuthError = TokenCodecError::SigningKeyTooShort { actual_bytes: 4 }.into();
-        assert!(matches!(err, AuthError::ProviderError(_)));
-    }
-
-    #[test]
-    fn auth_error_from_token_codec_error_json() {
-        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
-        let err: AuthError = TokenCodecError::Json(json_err).into();
-        assert!(matches!(err, AuthError::ProviderError(_)));
+    fn configuration_and_serialization_failures_remain_provider_errors() {
+        for error in [
+            TokenCodecError::EmptySigningKey("test".to_owned()),
+            TokenCodecError::SigningKeyTooShort { actual_bytes: 4 },
+            TokenCodecError::Json(serde_json::from_str::<serde_json::Value>("bad").unwrap_err()),
+        ] {
+            let err = AuthError::from(error);
+            assert!(matches!(err, AuthError::ProviderError(_)), "{err:?}");
+        }
     }
 }

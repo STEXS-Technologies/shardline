@@ -72,11 +72,6 @@ mod tests {
     // ── LocalHmacProvider::new ────────────────────────────────────────
 
     #[test]
-    fn new_with_valid_key_succeeds() {
-        assert!(LocalHmacProvider::new(VALID_KEY).is_ok());
-    }
-
-    #[test]
     fn new_with_empty_key_errors() {
         let result = LocalHmacProvider::new(b"");
         assert!(matches!(result.unwrap_err(), AuthError::ProviderError(_)));
