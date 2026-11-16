@@ -4346,29 +4346,37 @@ production PostgreSQL/object-store qualification remain outside this checkpoint.
 
 ### SDK ownership and lifecycle recheck (2026-11-16)
 
-Source `ec710f82af7ce9c40754853fd9e3f966a9770bf7` was held fixed while
+Source `4a693180a28c344e4d35101b3513e065d74f1c48` was held fixed while
 repeating the complete SDK/server E2E and Xorb interoperability command above,
 including `--run-ignored all --no-fail-fast --success-output final` with two
-test threads and required native fixtures. This rechecks the subsequent upload
-lock consolidation, lazy global-dedup descriptor imports, group lifecycle and
-cache path/test cleanup together. The all-features SDK suite also passed all
-337 tests, and strict SDK library/test Clippy passed with `-D warnings`.
+test threads and required native fixtures. This rechecks cache ownership,
+buffer permits, chunk placement, reader-failure contracts and direct metadata
+response decoding together. The all-features SDK suite also passed all 335
+tests, and strict SDK library/test Clippy passed with `-D warnings`.
 
-All 35 E2E tests passed with none skipped in 303.826 s. Both isolated clients
+All 35 E2E tests passed with none skipped in 296.110 s. Both isolated clients
 verified exact byte identity and length and passed the unchanged 65,536 KiB
 additional-RSS limit:
 
 | Isolated client workload | Baseline RSS (KiB) | Peak VmHWM (KiB) | Additional RSS (KiB) | Client transfer (ms) |
 | --- | ---: | ---: | ---: | ---: |
-| 256 MiB | 26,304 | 74,092 | 47,788 | 1,273 |
-| 1 GiB | 26,060 | 82,348 | 56,288 | 8,627 |
+| 256 MiB | 25,956 | 73,868 | 47,912 | 1,249 |
+| 1 GiB | 25,764 | 79,944 | 54,180 | 8,300 |
 
-The parent memory tests took 22.881 s and 224.263 s, including fixture ingestion.
+The parent memory tests took 22.775 s and 221.353 s, including fixture ingestion.
 The shared Linux host, Rust 1.99.0 test toolchain, Rust 1.100.0 Clippy toolchain
 and unoptimized build settings with debug information disabled match the earlier
 checkpoints. These samples do not isolate individual optimizations, establish
 production throughput, or explain the historical hosted RSS failure. PostgreSQL
 and remote-object-storage qualification are separate from this local SDK check.
+
+This source contains 571,137 tracked Rust lines, down 32,512 (5.39%) from the
+603,649-line baseline, counting comments, tests and blank lines. The remaining
+closeout work is to assess the boxed future in protocol chunk reuse, qualify one
+final source snapshot across the database and object-store gates, investigate
+the hosted RSS failure, and measure optimized production-topology performance
+and retained storage after retention expiry and GC. These remain open; the SDK
+checkpoint does not establish whole-branch or production qualification.
 
 ### PostgreSQL cleanup checkpoint (2026-11-16)
 
