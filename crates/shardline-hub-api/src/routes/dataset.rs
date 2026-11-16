@@ -541,30 +541,26 @@ impl RangeLineReader {
             let remaining = self.chunk.get(self.chunk_position..).ok_or_else(|| {
                 HubApiError::PathValidation("dataset text cursor out of bounds".to_owned())
             })?;
-            if let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') {
-                let end = self.chunk_position.saturating_add(newline);
-                let segment = self.chunk.get(self.chunk_position..end).ok_or_else(|| {
+            let newline = remaining.iter().position(|byte| *byte == b'\n');
+            let segment = remaining
+                .get(..newline.unwrap_or(remaining.len()))
+                .ok_or_else(|| {
                     HubApiError::PathValidation("dataset text cursor out of bounds".to_owned())
                 })?;
-                if line.len().saturating_add(segment.len()) > MAX_DATASET_LINE_BYTES {
-                    return Err(HubApiError::PathValidation(
-                        "dataset text line exceeds limit".to_owned(),
-                    ));
-                }
-                line.extend_from_slice(segment);
-                self.chunk_position = end.saturating_add(1);
+            if line.len().saturating_add(segment.len()) > MAX_DATASET_LINE_BYTES {
+                return Err(HubApiError::PathValidation(
+                    "dataset text line exceeds limit".to_owned(),
+                ));
+            }
+            line.extend_from_slice(segment);
+            self.chunk_position = self.chunk_position.saturating_add(segment.len());
+            if newline.is_some() {
+                self.chunk_position = self.chunk_position.saturating_add(1);
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
                 return Ok(Some(line));
             }
-            if line.len().saturating_add(remaining.len()) > MAX_DATASET_LINE_BYTES {
-                return Err(HubApiError::PathValidation(
-                    "dataset text line exceeds limit".to_owned(),
-                ));
-            }
-            line.extend_from_slice(remaining);
-            self.chunk_position = self.chunk.len();
         }
     }
 }
@@ -827,6 +823,33 @@ mod tests {
         assert_eq!(first, content[..content.len() - 6]);
         assert_eq!(reader.next_line().unwrap().unwrap(), b"last");
         assert!(reader.next_line().unwrap().is_none());
+    }
+
+    #[test]
+    fn text_reader_enforces_line_limit_across_multiple_storage_ranges() {
+        for length in [
+            super::MAX_DATASET_LINE_BYTES,
+            super::MAX_DATASET_LINE_BYTES + 1,
+        ] {
+            let mut content = vec![b'a'; length];
+            content.push(b'\n');
+            let (_directory, store, key) = preview_store(&content);
+            let mut reader = RangeLineReader::new(
+                &store,
+                key,
+                content.len() as u64,
+                Arc::new(AtomicBool::new(false)),
+            );
+            if length == super::MAX_DATASET_LINE_BYTES {
+                assert_eq!(reader.next_line().unwrap().unwrap(), content[..length]);
+                assert!(reader.next_line().unwrap().is_none());
+            } else {
+                assert!(matches!(
+                    reader.next_line(),
+                    Err(HubApiError::PathValidation(message)) if message == "dataset text line exceeds limit"
+                ));
+            }
+        }
     }
 
     fn preview_store(content: &[u8]) -> (tempfile::TempDir, ServerObjectStore, ObjectKey) {
