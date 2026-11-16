@@ -621,14 +621,7 @@ async fn maintenance_tracking_is_shared_across_postgres_s3_nodes_and_roles() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_upload_session() {
-    // OCI v2 root and token endpoints work via HTTP, but the wildcard route
-    // `/v2/{*path}` has a routing issue with reqwest in this test setup.
-    // The monolithic blob upload and blob GET use Axum's built-in
-    // `tower::ServiceExt::oneshot` to bypass the HTTP layer and test the full
-    // handler/backend stack directly. Health/ready metrics tests above already
-    // validate the HTTP layer end-to-end.
     let content = b"OCI session upload content";
-    let digest = sha256_hex(content);
     // Repository must match or be under the token scope owner/name (test/test).
     let repo = "test/test";
 
@@ -668,42 +661,7 @@ async fn test_oci_upload_session() {
         provider.mint_token(&claims).unwrap()
     };
 
-    // Monolithic upload via POST with ?digest= query parameter.
-    let uri = format!("/v2/{repo}/blobs/uploads/?digest=sha256:{digest}");
-    let request = axum::http::Request::builder()
-        .method("POST")
-        .uri(&uri)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(axum::body::Body::from(content.to_vec()))
-        .unwrap();
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_eq!(
-        status,
-        201,
-        "OCI monolithic upload (oneshot) failed: status={} body={:?}",
-        status,
-        String::from_utf8_lossy(&body)
-    );
-
-    // Verify: GET the blob and check content (digest needs sha256: prefix for OCI path parser).
-    let get_uri = format!("/v2/{repo}/blobs/sha256:{digest}");
-    let get_request = axum::http::Request::builder()
-        .method("GET")
-        .uri(&get_uri)
-        .header("Authorization", format!("Bearer {token}"))
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let get_response = app.oneshot(get_request).await.unwrap();
-    assert_eq!(get_response.status(), 200);
-    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_eq!(get_body.as_ref(), content);
+    http_contracts::oci::blob_round_trip(&app, &token, repo, content).await;
 }
 
 // ---------------------------------------------------------------------------

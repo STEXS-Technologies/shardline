@@ -17,8 +17,34 @@ pub(crate) async fn oci_upload_blob_oneshot(
         .body(axum::body::Body::from(data.to_vec()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), 201, "blob upload: status={}", resp.status());
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        201,
+        "blob upload: {}",
+        String::from_utf8_lossy(&body)
+    );
     digest
+}
+
+/// Exercises monolithic upload and exact blob retrieval through the router/backend stack.
+pub(crate) async fn blob_round_trip(app: &axum::Router, token: &str, repo: &str, content: &[u8]) {
+    let digest = oci_upload_blob_oneshot(app, token, repo, content).await;
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("/v2/{repo}/blobs/sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), content);
 }
 
 pub(crate) fn oci_manifest_json(
