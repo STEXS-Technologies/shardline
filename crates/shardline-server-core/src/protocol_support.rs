@@ -122,11 +122,8 @@ pub fn validate_oci_repository_scope<E: ProtocolValidation>(
         return Ok(());
     };
 
-    let expected_root = format!(
-        "{}/{}",
-        repository_scope.owner().to_ascii_lowercase(),
-        repository_scope.name().to_ascii_lowercase()
-    );
+    let mut expected_root = format!("{}/{}", repository_scope.owner(), repository_scope.name());
+    expected_root.make_ascii_lowercase();
     if value == expected_root
         || value
             .strip_prefix(&expected_root)
@@ -309,7 +306,13 @@ mod tests {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let mixed_scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "Team", "Assets", None).unwrap();
         for (value, scope, valid) in [
+            ("team/assets", Some(&mixed_scope), true),
+            ("team/assets/cache", Some(&mixed_scope), true),
+            ("Team/Assets", Some(&mixed_scope), false),
+            ("team/assets-other", Some(&mixed_scope), false),
             ("team/assets", Some(&scope), true),
             ("team/assets/cache", Some(&scope), true),
             ("team/other", Some(&scope), false),
