@@ -5384,6 +5384,24 @@ current server executable; the remote Git fixtures also require object storage.
 The disposable PostgreSQL container was removed afterward. Strict all-features
 Hub library/test Clippy checks passed during the preceding source changes.
 
-This checkpoint covers the accumulated Hub response, streaming-preview, LFS
-staging, and security-test cleanup together. It does not qualify the four ignored
-fixtures, production throughput, or the historical hosted SDK memory failure.
+A follow-up at `c88935ce` (documentation-only changes since the frozen source)
+built the current all-features CLI in 23.31 seconds, then explicitly ran all four
+normally ignored Hub tests. The Git clone/fetch and protocol-v2 matrices used
+stock Git with disposable PostgreSQL/MinIO; the snapshot-token fixture checked
+confinement on PostgreSQL/MinIO; and the publication fixture checked PostgreSQL
+conflicts, deleted branches, concurrent reads, and corrupt journal rejection.
+All four passed in 37.743 seconds, using one test thread:
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 SHARDLINE_BIN="$CARGO_TARGET_DIR/debug/shardline" \
+  cargo +1.99.0 nextest run --offline --locked -p shardline-hub-api \
+  --all-features --run-ignored only --no-fail-fast --success-output final \
+  --test-threads 1
+```
+
+The fixture containers were cleaned up; the running-container inventory matched
+the pre-run inventory. Across the two runs, all 833 Hub tests passed, including
+the four normally ignored tests. This checkpoint covers the accumulated Hub
+response, streaming-preview, LFS staging, and security-test cleanup together.
+It does not qualify production throughput or resolve the historical hosted SDK
+memory failure.
