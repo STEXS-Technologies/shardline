@@ -4344,6 +4344,33 @@ These local results do not isolate individual changes, establish production
 throughput, or explain the historical hosted RSS failure. Full server and
 production PostgreSQL/object-store qualification remain outside this checkpoint.
 
+### Server library checkpoint (2026-11-16)
+
+At source `6911a2bd41698da6730d4dfaab64eaee2dda4ff8`, the server library
+suite was run with the same shared-host test build settings:
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 RUSTC_WRAPPER= \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 \
+  cargo +1.99.0 nextest run --offline --locked \
+  -p shardline-server --lib --no-fail-fast --test-threads 4
+```
+
+The initial run finished in 239.708 s: 3,192 passed, eight failed and 28
+were skipped. All eight failures reported missing released recovery executables.
+After configuring `SHARDLINE_N_MINUS_ONE_BINARY` to the pinned 1.12.1 release
+and `SHARDLINE_LEGACY_RECOVERY_BINARY` to the pinned 1.11.3 release, rerunning
+`test(historical_server_preserves) | test(released_server_recovers)` returned
+success for all eight in 0.891 s. The release archives matched the checksums in
+`scripts/shardline/fetch_compatibility_baseline.sh`.
+
+This is not a fully qualified server-suite pass: `DATABASE_URL` was unset,
+and optional PostgreSQL fixtures return early in that configuration. In
+particular, only the four local-backend cases in the recovery rerun exercised
+released-server compatibility; the four PostgreSQL cases returned early.
+The 28 ignored tests were not enabled. PostgreSQL/object-store integration,
+full-capacity drills and the historical hosted RSS failure remain outstanding.
+
 ## Shared protocol chunk reuse qualification
 
 The shared ingestion path now consults the existing scoped native chunk index,
