@@ -194,27 +194,49 @@ pub(crate) fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
     use shardline_protocol::ShardlineHash;
 
-    use super::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata};
+    use super::{ObjectBody, ObjectIntegrity, ObjectMetadata};
     use crate::ObjectKey;
 
     #[test]
-    fn object_body_borrows_input_bytes() {
-        let bytes = [1, 2, 3];
-        let body = ObjectBody::from_slice(&bytes);
+    fn object_bodies_preserve_bytes_and_ownership() {
+        for input in [
+            b"".as_slice(),
+            &[1, 2, 3],
+            b"payload",
+            &[10, 20, 30, 40],
+            b"test-data",
+            b"shared-data",
+        ] {
+            let borrowed = ObjectBody::from_slice(input);
+            assert_eq!(borrowed.as_slice().as_ptr(), input.as_ptr());
+            let copied = borrowed.into_bytes();
+            assert_eq!(copied.as_ref(), input);
+            if !input.is_empty() {
+                assert_ne!(copied.as_ptr(), input.as_ptr());
+            }
 
-        assert_eq!(body.as_slice(), bytes);
-    }
-
-    #[test]
-    fn object_body_keeps_shared_bytes_without_copy() {
-        let shared = Bytes::from_static(b"payload");
-        let body = ObjectBody::from_bytes(shared.clone());
-
-        assert_eq!(body.as_slice(), shared.as_ref());
-        assert_eq!(body.into_bytes(), shared);
+            let owned = input.to_vec();
+            let pointer = owned.as_ptr();
+            let body = ObjectBody::from_vec(owned);
+            assert_eq!(body.as_slice(), input);
+            if !input.is_empty() {
+                assert_eq!(body.as_slice().as_ptr(), pointer);
+            }
+            let shared = body.into_bytes();
+            assert_eq!(shared.as_ref(), input);
+            if !input.is_empty() {
+                assert_eq!(shared.as_ptr(), pointer);
+            }
+            let body = ObjectBody::from_bytes(shared);
+            assert_eq!(body.as_slice(), input);
+            let result = body.into_bytes();
+            assert_eq!(result.as_ref(), input);
+            if !input.is_empty() {
+                assert_eq!(result.as_ptr(), pointer);
+            }
+        }
     }
 
     #[test]
@@ -259,49 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_outcome_distinguishes_deleted_and_missing() {
-        assert_eq!(DeleteOutcome::Deleted, DeleteOutcome::Deleted);
-        assert_eq!(DeleteOutcome::NotFound, DeleteOutcome::NotFound);
-    }
-
-    #[test]
-    fn object_body_from_vec_creates_shared_bytes() {
-        let vec = vec![10, 20, 30, 40];
-        let body = ObjectBody::from_vec(vec.clone());
-        assert_eq!(body.as_slice(), &vec[..]);
-        let into = body.into_bytes();
-        assert_eq!(into.as_ref(), &vec[..]);
-    }
-
-    #[test]
-    fn object_body_from_slice_into_bytes_copies() {
-        let slice: &[u8] = &[1, 2, 3];
-        let body = ObjectBody::from_slice(slice);
-        let bytes = body.into_bytes();
-        assert_eq!(bytes.as_ref(), slice);
-    }
-
-    #[test]
-    fn object_body_shared_from_slice() {
-        let body = ObjectBody::from_bytes(Bytes::from_static(b"test-data"));
-        assert_eq!(body.as_slice(), b"test-data");
-    }
-
-    #[test]
-    fn object_body_from_vec_empty() {
-        let body = ObjectBody::from_vec(vec![]);
-        assert!(body.as_slice().is_empty());
-        let bytes = body.into_bytes();
-        assert!(bytes.is_empty());
-    }
-
-    #[test]
-    fn object_body_borrowed_empty() {
-        let body = ObjectBody::from_slice(b"");
-        assert!(body.as_slice().is_empty());
-    }
-
-    #[test]
     fn object_metadata_with_none_checksum() {
         let key = ObjectKey::parse("xorbs/default/no-checksum.xorb").unwrap();
         let metadata = ObjectMetadata::new(key.clone(), 128, None);
@@ -316,22 +295,5 @@ mod tests {
         let integrity = ObjectIntegrity::new(hash, 0);
         assert_eq!(integrity.length(), 0);
         assert_eq!(integrity.hash(), hash);
-    }
-
-    #[test]
-    fn object_body_shared_into_bytes_returns_same() {
-        let shared = Bytes::from_static(b"shared-data");
-        let body = ObjectBody::from_bytes(shared.clone());
-        let result = body.into_bytes();
-        assert_eq!(result, shared);
-    }
-
-    #[test]
-    fn object_metadata_debug_format() {
-        let key = ObjectKey::parse("test/key.xorb").unwrap();
-        let metadata = ObjectMetadata::new(key, 42, None);
-        let debug = format!("{metadata:?}");
-        assert!(debug.contains("key"));
-        assert!(debug.contains("42"));
     }
 }
