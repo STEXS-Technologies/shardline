@@ -424,21 +424,6 @@ pub fn create_directory(path: &Path, directory_mode: Option<u32>) -> io::Result<
     builder.create(path)
 }
 
-/// Recursively creates a directory chain, optionally applying an explicit mode.
-///
-/// # Errors
-///
-/// Returns an error when any directory in the chain cannot be created.
-#[cfg(test)]
-pub fn create_directory_all(path: &Path, directory_mode: Option<u32>) -> io::Result<()> {
-    let mut builder = DirBuilder::new();
-    builder.recursive(true);
-    if let Some(mode) = directory_mode {
-        builder.mode(mode);
-    }
-    builder.create(path)
-}
-
 /// Builds a descriptor-relative child path below an open directory.
 #[must_use]
 pub fn fd_child_path(directory: &File, child: &OsStr) -> PathBuf {
@@ -1102,28 +1087,6 @@ mod tests {
     }
 
     #[test]
-    fn open_directory_chain_rejects_prefix_component() {
-        // The only way to get a Prefix component on Unix is... not possible,
-        // but on Windows it would be.  We test the error path by asserting
-        // the function signature handles it.  Since Prefix only appears on
-        // Windows, this test is a no-op on other platforms but ensures the
-        // code compiles and is reachable.
-        #[cfg(not(unix))]
-        {
-            let dir = tempdir().unwrap();
-            let path = std::path::Path::new(r"\\?\C:\");
-            let result = open_directory_chain(path, false, None, invalid_path_error);
-            assert!(result.is_err());
-        }
-        // On Unix we verify the function is callable.
-        #[cfg(unix)]
-        {
-            let _ =
-                open_directory_chain(std::path::Path::new("/"), false, None, invalid_path_error);
-        }
-    }
-
-    #[test]
     fn open_or_create_child_directory_create_error() {
         let dir = tempdir().unwrap();
         let parent = std::fs::OpenOptions::new()
@@ -1267,35 +1230,6 @@ mod tests {
         let result = create_directory(&new_dir, Some(0o755));
         assert!(result.is_ok());
         assert!(new_dir.is_dir());
-    }
-
-    // ── create_directory_all ──────────────────────────────────────────────
-
-    #[test]
-    fn create_directory_all_nested() {
-        let dir = tempdir().unwrap();
-        let nested = dir.path().join("a/b/c");
-
-        assert!(create_directory_all(&nested, None).is_ok());
-        assert!(nested.is_dir());
-    }
-
-    #[test]
-    fn create_directory_all_idempotent() {
-        let dir = tempdir().unwrap();
-        let nested = dir.path().join("x/y");
-
-        assert!(create_directory_all(&nested, None).is_ok());
-        assert!(create_directory_all(&nested, None).is_ok());
-    }
-
-    #[test]
-    fn create_directory_all_with_mode() {
-        let dir = tempdir().unwrap();
-        let nested = dir.path().join("p/q/r");
-
-        assert!(create_directory_all(&nested, Some(0o755)).is_ok());
-        assert!(nested.is_dir());
     }
 
     // ── open_new_file with mode ──────────────────────────────────────────
@@ -1486,26 +1420,6 @@ mod tests {
             result.is_ok(),
             "should handle concurrent directory creation"
         );
-    }
-
-    // ── open_directory_chain with Prefix component (compile check) ───────
-
-    #[test]
-    fn open_directory_chain_rejects_prefix_via_invalid_path() {
-        // The Prefix component only appears on Windows.
-        // On Unix, we can test that a non-Normal component in the path
-        // path (like a trailing slash with ParentDir) is handled.
-        let dir = tempdir().unwrap();
-        // The function handles RootDir and CurDir via empty match arms (L140).
-        // ParentDir is handled at L141-143.
-        // Normal segments go through open_or_create_child_directory (L144-151).
-        //
-        // To hit L152 (Prefix), we'd need a Windows path like \\?\C:\.
-        // On Unix this is unreachable.
-        //
-        // We can still verify the function works correctly with valid paths.
-        let result = open_directory_chain(dir.path(), false, None, invalid_path_error);
-        assert!(result.is_ok());
     }
 
     // ── open_anchored_target with traversal in relative parent path ─────
