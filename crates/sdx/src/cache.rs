@@ -114,31 +114,17 @@ type CacheKey = (String, u64, u64);
 struct CacheState {
     entries: std::collections::HashMap<CacheKey, CacheEntry>,
     total_bytes: u64,
+    last_access: u64,
 }
 
-/// Monotonic access clock shared across a process.
-///
-/// Based on system-time millis (so startup-seeded entries — whose
-/// `last_accessed` comes from file mtimes — share a comparable scale) plus a
-/// per-call counter that strictly increases within the same millisecond.
-/// Millisecond clock granularity alone would produce ties that make LRU
-/// eviction order arbitrary.
-fn clock_tick() -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            duration.as_millis().try_into().unwrap_or(u64::MAX)
-        });
-    let counter = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-    let tick = now.saturating_add(counter);
-    let previous = LAST_TICK.fetch_max(tick, Ordering::Relaxed);
-    previous.max(tick)
+impl CacheState {
+    // The state mutex serializes access. Seed from restored mtimes, then use
+    // logical ticks so wall-clock changes cannot reverse eviction order.
+    const fn next_access(&mut self) -> u64 {
+        self.last_access = self.last_access.saturating_add(1);
+        self.last_access
+    }
 }
-
-/// Last value handed out by [`clock_tick`] (monotonic ratchet).
-static LAST_TICK: AtomicU64 = AtomicU64::new(0);
-/// Strictly increasing per-call counter (disambiguates same-millisecond ticks).
-static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// On-disk chunk cache for decoded xorb ranges, keyed by the 64-hex xorb hash.
 ///
@@ -275,8 +261,9 @@ impl ChunkCache {
                 }
             };
             // File reads and index updates share the lock with writes and eviction.
+            let last_accessed = state.next_access();
             if let Some(entry) = state.entries.get_mut(&key) {
-                entry.last_accessed = clock_tick();
+                entry.last_accessed = last_accessed;
             }
             Ok(Some(cached))
         })
@@ -366,11 +353,12 @@ impl ChunkCache {
             let mut state = state.blocking_lock();
             let metadata = serialize_entry_metadata(chunk_range, &offsets, &owned_data);
             write_atomic(&path, &metadata, &owned_data)?;
+            let last_accessed = state.next_access();
             if let Some(existing) = state.entries.insert(
                 key,
                 CacheEntry {
                     size,
-                    last_accessed: clock_tick(),
+                    last_accessed,
                 },
             ) {
                 state.total_bytes = state.total_bytes.saturating_sub(existing.size);
@@ -823,6 +811,7 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
                 .map_or(0, |duration| {
                     duration.as_millis().try_into().unwrap_or(u64::MAX)
                 });
+            state.last_access = state.last_access.max(last_accessed);
             if state
                 .entries
                 .insert(
@@ -1409,12 +1398,34 @@ mod tests {
         assert!(get(&cache, &key).await.is_none());
     }
 
-    #[test]
-    fn clock_tick_is_monotonic() {
-        // Sanity: clock_tick strictly increases (or holds) within a process.
-        let first = clock_tick();
-        std::thread::sleep(Duration::from_millis(5));
-        let second = clock_tick();
-        assert!(second >= first);
+    #[tokio::test]
+    async fn reopened_cache_orders_new_accesses_after_future_file_timestamps() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ChunkCache::new(directory.path(), 128).unwrap();
+        let first = hash('a');
+        let second = hash('b');
+        let newest = hash('c');
+        for key in [&first, &second] {
+            put(&cache, key, &[7; 16]).await;
+            let path = cache.item_path(&cache_key(key, (0, 1))).unwrap();
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
+                )
+                .unwrap();
+        }
+        drop(cache);
+        let cache = ChunkCache::new(directory.path(), 128).unwrap();
+        assert!(get(&cache, &first).await.is_some());
+        put(&cache, &newest, &[9; 16]).await;
+        assert!(get(&cache, &second).await.is_none());
+        assert!(get(&cache, &first).await.is_some());
+        assert!(get(&cache, &newest).await.is_some());
+        assert_eq!(cache.entry_count().await.unwrap(), 2);
+        assert_eq!(cache.total_bytes().await.unwrap(), 128);
     }
 }
