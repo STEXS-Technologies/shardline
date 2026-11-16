@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{borrow::Cow, str::FromStr};
 
 use axum::http::HeaderMap;
 use axum::{
@@ -34,10 +34,10 @@ pub(crate) async fn repo_create(
     repo: HubRepository<true>,
     Json(request): Json<RepoCreateRequest>,
 ) -> Result<Response, HubApiError> {
-    let full_name = request.organization.as_deref().map_or_else(
-        || request.name.clone(),
-        |organization| format!("{organization}/{}", request.name),
-    );
+    let full_name = match request.organization {
+        Some(organization) => format!("{organization}/{}", request.name),
+        None => request.name,
+    };
     // This route has no repository in its path, so bind the requested identity
     // from the body before checking whether it already exists. A repository
     // scoped write token may create/retry only that exact repository unless
@@ -444,24 +444,25 @@ pub(crate) async fn repo_refs(
         }) {
             continue;
         }
-        let (items, short_name, full_name) =
-            if let Some(short) = reference.ref_name.strip_prefix("refs/tags/") {
-                (&mut tags, short, reference.ref_name.clone())
-            } else if let Some(short) = reference.ref_name.strip_prefix("refs/heads/") {
-                (&mut branches, short, reference.ref_name.clone())
-            } else if let Some(short) = reference.ref_name.strip_prefix("refs/pr/") {
-                (&mut pull_requests, short, reference.ref_name.clone())
-            } else if let Some(short) = reference.ref_name.strip_prefix("refs/convert/") {
-                (&mut converts, short, reference.ref_name.clone())
-            } else if !reference.ref_name.starts_with("refs/") {
-                (
-                    &mut branches,
-                    reference.ref_name.as_str(),
-                    format!("refs/heads/{}", reference.ref_name),
-                )
-            } else {
-                continue;
-            };
+        let full_name = if reference.ref_name.starts_with("refs/") {
+            Cow::Borrowed(reference.ref_name.as_str())
+        } else {
+            Cow::Owned(format!("refs/heads/{}", reference.ref_name))
+        };
+        let (items, short_name) = if let Some(short) = reference.ref_name.strip_prefix("refs/tags/")
+        {
+            (&mut tags, short)
+        } else if let Some(short) = reference.ref_name.strip_prefix("refs/heads/") {
+            (&mut branches, short)
+        } else if let Some(short) = reference.ref_name.strip_prefix("refs/pr/") {
+            (&mut pull_requests, short)
+        } else if let Some(short) = reference.ref_name.strip_prefix("refs/convert/") {
+            (&mut converts, short)
+        } else if !reference.ref_name.starts_with("refs/") {
+            (&mut branches, reference.ref_name.as_str())
+        } else {
+            continue;
+        };
         items.push(serde_json::json!({
             "name": short_name,
             "ref": full_name,
