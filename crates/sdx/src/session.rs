@@ -206,7 +206,7 @@ impl DownloadSession {
         file_id: &str,
         range: Option<Range<u64>>,
     ) -> Result<DownloadStream, SdxError> {
-        let reconstructor = self.build_reconstructor(file_id, range).await?;
+        let reconstructor = self.inner.build_reconstructor(file_id, range).await?;
         Ok(reconstructor.reconstruct_to_stream())
     }
 
@@ -226,7 +226,7 @@ impl DownloadSession {
         file_id: &str,
         range: Option<Range<u64>>,
     ) -> Result<UnorderedDownloadStream, SdxError> {
-        let reconstructor = self.build_reconstructor(file_id, range).await?;
+        let reconstructor = self.inner.build_reconstructor(file_id, range).await?;
         Ok(reconstructor.reconstruct_to_unordered_stream())
     }
 
@@ -243,7 +243,7 @@ impl DownloadSession {
         file_id: &str,
         writer: W,
     ) -> Result<u64, SdxError> {
-        let reconstructor = self.build_reconstructor(file_id, None).await?;
+        let reconstructor = self.inner.build_reconstructor(file_id, None).await?;
         reconstructor.reconstruct_to_writer(writer).await
     }
 
@@ -264,20 +264,6 @@ impl DownloadSession {
             out.extend_from_slice(&chunk);
         }
         Ok(out.freeze())
-    }
-
-    /// Builds a [`FileReconstructor`] for `file_id`, validating the identifier
-    /// and resolving the read token.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SdxError`] when `file_id` is malformed or token issuance fails.
-    async fn build_reconstructor(
-        &self,
-        file_id: &str,
-        range: Option<Range<u64>>,
-    ) -> Result<FileReconstructor, SdxError> {
-        self.inner.build_reconstructor(file_id, range).await
     }
 
     async fn download(
