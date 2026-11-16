@@ -455,6 +455,7 @@ fn s3_store_debug_redacts_credentials() {
     assert!(!rendered.contains("access-key"));
     assert!(!rendered.contains("secret-key"));
     assert!(!rendered.contains("session-token"));
+    assert!(rendered.contains("runtime"));
 }
 
 #[test]
@@ -802,17 +803,37 @@ fn s3_config_defaults_and_prefix_accessors() {
 // ── S3ObjectStoreConfig Debug redaction ────────────────────────────────
 
 #[test]
-fn s3_config_debug_redacts_credentials() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        Some(SecretString::from_secret("access-key-123")),
-        Some(SecretString::from_secret("secret-key-456")),
-        Some(SecretString::from_secret("session-token-789")),
-    );
-    let rendered = format!("{config:?}");
-    assert!(!rendered.contains("access-key-123"));
-    assert!(!rendered.contains("secret-key-456"));
-    assert!(!rendered.contains("session-token-789"));
-    assert!(rendered.contains("***"));
+fn s3_config_debug_preserves_diagnostics_and_redacts_credentials() {
+    for credentials in [false, true] {
+        for virtual_hosted in [false, true] {
+            let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_virtual_hosted_style_request(virtual_hosted)
+                .with_credentials(
+                    credentials.then(|| SecretString::from_secret("access-key-123")),
+                    credentials.then(|| SecretString::from_secret("secret-key-456")),
+                    credentials.then(|| SecretString::from_secret("session-token-789")),
+                );
+            let rendered = format!("{config:?}");
+            for secret in ["access-key-123", "secret-key-456", "session-token-789"] {
+                assert!(!rendered.contains(secret));
+            }
+            for field in [
+                "bucket",
+                "region",
+                "allow_http",
+                "key_prefix",
+                "endpoint: None",
+            ] {
+                assert!(rendered.contains(field));
+            }
+            assert!(rendered.contains(&format!("virtual_hosted_style_request: {virtual_hosted}")));
+            assert!(rendered.contains(if credentials {
+                "***"
+            } else {
+                "access_key_id: None"
+            }));
+        }
+    }
 }
 
 // ── chunk_hash ────────────────────────────────────────────────────────
@@ -946,18 +967,6 @@ fn validate_config_accepts_valid_config() {
 }
 
 // ── is_temp_upload_key edge cases ──────────────────────────────────────
-
-// ── S3ObjectStoreConfig Debug with missing credentials ─────────────────
-
-#[test]
-fn s3_config_debug_without_credentials() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
-    let rendered = format!("{config:?}");
-    assert!(rendered.contains("bucket"));
-    assert!(rendered.contains("allow_http"));
-    assert!(rendered.contains("region"));
-    assert!(rendered.contains("key_prefix"));
-}
 
 // ── S3ByteStream type alias smoke test ─────────────────────────────────
 
@@ -1758,27 +1767,6 @@ fn location_for_prefix_contract() {
 }
 
 #[test]
-fn s3_config_debug_shows_virtual_hosted_style() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-        .with_virtual_hosted_style_request(true);
-    let rendered = format!("{config:?}");
-    assert!(rendered.contains("virtual_hosted_style_request: true"));
-}
-
-#[test]
-fn s3_store_debug_shows_runtime_status() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true),
-    );
-    let store = store.expect("expected valid store");
-    let rendered = format!("{store:?}");
-    // Should mention runtime status
-    assert!(rendered.contains("runtime"));
-}
-
-#[test]
 fn temp_key_for_overflow_key_rejected() {
     // A very long base key no longer overflows: the F-80 temp shape is a fixed
     // reserved-prefix key (`__tmp/shardline-overwrite/<key-digest>.…`),
@@ -1817,15 +1805,6 @@ fn s3_config_clone_and_eq() {
         .with_allow_http(true);
     let b = a.clone();
     assert_eq!(a, b);
-}
-
-// ── S3ObjectStoreConfig Debug without endpoint ────────────────────────
-
-#[test]
-fn s3_config_debug_without_endpoint_shows_none() {
-    let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
-    let dbg = format!("{config:?}");
-    assert!(dbg.contains("endpoint: None"));
 }
 
 // ── metadata_from_external with prefix and without ────────────────────
