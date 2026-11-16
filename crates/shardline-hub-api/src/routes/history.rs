@@ -127,6 +127,47 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn corrupt_history_never_returns_a_successful_page_or_continuation() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        let (root, state) = crate::routes::tests::make_test_state();
+        let repo = "alice/history";
+        state
+            .store
+            .create_repo(shardline_index::hub::HubRepoType::Model, repo, false)
+            .unwrap();
+        let head = state.store.resolve_revision(repo, "main").unwrap().unwrap();
+        let app = crate::routes::router::router(false).with_state(state);
+        let request = || {
+            Request::builder()
+                .uri("/api/models/alice/history/commits/main?limit=1")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        for parent in [head.clone(), "f".repeat(64)] {
+            connection
+                .execute(
+                    "UPDATE shardline_hub_revisions SET parent_sha=?1 WHERE repo_id=?2 AND sha=?3",
+                    rusqlite::params![parent, repo, head],
+                )
+                .unwrap();
+            let response = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(response.headers().get(LINK).is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn history_continuation_rechecks_branch_access_after_deletion_and_replacement() {
         use axum::{body::Body, http::Request};
         use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
