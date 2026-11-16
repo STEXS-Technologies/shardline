@@ -5719,7 +5719,24 @@ Formatting was also checked independently with Rust 1.100.0.
 The release executable was frozen with SHA-256
 `ddf875ff19e01148bd2742d9493dfe3d887887df51295baf5976028c9b091443`.
 This contributor gate does not qualify excluded tests or external-fixture tests
-that return early without their infrastructure. PostgreSQL, MinIO, distributed
-faults and real-client qualification retain their separately recorded source
-revisions. This is local evidence, not hosted-CI success, a controlled build-speed
+that return early without their infrastructure. Infrastructure qualification retains its separately recorded source revisions;
+the PostgreSQL follow-up below uses this same candidate. This is local evidence, not hosted-CI success, a controlled build-speed
 comparison, or resolution of the historical hosted SDK RSS failure.
+
+#### PostgreSQL follow-up
+
+The same frozen candidate completed `scripts/test-postgres.sh` against a fresh
+PostgreSQL 16 Alpine database migrated by that executable, with PostgreSQL and
+native-client prerequisites required and the pinned 1.12.1/1.11.3 recovery
+executables available. All **4,040 selected tests passed**: 813 index library,
+two provider-event integration, 3,218 server library, six explicitly enabled
+PostgreSQL copy-integrity/cache-revocation contracts, and one live migration E2E.
+The default library stages excluded six normally ignored index tests and 45
+normally ignored server tests; the six explicit contracts were enabled separately.
+
+The frozen executable's checksum was unchanged afterward, and the owned database
+container was removed. This used Rust 1.99.0, four test/build workers, cached
+dependencies and disabled test debug information on the shared development host.
+It is correctness evidence for this gate, not a production-topology or throughput
+qualification. Distributed and remote-object-store results remain tied to their
+previously recorded revisions.
