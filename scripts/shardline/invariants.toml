@@ -48,11 +48,10 @@ tests = [
 [[invariant]]
 id = "I-GC-TEMP"
 guarantee = "Generated temporary-object names must not shadow or sweep legal user object keys."
-owners = ["crates/shardline-storage/src/temporary_name.rs", "crates/shardline-storage/src/s3/operations.rs"]
+owners = ["crates/shardline-storage/src/temporary_name.rs", "crates/shardline-storage/src/s3/types.rs", "crates/shardline-storage/src/s3/operations.rs"]
 failure_boundaries = ["legacy temp-shaped user names", "listing", "flat namespace listing", "stale-temp sweep"]
 tests = [
-  { file = "crates/shardline-storage/src/s3/tests.rs", name = "is_temp_upload_key_does_not_shadow_user_keys", backend = "s3-helper" },
-  { file = "crates/shardline-storage/src/s3/tests.rs", name = "is_temp_upload_key_rejects_user_keys_that_look_like_generated_temps", backend = "s3-helper" },
+  { file = "crates/shardline-storage/src/s3/tests.rs", name = "temporary_key_detection_never_shadows_user_objects", backend = "s3-helper" },
   { file = "crates/shardline-storage/src/s3/tests.rs", name = "minio_collision_shaped_user_keys_are_listed_and_never_swept", backend = "minio", prerequisites = ["Docker", "SHARDLINE_REQUIRE_NATIVE_CLIENTS=1"] },
 ]
 
@@ -98,9 +97,10 @@ tests = [
 [[invariant]]
 id = "I-SNAPSHOT-HISTORY"
 guarantee = "Verify snapshot history and its current materialized state without changing released evidence encodings."
-owners = ["crates/shardline-reliability/src/snapshot_event.rs", "crates/shardline-reliability/src/snapshot_log.rs"]
-failure_boundaries = ["sequence gap", "sequence overflow", "current state mismatch", "tampered commitment", "rewritten storage sequence", "released encoding compatibility"]
+owners = ["crates/shardline-reliability/src/snapshot_event.rs", "crates/shardline-reliability/src/snapshot_log.rs", "crates/shardline-reliability/src/operation.rs"]
+failure_boundaries = ["sequence gap", "sequence overflow", "current state mismatch", "tampered commitment", "rewritten storage sequence", "released encoding compatibility", "operation ID field boundaries"]
 tests = [
+  { file = "crates/shardline-reliability/src/tests.rs", name = "operation_ids_preserve_byte_lengths_and_field_boundaries", backend = "typed-evidence" },
   { file = "crates/shardline-reliability/src/tests.rs", name = "snapshot_chain_rejects_sequence_gaps", backend = "typed-evidence" },
   { file = "crates/shardline-reliability/src/tests.rs", name = "snapshot_evidence_rejects_sequence_overflow", backend = "typed-evidence" },
   { file = "crates/shardline-reliability/src/tests.rs", name = "snapshot_evidence_helpers_share_baseline_repair_and_append_policy", backend = "typed-evidence" },
