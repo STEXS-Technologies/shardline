@@ -32,7 +32,7 @@ impl RepositoryScopeCacheKey {
     #[must_use]
     pub fn from_scope(scope: &RepositoryScope) -> Self {
         Self {
-            provider: provider_token(scope.provider()),
+            provider: scope.provider().as_str(),
             owner: Arc::from(scope.owner()),
             repo: Arc::from(scope.name()),
             revision: scope.revision().map(Arc::from),
@@ -73,7 +73,7 @@ impl RepositoryScopeCacheKey {
             "gitlab" => RepositoryProvider::GitLab,
             "codeberg" => RepositoryProvider::Codeberg,
             // Unreachable by construction: `provider` is only ever populated
-            // from `RepositoryProvider::as_str()` via `provider_token`. Kept as
+            // from `RepositoryProvider::as_str()`. Kept as
             // a lint-safe fallback (no unwrap/panic) to keep the match exhaustive.
             _other => RepositoryProvider::Generic,
         }
@@ -195,22 +195,12 @@ impl ReconstructionCacheKey {
     }
 }
 
-const fn provider_token(provider: RepositoryProvider) -> &'static str {
-    match provider {
-        RepositoryProvider::GitHub => "github",
-        RepositoryProvider::Gitea => "gitea",
-        RepositoryProvider::GitLab => "gitlab",
-        RepositoryProvider::Codeberg => "codeberg",
-        RepositoryProvider::Generic => "generic",
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
-    use super::{ReconstructionCacheKey, RepositoryScopeCacheKey, provider_token};
+    use super::{ReconstructionCacheKey, RepositoryScopeCacheKey};
 
     const PROVIDERS: [(RepositoryProvider, &str); 5] = [
         (RepositoryProvider::GitHub, "github"),
@@ -258,20 +248,8 @@ mod tests {
         assert!(version.repository_scope().is_none());
     }
 
-    // ── All provider tokens ──────────────────────────────────────────────
-
-    #[test]
-    fn provider_token_all_variants() {
-        assert_eq!(provider_token(RepositoryProvider::GitHub), "github");
-        assert_eq!(provider_token(RepositoryProvider::Gitea), "gitea");
-        assert_eq!(provider_token(RepositoryProvider::GitLab), "gitlab");
-        assert_eq!(provider_token(RepositoryProvider::Codeberg), "codeberg");
-        assert_eq!(provider_token(RepositoryProvider::Generic), "generic");
-    }
-
     // ── Scope with no revision ───────────────────────────────────────────
 
-    #[allow(clippy::unwrap_used)]
     #[test]
     fn cache_key_scope_without_revision() {
         let scope = RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
