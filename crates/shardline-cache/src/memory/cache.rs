@@ -190,19 +190,11 @@ impl MemoryReconstructionCache {
                 key: key.clone(),
                 notify: Arc::clone(&notify),
             };
-            let result = run_loader_with_heartbeat(last_seen_alive, loader).await;
-            match result {
-                Ok(payload) => {
-                    let reservation = ReconstructionCacheReservation::local(Arc::clone(&notify));
-                    self.put_reserved(key, &payload, &reservation).await?;
-                    Ok(Some(payload))
-                }
-                Err(e) => {
-                    // The guard above releases the loading latch and wakes
-                    // waiters on the way out.
-                    Err(e)
-                }
-            }
+            // On error, the guard releases the latch and wakes waiters.
+            let payload = run_loader_with_heartbeat(last_seen_alive, loader).await?;
+            let reservation = ReconstructionCacheReservation::local(Arc::clone(&notify));
+            self.put_reserved(key, &payload, &reservation).await?;
+            Ok(Some(payload))
         } else {
             // Someone else is loading — wait for them (bounded). `wait_for_loader`
             // re-enters for a second interval instead of stealing the latch while
