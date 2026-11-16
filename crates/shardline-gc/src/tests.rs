@@ -42,91 +42,79 @@ use crate::types::{
 };
 
 #[test]
-fn default_retention_seconds_value() {
+fn gc_options_preserve_modes_retention_and_revision_defaults() {
     assert_eq!(DEFAULT_LOCAL_GC_RETENTION_SECONDS, 86_400);
+    for (options, sweep, mode) in [
+        (LocalGcOptions::default(), false, "dry-run"),
+        (LocalGcOptions::dry_run(), false, "dry-run"),
+        (LocalGcOptions::sweep_only(), true, "sweep"),
+    ] {
+        assert!(!options.mark);
+        assert_eq!(options.sweep, sweep);
+        assert_eq!(
+            options.retention_seconds,
+            DEFAULT_LOCAL_GC_RETENTION_SECONDS
+        );
+        assert_eq!(options.mode_name(), mode);
+        assert_eq!(options.max_revisions_per_repo, None);
+    }
+    for retention in [0, 100, 3600, 7200, u64::MAX] {
+        for (options, sweep, mode) in [
+            (LocalGcOptions::mark_only(retention), false, "mark"),
+            (
+                LocalGcOptions::mark_and_sweep(retention),
+                true,
+                "mark-and-sweep",
+            ),
+        ] {
+            assert!(options.mark);
+            assert_eq!(options.sweep, sweep);
+            assert_eq!(options.retention_seconds, retention);
+            assert_eq!(options.mode_name(), mode);
+            assert_eq!(options.max_revisions_per_repo, None);
+        }
+    }
 }
 
 #[test]
-fn default_gc_options_are_dry_run() {
-    let opts = LocalGcOptions::default();
-    assert!(!opts.mark);
-    assert!(!opts.sweep);
-    assert_eq!(opts.retention_seconds, DEFAULT_LOCAL_GC_RETENTION_SECONDS);
+fn quarantine_roots_preserve_absolute_relative_and_empty_paths() {
+    for (root, expected) in [
+        ("/storage", "/storage/gc/quarantine"),
+        (".", "./gc/quarantine"),
+        ("", "gc/quarantine"),
+    ] {
+        assert_eq!(quarantine_root(Path::new(root)), PathBuf::from(expected));
+    }
 }
 
 #[test]
-fn dry_run_options() {
-    let opts = LocalGcOptions::dry_run();
-    assert!(!opts.mark);
-    assert!(!opts.sweep);
-    assert_eq!(opts.retention_seconds, DEFAULT_LOCAL_GC_RETENTION_SECONDS);
-}
-
-#[test]
-fn mark_only_options() {
-    let opts = LocalGcOptions::mark_only(3600);
-    assert!(opts.mark);
-    assert!(!opts.sweep);
-    assert_eq!(opts.retention_seconds, 3600);
-}
-
-#[test]
-fn sweep_only_options() {
-    let opts = LocalGcOptions::sweep_only();
-    assert!(!opts.mark);
-    assert!(opts.sweep);
-    assert_eq!(opts.retention_seconds, DEFAULT_LOCAL_GC_RETENTION_SECONDS);
-}
-
-#[test]
-fn mark_and_sweep_options() {
-    let opts = LocalGcOptions::mark_and_sweep(7200);
-    assert!(opts.mark);
-    assert!(opts.sweep);
-    assert_eq!(opts.retention_seconds, 7200);
-}
-
-#[test]
-fn mode_name_dry_run() {
-    assert_eq!(LocalGcOptions::dry_run().mode_name(), "dry-run");
-}
-
-#[test]
-fn mode_name_mark() {
-    assert_eq!(LocalGcOptions::mark_only(100).mode_name(), "mark");
-}
-
-#[test]
-fn mode_name_sweep() {
-    assert_eq!(LocalGcOptions::sweep_only().mode_name(), "sweep");
-}
-
-#[test]
-fn mode_name_mark_and_sweep() {
-    assert_eq!(
-        LocalGcOptions::mark_and_sweep(100).mode_name(),
-        "mark-and-sweep"
-    );
-}
-
-#[test]
-fn quarantine_root_for_storage_path() {
-    let result = quarantine_root(Path::new("/storage"));
-    assert_eq!(result, PathBuf::from("/storage/gc/quarantine"));
-}
-
-#[test]
-fn quarantine_root_for_dot_path() {
-    let result = quarantine_root(Path::new("."));
-    assert_eq!(result, PathBuf::from("./gc/quarantine"));
-}
-
-#[test]
-fn quarantine_record_path_starts_with_prefix_and_ends_with_json() {
-    let hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
-    let result = quarantine_record_path(Path::new("/storage"), hash);
-    assert!(result.starts_with("/storage/ab/"));
-    assert!(result.to_string_lossy().ends_with(".json"));
+fn quarantine_record_paths_preserve_prefix_and_filename() {
+    for (root, hash, prefix) in [
+        (
+            "/storage",
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            "ab",
+        ),
+        (
+            "/storage",
+            "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890",
+            "AB",
+        ),
+        (
+            "/root",
+            "ff00112233445566ff00112233445566ff00112233445566ff00112233445566",
+            "ff",
+        ),
+        ("/root", "ab", "ab"),
+        ("/root", "", ""),
+    ] {
+        let path = quarantine_record_path(Path::new(root), hash);
+        assert_eq!(path.parent(), Some(Path::new(root).join(prefix).as_path()));
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            format!("{hash}.json")
+        );
+    }
 }
 
 // GcError display message tests
@@ -296,32 +284,6 @@ fn gc_error_into_server_object_store_error_overflow() {
 #[test]
 fn minimum_gc_retention_seconds_is_enforced() {
     assert_eq!(MINIMUM_GC_RETENTION_SECONDS, 3600);
-}
-
-#[test]
-fn quarantine_record_path_uppercase_hex_hash_produces_valid_path() {
-    // Uppercase hex still produces a valid path; the first two chars become
-    // the prefix directory.
-    let hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890";
-    let result = quarantine_record_path(Path::new("/storage"), hash);
-    assert!(
-        result.to_string_lossy().ends_with(".json"),
-        "record path must end with .json"
-    );
-    assert!(
-        result.starts_with("/storage/AB/"),
-        "record path must be under the two-char prefix directory"
-    );
-}
-
-#[test]
-fn quarantine_record_path_produces_prefix_directory_from_first_two_chars() {
-    let hash = "ff00112233445566ff00112233445566ff00112233445566ff00112233445566";
-    let result = quarantine_record_path(Path::new("/root"), hash);
-    let expected = PathBuf::from(
-        "/root/ff/ff00112233445566ff00112233445566ff00112233445566ff00112233445566.json",
-    );
-    assert_eq!(result, expected);
 }
 
 // Error conversion: From<io::Error> for GcError
@@ -582,35 +544,6 @@ fn orphan_inventory_entry_quarantined() {
     assert_eq!(entry.quarantine_state, GcOrphanQuarantineState::Quarantined);
     assert_eq!(entry.first_seen_unreachable_at_unix_seconds, Some(now));
     assert_eq!(entry.delete_after_unix_seconds, Some(now + 3600));
-}
-
-// ── quarantine_root / quarantine_record_path edge cases ─────────────
-
-#[test]
-fn quarantine_root_empty_path() {
-    let result = quarantine_root(Path::new(""));
-    assert_eq!(result, PathBuf::from("gc/quarantine"));
-}
-
-#[test]
-fn quarantine_record_path_with_short_hash() {
-    // Short hashes still produce a valid path (first two chars become prefix).
-    let hash = "ab";
-    let result = quarantine_record_path(Path::new("/root"), hash);
-    assert!(result.to_string_lossy().ends_with("ab.json"));
-    assert!(result.starts_with("/root/ab/"));
-}
-
-#[test]
-fn quarantine_record_path_with_empty_hash() {
-    let hash = "";
-    let result = quarantine_record_path(Path::new("/root"), hash);
-    assert!(
-        result.to_string_lossy().ends_with("/.json"),
-        "got: {:?}",
-        result
-    );
-    // Empty prefix means first two chars are empty → root path
 }
 
 // ── run_local_gc is a thin wrapper ──────────────────────────────────
@@ -1747,25 +1680,6 @@ fn gc_error_from_s3_object_store_error_display() {
     let inner2 = S3ObjectStoreError::Io(std::io::Error::other("s3 error"));
     let err2 = GcError::S3ObjectStore(inner2);
     assert!(matches!(err2, GcError::S3ObjectStore(_)));
-}
-
-// ── LocalGcOptions boundary ─────────────────────────────────────────
-
-#[test]
-fn gc_options_all_zero_retention_is_accepted() {
-    // Even zero retention should not panic — the minimum is enforced elsewhere.
-    let opts = LocalGcOptions::mark_only(0);
-    assert_eq!(opts.retention_seconds, 0);
-    assert!(opts.mark);
-    assert!(!opts.sweep);
-}
-
-#[test]
-fn gc_options_max_retention_does_not_panic() {
-    let opts = LocalGcOptions::mark_and_sweep(u64::MAX);
-    assert_eq!(opts.retention_seconds, u64::MAX);
-    assert!(opts.mark);
-    assert!(opts.sweep);
 }
 
 // ── GcReport default ────────────────────────────────────────────────
