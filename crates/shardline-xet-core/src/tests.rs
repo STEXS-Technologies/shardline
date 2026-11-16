@@ -1327,46 +1327,6 @@ fn mdb_shard_info_serialize_from_roundtrip() {
 }
 
 // ============================================================================
-// MDBFileInfo — num_bytes and file_size edge cases
-// ============================================================================
-
-#[test]
-fn mdb_file_info_num_bytes_with_verification() {
-    let info = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u64, true, false),
-        segments: vec![
-            FileDataSequenceEntry::new(MerkleHash::default(), 50u64, 0u64, 25u64),
-            FileDataSequenceEntry::new(MerkleHash::default(), 75u64, 25u64, 50u64),
-        ],
-        verification: vec![
-            FileVerificationEntry::new(compute_data_hash(b"v1")),
-            FileVerificationEntry::new(compute_data_hash(b"v2")),
-        ],
-        metadata_ext: None,
-    };
-    let nbytes = info.num_bytes();
-    assert!(nbytes > 0);
-    assert_eq!(info.file_size(), 125);
-}
-
-#[test]
-fn mdb_file_info_num_bytes_with_metadata_ext() {
-    let info = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, true),
-        segments: vec![FileDataSequenceEntry::new(
-            MerkleHash::default(),
-            100u64,
-            0u64,
-            50u64,
-        )],
-        verification: vec![],
-        metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
-    };
-    let nbytes = info.num_bytes();
-    assert!(nbytes > 0);
-}
-
-// ============================================================================
 // MDBFileInfoView — from_data_and_header error path with insufficient size
 // ============================================================================
 

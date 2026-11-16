@@ -826,6 +826,7 @@ mod tests {
                 let mut reader = Cursor::new(&bytes);
                 let decoded = MDBFileInfo::deserialize(&mut reader, 3).unwrap().unwrap();
                 assert_eq!(decoded, info);
+                assert_eq!(info.file_size(), 25 * count * (count + 3) / 2);
                 assert_eq!(written, bytes.len());
                 assert_eq!(bytes.len() as u64, info.num_bytes());
                 assert_eq!(reader.position(), bytes.len() as u64);
@@ -863,25 +864,6 @@ mod tests {
         b.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         assert!(MDBFileInfo::deserialize(&mut r, 3).unwrap().is_none());
-    }
-
-    #[test]
-    fn file_info_num_bytes_with_verification_and_metadata_ext() {
-        let info = MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2, true, true),
-            segments: vec![
-                FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25),
-                FileDataSequenceEntry::new(MerkleHash::default(), 75, 25, 50),
-            ],
-            verification: vec![
-                FileVerificationEntry::new(compute_data_hash(b"v1")),
-                FileVerificationEntry::new(compute_data_hash(b"v2")),
-            ],
-            metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
-        };
-        let nbytes = info.num_bytes();
-        assert!(nbytes > 0);
-        assert_eq!(info.file_size(), 125);
     }
 
     #[test]
