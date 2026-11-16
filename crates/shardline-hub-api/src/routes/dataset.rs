@@ -287,27 +287,20 @@ pub(crate) async fn dataset_query(
         .length();
     let object_store = state.object_store.clone();
     let mut selected_columns = request.columns.clone();
-    for predicate in &request.predicates {
-        if !selected_columns
-            .iter()
-            .any(|column| column == &predicate.column)
-        {
-            selected_columns.push(predicate.column.clone());
-        }
-    }
-    for aggregate in &request.aggregates {
-        if let Some(column) = &aggregate.column
-            && !selected_columns.iter().any(|selected| selected == column)
-        {
+    for column in request
+        .predicates
+        .iter()
+        .map(|predicate| &predicate.column)
+        .chain(
+            request
+                .aggregates
+                .iter()
+                .filter_map(|aggregate| aggregate.column.as_ref()),
+        )
+        .chain(request.order_by.iter().map(|order| &order.column))
+    {
+        if !selected_columns.contains(column) {
             selected_columns.push(column.clone());
-        }
-    }
-    for order in &request.order_by {
-        if !selected_columns
-            .iter()
-            .any(|selected| selected == &order.column)
-        {
-            selected_columns.push(order.column.clone());
         }
     }
     let has_aggregates = !request.aggregates.is_empty();
