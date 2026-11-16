@@ -1,13 +1,18 @@
 use super::*;
 use std::io::{Read, Write};
 
-#[test]
-fn synchronous_operations_preserve_provider_permission_failures() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operations_preserve_provider_permission_failures() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        for method in ["HEAD", "PUT", "PUT", "GET", "POST", "GET"] {
+        for (index, method) in [
+            "HEAD", "PUT", "PUT", "GET", "POST", "GET", "POST", "HEAD", "GET",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             let mut socket = loop {
                 match listener.accept() {
@@ -33,6 +38,16 @@ fn synchronous_operations_preserve_provider_permission_failures() {
             }
             let headers = String::from_utf8(headers).unwrap();
             assert!(headers.starts_with(&format!("{method} ")), "{headers}");
+            if index == 8 {
+                assert!(
+                    headers
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .contains("start-after=ns%2Fkey01"),
+                    "{headers}"
+                );
+            }
             let length = headers
                 .lines()
                 .find_map(|line| {
@@ -65,11 +80,20 @@ fn synchronous_operations_preserve_provider_permission_failures() {
         store
             .list_prefix(&ObjectPrefix::parse("").unwrap())
             .map(|_| ()),
+        store.delete_if_present(&key).map(|_| ()),
+        store.begin_content_addressed_upload(&key).await.map(|_| ()),
+        store
+            .list_flat_namespace_page(
+                &ObjectPrefix::parse("ns/").unwrap(),
+                Some(&ObjectKey::parse("ns/key01").unwrap()),
+                10,
+            )
+            .map(|_| ()),
     ];
     server.join().unwrap().unwrap();
     for (index, result) in results.into_iter().enumerate() {
         let error = result.unwrap_err();
-        if index == 5 {
+        if matches!(index, 5 | 8) {
             // The upstream listing client retains HTTP failures in ListRequest.
             assert!(matches!(
                 &error,
