@@ -5239,24 +5239,24 @@ PostgreSQL and MinIO services. It does not establish independent server-process
 failure recovery, multi-host isolation, or production capacity.
 
 
-### FSCK MinIO regression qualification (2026-11-15)
+### FSCK MinIO regression qualification (2026-11-16)
 
-At cleanup commit `b0281c30`, all three ignored FSCK library tests passed
-against their owned Docker MinIO fixtures (Docker 29.2.1, Rust 1.99.0).
+At cleanup commit `74337505`, all 114 FSCK library tests passed in 4.396 s
+with none skipped, including the three normally ignored Docker MinIO tests.
+The run used Rust 1.99.0 on the shared Linux development host.
 Reproduce from the repository root:
 
 ```bash
 SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 RUSTC_WRAPPER= \
   cargo +1.99.0 nextest run --offline --locked -p shardline-fsck --lib \
-  --run-ignored only --test-threads 1
+  --all-features --run-ignored all --no-fail-fast --test-threads 4
 ```
 
 The tests check bounded ordinary-chunk reads, native-container corruption and
 missing-member diagnostics, and multi-member snapshot turnover with asserted
 GET/HEAD counts. The turnover case checks 17, 16, 17 and 1 GETs across initial,
 repeated, changed-source and corrupted-source scans, with zero HEADs throughout.
-All three selected tests passed; 111 other library tests were excluded by the
-ignored-only selection. Fixtures were removed after the run. This qualifies
+The complete library target was selected. Fixtures were removed after the run. This qualifies
 these local MinIO regression scenarios, not production throughput or scale.
 
 ### Incremental development recompilation
