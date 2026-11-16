@@ -69,7 +69,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         "SHARDLINE_MAX_REQUEST_BODY_BYTES",
         DEFAULT_MAX_REQUEST_BODY_BYTES,
         ServerConfigError::MaxRequestBodyBytes,
-        || ServerConfigError::ZeroMaxRequestBodyBytes,
+        ServerConfigError::ZeroMaxRequestBodyBytes,
     )?;
     let max_xorb_body_bytes = max_xorb_body_bytes_from_env(max_request_body_bytes)?;
     let shard_metadata_limits = ShardMetadataLimits::new(
@@ -77,38 +77,38 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_MAX_SHARD_FILES",
             DEFAULT_MAX_SHARD_FILES,
             ServerConfigError::MaxShardFiles,
-            || ServerConfigError::ZeroMaxShardFiles,
+            ServerConfigError::ZeroMaxShardFiles,
         )?,
         load_non_zero_usize_env(
             "SHARDLINE_MAX_SHARD_XORBS",
             DEFAULT_MAX_SHARD_XORBS,
             ServerConfigError::MaxShardXorbs,
-            || ServerConfigError::ZeroMaxShardXorbs,
+            ServerConfigError::ZeroMaxShardXorbs,
         )?,
         load_non_zero_usize_env(
             "SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS",
             DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS,
             ServerConfigError::MaxShardReconstructionTerms,
-            || ServerConfigError::ZeroMaxShardReconstructionTerms,
+            ServerConfigError::ZeroMaxShardReconstructionTerms,
         )?,
         load_non_zero_usize_env(
             "SHARDLINE_MAX_SHARD_XORB_CHUNKS",
             DEFAULT_MAX_SHARD_XORB_CHUNKS,
             ServerConfigError::MaxShardXorbChunks,
-            || ServerConfigError::ZeroMaxShardXorbChunks,
+            ServerConfigError::ZeroMaxShardXorbChunks,
         )?,
     );
     let max_revisions_per_repo = load_non_zero_usize_env(
         "SHARDLINE_MAX_REVISIONS_PER_REPO",
         DEFAULT_MAX_REVISIONS_PER_REPO,
         ServerConfigError::MaxRevisionsPerRepo,
-        || ServerConfigError::ZeroMaxRevisionsPerRepo,
+        ServerConfigError::ZeroMaxRevisionsPerRepo,
     )?;
     let max_tree_entries_per_repo = load_non_zero_usize_env(
         "SHARDLINE_MAX_TREE_ENTRIES_PER_REPO",
         DEFAULT_MAX_TREE_ENTRIES_PER_REPO,
         ServerConfigError::MaxTreeEntriesPerRepo,
-        || ServerConfigError::ZeroMaxTreeEntriesPerRepo,
+        ServerConfigError::ZeroMaxTreeEntriesPerRepo,
     )?;
     let raw_chunk_size_str = var("SHARDLINE_CHUNK_SIZE")
         .or_else(|_| var("SHARDLINE_CHUNK_SIZE_BYTES"))
@@ -142,31 +142,31 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         "SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS",
         DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
         ServerConfigError::ReconstructionCacheTtl,
-        || ServerConfigError::ZeroReconstructionCacheTtlSeconds,
+        ServerConfigError::ZeroReconstructionCacheTtlSeconds,
     )?;
     let reconstruction_cache_memory_max_entries = load_non_zero_usize_env(
         "SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES",
         DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES,
         ServerConfigError::ReconstructionCacheMemoryMaxEntries,
-        || ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries,
+        ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries,
     )?;
     let oci_upload_session_ttl_seconds = load_non_zero_u64_env(
         "SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS",
         DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
         ServerConfigError::OciUploadSessionTtl,
-        || ServerConfigError::ZeroOciUploadSessionTtlSeconds,
+        ServerConfigError::ZeroOciUploadSessionTtlSeconds,
     )?;
     let oci_upload_max_active_sessions = load_non_zero_usize_env(
         "SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS",
         DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
         ServerConfigError::OciUploadMaxActiveSessions,
-        || ServerConfigError::ZeroOciUploadMaxActiveSessions,
+        ServerConfigError::ZeroOciUploadMaxActiveSessions,
     )?;
     let oci_registry_token_ttl_seconds = load_non_zero_u64_env(
         "SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS",
         DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
         ServerConfigError::OciRegistryTokenTtl,
-        || ServerConfigError::ZeroOciRegistryTokenTtlSeconds,
+        ServerConfigError::ZeroOciRegistryTokenTtlSeconds,
     )?;
     let raw_oci_registry_token_max_in_flight_requests =
         var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS")
@@ -184,67 +184,67 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         "SHARDLINE_S3_MAX_PART_BYTES",
         DEFAULT_S3_MAX_PART_BYTES,
         ServerConfigError::S3MaxPartBytes,
-        || ServerConfigError::ZeroS3MaxPartBytes,
+        ServerConfigError::ZeroS3MaxPartBytes,
     )?;
     let s3_upload_session_ttl_seconds = load_non_zero_u64_env(
         "SHARDLINE_S3_UPLOAD_SESSION_TTL_SECONDS",
         DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS,
         ServerConfigError::S3UploadSessionTtl,
-        || ServerConfigError::ZeroS3UploadSessionTtlSeconds,
+        ServerConfigError::ZeroS3UploadSessionTtlSeconds,
     )?;
     let s3_upload_max_active_sessions = load_non_zero_usize_env(
         "SHARDLINE_S3_UPLOAD_MAX_ACTIVE_SESSIONS",
         DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
         ServerConfigError::S3UploadMaxActiveSessions,
-        || ServerConfigError::ZeroS3UploadMaxActiveSessions,
+        ServerConfigError::ZeroS3UploadMaxActiveSessions,
     )?;
     let s3_min_part_bytes = load_non_zero_u64_env(
         "SHARDLINE_S3_MIN_PART_BYTES",
         DEFAULT_S3_MIN_PART_BYTES,
         ServerConfigError::S3MinPartBytes,
-        || ServerConfigError::ZeroS3MinPartBytes,
+        ServerConfigError::ZeroS3MinPartBytes,
     )?;
     let s3_upload_session_max_bytes = load_non_zero_u64_env(
         "SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES",
         DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
         ServerConfigError::S3UploadSessionMaxBytes,
-        || ServerConfigError::ZeroS3UploadSessionMaxBytes,
+        ServerConfigError::ZeroS3UploadSessionMaxBytes,
     )?;
     let s3_upload_total_max_bytes = load_non_zero_u64_env(
         "SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES",
         DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES,
         ServerConfigError::S3UploadTotalMaxBytes,
-        || ServerConfigError::ZeroS3UploadTotalMaxBytes,
+        ServerConfigError::ZeroS3UploadTotalMaxBytes,
     )?;
     let s3_upload_max_active_part_files = load_non_zero_usize_env(
         "SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES",
         DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
         ServerConfigError::S3UploadMaxActivePartFiles,
-        || ServerConfigError::ZeroS3UploadMaxActivePartFiles,
+        ServerConfigError::ZeroS3UploadMaxActivePartFiles,
     )?;
     let lfs_patch_ttl_seconds = load_non_zero_u64_env(
         "SHARDLINE_LFS_PATCH_TTL_SECONDS",
         DEFAULT_LFS_PATCH_TTL_SECONDS,
         ServerConfigError::LfsPatchTtl,
-        || ServerConfigError::ZeroLfsPatchTtlSeconds,
+        ServerConfigError::ZeroLfsPatchTtlSeconds,
     )?;
     let lfs_patch_max_active_sessions = load_non_zero_usize_env(
         "SHARDLINE_LFS_PATCH_MAX_ACTIVE_SESSIONS",
         DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
         ServerConfigError::LfsPatchMaxActiveSessions,
-        || ServerConfigError::ZeroLfsPatchMaxActiveSessions,
+        ServerConfigError::ZeroLfsPatchMaxActiveSessions,
     )?;
     let lfs_patch_total_max_bytes = load_non_zero_u64_env(
         "SHARDLINE_LFS_PATCH_TOTAL_MAX_BYTES",
         DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
         ServerConfigError::LfsPatchTotalMaxBytes,
-        || ServerConfigError::ZeroLfsPatchTotalMaxBytes,
+        ServerConfigError::ZeroLfsPatchTotalMaxBytes,
     )?;
     let lfs_patch_max_seek_ahead_bytes = load_non_zero_u64_env(
         "SHARDLINE_LFS_PATCH_MAX_SEEK_AHEAD_BYTES",
         DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES,
         ServerConfigError::LfsPatchMaxSeekAheadBytes,
-        || ServerConfigError::ZeroLfsPatchMaxSeekAheadBytes,
+        ServerConfigError::ZeroLfsPatchMaxSeekAheadBytes,
     )?;
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
@@ -776,7 +776,7 @@ fn max_xorb_body_bytes_from_env(
             super::DEFAULT_MAX_XORB_BODY_BYTES
         },
         ServerConfigError::MaxXorbBodyBytes,
-        || ServerConfigError::ZeroMaxXorbBodyBytes,
+        ServerConfigError::ZeroMaxXorbBodyBytes,
     )
 }
 
@@ -784,26 +784,24 @@ fn load_non_zero_usize_env(
     name: &str,
     default: NonZeroUsize,
     parse_error: fn(ParseIntError) -> ServerConfigError,
-    zero_error: impl FnOnce() -> ServerConfigError,
+    zero_error: ServerConfigError,
 ) -> Result<NonZeroUsize, ServerConfigError> {
-    let raw = var(name)
-        .unwrap_or_else(|_error| default.get().to_string())
-        .parse::<usize>()
-        .map_err(parse_error)?;
-    NonZeroUsize::new(raw).ok_or_else(zero_error)
+    match var(name) {
+        Ok(value) => NonZeroUsize::new(value.parse().map_err(parse_error)?).ok_or(zero_error),
+        Err(_) => Ok(default),
+    }
 }
 
 fn load_non_zero_u64_env(
     name: &str,
     default: NonZeroU64,
     parse_error: fn(ParseIntError) -> ServerConfigError,
-    zero_error: impl FnOnce() -> ServerConfigError,
+    zero_error: ServerConfigError,
 ) -> Result<NonZeroU64, ServerConfigError> {
-    let raw = var(name)
-        .unwrap_or_else(|_error| default.get().to_string())
-        .parse::<u64>()
-        .map_err(parse_error)?;
-    NonZeroU64::new(raw).ok_or_else(zero_error)
+    match var(name) {
+        Ok(value) => NonZeroU64::new(value.parse().map_err(parse_error)?).ok_or(zero_error),
+        Err(_) => Ok(default),
+    }
 }
 
 /// Loads server configuration from environment variables, applying optional
@@ -2261,7 +2259,7 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
                 key,
                 std::num::NonZeroUsize::new(42).unwrap(),
                 ServerConfigError::MaxShardFiles,
-                || ServerConfigError::ZeroMaxShardFiles,
+                ServerConfigError::ZeroMaxShardFiles,
             );
             match value {
                 None => assert_eq!(result.unwrap().get(), 42),
@@ -2292,7 +2290,7 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
                 key,
                 std::num::NonZeroU64::new(42).unwrap(),
                 ServerConfigError::S3MaxPartBytes,
-                || ServerConfigError::ZeroS3MaxPartBytes,
+                ServerConfigError::ZeroS3MaxPartBytes,
             );
             match value {
                 None => assert_eq!(result.unwrap().get(), 42),
