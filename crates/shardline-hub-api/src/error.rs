@@ -218,52 +218,25 @@ mod tests {
     }
 
     #[test]
-    fn io_error_maps_to_500() {
-        let io_err = std::io::Error::other("disk failure");
-        let (status, body) = status_and_body(HubApiError::Io(io_err));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("internal error"));
-    }
-
-    #[test]
-    fn json_error_maps_to_500() {
-        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
-        let (status, body) = status_and_body(HubApiError::Json(json_err));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("internal error"));
-    }
-
-    #[test]
-    fn cas_error_maps_to_500() {
-        let (status, body) = status_and_body(HubApiError::CasError("oops".into()));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("internal error"));
-    }
-
-    #[test]
-    fn signing_key_error_maps_to_500() {
-        let (status, body) = status_and_body(HubApiError::SigningKeyError("misconfig".into()));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("internal error"));
-    }
-
-    #[test]
-    fn pkt_line_error_maps_to_500() {
-        let err = HubApiError::from(crate::git::pktline::PktLineError::PayloadTooLarge {
-            size: 100,
-            max: 50,
-        });
-        let (status, body) = status_and_body(err);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("internal error"));
-    }
-
-    #[test]
-    fn pack_error_maps_to_500() {
-        let err = HubApiError::from(crate::git::pack::PackError::TooManyObjects);
-        let (status, body) = status_and_body(err);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("internal error"));
+    fn internal_errors_return_only_a_generic_message() {
+        let errors = [
+            HubApiError::Io(std::io::Error::other("disk failure")),
+            HubApiError::Json(serde_json::from_str::<serde_json::Value>("not json").unwrap_err()),
+            HubApiError::CasError("private storage details".into()),
+            HubApiError::SigningKeyError("private key configuration".into()),
+            HubApiError::from(crate::git::pktline::PktLineError::PayloadTooLarge {
+                size: 100,
+                max: 50,
+            }),
+            HubApiError::from(crate::git::pack::PackError::TooManyObjects),
+            HubApiError::from(crate::secrets::WebhookSecretCipherError::NoCipherForCiphertext),
+        ];
+        for error in errors {
+            let diagnostic = error.to_string();
+            let (status, body) = status_and_body(error);
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{diagnostic}");
+            assert_eq!(body, r#"{"error":"internal error"}"#, "{diagnostic}");
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -227,24 +227,6 @@ fn validate_whoami_hardcoded_admin() {
 }
 
 // ============================================================================
-// FINDING 7: Error messages leak internal details — FIXED
-// ============================================================================
-
-/// Validates that CasError no longer leaks internal error strings to clients.
-///
-/// **[FIXED]**: The `IntoResponse` impl for `CasError` now returns a generic
-/// "internal error" string instead of `self.to_string()`.
-#[test]
-fn validate_cas_error_no_longer_leaks_internals() {
-    let error_source = include_str!("../src/error.rs");
-
-    assert!(
-        error_source.contains("CasError(_)") && error_source.contains("\"internal error\""),
-        "CasError now returns generic 'internal error' — no internal details leaked"
-    );
-}
-
-// ============================================================================
 // FINDING 8: NDJSON commit instruction count limit — FIXED
 // ============================================================================
 
