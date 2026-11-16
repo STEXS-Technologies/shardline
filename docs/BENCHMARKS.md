@@ -4316,25 +4316,28 @@ isolate individual changes or establish production throughput. The full server
 suite, production PostgreSQL/object-store qualification and historical hosted
 RSS failure remain outside these passing checks.
 
-### Xet codec and metadata follow-up checkpoint (2026-11-16)
+### Xet codec, metadata and SDK parser checkpoint (2026-11-16)
 
-Source `1ef3b6287fd1cfd0182a524885c519cdc576a574` was held fixed after the
-hash conversion, codec dispatch, chunk-header, container-position and metadata
-cleanup. The combined `shardline-xet-core`, `sdx` and `shardline-xet-adapter`
-suites passed 1,286 tests; the adapter's explicitly ignored Linux normalization
-I/O diagnostic remained skipped. Strict Clippy passed for these three crates.
-The same shared-host build settings and toolchains described above were used.
+Source `4f8bbf1e7105f7d154d0cef13d5b2a1561408619` was held fixed after the
+hash conversion, codec dispatch, chunk-header, container-position, shared record
+decoding, footerless accounting and SDK shard-parser cleanup. The combined
+`shardline-xet-core`, `sdx` and `shardline-xet-adapter` suites passed 1,224 tests;
+the adapter's explicitly ignored Linux normalization I/O diagnostic remained
+skipped. The lower test count reflects consolidation of duplicated wrappers into
+the owning modules, with complete-record, wire-size and truncation assertions.
+Strict Clippy passed for these three crates. The same shared-host build settings
+and toolchains described above were used.
 
 The SDK/server E2E command above, with `--run-ignored all`, passed all 35 tests
-with none skipped in 295.090 s. Both isolated clients verified byte identity and
+with none skipped in 285.255 s. Both isolated clients verified byte identity and
 length and met the unchanged 65,536 KiB additional-RSS limit:
 
 | Isolated client workload | Baseline RSS (KiB) | Peak VmHWM (KiB) | Additional RSS (KiB) | Client transfer (ms) |
 | --- | ---: | ---: | ---: | ---: |
-| 256 MiB | 25,796 | 68,788 | 42,992 | 1,121 |
-| 1 GiB | 25,228 | 72,396 | 47,168 | 8,891 |
+| 256 MiB | 24,948 | 79,608 | 54,660 | 1,123 |
+| 1 GiB | 24,764 | 80,400 | 55,636 | 8,095 |
 
-The parent tests took 22.733 s and 222.701 s, including fixture ingestion.
+The parent tests took 22.473 s and 210.536 s, including fixture ingestion.
 These local results do not isolate individual changes, establish production
 throughput, or explain the historical hosted RSS failure. Full server and
 production PostgreSQL/object-store qualification remain outside this checkpoint.
