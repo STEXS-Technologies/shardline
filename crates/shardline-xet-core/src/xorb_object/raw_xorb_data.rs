@@ -98,196 +98,99 @@ pub mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merklehash::compute_data_hash;
-    use crate::xorb_object::Chunk;
+    use crate::merklehash::aggregated_hashes::xorb_hash;
 
     #[test]
-    fn xorb_info_default_has_empty_boundaries() {
-        let info = XorbInfo::default();
-        assert!(info.chunk_boundaries.is_empty());
+    fn boundary_projection_preserves_every_offset() {
+        assert!(XorbInfo::default().chunk_boundaries.is_empty());
+        for offsets in [vec![], vec![100, 250, 400]] {
+            let expected: Vec<_> = offsets
+                .iter()
+                .map(|&offset| (MerkleHash::default(), offset))
+                .collect();
+            assert_eq!(
+                XorbInfo {
+                    chunk_boundaries: offsets
+                }
+                .chunks_and_boundaries(),
+                expected
+            );
+        }
     }
 
     #[test]
-    fn xorb_info_chunks_and_boundaries_empty() {
-        let info = XorbInfo::default();
-        assert!(info.chunks_and_boundaries().is_empty());
-    }
-
-    #[test]
-    fn xorb_info_chunks_and_boundaries_with_data() {
-        let info = XorbInfo {
-            chunk_boundaries: vec![100, 250, 400],
-        };
-        let boundaries = info.chunks_and_boundaries();
-        assert_eq!(boundaries.len(), 3);
-        assert_eq!(boundaries[0].1, 100);
-        assert_eq!(boundaries[1].1, 250);
-        assert_eq!(boundaries[2].1, 400);
-        // Hash is always default (all zeros)
-        assert_eq!(boundaries[0].0, MerkleHash::default());
-    }
-
-    #[test]
-    fn raw_xorb_data_from_chunks_basic() {
-        let chunks = vec![
-            Chunk {
-                hash: compute_data_hash(b"c1"),
-                data: vec![1u8; 100].into(),
-            },
-            Chunk {
-                hash: compute_data_hash(b"c2"),
-                data: vec![2u8; 200].into(),
-            },
-        ];
-        let raw = RawXorbData::from_chunks(&chunks, vec![0, 100]);
-        assert_eq!(raw.num_bytes(), 300);
-        assert_eq!(raw.data.len(), 2);
-        assert_eq!(raw.file_boundaries, vec![0, 100]);
-        // Check chunk_boundaries are cumulative sizes
-        assert_eq!(raw.xorb_info.chunk_boundaries, vec![100, 300]);
-    }
-
-    #[test]
-    fn raw_xorb_data_from_single_chunk() {
-        let chunks = vec![Chunk {
-            hash: MerkleHash::default(),
-            data: vec![0u8; 42].into(),
-        }];
-        let raw = RawXorbData::from_chunks(&chunks, vec![]);
-        assert_eq!(raw.num_bytes(), 42);
-        assert_eq!(raw.data.len(), 1);
-        assert_eq!(raw.xorb_info.chunk_boundaries, vec![42]);
-    }
-
-    #[test]
-    fn raw_xorb_data_hash_non_default() {
-        let chunks = vec![Chunk {
-            hash: compute_data_hash(b"c"),
-            data: vec![0u8; 50].into(),
-        }];
-        let raw = RawXorbData::from_chunks(&chunks, vec![0]);
-        assert_ne!(raw.hash(), MerkleHash::default());
-    }
-
-    #[test]
-    fn raw_xorb_data_hash_deterministic() {
-        let chunks = vec![Chunk {
-            hash: compute_data_hash(b"c"),
-            data: vec![7u8; 100].into(),
-        }];
-        let raw1 = RawXorbData::from_chunks(&chunks, vec![0]);
-        let raw2 = RawXorbData::from_chunks(&chunks, vec![0]);
-        assert_eq!(raw1.hash(), raw2.hash());
-    }
-
-    #[test]
-    fn raw_xorb_data_hash_with_chunk_hashes_matches_individual_hashes() {
-        let chunks = vec![
-            Chunk {
-                hash: MerkleHash::default(),
-                data: b"first".to_vec().into(),
-            },
-            Chunk {
-                hash: MerkleHash::default(),
-                data: b"second".to_vec().into(),
-            },
-        ];
-        let raw = RawXorbData::from_chunks(&chunks, vec![]);
-
-        let (xorb_hash, chunk_hashes) = raw.hash_with_chunk_hashes();
-
-        assert_eq!(xorb_hash, raw.hash());
-        assert_eq!(
-            chunk_hashes,
-            vec![compute_data_hash(b"first"), compute_data_hash(b"second")]
-        );
-    }
-
-    #[test]
-    fn raw_xorb_data_num_bytes_multi_chunk() {
-        let chunks = vec![
-            Chunk {
-                hash: MerkleHash::default(),
-                data: vec![0u8; 10].into(),
-            },
-            Chunk {
-                hash: MerkleHash::default(),
-                data: vec![0u8; 20].into(),
-            },
-            Chunk {
-                hash: MerkleHash::default(),
-                data: vec![0u8; 30].into(),
-            },
-        ];
-        let raw = RawXorbData::from_chunks(&chunks, vec![0]);
-        assert_eq!(raw.num_bytes(), 60);
-    }
-
-    #[test]
-    fn raw_xorb_data_file_boundaries_preserved() {
-        let chunks = vec![
-            Chunk {
-                hash: MerkleHash::default(),
-                data: vec![1u8; 50].into(),
-            },
-            Chunk {
-                hash: MerkleHash::default(),
-                data: vec![2u8; 50].into(),
-            },
-        ];
-        let raw = RawXorbData::from_chunks(&chunks, vec![0, 1]);
-        assert_eq!(raw.file_boundaries, vec![0, 1]);
-    }
-
-    #[test]
-    fn raw_xorb_data_from_owned_data_preserves_payloads_and_hash() {
-        let owned_data = vec![
-            Cow::Owned(b"first".to_vec()),
-            Cow::Owned(b"second".to_vec()),
-        ];
-        let raw = RawXorbData::from_owned_data(owned_data, vec![0, 5]);
-        let reference_chunks = vec![
-            Chunk {
-                hash: MerkleHash::default(),
-                data: Cow::Borrowed(b"first"),
-            },
-            Chunk {
-                hash: MerkleHash::default(),
-                data: Cow::Borrowed(b"second"),
-            },
-        ];
-        let reference = RawXorbData::from_chunks(&reference_chunks, vec![0, 5]);
-
-        assert_eq!(raw.data, reference.data);
-        assert_eq!(raw.xorb_info.chunk_boundaries, vec![5, 11]);
-        assert_eq!(raw.file_boundaries, reference.file_boundaries);
-        assert_eq!(raw.hash(), reference.hash());
-    }
-
-    #[test]
-    fn raw_xorb_data_empty_chunks_list() {
-        let raw = RawXorbData::from_chunks(&[], vec![]);
-        assert_eq!(raw.num_bytes(), 0);
-        assert!(raw.data.is_empty());
-        assert!(raw.xorb_info.chunk_boundaries.is_empty());
-        assert_eq!(raw.hash(), MerkleHash::default());
-    }
-
-    #[test]
-    fn test_utils_raw_xorb_to_vec() {
-        let chunks = vec![
-            Chunk {
-                hash: MerkleHash::default(),
-                data: vec![1u8; 10].into(),
-            },
-            Chunk {
-                hash: MerkleHash::default(),
-                data: vec![2u8; 20].into(),
-            },
-        ];
-        let raw = RawXorbData::from_chunks(&chunks, vec![]);
-        let flat = test_utils::raw_xorb_to_vec(&raw);
-        assert_eq!(flat, [vec![1u8; 10], vec![2u8; 20]].concat());
-        assert_eq!(flat.len(), 30);
+    fn raw_construction_preserves_payloads_boundaries_and_hashes() {
+        for lengths in [
+            vec![],
+            vec![0],
+            vec![42],
+            vec![50],
+            vec![100],
+            vec![100, 200],
+            vec![10, 20, 30],
+            vec![50, 50],
+            vec![5, 6],
+        ] {
+            let chunks: Vec<_> = lengths
+                .iter()
+                .enumerate()
+                .map(|(index, &len)| Chunk {
+                    // Construction and hashing must use payload bytes, not this cached hash.
+                    hash: MerkleHash::default(),
+                    data: match len {
+                        5 => Cow::Borrowed(b"first"),
+                        6 => Cow::Borrowed(b"second"),
+                        _ => vec![index as u8 + 1; len].into(),
+                    },
+                })
+                .collect();
+            let expected_hashes: Vec<_> = chunks
+                .iter()
+                .map(|chunk| compute_data_hash(&chunk.data))
+                .collect();
+            let members: Vec<_> = expected_hashes
+                .iter()
+                .copied()
+                .zip(lengths.iter().map(|&len| len as u64))
+                .collect();
+            let expected_hash = xorb_hash(&members);
+            let mut total = 0;
+            let expected_offsets: Vec<_> = lengths
+                .iter()
+                .map(|&len| {
+                    total += len as u32;
+                    total
+                })
+                .collect();
+            let flattened: Vec<_> = chunks
+                .iter()
+                .flat_map(|chunk| chunk.data.iter().copied())
+                .collect();
+            let files = vec![0, 100, lengths.len()];
+            let cloned = RawXorbData::from_chunks(&chunks, files.clone());
+            let owned_data: Vec<_> = chunks.into_iter().map(|chunk| chunk.data).collect();
+            let pointers: Vec<_> = owned_data.iter().map(|data| data.as_ptr()).collect();
+            let owned = RawXorbData::from_owned_data(owned_data, files.clone());
+            assert_eq!(
+                owned
+                    .data
+                    .iter()
+                    .map(|data| data.as_ptr())
+                    .collect::<Vec<_>>(),
+                pointers
+            );
+            for raw in [cloned, owned] {
+                assert_eq!(raw.data.len(), lengths.len());
+                assert_eq!(raw.num_bytes(), total as usize);
+                assert_eq!(raw.file_boundaries, files);
+                assert_eq!(raw.xorb_info.chunk_boundaries, expected_offsets);
+                assert_eq!(test_utils::raw_xorb_to_vec(&raw), flattened);
+                assert_eq!(raw.hash(), expected_hash);
+                assert_eq!(
+                    raw.hash_with_chunk_hashes(),
+                    (expected_hash, expected_hashes.clone())
+                );
+            }
+        }
     }
 }
