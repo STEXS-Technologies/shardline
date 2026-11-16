@@ -511,11 +511,15 @@ pub fn verify_sigv4(
         .map(|(name, value)| (encode(name), encode(value)))
         .collect::<Vec<_>>();
     pairs.sort();
-    let canonical_query = pairs
-        .into_iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect::<Vec<_>>()
-        .join("&");
+    let mut canonical_query = String::new();
+    for (index, (name, value)) in pairs.into_iter().enumerate() {
+        if index != 0 {
+            canonical_query.push('&');
+        }
+        canonical_query.push_str(&name);
+        canonical_query.push('=');
+        canonical_query.push_str(&value);
+    }
     let canonical =
         format!("{method}\n{path}\n{canonical_query}\n{canonical_headers}\n{signed}\n{payload}");
     let scope_suffix = scope
