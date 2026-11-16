@@ -295,28 +295,23 @@ impl S3ObjectStore {
         &self,
         key: &ObjectKey,
     ) -> Result<ObjectStorePath, S3ObjectStoreError> {
-        let location = self.key_prefix.as_ref().map_or_else(
-            || key.as_str().to_owned(),
-            |prefix| format!("{prefix}/{}", key.as_str()),
-        );
-        ObjectStorePath::parse(location).map_err(S3ObjectStoreError::Path)
+        self.storage_location(key.as_str())
     }
 
     pub(crate) fn location_for_prefix(
         &self,
         prefix: &ObjectPrefix,
     ) -> Result<ObjectStorePath, S3ObjectStoreError> {
-        let location = self.key_prefix.as_ref().map_or_else(
-            || prefix.as_str().to_owned(),
-            |key_prefix| {
-                if prefix.as_str().is_empty() {
-                    key_prefix.clone()
-                } else {
-                    format!("{key_prefix}/{}", prefix.as_str())
-                }
-            },
-        );
-        ObjectStorePath::parse(location).map_err(S3ObjectStoreError::Path)
+        self.storage_location(prefix.as_str())
+    }
+
+    fn storage_location(&self, relative: &str) -> Result<ObjectStorePath, S3ObjectStoreError> {
+        match (&self.key_prefix, relative.is_empty()) {
+            (Some(prefix), false) => ObjectStorePath::parse(format!("{prefix}/{relative}")),
+            (Some(prefix), true) => ObjectStorePath::parse(prefix),
+            (None, _) => ObjectStorePath::parse(relative),
+        }
+        .map_err(S3ObjectStoreError::Path)
     }
 
     /// Lists a bounded page of direct child objects under a flat namespace prefix.
