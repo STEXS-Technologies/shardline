@@ -43,6 +43,9 @@ pub(super) mod temp_cleanup;
 mod conditional_upload_tests;
 
 #[cfg(test)]
+mod runtime_tests;
+
+#[cfg(test)]
 mod temp_cleanup_tests;
 
 /// S3-compatible implementation of [`ObjectStore`].
