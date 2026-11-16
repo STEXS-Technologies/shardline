@@ -309,42 +309,30 @@ mod tests {
     }
 
     #[test]
-    fn from_u8_32_and_back() {
-        let arr = [0xABu8; 32];
-        let h = DataHash::from(arr);
-        let back: [u8; 32] = h.into();
-        assert_eq!(arr, back);
-    }
-
-    #[test]
-    fn from_ref_u8_32() {
-        let arr = [0xCDu8; 32];
-        let h = DataHash::from(&arr);
-        let back: [u8; 32] = h.into();
-        assert_eq!(arr, back);
-    }
-
-    #[test]
-    fn from_slice_valid() {
-        let bytes = vec![42u8; 32];
-        let h = DataHash::from_slice(&bytes).unwrap();
-        let back: [u8; 32] = h.into();
-        assert_eq!(&bytes, &back[..]);
-    }
-
-    #[test]
-    fn from_slice_wrong_length() {
-        assert!(DataHash::from_slice(&[0u8; 31]).is_err());
-        assert!(DataHash::from_slice(&[0u8; 33]).is_err());
-    }
-
-    #[test]
-    fn try_from_slice() {
-        let bytes = [7u8; 32];
-        let h = DataHash::try_from(bytes.as_slice()).unwrap();
-        let back: [u8; 32] = h.into();
-        assert_eq!(bytes, back);
-        assert!(DataHash::try_from(&[0u8; 16][..]).is_err());
+    fn byte_conversions_preserve_little_endian_words() {
+        for bytes in [
+            [0xAB; 32],
+            [0xCD; 32],
+            [42; 32],
+            [7; 32],
+            std::array::from_fn(|i| i as u8),
+        ] {
+            let hash = DataHash::from(bytes);
+            for (word, chunk) in hash.iter().zip(bytes.as_chunks::<8>().0) {
+                assert_eq!(*word, u64::from_le_bytes(*chunk));
+            }
+            assert_eq!(DataHash::from(&bytes), hash);
+            assert_eq!(DataHash::from_slice(&bytes).unwrap(), hash);
+            assert_eq!(DataHash::try_from(bytes.as_slice()).unwrap(), hash);
+            assert_eq!(<[u8; 32]>::from(hash), bytes);
+            assert_eq!(hash.to_bytes(), bytes);
+            assert_eq!(Vec::<u8>::from(hash), bytes);
+        }
+        for len in [0, 16, 31, 33] {
+            let bytes = vec![0; len];
+            assert!(DataHash::from_slice(&bytes).is_err());
+            assert!(DataHash::try_from(bytes.as_slice()).is_err());
+        }
     }
 
     #[test]
@@ -425,13 +413,6 @@ mod tests {
         assert_eq!(h % 3, 1);
         assert_eq!(h % 5, 0);
         assert_eq!(h % 10, 0);
-    }
-
-    #[test]
-    fn into_bytes() {
-        let h = DataHash::from([1u64, 2, 3, 4]);
-        let bytes: [u8; 32] = h.into();
-        assert_eq!(bytes.len(), 32);
     }
 
     #[test]
