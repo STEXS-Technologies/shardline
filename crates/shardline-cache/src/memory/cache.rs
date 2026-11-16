@@ -169,11 +169,7 @@ impl MemoryReconstructionCache {
                     let last_seen_alive = Arc::clone(&new.last_seen_alive);
                     slot.insert(new);
                     // Clean up any expired entry so the loader can store fresh data.
-                    if let Some(entry) = inner.entries.get(key)
-                        && !entry.is_live(now, self.ttl)
-                    {
-                        inner.remove(key);
-                    }
+                    inner.remove(key);
                     (true, notify, last_seen_alive)
                 }
             }
@@ -644,13 +640,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(key.clone(), loading);
 
-            let should_remove = inner
-                .entries
-                .get(key)
-                .is_some_and(|entry| !entry.is_live(now, self.ttl));
-            if should_remove {
-                inner.remove(key);
-            }
+            inner.remove(key);
             Ok(None)
         })
     }
@@ -670,16 +660,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 self.max_entries.get(),
                 MAX_MEMORY_CACHE_BYTES,
             );
-            let released = {
-                let mut loading = self
-                    .loading
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                loading.remove(key)
-            };
-            if let Some(released) = released {
-                released.notify.notify_waiters();
-            }
+            self.release_loading(key);
             Ok(())
         })
     }
@@ -695,16 +676,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             // explicitly gone, so waiting callers must wake and observe an
             // absence rather than block until the adapter's stall timeout. This
             // is what lets a failed loader's concurrency latch be cleaned up.
-            let released = {
-                let mut loading = self
-                    .loading
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                loading.remove(key)
-            };
-            if let Some(released) = released {
-                released.notify.notify_waiters();
-            }
+            self.release_loading(key);
             Ok(removed)
         })
     }
