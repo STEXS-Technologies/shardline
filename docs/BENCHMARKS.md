@@ -5259,6 +5259,28 @@ repeated, changed-source and corrupted-source scans, with zero HEADs throughout.
 The complete library target was selected. Fixtures were removed after the run. This qualifies
 these local MinIO regression scenarios, not production throughput or scale.
 
+### Complete CLI library cleanup checkpoint (2026-11-16)
+
+Source `d6b390ea` passed all 558 CLI library tests with none skipped in
+30.717 s. The run used a fresh, migrated PostgreSQL 16 Alpine database,
+`SHARDLINE_REQUIRE_POSTGRES_TESTS=1`, `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1`,
+Rust 1.99.0 and the same unoptimized, debug-information-disabled build settings
+as the checkpoints above. The disposable database was removed afterward.
+
+```bash
+# DATABASE_URL identifies a disposable database with current migrations applied.
+SHARDLINE_REQUIRE_POSTGRES_TESTS=1 SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 \
+  cargo +1.99.0 nextest run --offline --locked -p shardline --all-features \
+  --lib --no-fail-fast --success-output final --test-threads 4
+```
+
+The all-features CLI executable build also passed. This checks the accumulated
+maintenance, inspection, backup, retention-hold and migration cleanup together.
+The snapshot contains 570,633 tracked Rust lines, down 33,016 (5.47%) from the
+603,649-line baseline, including comments, tests and blank lines. These are local
+functional results; the historical hosted SDK RSS failure and production
+performance qualification remain open.
+
 ### Incremental development recompilation
 
 On November 16, 2026, source `b9820832049726a53818dd6bcf07f40709e6e478`
