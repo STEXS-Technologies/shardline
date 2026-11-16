@@ -589,35 +589,31 @@ impl FileUploadPipeline {
                 && let Ok(xorbs) = parse_shard_xorbs(&shard_body)
                 && let Some((xorb, index)) = find_chunk_in_xorbs(&xorbs, &hash)
             {
+                let location = ChunkLocation {
+                    xorb_hash: xorb.xorb_hash,
+                    chunk_index: index,
+                };
                 {
                     let mut state = self.session.inner.state.lock().await;
-                    let location = ChunkLocation {
-                        xorb_hash: xorb.xorb_hash,
-                        chunk_index: index,
-                    };
                     state.chunk_locations.insert(hash, location);
-                    // Import the xorb info, marking the referenced chunk with
-                    // the global-dedup flag so the server re-indexes it.
-                    let mut imported = xorb.clone();
-                    if let Some(imported_chunk) = imported
-                        .chunks
-                        .get_mut(usize::try_from(index).unwrap_or(usize::MAX))
-                    {
-                        imported_chunk.flags |= MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
-                    }
-                    state
-                        .xorb_infos
-                        .entry(imported.xorb_hash)
-                        .or_insert(imported);
+                    // Import only absent xorb info, marking the referenced
+                    // chunk for server re-indexing after global dedup.
+                    state.xorb_infos.entry(xorb.xorb_hash).or_insert_with(|| {
+                        let mut imported = xorb.clone();
+                        if let Some(imported_chunk) = imported
+                            .chunks
+                            .get_mut(usize::try_from(index).unwrap_or(usize::MAX))
+                        {
+                            imported_chunk.flags |= MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
+                        }
+                        imported
+                    });
                     state.global_chunk_index = state.global_chunk_index.saturating_add(1);
                 }
                 self.placements.push(Placement::Known {
                     hash,
                     len,
-                    location: ChunkLocation {
-                        xorb_hash: xorb.xorb_hash,
-                        chunk_index: index,
-                    },
+                    location,
                 });
                 self.total_bytes = self.total_bytes.saturating_add(len);
                 return Ok(());
