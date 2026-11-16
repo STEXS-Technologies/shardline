@@ -988,15 +988,11 @@ fn transfer_error_from_json(error: &JsonDecodeError) -> TransferError {
 
 /// Parses a `Content-Range: bytes start-end/total` header (inclusive end).
 fn parse_content_range(value: &str) -> Result<ByteRange, TransferError> {
-    let spec = value.trim().strip_prefix("bytes ").ok_or_else(|| {
-        TransferError::InvalidResponse(format!("invalid Content-Range header: {value}"))
-    })?;
-    let (range_part, _total) = spec.split_once('/').ok_or_else(|| {
-        TransferError::InvalidResponse(format!("invalid Content-Range header: {value}"))
-    })?;
-    let (start, end) = range_part.split_once('-').ok_or_else(|| {
-        TransferError::InvalidResponse(format!("invalid Content-Range header: {value}"))
-    })?;
+    let malformed =
+        || TransferError::InvalidResponse(format!("invalid Content-Range header: {value}"));
+    let spec = value.trim().strip_prefix("bytes ").ok_or_else(malformed)?;
+    let (range_part, _total) = spec.split_once('/').ok_or_else(malformed)?;
+    let (start, end) = range_part.split_once('-').ok_or_else(malformed)?;
     let start = start.parse::<u64>().map_err(|error| {
         TransferError::InvalidResponse(format!("invalid Content-Range header {value}: {error}"))
     })?;
