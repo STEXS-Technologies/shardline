@@ -364,8 +364,8 @@ impl ChunkCache {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut state = state.blocking_lock();
-            let serialized = serialize_entry(chunk_range, &offsets, &owned_data);
-            write_atomic(&path, &serialized)?;
+            let metadata = serialize_entry_metadata(chunk_range, &offsets, &owned_data);
+            write_atomic(&path, &metadata, &owned_data)?;
             if let Some(existing) = state.entries.get(&key) {
                 state.total_bytes = state.total_bytes.saturating_sub(existing.size);
             }
@@ -532,23 +532,23 @@ fn validate_offsets(
     Ok(())
 }
 
-/// Serializes an entry: fixed header followed by the payload (offsets + data).
-fn serialize_entry(chunk_range: (u64, u64), chunk_offsets: &[u32], data: &[u8]) -> Vec<u8> {
-    // Hash the payload directly, avoiding a full temporary payload copy while
-    // the worker already owns the decoded data and final serialized entry.
+/// Serializes the fixed header and offsets; the worker writes data separately.
+fn serialize_entry_metadata(
+    chunk_range: (u64, u64),
+    chunk_offsets: &[u32],
+    data: &[u8],
+) -> Vec<u8> {
+    // The checksum covers offsets and data without copying the decoded payload.
     let mut checksum = crc32fast::Hasher::new();
     for offset in chunk_offsets {
         checksum.update(&offset.to_le_bytes());
     }
     checksum.update(data);
-    let payload_len = chunk_offsets
-        .len()
-        .saturating_mul(4)
-        .saturating_add(data.len());
     let crc = checksum.finalize();
     let num_offsets = u32::try_from(chunk_offsets.len()).unwrap_or(u32::MAX);
     let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-    let mut out = Vec::with_capacity(HEADER_LEN.saturating_add(payload_len));
+    let mut out =
+        Vec::with_capacity(HEADER_LEN.saturating_add(chunk_offsets.len().saturating_mul(4)));
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&chunk_range.0.to_le_bytes());
     out.extend_from_slice(&chunk_range.1.to_le_bytes());
@@ -558,7 +558,6 @@ fn serialize_entry(chunk_range: (u64, u64), chunk_offsets: &[u32], data: &[u8]) 
     for offset in chunk_offsets {
         out.extend_from_slice(&offset.to_le_bytes());
     }
-    out.extend_from_slice(data);
     out
 }
 
@@ -722,8 +721,8 @@ fn parse_header(bytes: &[u8]) -> Option<EntryHeader> {
     })
 }
 
-/// Writes `data` to `path` atomically (temp file + rename).
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), SdxError> {
+/// Writes metadata and data atomically (temp file + sync + rename).
+fn write_atomic(path: &Path, metadata: &[u8], data: &[u8]) -> Result<(), SdxError> {
     let dir = path
         .parent()
         .ok_or_else(|| SdxError::StreamInternal("cache path has no parent directory".to_owned()))?;
@@ -736,6 +735,7 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), SdxError> {
     let temp_path = dir.join(temp_name);
     let write_result = (|| {
         let mut file = File::create(&temp_path)?;
+        file.write_all(metadata)?;
         file.write_all(data)?;
         file.sync_all()?;
         // Close before renaming, including on platforms that disallow moving
@@ -1227,6 +1227,11 @@ mod tests {
         assert_eq!(cached.chunk_offsets, vec![0, 11]);
         assert_eq!(cached.data.as_ref(), b"hello world");
         assert_eq!(cached.chunk_range, (0, 1));
+        let path = cache.item_path(&cache_key(&key, (0, 1))).unwrap();
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"SDXCHNK1\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x0b\x00\x00\x00\x00\x00\x00\x00\xf8\xcf\x31\x62\x00\x00\x00\x00\x0b\x00\x00\x00hello world"
+        );
     }
 
     #[tokio::test]
