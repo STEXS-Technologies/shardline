@@ -4562,7 +4562,6 @@ dependencies = [
  "lz4_flex 0.13.0",
  "proptest",
  "serde",
- "static_assertions",
  "thiserror 2.0.18",
  "tracing",
  "xet-core-structures",

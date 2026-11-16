@@ -12,22 +12,16 @@ use crate::{
 
 pub const MDB_FILE_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u64>();
 
-static_assertions::const_assert!(
-    size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileDataSequenceHeader>()
-);
-static_assertions::const_assert!(
-    size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileDataSequenceEntry>()
-);
-static_assertions::const_assert!(
-    size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileVerificationEntry>()
-);
-static_assertions::const_assert!(
-    size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileMetadataExt>()
-);
-
 const MDB_XORB_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u64>();
-static_assertions::const_assert!(MDB_XORB_INFO_ENTRY_SIZE == size_of::<XorbChunkSequenceHeader>());
-static_assertions::const_assert!(MDB_XORB_INFO_ENTRY_SIZE == size_of::<XorbChunkSequenceEntry>());
+
+const _: () = {
+    assert!(MDB_FILE_INFO_ENTRY_SIZE == size_of::<FileDataSequenceHeader>());
+    assert!(MDB_FILE_INFO_ENTRY_SIZE == size_of::<FileDataSequenceEntry>());
+    assert!(MDB_FILE_INFO_ENTRY_SIZE == size_of::<FileVerificationEntry>());
+    assert!(MDB_FILE_INFO_ENTRY_SIZE == size_of::<FileMetadataExt>());
+    assert!(MDB_XORB_INFO_ENTRY_SIZE == size_of::<XorbChunkSequenceHeader>());
+    assert!(MDB_XORB_INFO_ENTRY_SIZE == size_of::<XorbChunkSequenceEntry>());
+};
 
 const MDB_SHARD_FOOTER_SIZE: i64 = size_of::<MDBShardFileFooter>() as i64;
 const MDB_SHARD_HEADER_VERSION: u64 = 3;

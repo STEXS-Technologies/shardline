@@ -4030,7 +4030,6 @@ dependencies = [
  "gearhash",
  "lz4_flex 0.13.1",
  "serde",
- "static_assertions",
  "thiserror",
  "tracing",
  "xet-core-structures",
