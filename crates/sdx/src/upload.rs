@@ -1615,62 +1615,65 @@ mod tests {
         }
     }
 
-    async fn check_failed_reader_does_not_publish(remaining: usize, panic: bool) {
-        for recover in [false, true] {
-            let (server, client) = mock_client().await;
-            let session = client.upload_session().unwrap();
-            let error = session
-                .upload_stream("remote/failed.bin", FailingReader { remaining, panic })
-                .await
-                .unwrap_err();
-            if panic {
-                assert!(
-                    matches!(error, crate::SdxError::TaskJoin(message) if message.contains("owned reader panic"))
-                );
-            } else {
-                assert!(
-                    matches!(error, crate::SdxError::Io(error) if error.to_string() == "owned reader failure")
-                );
-            }
-            {
-                let state = session.inner.state.lock().await;
-                assert!(state.file_infos.is_empty());
-                assert!(state.file_reports.is_empty());
-                assert!(state.pending_registrations.is_empty());
-            }
-            let expected = if recover {
-                Some(
-                    session
-                        .upload_bytes("remote/success.bin", b"complete file".to_vec())
-                        .await
-                        .unwrap(),
-                )
-            } else {
-                None
-            };
-            let expected_shard = {
-                let state = session.inner.state.lock().await;
-                let xorbs = state.xorb_infos.values().cloned().collect::<Vec<_>>();
-                serialize_shard(&state.file_infos, &xorbs)
-            };
-            let report = session.finalize().await.unwrap();
-            assert_eq!(report.files, expected.into_iter().collect::<Vec<_>>());
-            assert_eq!(report.shard_posts, u64::from(recover));
-            let requests = server.received_requests().await.unwrap();
-            let registrations = requests
-                .iter()
-                .filter(|request| request.method.as_str() == "PUT")
-                .collect::<Vec<_>>();
-            assert_eq!(registrations.len(), usize::from(recover));
-            if recover {
-                assert!(registrations[0].url.path().ends_with("/remote/success.bin"));
-                assert_eq!(shard_post_body(&server).await, expected_shard);
-            } else {
-                assert!(
-                    requests
-                        .iter()
-                        .all(|request| request.url.path() != "/v1/shards")
-                );
+    #[tokio::test]
+    async fn failed_readers_preserve_session_publication_and_recovery_contract() {
+        for (remaining, panic) in [(0, false), (1024 * 1024, false), (0, true)] {
+            for recover in [false, true] {
+                let (server, client) = mock_client().await;
+                let session = client.upload_session().unwrap();
+                let error = session
+                    .upload_stream("remote/failed.bin", FailingReader { remaining, panic })
+                    .await
+                    .unwrap_err();
+                if panic {
+                    assert!(
+                        matches!(error, crate::SdxError::TaskJoin(message) if message.contains("owned reader panic"))
+                    );
+                } else {
+                    assert!(
+                        matches!(error, crate::SdxError::Io(error) if error.to_string() == "owned reader failure")
+                    );
+                }
+                {
+                    let state = session.inner.state.lock().await;
+                    assert!(state.file_infos.is_empty());
+                    assert!(state.file_reports.is_empty());
+                    assert!(state.pending_registrations.is_empty());
+                }
+                let expected = if recover {
+                    Some(
+                        session
+                            .upload_bytes("remote/success.bin", b"complete file".to_vec())
+                            .await
+                            .unwrap(),
+                    )
+                } else {
+                    None
+                };
+                let expected_shard = {
+                    let state = session.inner.state.lock().await;
+                    let xorbs = state.xorb_infos.values().cloned().collect::<Vec<_>>();
+                    serialize_shard(&state.file_infos, &xorbs)
+                };
+                let report = session.finalize().await.unwrap();
+                assert_eq!(report.files, expected.into_iter().collect::<Vec<_>>());
+                assert_eq!(report.shard_posts, u64::from(recover));
+                let requests = server.received_requests().await.unwrap();
+                let registrations = requests
+                    .iter()
+                    .filter(|request| request.method.as_str() == "PUT")
+                    .collect::<Vec<_>>();
+                assert_eq!(registrations.len(), usize::from(recover));
+                if recover {
+                    assert!(registrations[0].url.path().ends_with("/remote/success.bin"));
+                    assert_eq!(shard_post_body(&server).await, expected_shard);
+                } else {
+                    assert!(
+                        requests
+                            .iter()
+                            .all(|request| request.url.path() != "/v1/shards")
+                    );
+                }
             }
         }
     }
@@ -1783,21 +1786,6 @@ mod tests {
         let report = session.finalize().await.unwrap();
         assert!(report.files.is_empty());
         assert_eq!(report.shard_posts, 0);
-    }
-
-    #[tokio::test]
-    async fn failed_reader_immediate_error_does_not_publish_file() {
-        check_failed_reader_does_not_publish(0, false).await;
-    }
-
-    #[tokio::test]
-    async fn failed_reader_partial_error_does_not_publish_file() {
-        check_failed_reader_does_not_publish(1024 * 1024, false).await;
-    }
-
-    #[tokio::test]
-    async fn failed_reader_panic_does_not_publish_file() {
-        check_failed_reader_does_not_publish(0, true).await;
     }
 
     #[tokio::test]
