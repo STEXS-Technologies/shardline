@@ -1499,40 +1499,6 @@ async fn cache_inner_fifo_eviction_order() {
     );
 }
 
-// ── CacheInner evict_oldest skips stale eviction entries ──────────────
-//
-// If eviction_order has a stale key (entry was already removed from
-// `entries` without cleaning up eviction_order), evict_oldest should
-// skip it and pop the next one.
-
-#[tokio::test]
-async fn cache_inner_evict_oldest_skips_stale_entries() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN), // capacity = 2
-    );
-    let keys = [
-        ReconstructionCacheKey::latest("stale-a", None),
-        ReconstructionCacheKey::latest("stale-b", None),
-        ReconstructionCacheKey::latest("stale-c", None),
-    ];
-
-    // Fill cache to capacity
-    cache.put(&keys[0], b"a").await.unwrap();
-    cache.put(&keys[1], b"b").await.unwrap();
-
-    // Delete keys[0] normally (cleans up eviction_order)
-    cache.delete(&keys[0]).await.unwrap();
-
-    // Now cache has capacity for 1 more, insert keys[2] (no eviction needed)
-    cache.put(&keys[2], b"c").await.unwrap();
-
-    // keys[0] is gone, keys[1] and keys[2] are present
-    assert_eq!(cache.get(&keys[0]).await.unwrap(), None);
-    assert_eq!(cache.get(&keys[1]).await.unwrap(), Some(b"b".to_vec()));
-    assert_eq!(cache.get(&keys[2]).await.unwrap(), Some(b"c".to_vec()));
-}
-
 // ── get_or_load write-lock re-check hit ───────────────────────────────
 //
 // When get_or_load re-checks after acquiring the write lock, it may
@@ -1923,48 +1889,40 @@ async fn get_phantom_loading_removes_expired_entry() {
     exercise_get_contention(GetContention::ShortLivedSeed).await;
 }
 
-// ── CacheInner evict_oldest on empty cache ────────────────────────────
+#[test]
+fn cache_inner_eviction_handles_empty_and_stale_state_without_losing_live_entries() {
+    use super::inner::{CacheInner, EvictionKey};
 
-#[tokio::test]
-async fn cache_inner_evict_oldest_empty_cache_is_noop() {
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(5).unwrap_or(NonZeroUsize::MIN),
-    );
-    let key = ReconstructionCacheKey::latest("new-key", None);
-
-    // Eviction should not prevent insertion
-    cache.put(&key, b"data").await.unwrap();
-    let result = cache.get(&key).await.unwrap();
-    assert_eq!(result, Some(b"data".to_vec()));
-}
-
-// ── CacheInner evict_oldest stale eviction entries only ────────────────
-
-#[tokio::test]
-async fn cache_inner_evict_oldest_all_stale_clears_eviction_order() {
-    // Create a cache with capacity 2 and insert 2 entries, then
-    // delete both via remove() which cleans eviction_order.
-    // Then insert a third key — evict_oldest must handle finding
-    // nothing to evict gracefully.
-    let cache = MemoryReconstructionCache::new(
-        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
-    );
-    let k1 = ReconstructionCacheKey::latest("k1", None);
-    let k2 = ReconstructionCacheKey::latest("k2", None);
-    let k3 = ReconstructionCacheKey::latest("k3", None);
-
-    cache.put(&k1, b"one").await.unwrap();
-    cache.put(&k2, b"two").await.unwrap();
-
-    // Delete both to clean up entries but keep eviction_order entries
-    cache.delete(&k1).await.unwrap();
-    cache.delete(&k2).await.unwrap();
-
-    // k3 should be insertable without panic
-    cache.put(&k3, b"three").await.unwrap();
-    assert_eq!(cache.get(&k3).await.unwrap(), Some(b"three".to_vec()));
+    let now = tokio::time::Instant::now();
+    let first = ReconstructionCacheKey::latest("first", None);
+    let second = ReconstructionCacheKey::latest("second", None);
+    let stale = ReconstructionCacheKey::latest("stale", None);
+    for stale_count in [0, 2] {
+        for live in [false, true] {
+            let mut inner = CacheInner::new();
+            for seq in 0..stale_count {
+                inner
+                    .eviction_order
+                    .insert(EvictionKey(now, seq), stale.clone());
+            }
+            if live {
+                let inserted_at = now + Duration::from_secs(1);
+                inner.store(&first, b"a", inserted_at, 2, 16);
+                inner.store(&second, b"bb", inserted_at, 2, 16);
+            }
+            inner.evict_oldest();
+            assert!(!inner.entries.contains_key(&first));
+            assert_eq!(inner.total_bytes, if live { 2 } else { 0 });
+            assert_eq!(inner.eviction_order.len(), usize::from(live));
+            if live {
+                assert_eq!(inner.entries[&second].payload.as_slice(), b"bb");
+                inner.evict_oldest();
+            }
+            assert!(inner.entries.is_empty());
+            assert!(inner.eviction_order.is_empty());
+            assert_eq!(inner.total_bytes, 0);
+        }
+    }
 }
 
 #[test]
