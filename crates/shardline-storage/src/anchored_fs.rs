@@ -879,70 +879,54 @@ mod tests {
     // ── open_or_create_child_directory ────────────────────────────────────
 
     #[test]
-    fn open_or_create_child_existing() {
-        let dir = tempdir().unwrap();
-        let child_name: &OsStr = "child".as_ref();
-        fs::create_dir(dir.path().join("child")).unwrap();
-        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
-
-        let result = open_or_create_child_directory(&parent, child_name, false, None);
-        assert!(result.is_ok());
+    fn child_directory_creation_respects_existing_and_missing_paths() {
+        for (exists, create) in [(true, false), (false, true), (false, false), (true, true)] {
+            let dir = tempdir().unwrap();
+            let child_name = OsStr::new("child");
+            let child_path = dir.path().join(child_name);
+            if exists {
+                fs::create_dir(&child_path).unwrap();
+            }
+            let parent = open_directory(dir.path()).unwrap();
+            let result = open_or_create_child_directory(&parent, child_name, create, None);
+            if exists || create {
+                assert!(result.is_ok());
+                assert!(child_path.is_dir());
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+                assert!(!child_path.exists());
+            }
+        }
     }
 
     #[test]
-    fn open_or_create_child_create_missing() {
-        let dir = tempdir().unwrap();
-        let child_name: &OsStr = "newchild".as_ref();
-        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
+    fn temporary_writes_preserve_contents_names_and_requested_mode() {
+        use std::os::unix::fs::PermissionsExt;
 
-        let result = open_or_create_child_directory(&parent, child_name, true, None);
-        assert!(result.is_ok());
-        assert!(dir.path().join("newchild").exists());
-    }
-
-    #[test]
-    fn open_or_create_child_no_create_missing() {
-        let dir = tempdir().unwrap();
-        let child_name: &OsStr = "nochild".as_ref();
-        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
-
-        let result = open_or_create_child_directory(&parent, child_name, false, None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn open_or_create_child_race_condition_already_exists() {
-        let dir = tempdir().unwrap();
-        let child_name: &OsStr = "racechild".as_ref();
-        fs::create_dir(dir.path().join("racechild")).unwrap();
-        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
-
-        let result = open_or_create_child_directory(&parent, child_name, true, None);
-        assert!(result.is_ok());
-    }
-
-    // ── write_anchored_temporary_file ─────────────────────────────────────
-
-    #[test]
-    fn write_anchored_temporary_file_basic() {
-        let dir = tempdir().unwrap();
-        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
-        let target = AnchoredTarget::new(parent, dir.path().to_path_buf(), "target.txt".into());
-        let payload = b"hello world";
-
-        let result = write_anchored_temporary_file(&target, payload, None);
-        let tmp_path = result.unwrap();
-
-        // Short destinations retain the GC-recognizable suffix
-        let tmp_name = tmp_path.file_name().unwrap().to_string_lossy();
-        assert!(
-            tmp_name.starts_with("target.txt.tmp-"),
-            "unexpected temp name: {tmp_name}"
-        );
-
-        // File content should match
-        let contents = fs::read(&tmp_path).unwrap();
-        assert_eq!(contents, payload);
+        for mode in [None, Some(0o600)] {
+            let dir = tempdir().unwrap();
+            let target = AnchoredTarget::new(
+                open_directory(dir.path()).unwrap(),
+                dir.path().to_path_buf(),
+                "target.txt".into(),
+            );
+            let payload = b"hello world";
+            let path = write_anchored_temporary_file(&target, payload, mode).unwrap();
+            assert!(
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("target.txt.tmp-")
+            );
+            assert_eq!(fs::read(&path).unwrap(), payload);
+            if let Some(mode) = mode {
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+            }
+        }
     }
 
     #[test]
@@ -973,36 +957,6 @@ mod tests {
         }
         let temporary = copy_anchored_temporary_file(&target, &source, Some(0o600)).unwrap();
         assert_eq!(fs::read(temporary).unwrap(), b"complete payload");
-    }
-
-    #[test]
-    fn write_anchored_temporary_file_with_file_mode() {
-        let dir = tempdir().unwrap();
-        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
-        let target = AnchoredTarget::new(parent, dir.path().to_path_buf(), "moded.txt".into());
-        let payload = b"mode test";
-
-        let result = write_anchored_temporary_file(&target, payload, Some(0o600));
-        let tmp_path = result.unwrap();
-        assert!(tmp_path.exists());
-        let contents = fs::read(&tmp_path).unwrap();
-        assert_eq!(contents, payload);
-    }
-
-    // ── temporary_file_name ──────────────────────────────────────────────
-
-    #[test]
-    fn temporary_file_name_has_tmp_suffix() {
-        let name = temporary_file_name(OsStr::new("file.txt"));
-        let name_str = name.to_string_lossy();
-        assert!(name_str.starts_with("file.txt.tmp-"));
-    }
-
-    #[test]
-    fn temporary_file_name_unique() {
-        let a = temporary_file_name(OsStr::new("file.txt"));
-        let b = temporary_file_name(OsStr::new("file.txt"));
-        assert_ne!(a, b);
     }
 
     // ── ensure_parent_path_matches_anchor ─────────────────────────────────

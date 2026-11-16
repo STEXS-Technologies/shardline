@@ -36,6 +36,7 @@ mod tests {
     fn managed_object_names_keep_gc_recognizable_suffixes() {
         let hash = "a".repeat(64);
         for destination in [
+            "file.txt".to_owned(),
             hash.clone(),
             format!("{hash}.xorb"),
             format!("{hash}.shard"),
@@ -43,6 +44,7 @@ mod tests {
             "gc-clock-boot-observation".to_owned(),
         ] {
             let name = temporary_file_name(OsStr::new(&destination));
+            assert_ne!(name, temporary_file_name(OsStr::new(&destination)));
             let name = name.to_str().unwrap();
             let (base, suffix) = name.rsplit_once(".tmp-").unwrap();
             assert_eq!(base, destination);
