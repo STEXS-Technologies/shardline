@@ -169,13 +169,10 @@ where
     VisitorError: Send,
 {
     let reservation = super::index_store::reserve_async_cursor().map_err(Into::into)?;
-    let scan = tokio::task::spawn_blocking(move || {
-        RecordScan::new(&store, kind, Some(reservation), repository)
-    })
-    .await
-    .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
-    .map_err(Into::into)?
-    .map_err(Into::into)?;
+    let scan =
+        run_blocking_store(move || RecordScan::new(&store, kind, Some(reservation), repository))
+            .await
+            .map_err(Into::into)?;
     visit_scan(scan, visitor).await
 }
 
@@ -191,18 +188,15 @@ where
     for locators_only in [true, false] {
         scan.after = None;
         loop {
-            let (next, batch) =
-                tokio::task::spawn_blocking(move || match scan.next_batch(locators_only) {
-                    Ok(batch) => Ok((scan, batch)),
-                    Err(error) => {
-                        scan.abort();
-                        Err(error)
-                    }
-                })
-                .await
-                .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
-                .map_err(Into::into)?
-                .map_err(Into::into)?;
+            let (next, batch) = run_blocking_store(move || match scan.next_batch(locators_only) {
+                Ok(batch) => Ok((scan, batch)),
+                Err(error) => {
+                    scan.abort();
+                    Err(error)
+                }
+            })
+            .await
+            .map_err(Into::into)?;
             scan = next;
             if batch.is_empty() {
                 break;
@@ -221,10 +215,8 @@ where
             }
         }
     }
-    tokio::task::spawn_blocking(move || scan.finish())
+    run_blocking_store(move || scan.finish())
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
-        .map_err(Into::into)?
         .map_err(Into::into)
 }
 
@@ -302,15 +294,13 @@ impl RecordTraversal for LocalRecordStore {
         let filter = (domain.as_str().to_owned(), hash_hex.to_owned());
         Box::pin(async move {
             let reservation = super::index_store::reserve_async_cursor().map_err(Into::into)?;
-            let scan = tokio::task::spawn_blocking(move || {
+            let scan = run_blocking_store(move || {
                 let mut scan =
                     RecordScan::new(&store, RecordKind::Latest, Some(reservation), None)?;
                 scan.hash_filter = Some(filter);
                 Ok::<_, LocalIndexStoreError>(scan)
             })
             .await
-            .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))
-            .map_err(Into::into)?
             .map_err(Into::into)?;
             visit_scan(scan, visitor).await
         })
@@ -434,17 +424,11 @@ impl RecordTraversal for LocalRecordStore {
     ) -> RecordStoreFuture<'operation, Vec<u8>, Self::Error> {
         let store = self.clone();
         let locator = locator.clone();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                store
-                    .read_record_bytes_raw(&locator)?
-                    .ok_or_else(record_not_found_error)
-            })
-            .await
-            .map_err(|e: tokio::task::JoinError| {
-                LocalIndexStoreError::BlockingTask(e.to_string())
-            })?
-        })
+        Box::pin(run_blocking_store(move || {
+            store
+                .read_record_bytes_raw(&locator)?
+                .ok_or_else(record_not_found_error)
+        }))
     }
 
     fn read_latest_record_bytes<'operation>(

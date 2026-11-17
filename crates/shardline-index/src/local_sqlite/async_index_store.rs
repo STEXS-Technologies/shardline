@@ -33,12 +33,10 @@ where
     VisitorError: Send,
 {
     let reservation = super::index_store::reserve_async_cursor().map_err(Into::into)?;
-    let mut scan = tokio::task::spawn_blocking(move || {
+    let mut scan = super::helpers::run_blocking_store(move || {
         super::index_store::InventoryScan::<Entry>::open(&store, Some(reservation))
     })
     .await
-    .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
-    .map_err(Into::into)?
     .map_err(Into::into)?;
     for phase in 0..6 {
         if (phase == 1 && !Entry::PREVALIDATE_SNAPSHOTS)
@@ -48,17 +46,16 @@ where
         }
         scan.rewind();
         loop {
-            let (next, batch) = tokio::task::spawn_blocking(move || match scan.next_batch(phase) {
-                Ok(batch) => Ok((scan, batch)),
-                Err(error) => {
-                    scan.abort();
-                    Err(error)
-                }
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
-            .map_err(Into::into)?
-            .map_err(Into::into)?;
+            let (next, batch) =
+                super::helpers::run_blocking_store(move || match scan.next_batch(phase) {
+                    Ok(batch) => Ok((scan, batch)),
+                    Err(error) => {
+                        scan.abort();
+                        Err(error)
+                    }
+                })
+                .await
+                .map_err(Into::into)?;
             scan = next;
             if batch.is_empty() {
                 break;
@@ -76,10 +73,8 @@ where
             }
         }
     }
-    tokio::task::spawn_blocking(move || scan.finish())
+    super::helpers::run_blocking_store(move || scan.finish())
         .await
-        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))
-        .map_err(Into::into)?
         .map_err(Into::into)
 }
 
