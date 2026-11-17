@@ -5740,3 +5740,30 @@ dependencies and disabled test debug information on the shared development host.
 It is correctness evidence for this gate, not a production-topology or throughput
 qualification. Distributed and remote-object-store results remain tied to their
 previously recorded revisions.
+
+### Contributor CI refresh after maintenance simplification (2026-11-17)
+
+Source `6c8f0d58d4fe68c82c1e5f326cf97096eff824b6` completed `cargo make ci`
+locally after the subsequent index, SDK, upload, rebuild and fsck cleanup.
+The isolated checkout excluded unrelated uncommitted main-worktree changes.
+The run used Rust 1.99.0, four build jobs, cached dependencies, no compiler
+wrapper and disabled dev/test debug information; release checks retained the
+optimized repository profile.
+
+| Test stage | Passed | Normally ignored tests excluded |
+| --- | ---: | ---: |
+| Workspace library tests | 8,138 | 45 |
+| Reliability contracts | 39 | 0 |
+| Release CLI API and maintenance contracts | 41 | 5 |
+
+Workspace formatting, strict Clippy, dependency exceptions, both workspace
+cargo-deny policies, release help/manpage/completion checks and parity across
+44 database migrations passed. The full command exited successfully in 550.82
+seconds on the shared development host. This is a correctness checkpoint,
+not a controlled build-speed measurement.
+
+External fixtures were not required by this contributor run: tests that return
+early without their infrastructure do not constitute infrastructure
+qualification. PostgreSQL and distributed qualifications retain their separately
+recorded source revisions. This run does not resolve the historical hosted SDK
+RSS failure or establish hosted-CI success or production capacity.
