@@ -178,13 +178,13 @@ pub struct Contents {
 }
 
 impl Contents {
-    fn to_xml(&self, owner_id: Option<&str>) -> String {
+    fn to_xml(&self, owner_id: Option<&str>, url_encoding: bool) -> String {
         let owner = owner_id
             .map(|id| format!("    <Owner><ID>{}</ID></Owner>\n", xml_escape(id)))
             .unwrap_or_default();
         format!(
             "  <Contents>\n    <Key>{}</Key>\n    <Size>{}</Size>\n    <ETag>{}</ETag>\n    <LastModified>{}</LastModified>\n{owner}  </Contents>\n",
-            xml_escape(&self.key),
+            listing_xml_value(&self.key, url_encoding),
             self.size_bytes,
             etag_header(&self.etag),
             xml_escape(&self.last_modified_iso8601),
@@ -218,12 +218,11 @@ pub fn listing_wire_value(value: &str, url_encoding: bool) -> String {
     }
 }
 
-fn encode_listing_rows(contents: &mut [Contents], prefixes: &mut [String]) {
-    for entry in contents {
-        entry.key = listing_wire_value(&entry.key, true);
-    }
-    for prefix in prefixes {
-        *prefix = listing_wire_value(prefix, true);
+fn listing_xml_value(value: &str, url_encoding: bool) -> String {
+    if url_encoding {
+        xml_escape(&listing_wire_value(value, true))
+    } else {
+        xml_escape(value)
     }
 }
 
@@ -251,12 +250,7 @@ impl ListBucketResult {
     /// encoding. Opaque continuation tokens retain their original values.
     #[must_use]
     pub fn to_xml_with_context(&self, context: ListObjectsV2ResponseContext<'_>) -> String {
-        let mut result = std::borrow::Cow::Borrowed(self);
-        if context.url_encoding {
-            let encoded = result.to_mut();
-            encode_listing_rows(&mut encoded.contents, &mut encoded.common_prefixes);
-        }
-        let mut xml = result.to_xml_with_owner(context.owner_id);
+        let mut xml = self.to_xml_with_owner(context.owner_id, context.url_encoding);
         let mut fields = format!(
             "  <Prefix>{}</Prefix>\n",
             xml_escape(&listing_wire_value(context.prefix, context.url_encoding))
@@ -288,14 +282,14 @@ impl ListBucketResult {
     /// Serializes the result to the S3 `ListBucketResult` XML envelope.
     #[must_use]
     pub fn to_xml(&self) -> String {
-        self.to_xml_with_owner(None)
+        self.to_xml_with_owner(None, false)
     }
 
-    fn to_xml_with_owner(&self, owner_id: Option<&str>) -> String {
+    fn to_xml_with_owner(&self, owner_id: Option<&str>, url_encoding: bool) -> String {
         let contents = self
             .contents
             .iter()
-            .map(|content| content.to_xml(owner_id))
+            .map(|content| content.to_xml(owner_id, url_encoding))
             .collect::<String>();
         let common_prefixes = self
             .common_prefixes
@@ -303,7 +297,7 @@ impl ListBucketResult {
             .map(|prefix| {
                 format!(
                     "  <CommonPrefixes>\n    <Prefix>{}</Prefix>\n  </CommonPrefixes>\n",
-                    xml_escape(prefix)
+                    listing_xml_value(prefix, url_encoding)
                 )
             })
             .collect::<String>();
@@ -352,31 +346,10 @@ impl ListBucketResultV1 {
     /// keys, prefix, delimiter and markers. Bucket names are unchanged.
     #[must_use]
     pub fn to_xml_with_url_encoding(&self, url_encoding: bool) -> String {
-        if !url_encoding {
-            return self.to_xml();
-        }
-        let mut result = self.clone();
-        encode_listing_rows(&mut result.contents, &mut result.common_prefixes);
-        result.prefix = listing_wire_value(&result.prefix, true);
-        result.marker = listing_wire_value(&result.marker, true);
-        result.delimiter = result
-            .delimiter
-            .map(|value| listing_wire_value(&value, true));
-        result.next_marker = result
-            .next_marker
-            .map(|value| listing_wire_value(&value, true));
-        let mut xml = result.to_xml();
-        append_listing_fields(&mut xml, "  <EncodingType>url</EncodingType>\n");
-        xml
-    }
-
-    /// Serializes the result to the S3 `ListBucketResult` (v1) XML envelope.
-    #[must_use]
-    pub fn to_xml(&self) -> String {
         let contents = self
             .contents
             .iter()
-            .map(|content| content.to_xml(None))
+            .map(|content| content.to_xml(None, url_encoding))
             .collect::<String>();
         let common_prefixes = self
             .common_prefixes
@@ -384,28 +357,48 @@ impl ListBucketResultV1 {
             .map(|prefix| {
                 format!(
                     "  <CommonPrefixes>\n    <Prefix>{}</Prefix>\n  </CommonPrefixes>\n",
-                    xml_escape(prefix)
+                    listing_xml_value(prefix, url_encoding)
                 )
             })
             .collect::<String>();
         let delimiter = self
             .delimiter
             .as_ref()
-            .map(|delimiter| format!("  <Delimiter>{}</Delimiter>\n", xml_escape(delimiter)))
+            .map(|delimiter| {
+                format!(
+                    "  <Delimiter>{}</Delimiter>\n",
+                    listing_xml_value(delimiter, url_encoding)
+                )
+            })
             .unwrap_or_default();
         let next_marker = self
             .next_marker
             .as_ref()
-            .map(|marker| format!("  <NextMarker>{}</NextMarker>\n", xml_escape(marker)))
+            .map(|marker| {
+                format!(
+                    "  <NextMarker>{}</NextMarker>\n",
+                    listing_xml_value(marker, url_encoding)
+                )
+            })
             .unwrap_or_default();
-        format!(
+        let mut xml = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n  <Name>{}</Name>\n  <Prefix>{}</Prefix>\n  <Marker>{}</Marker>\n  <MaxKeys>{}</MaxKeys>\n{delimiter}{contents}{common_prefixes}  <IsTruncated>{}</IsTruncated>\n{next_marker}</ListBucketResult>\n",
             xml_escape(&self.name),
-            xml_escape(&self.prefix),
-            xml_escape(&self.marker),
+            listing_xml_value(&self.prefix, url_encoding),
+            listing_xml_value(&self.marker, url_encoding),
             self.max_keys,
             self.is_truncated,
-        )
+        );
+        if url_encoding {
+            append_listing_fields(&mut xml, "  <EncodingType>url</EncodingType>\n");
+        }
+        xml
+    }
+
+    /// Serializes the result to the S3 `ListBucketResult` (v1) XML envelope.
+    #[must_use]
+    pub fn to_xml(&self) -> String {
+        self.to_xml_with_url_encoding(false)
     }
 }
 
