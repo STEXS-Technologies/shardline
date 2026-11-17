@@ -6571,3 +6571,24 @@ parent projects directory in `.shardline-cleanup-state/postgres-index-df0d63fd/`
 and `.shardline-cleanup-state/minio-df0d63fd/`. Their orchestration scripts are
 `.shardline-cleanup-state/postgres-index-df0d63fd.py` and
 `.shardline-cleanup-state/minio-df0d63fd.py`.
+
+### Standalone data-integrity checkpoint at d2d9df5f (2026-11-17)
+
+Frozen source `d2d9df5ff78a0d0a6cc4b24da4724b6e4ebcaa40` passed all
+284 standalone data-integrity tests, with zero skipped, in 26.917 seconds:
+
+```bash
+cargo +1.99.0 nextest run --manifest-path e2e/Cargo.toml --locked \
+  --test data_integrity --no-fail-fast --test-threads 4
+```
+
+The shared-host run used four build jobs, cached dependencies, offline mode,
+no compiler wrapper and disabled dev/test debug information. It covers the
+fixture storage-lifetime regression, consolidated range cases and actual CDC
+boundary upload/download cases together with the suite's other protocol cases.
+Strict Clippy for this E2E target also passed after the final test change.
+This is not a required PostgreSQL qualification or a production performance
+measurement. The separate required backend checkpoints above remain applicable
+to unchanged production code. Hosted SDK memory qualification remains open.
+The local log is `.shardline-cleanup-state/data-integrity-d2d9df5f.log` under
+the parent projects directory.
