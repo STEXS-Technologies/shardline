@@ -36,9 +36,12 @@ code.
    qualification at `39c86a9e` has passed the owned PostgreSQL process-cut job and
    all 59 distributed-integrity/mixed-version tests. The contributor job failed
    `cargo deny check` on the `chrono` and `humantime` unmaintained advisories;
-   no exception was added. Configured PostgreSQL and E2E jobs were still running
-   at this checkpoint. Complete those jobs and resolve the dependency-policy
-   failure without relaxing the memory bound or opening a pull request. Repeat integrated PostgreSQL/object
+   no exception was added. Configured PostgreSQL subsequently passed. Hosted E2E
+   failed: the 256 MiB SDK case passed byte identity with a 61,584 KiB streaming
+   RSS delta, but the 1 GiB case timed out at 300 seconds before reporting an
+   isolated-client measurement. Later workflow steps were skipped. Investigate
+   that timeout and resolve the dependency-policy failure without relaxing the
+   memory bound or opening a pull request. Repeat integrated PostgreSQL/object
    storage qualification after changes affecting those paths; preserve concurrent
    upload, GC, source deletion, restart and byte-identity coverage.
 2. **Review large protocol fixtures for overlap.** Start with server

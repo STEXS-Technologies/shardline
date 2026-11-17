@@ -6699,3 +6699,35 @@ workflow change.
 Logs, upstream advisory snapshots, dependency trees, downloaded distributed
 artifacts and binary-checksum verification are retained in
 `.shardline-cleanup-state/hosted-39c86a9e/`, under the parent projects directory.
+
+### Hosted cleanup qualification completed with failures (2026-11-17)
+
+The dispatches above finished on frozen source `39c86a9e`. All three CI
+PostgreSQL jobs passed: owned process cuts, configured PostgreSQL, and
+distributed integrity. The configured gate required PostgreSQL and passed
+813 index library cases, two provider-event cases, 3,161 server library cases,
+six explicitly ignored PostgreSQL integrity cases, and one CLI migration case.
+These are separate selections, not a deduplicated coverage total. The earlier
+59-test distributed result and process-cut result remain valid. CI nevertheless
+failed because of the dependency-policy findings described above.
+
+The E2E workflow failed in its dedicated SDK memory qualification. The 256 MiB
+case passed byte identity and the unchanged 65,536 KiB streaming-memory bound:
+baseline RSS 25,392 KiB, peak high-water RSS 86,976 KiB, delta 61,584 KiB;
+client transfer took 3,488 ms and the complete case took 41.976 seconds. This
+sample did not reproduce the earlier 256 MiB memory-bound failure.
+
+The 1 GiB case reached Nextest's 300-second timeout. Its captured output contains
+only the parent test's startup, with no isolated-child startup or memory report.
+The evidence therefore does not establish either its streaming RSS or successful
+byte identity. Fixture preparation occurs before the isolated client starts;
+further investigation must distinguish preparation cost from download behavior.
+Neither the timeout nor the memory bound was relaxed.
+
+Earlier E2E steps passed, including actual object-store disk exhaustion for
+SQLite and PostgreSQL with stock Xet, restart and byte-identity checks. Later
+steps, including large native transfers/process recovery, official JavaScript
+delta edits and native Bazel flows, were skipped after the memory-step failure.
+The workflow is not a passing release qualification, and does not qualify later
+Hub source changes. Final job status and the complete E2E log are retained as
+`e2e-final-status.json` and `e2e-job.log` in the evidence directory above.
