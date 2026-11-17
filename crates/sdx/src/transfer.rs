@@ -1057,13 +1057,8 @@ fn multipart_slices<'body>(
         TransferError::MalformedMultipart("boundary offset out of bounds".to_owned())
     })?;
     let mut parts = Vec::new();
-    loop {
-        if !remaining.starts_with(b"\r\n") {
-            break;
-        }
-        remaining = remaining
-            .get(2..)
-            .ok_or_else(|| TransferError::MalformedMultipart("truncated part".to_owned()))?;
+    while let Some(part) = remaining.strip_prefix(b"\r\n") {
+        remaining = part;
         let next_boundary = find_subsequence(remaining, delimiter.as_bytes());
         let part_bytes = match next_boundary {
             Some(position) => remaining.get(..position).ok_or_else(|| {
