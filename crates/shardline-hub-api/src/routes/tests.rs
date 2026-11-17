@@ -257,69 +257,47 @@ fn webhook_response_from_hub_inactive() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn parse_yaml_frontmatter_valid_simple() {
-    let content = b"---\nkey: value\n---\n# README\nHello";
-    let result = parse_yaml_frontmatter(content);
-    assert!(result.is_some());
-    let obj = result.unwrap();
-    assert_eq!(obj.get("key").and_then(|v| v.as_str()), Some("value"));
+fn parse_yaml_frontmatter_preserves_scalar_types_and_quoting() {
+    for (content, expected) in [
+        (
+            "---\nkey: value\n---\n# README\nHello",
+            serde_json::json!({"key": "value"}),
+        ),
+        (
+            "---\ntitle: 'My Model'\n---\nbody",
+            serde_json::json!({"title": "My Model"}),
+        ),
+        (
+            "---\nlikes: 42\n---\nbody",
+            serde_json::json!({"likes": 42}),
+        ),
+        (
+            "---\nprivate: true\n---\nbody",
+            serde_json::json!({"private": true}),
+        ),
+        (
+            "---\nname: \"hello world\"\n---\nbody",
+            serde_json::json!({"name": "hello world"}),
+        ),
+    ] {
+        assert_eq!(
+            parse_yaml_frontmatter(content.as_bytes()),
+            Some(expected),
+            "{content:?}"
+        );
+    }
 }
 
 #[test]
-fn parse_yaml_frontmatter_with_quoted_value() {
-    let content = b"---\ntitle: 'My Model'\n---\nbody";
-    let result = parse_yaml_frontmatter(content);
-    assert!(result.is_some());
-    let obj = result.unwrap();
-    assert_eq!(obj.get("title").and_then(|v| v.as_str()), Some("My Model"));
-}
-
-#[test]
-fn parse_yaml_frontmatter_no_frontmatter() {
-    let content = b"Just a README\nno frontmatter";
-    assert!(parse_yaml_frontmatter(content).is_none());
-}
-
-#[test]
-fn parse_yaml_frontmatter_empty_yaml() {
-    let content = b"---\n---\nbody";
-    assert!(parse_yaml_frontmatter(content).is_none());
-}
-
-#[test]
-fn parse_yaml_frontmatter_only_comments() {
-    let content = b"---\n# just a comment\n---\nbody";
-    assert!(parse_yaml_frontmatter(content).is_none());
-}
-
-#[test]
-fn parse_yaml_frontmatter_numeric_value() {
-    let content = b"---\nlikes: 42\n---\nbody";
-    let result = parse_yaml_frontmatter(content).unwrap();
-    assert_eq!(result.get("likes").and_then(|v| v.as_u64()), Some(42));
-}
-
-#[test]
-fn parse_yaml_frontmatter_boolean_value() {
-    let content = b"---\nprivate: true\n---\nbody";
-    let result = parse_yaml_frontmatter(content).unwrap();
-    assert_eq!(result.get("private").and_then(|v| v.as_bool()), Some(true));
-}
-
-#[test]
-fn parse_yaml_frontmatter_double_quoted_value() {
-    let content = b"---\nname: \"hello world\"\n---\nbody";
-    let result = parse_yaml_frontmatter(content).unwrap();
-    assert_eq!(
-        result.get("name").and_then(|v| v.as_str()),
-        Some("hello world")
-    );
-}
-
-#[test]
-fn parse_yaml_frontmatter_not_utf8() {
-    let content = b"\xff\xfe\x00\x01";
-    assert!(parse_yaml_frontmatter(content).is_none());
+fn parse_yaml_frontmatter_omits_absent_empty_and_non_utf8_metadata() {
+    for content in [
+        b"Just a README\nno frontmatter".as_slice(),
+        b"---\n---\nbody",
+        b"---\n# just a comment\n---\nbody",
+        b"\xff\xfe\x00\x01",
+    ] {
+        assert!(parse_yaml_frontmatter(content).is_none(), "{content:?}");
+    }
 }
 
 // -----------------------------------------------------------------------
