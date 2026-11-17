@@ -16,7 +16,6 @@ use crate::{
 
 impl From<RebuildError> for ServerError {
     fn from(value: RebuildError) -> Self {
-        use crate::error::{IndexError, ObjectStoreError};
         match value {
             RebuildError::Io(e) => Self::Io(e),
             RebuildError::Json(e) => Self::Json(e),
@@ -24,14 +23,14 @@ impl From<RebuildError> for ServerError {
             RebuildError::InvalidContentHash => Self::InvalidContentHash,
             RebuildError::InvalidFileId => Self::InvalidFileId,
             RebuildError::Overflow => Self::Overflow,
-            RebuildError::ObjectPrefix(e) => Self::ObjectStore(ObjectStoreError::Prefix(e)),
-            RebuildError::LocalObjectStore(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
-            RebuildError::S3ObjectStore(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
+            RebuildError::ObjectPrefix(e) => Self::from(e),
+            RebuildError::LocalObjectStore(e) => Self::from(e),
+            RebuildError::S3ObjectStore(e) => Self::from(e),
             RebuildError::XetAdapter(e) => Self::from(e),
-            RebuildError::IndexStore(e) => Self::Index(IndexError::Local(e)),
-            RebuildError::MemoryIndexStore(e) => Self::Index(IndexError::MemoryIndex(e)),
-            RebuildError::MemoryRecordStore(e) => Self::Index(IndexError::MemoryRecord(e)),
-            RebuildError::PostgresMetadata(e) => Self::Index(IndexError::PostgresMetadata(e)),
+            RebuildError::IndexStore(e) => Self::from(e),
+            RebuildError::MemoryIndexStore(e) => Self::from(e),
+            RebuildError::MemoryRecordStore(e) => Self::from(e),
+            RebuildError::PostgresMetadata(e) => Self::from(e),
             RebuildError::HashParse(e) => Self::HashParse(e),
             RebuildError::StoredFileMetadataTooLarge {
                 observed_bytes,

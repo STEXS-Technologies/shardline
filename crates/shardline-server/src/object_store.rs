@@ -57,8 +57,8 @@ impl From<ServerObjectStoreError> for ServerError {
             ServerObjectStoreError::StoredObjectLengthMismatch => {
                 Self::ObjectStore(ObjectStoreError::StoredLengthMismatch)
             }
-            ServerObjectStoreError::Local(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
-            ServerObjectStoreError::S3(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
+            ServerObjectStoreError::Local(e) => Self::from(e),
+            ServerObjectStoreError::S3(e) => Self::from(e),
             ServerObjectStoreError::Io(e) => Self::Io(e),
             ServerObjectStoreError::NumericConversion(e) => Self::NumericConversion(e),
         }

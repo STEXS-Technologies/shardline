@@ -3,9 +3,7 @@ use shardline_index::{LocalIndexStore, LocalRecordStore, PostgresIndexStore, Pos
 
 use crate::database_migration::verify_reliability_events_for_fsck;
 use crate::{
-    ServerConfig, ServerError,
-    error::{IndexError, ObjectStoreError},
-    object_store::object_store_from_config,
+    ServerConfig, ServerError, object_store::object_store_from_config,
     postgres_backend::connect_postgres_metadata_pool,
 };
 
@@ -78,14 +76,14 @@ impl From<FsckError> for ServerError {
             FsckError::Json(e) => Self::Json(e),
             FsckError::NumericConversion(e) => Self::NumericConversion(e),
             FsckError::Overflow => Self::Overflow,
-            FsckError::LocalObjectStore(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
-            FsckError::S3ObjectStore(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
+            FsckError::LocalObjectStore(e) => Self::from(e),
+            FsckError::S3ObjectStore(e) => Self::from(e),
             FsckError::ObjectStore(e) => Self::from(e),
             FsckError::XetAdapter(e) => Self::from(e),
-            FsckError::LocalIndexStore(e) => Self::Index(IndexError::Local(e)),
-            FsckError::MemoryIndexStore(e) => Self::Index(IndexError::MemoryIndex(e)),
-            FsckError::MemoryRecordStore(e) => Self::Index(IndexError::MemoryRecord(e)),
-            FsckError::PostgresMetadata(e) => Self::Index(IndexError::PostgresMetadata(e)),
+            FsckError::LocalIndexStore(e) => Self::from(e),
+            FsckError::MemoryIndexStore(e) => Self::from(e),
+            FsckError::MemoryRecordStore(e) => Self::from(e),
+            FsckError::PostgresMetadata(e) => Self::from(e),
             FsckError::StoredFileMetadataTooLarge {
                 observed_bytes,
                 maximum_bytes,
