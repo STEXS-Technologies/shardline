@@ -581,69 +581,28 @@ mod tests {
     }
 
     #[test]
-    fn is_private_ip_true_for_loopback() {
-        let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_private_10() {
-        let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_private_172() {
-        let ip: IpAddr = "172.16.0.1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_private_192_168() {
-        let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_link_local() {
-        let ip: IpAddr = "169.254.1.1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_cgnat() {
-        let ip: IpAddr = "100.64.0.1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_unspecified() {
-        let ip: IpAddr = "0.0.0.0".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_ipv6_loopback() {
-        let ip: IpAddr = "::1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_ipv6_link_local() {
-        let ip: IpAddr = "fe80::1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_false_for_public() {
-        let ip: IpAddr = "8.8.8.8".parse().unwrap();
-        assert!(!is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_false_for_ipv6_public() {
-        let ip: IpAddr = "2001:4860:4860::8888".parse().unwrap();
-        assert!(!is_private_ip(&ip));
+    fn webhook_address_classification_preserves_blocked_and_public_ranges() {
+        for (address, blocked) in [
+            ("127.0.0.1", true),
+            ("10.0.0.1", true),
+            ("172.16.0.1", true),
+            ("192.168.1.1", true),
+            ("169.254.1.1", true),
+            ("100.64.0.1", true),
+            ("0.0.0.0", true),
+            ("::1", true),
+            ("fe80::1", true),
+            ("8.8.8.8", false),
+            ("2001:4860:4860::8888", false),
+            ("::ffff:8.8.8.8", false),
+            ("::ffff:127.0.0.1", true),
+            ("::ffff:192.168.1.1", true),
+            ("fc00::1", true),
+            ("2600::1", false),
+        ] {
+            let ip: IpAddr = address.parse().unwrap();
+            assert_eq!(is_private_ip(&ip), blocked, "{address}");
+        }
     }
 
     #[test]
@@ -722,18 +681,6 @@ mod tests {
     #[test]
     fn validate_webhook_url_rejects_broadcast() {
         assert!(validate_webhook_url("http://255.255.255.255/hook").is_err());
-    }
-
-    #[test]
-    fn is_private_ip_false_for_ipv4_mapped_public_v6() {
-        let ip: IpAddr = "::ffff:8.8.8.8".parse().unwrap();
-        assert!(!is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_ipv4_mapped_loopback_v6() {
-        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
-        assert!(is_private_ip(&ip));
     }
 
     // ── At-rest webhook secret encryption ─────────────────────────────────
@@ -1028,24 +975,6 @@ mod tests {
         let wrong = WebhookSecretCipher::new(SecretBytes::new(WRONG_KEY.to_vec())).unwrap();
         let result = wrong.decrypt(repo, wh.secret.as_ref().unwrap().expose_secret());
         assert!(matches!(result, Err(WebhookSecretCipherError::Decrypt(_))));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_ipv4_mapped_private_v6() {
-        let ip: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_true_for_ipv6_unique_local() {
-        let ip: IpAddr = "fc00::1".parse().unwrap();
-        assert!(is_private_ip(&ip));
-    }
-
-    #[test]
-    fn is_private_ip_false_for_ipv6_public_unicast() {
-        let ip: IpAddr = "2600::1".parse().unwrap();
-        assert!(!is_private_ip(&ip));
     }
 
     #[test]
