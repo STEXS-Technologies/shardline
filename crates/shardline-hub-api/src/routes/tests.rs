@@ -183,30 +183,14 @@ fn repo_delete_idempotent() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn repo_type_path_model() {
-    assert_eq!(repo_type_path(HubRepoType::Model), "models");
-}
-
-#[test]
-fn repo_type_path_dataset() {
-    assert_eq!(repo_type_path(HubRepoType::Dataset), "datasets");
-}
-
-#[test]
-fn repo_type_path_space() {
-    assert_eq!(repo_type_path(HubRepoType::Space), "spaces");
-}
-
-// -----------------------------------------------------------------------
-// sanitize_log_url
-// -----------------------------------------------------------------------
-
-#[test]
-fn sanitize_log_url_omits_long_private_paths() {
-    let base = "https://example.com/";
-    let long = format!("{}{}", base, "a".repeat(300));
-    let result = sanitize_log_url(&long);
-    assert_eq!(result, "https://example.com");
+fn repo_type_paths_preserve_plural_api_segments() {
+    for (repo_type, expected) in [
+        (HubRepoType::Model, "models"),
+        (HubRepoType::Dataset, "datasets"),
+        (HubRepoType::Space, "spaces"),
+    ] {
+        assert_eq!(repo_type_path(repo_type), expected);
+    }
 }
 
 // -----------------------------------------------------------------------

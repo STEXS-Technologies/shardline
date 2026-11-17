@@ -647,18 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_log_url_normal() {
-        let url = "https://example.com/webhook";
-        assert_eq!(sanitize_log_url(url), "https://example.com");
-    }
-
-    #[test]
-    fn sanitize_log_url_replaces_control_chars() {
-        let url = "https://example.com/new\nline";
-        assert_eq!(sanitize_log_url(url), "https://example.com");
-    }
-
-    #[test]
     fn sanitize_log_url_truncates_long() {
         let labels = vec!["a".repeat(60); 4].join(".");
         let long = format!("https://{labels}/private");
@@ -668,30 +656,23 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_log_url_replaces_tab() {
-        let url = "https://example.com/\tpath";
-        assert_eq!(sanitize_log_url(url), "https://example.com");
-    }
-
-    #[test]
-    fn sanitize_log_url_short_no_truncation() {
-        let url = "http://a.b";
-        assert_eq!(sanitize_log_url(url), url);
-        assert!(!url.ends_with("..."));
-    }
-
-    #[test]
-    fn webhook_logs_redact_credentials_and_path_tokens() {
-        let url = "https://user:password@example.com:8443/services/private-token?key=query-secret#fragment-secret";
-        assert_eq!(sanitize_log_url(url), "https://example.com:8443");
-        assert_eq!(
-            sanitize_log_url("invalid private-token"),
-            "<invalid webhook URL>"
-        );
-        assert_eq!(
-            sanitize_log_url("data:text/plain,private-token"),
-            "<invalid webhook URL>"
-        );
+    fn webhook_logs_redact_credentials_paths_and_invalid_urls() {
+        let long_path = format!("https://example.com/{}", "a".repeat(300));
+        for (input, expected) in [
+            ("https://example.com/webhook", "https://example.com"),
+            ("https://example.com/new\nline", "https://example.com"),
+            ("https://example.com/\tpath", "https://example.com"),
+            ("http://a.b", "http://a.b"),
+            (long_path.as_str(), "https://example.com"),
+            (
+                "https://user:password@example.com:8443/services/private-token?key=query-secret#fragment-secret",
+                "https://example.com:8443",
+            ),
+            ("invalid private-token", "<invalid webhook URL>"),
+            ("data:text/plain,private-token", "<invalid webhook URL>"),
+        ] {
+            assert_eq!(sanitize_log_url(input), expected, "{input:?}");
+        }
     }
 
     #[test]
