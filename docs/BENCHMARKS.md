@@ -5805,3 +5805,43 @@ verification fixtures were kept outside the host's cache-cleanup directory.
 This remains local PostgreSQL/local-object-storage correctness evidence;
 it does not qualify MinIO, hosted CI, production capacity or the historical
 hosted SDK RSS failure.
+
+### Contributor CI checkpoint after GC and CLI test cleanup (2026-11-17)
+
+Source `8f648825d65454bd0b30d6bfd9b9582edbbf63a7` completed `cargo make ci`
+in the isolated cleanup checkout. The run used Rust 1.99.0, four build jobs,
+four Nextest workers, disabled dev/test debug information and no compiler
+wrapper. Release checks retained the repository's optimized profile, including thin LTO and one
+code-generation unit. The target cache had no release artifacts at the start.
+
+| Test stage | Passed | Normally ignored tests excluded |
+| --- | ---: | ---: |
+| Workspace library tests | 8,126 | 45 |
+| Reliability contracts | 39 | 0 |
+| Release CLI API and maintenance contracts | 41 | 5 |
+
+All 8,206 selected tests passed. Workspace formatting, strict Clippy,
+dependency-exception checks, root and E2E cargo-deny policies, release
+help/manpage/completion checks and parity across 44 migrations passed.
+The command exited successfully in 757.43 seconds on the shared development
+host; this is correctness evidence, not a controlled build-speed comparison.
+
+The preceding run at `1ab1f26f` stopped on the webhook TLS test's assertion
+that a negative result must be certificate validation. Its underlying cause
+was not included in the original diagnostic. The follow-up adds that cause
+to assertion failures without changing delivery code or relaxing the test.
+The test passed in 22 focused executions (including 20 bounded repetitions)
+and in this complete rerun. The original intermittent failure remains
+unexplained; these passes do not establish that it is fixed.
+
+The verified release executable was frozen for subsequent qualifications.
+Its SHA-256 is
+`65f56834cd9b5fddad6961ec46a0f56f406d46830206b476ffaed9bc6ce26ba9`.
+At this source revision the tracked Rust inventory is 567,686 lines, down
+35,963 lines (5.96%) from the 603,649-line baseline. This includes tests,
+comments and blank lines and excludes unrelated uncommitted changes.
+
+External fixture requirements were not enabled for this contributor gate.
+Infrastructure-dependent tests that return early do not qualify their
+backends. Required PostgreSQL/object-storage topology, hosted CI, production
+capacity and the historical hosted SDK RSS failure remain separate gates.
