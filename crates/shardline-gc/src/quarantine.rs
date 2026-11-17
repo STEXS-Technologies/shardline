@@ -262,7 +262,7 @@ where
         .visit_retention_holds(|hold| {
             if hold.is_active_at(now_unix_seconds) {
                 hold_object_keys.insert(hold.object_key().as_str().to_owned());
-            } else if prune_expired && hold.release_after_unix_seconds().is_some() {
+            } else if prune_expired {
                 expired_holds.push(hold);
             }
 
@@ -381,43 +381,14 @@ where
     IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<GcError>,
 {
-    let object_keys = quarantine_entries.keys().cloned().collect::<Vec<_>>();
-
-    // Collect-once-then-check delete-time reachability.
-    //
-    // The cycle snapshot (`orphan_objects`) is taken at mark time. Between
-    // that snapshot and this sweep a chunk may have been re-referenced (e.g.
-    // re-uploaded, or an object-store write landing between
-    // `collect_referenced_object_keys` and `scan_orphan_objects` in the
-    // runner). Deleting it then would destroy live data and cause
-    // reconstruction 404s.
-    //
-    // To close that stale-snapshot window we re-run the reachability mark
-    // against the *current* index/record state once, immediately before the
-    // sweep, and hold the resulting referenced-key set in memory. Every
-    // expired candidate is then checked with an O(1) set membership test
-    // against that single pre-built set — NOT a fresh full mark per candidate
-    // (a full mark visits every record, every dedupe shard mapping, and for
-    // XorbCdcV1 records reads + parses the stored xorb container; doing it
-    // once per candidate would make the sweep O(candidates × store_size)).
-    //
-    // The supported server wrapper closes the residual mark-to-delete window
-    // with an exclusive GC/write barrier. Every mutating HTTP request holds
-    // the shared side from before it can write objects until its handler has
-    // published metadata. Direct callers of `run_gc_with_stores` must provide
-    // the same exclusion contract. If a candidate is
-    // referenced in this set we skip the storage delete and only release the
-    // (now stale) quarantine entry; the object stays on disk and is seen as
-    // live on the next cycle, so no data is lost and nothing is resurrected.
-    //
-    // We only pay for the mark when at least one candidate actually reaches
-    // the delete-time check (expired + still in `orphan_objects`); a sweep
-    // with nothing to delete skips it entirely.
-    let requires_reachability_check = object_keys.iter().any(|object_key| {
+    // The orphan snapshot may be stale. Refresh reachability once, only if
+    // an expired orphan could be deleted, rather than scanning per candidate.
+    // Callers must hold the exclusive GC/write barrier through deletion to
+    // prevent new references after this refresh. Live objects are retained
+    // and only their stale quarantine entries are released.
+    let requires_reachability_check = quarantine_entries.iter().any(|(object_key, candidate)| {
         orphan_objects.contains_key(object_key)
-            && quarantine_entries
-                .get(object_key)
-                .is_some_and(|candidate| candidate.delete_after_unix_seconds() <= now_unix_seconds)
+            && candidate.delete_after_unix_seconds() <= now_unix_seconds
     });
     let mut referenced_object_keys = HashSet::new();
     if requires_reachability_check {
@@ -433,6 +404,7 @@ where
         referenced_object_keys = reachability.referenced_object_keys;
     }
 
+    let object_keys = quarantine_entries.keys().cloned().collect::<Vec<_>>();
     for object_key in object_keys {
         let Some(orphan) = orphan_objects.get(&object_key) else {
             if release_quarantine_candidate(index_store, quarantine_entries, &object_key).await? {
@@ -472,8 +444,7 @@ where
         // storage delete and only release the (now stale) quarantine entry;
         // the object stays on disk and will be seen as live on the next
         // cycle, so no data is lost and nothing is resurrected.
-        let still_unreferenced = !referenced_object_keys.contains(orphan.object_key.as_str());
-        if !still_unreferenced {
+        if referenced_object_keys.contains(orphan.object_key.as_str()) {
             tracing::debug!(
                 "skipping sweep delete for {object_key}: object became referenced after snapshot",
             );
@@ -1678,7 +1649,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Expired hold (no release_after — permanent hold, always active)
+        // A permanent hold stays active even when pruning is enabled.
         let permanent_key =
             ObjectKey::parse("ab/9999999999999999999999999999999999999999999999999999999999999999")
                 .unwrap();
@@ -1694,11 +1665,23 @@ mod tests {
             .await
             .unwrap();
 
-        let holds = read_active_retention_hold_object_keys(&index_store, now, false)
-            .await
-            .unwrap();
-        assert!(holds.contains(active_key.as_str()));
-        assert!(holds.contains(permanent_key.as_str()));
+        for prune_expired in [false, true] {
+            let holds = read_active_retention_hold_object_keys(&index_store, now, prune_expired)
+                .await
+                .unwrap();
+            assert_eq!(holds.len(), 2);
+            for hold in [&active_hold, &permanent_hold] {
+                assert!(holds.contains(hold.object_key().as_str()));
+                assert_eq!(
+                    index_store
+                        .retention_hold(hold.object_key())
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    Some(hold),
+                );
+            }
+        }
     }
 
     // ── read_newest_stored_creation_timestamp (F-57) ────────────────────
