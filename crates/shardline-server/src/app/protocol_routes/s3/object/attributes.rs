@@ -136,16 +136,15 @@ pub(super) async fn get(
         let checksum_field = checksum_manifest
             .as_ref()
             .map(|manifest| manifest.algorithm.xml_field());
-        let page = checksum_manifest.as_ref().map(|manifest| {
-            let mut parts = manifest
-                .parts
-                .iter()
-                .filter(|part| part.part_number > part_number_marker);
-            let page: Vec<_> = parts.by_ref().take(max_parts as usize).collect();
-            let is_truncated = parts.next().is_some();
-            (page, is_truncated)
-        });
-        let (page, is_truncated) = page.unwrap_or_else(|| (Vec::new(), false));
+        let parts = checksum_manifest
+            .as_ref()
+            .map(|manifest| manifest.parts.as_slice())
+            .unwrap_or_default();
+        // Manifest validation guarantees strictly increasing part numbers.
+        let (_, parts) =
+            parts.split_at(parts.partition_point(|part| part.part_number <= part_number_marker));
+        let (page, remainder) = parts.split_at(parts.len().min(max_parts as usize));
+        let is_truncated = !remainder.is_empty();
         write!(
             xml,
             "<ObjectParts><IsTruncated>{is_truncated}</IsTruncated><MaxParts>{max_parts}</MaxParts>"

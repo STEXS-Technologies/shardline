@@ -299,16 +299,34 @@ async fn assert_request_integrity(database_url: Option<&str>) {
         "{completed_xml}"
     );
     assert!(completed_xml.contains("<ChecksumType>COMPOSITE</ChecksumType>"));
-    let attributes = client
-        .get(format!("{multipart}?attributes"))
-        .bearer_auth(&token)
-        .header("x-amz-object-attributes", "Checksum,ObjectParts")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(attributes.status(), 200);
-    let attributes = attributes.text().await.unwrap();
-    assert!(attributes.contains("<ChecksumSHA256>"), "{attributes}");
+    for (max_parts, marker, has_part, truncated) in [
+        (0, 0, false, true),
+        (1, 0, true, false),
+        (1, 1, false, false),
+        (1000, 10_000, false, false),
+    ] {
+        let attributes = client
+            .get(format!("{multipart}?attributes"))
+            .bearer_auth(&token)
+            .header("x-amz-object-attributes", "Checksum,ObjectParts")
+            .header("x-amz-max-parts", max_parts.to_string())
+            .header("x-amz-part-number-marker", marker.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(attributes.status(), 200);
+        let attributes = attributes.text().await.unwrap();
+        assert!(attributes.contains("<ChecksumSHA256>"), "{attributes}");
+        assert_eq!(
+            attributes.contains("<Part><PartNumber>1</PartNumber>"),
+            has_part,
+            "{attributes}"
+        );
+        assert!(
+            attributes.contains(&format!("<IsTruncated>{truncated}</IsTruncated>")),
+            "{attributes}"
+        );
+    }
     let head = client
         .head(&multipart)
         .bearer_auth(&token)
