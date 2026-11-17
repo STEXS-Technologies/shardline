@@ -608,6 +608,26 @@ impl InventoryEntry for ProviderRepositoryState {
     }
 }
 
+fn upload_intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UploadIntent> {
+    let state_text: String = row.get(4)?;
+    let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+        rusqlite::Error::InvalidColumnType(
+            4,
+            format!("invalid state: {state_text}"),
+            rusqlite::types::Type::Text,
+        )
+    })?;
+    Ok(UploadIntent::from_parts(
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get::<_, i64>(3)? as u64,
+        state,
+        Duration::from_secs(row.get::<_, i64>(5)? as u64),
+        Duration::from_secs(row.get::<_, i64>(6)? as u64),
+    ))
+}
+
 pub(super) fn load_verified_sqlite_intent(
     transaction: &Transaction<'_>,
     intent_id: &str,
@@ -618,25 +638,7 @@ pub(super) fn load_verified_sqlite_intent(
                 created_at_unix_seconds, updated_at_unix_seconds
          FROM shardline_upload_intents WHERE intent_id = ?1",
             [intent_id],
-            |row| {
-                let state_text: String = row.get(4)?;
-                let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
-                    rusqlite::Error::InvalidColumnType(
-                        4,
-                        format!("invalid state: {state_text}"),
-                        rusqlite::types::Type::Text,
-                    )
-                })?;
-                Ok(UploadIntent::from_parts(
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get::<_, i64>(3)? as u64,
-                    state,
-                    Duration::from_secs(row.get::<_, i64>(5)? as u64),
-                    Duration::from_secs(row.get::<_, i64>(6)? as u64),
-                ))
-            },
+            upload_intent_from_row,
         )
         .optional()?;
     if let Some(intent) = &intent {
@@ -1968,16 +1970,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                             created_at_unix_seconds, updated_at_unix_seconds
                      FROM shardline_upload_intents WHERE intent_id = ?1",
                     rusqlite::params![intent.intent_id()],
-                    |row| {
-                        let state_text: String = row.get(4)?;
-                        let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
-                            rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_text}"), rusqlite::types::Type::Text)
-                        })?;
-                        Ok(UploadIntent::from_parts(row.get(0)?, row.get(1)?, row.get(2)?,
-                            row.get::<_, i64>(3)? as u64, state,
-                            Duration::from_secs(row.get::<_, i64>(5)? as u64),
-                            Duration::from_secs(row.get::<_, i64>(6)? as u64)))
-                    },
+                    upload_intent_from_row,
                 )?;
                 if !durable_intent.has_same_identity(&intent) {
                     return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
@@ -2122,21 +2115,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                 "SELECT intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds FROM shardline_upload_intents WHERE state = ?1 ORDER BY created_at_unix_seconds"
             )?;
             let intents = stmt
-                .query_map(rusqlite::params![state.as_str()], |row| {
-                    let state_str: String = row.get(4)?;
-                    let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
-                        rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_str}"), rusqlite::types::Type::Text)
-                    })?;
-                    Ok(UploadIntent::from_parts(
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get::<_, i64>(3)? as u64,
-                        s,
-                        Duration::from_secs(row.get::<_, i64>(5)? as u64),
-                        Duration::from_secs(row.get::<_, i64>(6)? as u64),
-                    ))
-                })
+                .query_map(rusqlite::params![state.as_str()], upload_intent_from_row)
                 .map_err(LocalIndexStoreError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
@@ -2192,21 +2171,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                 "SELECT intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds FROM shardline_upload_intents WHERE state = ?1 AND created_at_unix_seconds < ?2 ORDER BY created_at_unix_seconds"
             )?;
             let intents = stmt
-                .query_map(rusqlite::params![state.as_str(), cutoff], |row| {
-                    let state_str: String = row.get(4)?;
-                    let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
-                        rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_str}"), rusqlite::types::Type::Text)
-                    })?;
-                    Ok(UploadIntent::from_parts(
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get::<_, i64>(3)? as u64,
-                        s,
-                        Duration::from_secs(row.get::<_, i64>(5)? as u64),
-                        Duration::from_secs(row.get::<_, i64>(6)? as u64),
-                    ))
-                })
+                .query_map(rusqlite::params![state.as_str(), cutoff], upload_intent_from_row)
                 .map_err(LocalIndexStoreError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
