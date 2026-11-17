@@ -160,13 +160,11 @@ fn build_xorb_entries<'chunks>(
         footer.unpacked_chunk_offsets.push(unpacked_total);
     }
 
-    // Reuse the hashes computed while serializing each chunk.
+    // Each entry owns the matching content hash and uncompressed length.
     let xorb_hash = xorb_hash_from_owned(
-        footer
-            .chunk_hashes
+        chunk_entries
             .iter()
-            .copied()
-            .zip(chunk_entries.iter().map(|entry| entry.raw_length))
+            .map(|entry| (<[u8; 32]>::from(entry.hash).into(), entry.raw_length))
             .collect(),
     );
     footer.xorb_hash = xorb_hash;
