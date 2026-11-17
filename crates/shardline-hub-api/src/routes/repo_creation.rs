@@ -51,7 +51,7 @@ pub(super) fn create(
                     StatusCode::CREATED,
                     Json(super::repos::repo_response_for_public_base(
                         &state.public_base_url,
-                        &created,
+                        created,
                     )),
                 )
                     .into_response());
@@ -95,7 +95,7 @@ pub(super) fn create(
             StatusCode::CONFLICT,
             Json(super::repos::repo_response_for_public_base(
                 &state.public_base_url,
-                &existing,
+                existing,
             )),
         )
             .into_response());

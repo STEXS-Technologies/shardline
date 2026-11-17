@@ -88,7 +88,7 @@ pub(crate) async fn repo_create_type(
 
 pub(crate) fn repo_response_for_public_base(
     public_base_url: &str,
-    repo: &shardline_index::hub::HubRepo,
+    repo: shardline_index::hub::HubRepo,
 ) -> RepoResponse {
     let mut response = repo_response_from_hub(repo);
     // The configured public origin is trusted deployment state. Host and
@@ -97,12 +97,11 @@ pub(crate) fn repo_response_for_public_base(
     response
 }
 
-pub(crate) fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> RepoResponse {
+pub(crate) fn repo_response_from_hub(repo: shardline_index::hub::HubRepo) -> RepoResponse {
     let last_modified = chrono::DateTime::from_timestamp(repo.updated_at_unix_seconds as i64, 0)
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         .unwrap_or_default();
     RepoResponse {
-        id: repo.repo_id.clone(),
         repo_type: repo.repo_type.into(),
         private: repo.private,
         sha: None,
@@ -118,6 +117,7 @@ pub(crate) fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> Re
                 repo_id = repo.repo_id
             ),
         },
+        id: repo.repo_id,
         default_branch: Some("main".to_owned()),
         tags: Vec::new(),
         downloads: 0,
@@ -161,7 +161,7 @@ pub(crate) async fn repo_list(
     // the caller's own private repos (exact `owner/name` match) remain visible.
     let response = RepoListResponse {
         repos: repos
-            .iter()
+            .into_iter()
             .filter(|entry| repo_visible_to_owner(entry, caller_repo_id.as_deref()))
             .map(repo_response_from_hub)
             .collect(),
@@ -231,7 +231,7 @@ pub(crate) async fn repo_search(
         )
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     let response = RepoListResponse {
-        repos: visible.iter().map(repo_response_from_hub).collect(),
+        repos: visible.into_iter().map(repo_response_from_hub).collect(),
     };
     Ok(Json(response))
 }
@@ -479,15 +479,15 @@ pub(crate) async fn repo_info(
         .get_repo(&name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RepoNotFound)?;
-    let mut response = repo_response_from_hub(&entry);
 
     // SDK repo_info() needs the same current commit and siblings as the
     // explicit revision endpoint, rather than an apparently empty repository.
-    if let Some(sha) = state
+    let current_sha = state
         .store
         .resolve_revision(&name, &entry.default_branch)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-    {
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let mut response = repo_response_from_hub(entry);
+    if let Some(sha) = current_sha {
         crate::revision_access::authorize_read(&state, &name, "main", &sha, repo.capability())
             .await?;
         response =
@@ -521,7 +521,7 @@ pub(crate) async fn repo_revision_info(
             &name,
             &rev,
             &commit_sha,
-            repo_response_from_hub(&entry),
+            repo_response_from_hub(entry),
         )
         .await?,
     ))

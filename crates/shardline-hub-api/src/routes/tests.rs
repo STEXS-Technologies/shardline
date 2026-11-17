@@ -228,7 +228,7 @@ fn repo_responses_preserve_type_visibility_url_and_timestamp() {
             "1970-01-01T00:00:00.000Z",
         ),
     ] {
-        let response = repo_response_from_hub(&HubRepo {
+        let response = repo_response_from_hub(HubRepo {
             repo_id: id.to_owned(),
             repo_type,
             private,
@@ -4742,7 +4742,7 @@ fn repo_response_for_public_base_dataset_url() {
         created_at_unix_seconds: 0,
         updated_at_unix_seconds: 0,
     };
-    let resp = repo_response_for_public_base("https://hub.example.com/", &repo);
+    let resp = repo_response_for_public_base("https://hub.example.com/", repo);
     assert_eq!(resp.url, "https://hub.example.com/datasets/org/mydata");
     assert_eq!(resp.repo_type, RepoType::Dataset);
 }
@@ -4758,7 +4758,7 @@ fn repo_response_for_public_base_space_url() {
         created_at_unix_seconds: 0,
         updated_at_unix_seconds: 0,
     };
-    let resp = repo_response_for_public_base("https://hub.example.com", &repo);
+    let resp = repo_response_for_public_base("https://hub.example.com", repo);
     assert_eq!(resp.url, "https://hub.example.com/spaces/org/myspace");
     assert_eq!(resp.repo_type, RepoType::Space);
 }
