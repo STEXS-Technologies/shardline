@@ -24,18 +24,26 @@ pub fn write_hold_summary<W: std::io::Write + ?Sized>(
     writer: &mut W,
     hold: &RetentionHold,
 ) -> std::io::Result<()> {
-    writeln!(writer, "object_key: {}", hold.object_key().as_str())?;
-    writeln!(writer, "reason: {}", hold.reason())?;
+    write_hold_fields(writer, "", hold)?;
+    writer.flush()
+}
+
+fn write_hold_fields<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    prefix: impl std::fmt::Display,
+    hold: &RetentionHold,
+) -> std::io::Result<()> {
+    writeln!(writer, "{prefix}object_key: {}", hold.object_key().as_str())?;
+    writeln!(writer, "{prefix}reason: {}", hold.reason())?;
     writeln!(
         writer,
-        "held_at_unix_seconds: {}",
+        "{prefix}held_at_unix_seconds: {}",
         hold.held_at_unix_seconds()
     )?;
     match hold.release_after_unix_seconds() {
-        Some(value) => writeln!(writer, "release_after_unix_seconds: {value}")?,
-        None => writeln!(writer, "release_after_unix_seconds: none")?,
+        Some(value) => writeln!(writer, "{prefix}release_after_unix_seconds: {value}"),
+        None => writeln!(writer, "{prefix}release_after_unix_seconds: none"),
     }
-    writer.flush()
 }
 
 pub fn print_hold_list_summary(root: &Path, active_only: bool, holds: &[RetentionHold]) {
@@ -56,25 +64,7 @@ pub fn write_hold_list_summary<W: std::io::Write + ?Sized>(
     writeln!(writer, "active_only: {active_only}")?;
     writeln!(writer, "hold_count: {}", holds.len())?;
     for (index, hold) in holds.iter().enumerate() {
-        writeln!(
-            writer,
-            "hold[{index}].object_key: {}",
-            hold.object_key().as_str()
-        )?;
-        writeln!(writer, "hold[{index}].reason: {}", hold.reason())?;
-        writeln!(
-            writer,
-            "hold[{index}].held_at_unix_seconds: {}",
-            hold.held_at_unix_seconds()
-        )?;
-        match hold.release_after_unix_seconds() {
-            Some(value) => {
-                writeln!(writer, "hold[{index}].release_after_unix_seconds: {value}")?;
-            }
-            None => {
-                writeln!(writer, "hold[{index}].release_after_unix_seconds: none")?;
-            }
-        }
+        write_hold_fields(writer, format_args!("hold[{index}]."), hold)?;
     }
     writer.flush()
 }
