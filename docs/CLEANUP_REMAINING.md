@@ -73,8 +73,11 @@ code.
    narrow workload, with full debug information and checked-in incremental
    settings). A server-library error-message edit at `1b02136b` measured
    medians of 21.733 s versus 7.442 s (65.8% shorter for that narrow workload).
-   Cold/edited-Rust container builds and broader contributor workloads still
-   need measurement before claiming the RFC's 30% contributor critical-path target. Review the sequential 150-minute
+   A container CLI-edit pair at `b6780921` took 146.197 s baseline versus
+   135.355 s current (7.4% shorter in one pair; not a proven speedup). Preparation
+   image builds were 266.364 s versus 273.602 s with warm registries/base images.
+   Cold-machine container builds and broader contributor workloads still need
+   measurement before claiming the RFC's 30% contributor critical-path target. Review the sequential 150-minute
    E2E job for reusable compatible artifacts and measured scheduling opportunities;
    retain every required qualification gate.
 

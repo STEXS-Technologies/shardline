@@ -6631,3 +6631,39 @@ Local logs and raw results are in
 `.shardline-cleanup-state/build-server-edit-1b02136b/`, under the parent projects
 directory. The orchestration script is
 `.shardline-cleanup-state/build-server-edit-1b02136b.py`.
+
+### Container Rust-edit checkpoint (2026-11-17)
+
+Compared baseline `401dcac4f95c61a41104df3ee6e222d93c0b18fb` with
+`b67809217cce2c05af856bf256e76d35d8af86a6` using Docker BuildKit on the
+shared development host. Both used their checked-in Dockerfile build inputs,
+identical pinned Rust 1.99.0 and Debian image digests, and release profiles.
+Temporary benchmark Dockerfiles added `CARGO_BUILD_JOBS=4` and distinct initially
+empty target-cache identifiers. Registry/git caches and base images were warm;
+repository Dockerfiles were unchanged. The two revisions have different locked
+dependencies, so this measures the accumulated branch rather than one change.
+
+Each revision received a preparation image build. A subsequent real Rust edit
+appended a distinct sentence to the CLI help description in
+`crates/shardline/src/command/definition.rs`, then rebuilt and loaded the image.
+All four images ran `-h`; both edited images were required to display the changed
+sentence. All builds and runtime help checks passed. Source bytes were restored.
+
+| Container build, one sample per revision | Baseline | Cleanup branch |
+| --- | ---: | ---: |
+| Preparation, excluded from edit comparison | 266.364 s | 273.602 s |
+| Rust source edit, retained compiler cache | 146.197 s | 135.355 s |
+
+The edited build was approximately 7.4% shorter in this pair. One sequential
+baseline/current pair on a shared host does not establish a repeatable speedup.
+Preparation timings do not show an improvement and are not cold-machine results.
+The Rust compilation step executed for both edits; this is distinct from the
+previous tooling-only edit that reused the entire compiled image layer. This
+measurement does not establish the overall 30% contributor critical-path target.
+
+The exact benchmark Dockerfiles, logs, source hashes and elapsed times are in
+`.shardline-cleanup-state/container-edit-b6780921/`, under the parent projects
+directory. Its orchestration script is
+`.shardline-cleanup-state/container-edit-b6780921.py`. Local benchmark image tags
+`shardline-cleanup-container-{baseline,current}:b6780921` contain the temporary
+help text and are measurement artifacts, not release candidates.
