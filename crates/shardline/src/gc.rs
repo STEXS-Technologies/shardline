@@ -121,132 +121,57 @@ mod tests {
 
     use super::MINIMUM_GC_RETENTION_SECONDS;
 
-    #[test]
-    fn minimum_gc_retention_seconds_is_one_hour() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gc_enforces_minimum_retention_on_quarantine_deadlines() {
         assert_eq!(MINIMUM_GC_RETENTION_SECONDS, 3600);
+        for (requested, expected) in [(0, 3600), (3599, 3600), (3600, 3600), (7200, 7200)] {
+            let root = tempfile::tempdir().unwrap();
+            let hash = "de".repeat(32);
+            let directory = root.path().join("chunks/de");
+            std::fs::create_dir_all(&directory).unwrap();
+            let object = directory.join(hash);
+            std::fs::write(&object, b"orphan").unwrap();
+            let diagnostics =
+                super::run_gc_diagnostics(Some(root.path()), true, true, requested, None, None)
+                    .await
+                    .unwrap();
+            assert_eq!(diagnostics.report.new_quarantine_candidates, 1);
+            assert_eq!(diagnostics.report.deleted_chunks, 0);
+            assert_eq!(diagnostics.retention_report.len(), 1);
+            let candidate = &diagnostics.retention_report[0];
+            assert_eq!(
+                candidate.delete_after_unix_seconds
+                    - candidate.first_seen_unreachable_at_unix_seconds,
+                expected,
+                "requested retention: {requested}",
+            );
+            assert!(!candidate.expired);
+            assert_eq!(std::fs::read(object).unwrap(), b"orphan");
+        }
     }
 
     #[test]
-    fn local_gc_options_clamps_retention_below_minimum() {
-        // When constructing LocalGcOptions, retention_seconds is *not* clamped
-        // at the options level — clamping happens inside run_gc_diagnostics.
-        let opts = LocalGcOptions {
-            mark: true,
-            sweep: false,
-            retention_seconds: 0,
-            max_revisions_per_repo: None,
-        };
-        assert_eq!(opts.retention_seconds, 0);
-
-        // The max() call inside run_gc_diagnostics ensures the minimum:
-        let clamped = opts.retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS);
-        assert_eq!(clamped, MINIMUM_GC_RETENTION_SECONDS);
-    }
-
-    #[test]
-    fn local_gc_options_above_minimum_unchanged() {
-        let opts = LocalGcOptions {
-            mark: true,
-            sweep: true,
-            retention_seconds: 7200,
-            max_revisions_per_repo: None,
-        };
-        let clamped = opts.retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS);
-        assert_eq!(clamped, 7200);
-    }
-
-    #[test]
-    fn local_gc_options_at_minimum_unchanged() {
-        let opts = LocalGcOptions {
-            mark: false,
-            sweep: true,
-            retention_seconds: MINIMUM_GC_RETENTION_SECONDS,
-            max_revisions_per_repo: None,
-        };
-        let clamped = opts.retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS);
-        assert_eq!(clamped, MINIMUM_GC_RETENTION_SECONDS);
-    }
-
-    #[test]
-    fn local_gc_options_mode_name() {
-        assert_eq!(
-            LocalGcOptions {
-                mark: false,
-                sweep: false,
-                retention_seconds: 3600,
-                max_revisions_per_repo: None,
-            }
-            .mode_name(),
-            "dry-run"
-        );
-        assert_eq!(
-            LocalGcOptions {
-                mark: true,
-                sweep: false,
-                retention_seconds: 3600,
-                max_revisions_per_repo: None,
-            }
-            .mode_name(),
-            "mark"
-        );
-        assert_eq!(
-            LocalGcOptions {
-                mark: false,
-                sweep: true,
-                retention_seconds: 3600,
-                max_revisions_per_repo: None,
-            }
-            .mode_name(),
-            "sweep"
-        );
-        assert_eq!(
-            LocalGcOptions {
-                mark: true,
-                sweep: true,
-                retention_seconds: 3600,
-                max_revisions_per_repo: None,
-            }
-            .mode_name(),
-            "mark-and-sweep"
-        );
-    }
-
-    #[test]
-    fn local_gc_options_dry_run_builder() {
-        let opts = LocalGcOptions::dry_run();
-        assert!(!opts.mark);
-        assert!(!opts.sweep);
-    }
-
-    #[test]
-    fn local_gc_options_mark_only_builder() {
-        let opts = LocalGcOptions::mark_only(7200);
-        assert!(opts.mark);
-        assert!(!opts.sweep);
-        assert_eq!(opts.retention_seconds, 7200);
-    }
-
-    #[test]
-    fn local_gc_options_sweep_only_builder() {
-        let opts = LocalGcOptions::sweep_only();
-        assert!(!opts.mark);
-        assert!(opts.sweep);
-    }
-
-    #[test]
-    fn local_gc_options_mark_and_sweep_builder() {
-        let opts = LocalGcOptions::mark_and_sweep(7200);
-        assert!(opts.mark);
-        assert!(opts.sweep);
-        assert_eq!(opts.retention_seconds, 7200);
-    }
-
-    #[test]
-    fn local_gc_options_default() {
-        let opts = LocalGcOptions::default();
-        assert!(!opts.mark);
-        assert!(!opts.sweep);
-        assert_eq!(opts.retention_seconds, 86400); // DEFAULT_LOCAL_GC_RETENTION_SECONDS
+    fn local_gc_options_builders_preserve_modes_and_retention() {
+        for (options, mark, sweep, retention, mode) in [
+            (LocalGcOptions::default(), false, false, 86400, "dry-run"),
+            (LocalGcOptions::dry_run(), false, false, 86400, "dry-run"),
+            (LocalGcOptions::mark_only(0), true, false, 0, "mark"),
+            (LocalGcOptions::mark_only(7200), true, false, 7200, "mark"),
+            (LocalGcOptions::sweep_only(), false, true, 86400, "sweep"),
+            (
+                LocalGcOptions::mark_and_sweep(7200),
+                true,
+                true,
+                7200,
+                "mark-and-sweep",
+            ),
+        ] {
+            assert_eq!(options.mode_name(), mode);
+            assert_eq!(options.mark, mark, "{mode}");
+            assert_eq!(options.sweep, sweep, "{mode}");
+            assert_eq!(options.retention_seconds, retention, "{mode}");
+            assert_eq!(options.max_revisions_per_repo, None, "{mode}");
+        }
     }
 
     #[test]
