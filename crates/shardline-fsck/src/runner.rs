@@ -59,24 +59,17 @@ where
     let mut report = FsckReport::default();
     let mut reachability = FsckReachability::default();
 
-    scan_record_tree(
-        record_store,
-        RecordKind::Latest,
-        object_root,
-        object_store,
-        &mut reachability,
-        &mut report,
-    )
-    .await?;
-    scan_record_tree(
-        record_store,
-        RecordKind::Version,
-        object_root,
-        object_store,
-        &mut reachability,
-        &mut report,
-    )
-    .await?;
+    for kind in [RecordKind::Latest, RecordKind::Version] {
+        scan_record_tree(
+            record_store,
+            kind,
+            object_root,
+            object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await?;
+    }
     crate::native_members::inspect_missing_copies(record_store, &mut report).await?;
     inspect_dedupe_shard_mappings(
         index_store,
@@ -88,7 +81,7 @@ where
     )
     .await?;
     inspect_reconstruction_index(index_store, &mut report).await?;
-    match inspect_lifecycle_metadata(
+    if let Err(error) = inspect_lifecycle_metadata(
         index_store,
         object_root,
         object_store,
@@ -97,18 +90,15 @@ where
     )
     .await
     {
-        Ok(()) => {}
-        Err(error) => {
-            if let Some(reason) = error.reliability_reason() {
-                push_issue(
-                    &mut report,
-                    FsckIssueKind::InvalidReliabilityEvidence,
-                    "lifecycle/reliability".to_owned(),
-                    FsckIssueDetail::ReliabilityEvidenceInvalid { reason },
-                )?;
-            } else {
-                return Err(error);
-            }
+        if let Some(reason) = error.reliability_reason() {
+            push_issue(
+                &mut report,
+                FsckIssueKind::InvalidReliabilityEvidence,
+                "lifecycle/reliability".to_owned(),
+                FsckIssueDetail::ReliabilityEvidenceInvalid { reason },
+            )?;
+        } else {
+            return Err(error);
         }
     }
 
