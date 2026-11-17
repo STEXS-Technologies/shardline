@@ -208,33 +208,14 @@ pub struct ListObjectsV2ResponseContext<'request> {
     pub owner_id: Option<&'request str>,
 }
 
-fn listing_wire_value(value: &str, url_encoding: bool) -> String {
-    if !url_encoding {
-        return value.to_owned();
+/// Encodes a listing field when the request selects S3's `encoding-type=url`.
+#[must_use]
+pub fn listing_wire_value(value: &str, url_encoding: bool) -> String {
+    if url_encoding {
+        crate::sigv4::encode(value)
+    } else {
+        value.to_owned()
     }
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(char::from(byte))
-            }
-            _ => {
-                encoded.push('%');
-                // Both nibble conversions are bounded to 0..16.
-                encoded.push(
-                    char::from_digit(u32::from(byte >> 4), 16)
-                        .unwrap_or('0')
-                        .to_ascii_uppercase(),
-                );
-                encoded.push(
-                    char::from_digit(u32::from(byte & 15), 16)
-                        .unwrap_or('0')
-                        .to_ascii_uppercase(),
-                );
-            }
-        }
-    }
-    encoded
 }
 
 fn encode_listing_rows(contents: &mut [Contents], prefixes: &mut [String]) {

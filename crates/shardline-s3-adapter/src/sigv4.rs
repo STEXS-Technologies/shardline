@@ -646,7 +646,7 @@ fn query_pairs(uri: &Uri) -> Result<Vec<(String, String)>, S3Error> {
         .collect()
 }
 
-fn encode(value: &str) -> String {
+pub(crate) fn encode(value: &str) -> String {
     const ESCAPED: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
         .remove(b'-')
         .remove(b'_')

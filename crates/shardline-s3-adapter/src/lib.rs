@@ -87,5 +87,5 @@ pub use types::{
     CompleteMultipartUploadResult, CompleteParts, Contents, CopyObjectResult, HeadObjectHeaders,
     InitiateMultipartUploadResult, ListBucketResult, ListBucketResultV1, ListBucketsResult,
     ListObjectsV2ResponseContext, MAX_S3_DELETE_KEYS, PutObjectResponseHeaders, S3ErrorBody,
-    parse_complete_multipart_parts, parse_delete_object_keys, xml_escape,
+    listing_wire_value, parse_complete_multipart_parts, parse_delete_object_keys, xml_escape,
 };

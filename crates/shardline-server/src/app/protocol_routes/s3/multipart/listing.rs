@@ -1,6 +1,6 @@
 //! Read-only multipart discovery over the existing durable session state.
 use super::*;
-use shardline_s3_adapter::{QueryMap, xml_escape};
+use shardline_s3_adapter::{QueryMap, listing_wire_value, xml_escape};
 use std::fmt::Write;
 
 mod anchor;
@@ -155,22 +155,7 @@ pub(crate) async fn s3_list_uploads(
     if truncated && let Some(last) = entries.last() {
         anchor::retain(state, &scope, bucket, last).await?;
     }
-    let encode = |value: &str| {
-        if encoding == "url" {
-            value
-                .bytes()
-                .map(|byte| {
-                    if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
-                        char::from(byte).to_string()
-                    } else {
-                        format!("%{byte:02X}")
-                    }
-                })
-                .collect::<String>()
-        } else {
-            value.to_owned()
-        }
-    };
+    let encode = |value: &str| listing_wire_value(value, encoding == "url");
     let (next_key, next_id) = entries
         .last()
         .map_or(("", ""), |entry| (entry.key.as_str(), entry.id.as_str()));

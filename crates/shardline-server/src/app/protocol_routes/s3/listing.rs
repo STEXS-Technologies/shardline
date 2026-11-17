@@ -12,8 +12,8 @@ use axum::{
 };
 use shardline_s3_adapter::{
     ListBucketResult, ListBucketResultV1, ListPage, S3Error, encode_continuation_token, group_page,
-    parse_list_objects_url_encoding, parse_list_objects_v1_params, parse_list_objects_v2_params,
-    xml_escape,
+    listing_wire_value, parse_list_objects_url_encoding, parse_list_objects_v1_params,
+    parse_list_objects_v2_params, xml_escape,
 };
 
 use super::{S3Repository, parse_s3_query, s3_xml_content_type};
@@ -258,32 +258,6 @@ fn optional_query_value(query: &[(String, String)], name: &str) -> Result<Option
         return Err(S3Error::invalid_argument("Repeated listing parameter"));
     }
     Ok(value)
-}
-
-fn listing_wire_value(value: &str, url_encoding: bool) -> String {
-    if !url_encoding {
-        return value.to_owned();
-    }
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(char::from(byte));
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(hex_digit(byte >> 4));
-                encoded.push(hex_digit(byte & 15));
-            }
-        }
-    }
-    encoded
-}
-
-fn hex_digit(nibble: u8) -> char {
-    char::from_digit(u32::from(nibble), 16)
-        .unwrap_or('0')
-        .to_ascii_uppercase()
 }
 
 fn push_xml_element(xml: &mut String, name: &str, value: &str) {
