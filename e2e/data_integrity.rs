@@ -886,166 +886,75 @@ async fn lfs_get_returns_content_digest_header() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_range_request_first_100_bytes() {
-    let (base_url, server) = start_server().await.unwrap();
-    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
-    let client = Client::new();
-
+async fn lfs_range_requests() {
     let content = b"this is a test file with enough content to test range requests across multiple boundaries";
-    let oid = hex::encode(sha2::Sha256::digest(content));
-
-    let upload = client
-        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(upload.status(), 200, "upload failed");
-
-    let download = client
-        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Range", "bytes=0-9")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(download.status(), 206, "expected 206 Partial Content");
-    let body = download.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), &content[0..10], "first 10 bytes mismatch");
-
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_range_request_middle_bytes() {
-    let (base_url, server) = start_server().await.unwrap();
-    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
-    let client = Client::new();
-
-    let content = b"this is a test file with enough content to test range requests across multiple boundaries";
-    let oid = hex::encode(sha2::Sha256::digest(content));
-
-    let upload = client
-        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(upload.status(), 200, "upload failed");
-
-    let download = client
-        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Range", "bytes=10-30")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(download.status(), 206, "expected 206 Partial Content");
-    let body = download.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), &content[10..31], "middle bytes mismatch");
-
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_range_request_beyond_end_returns_416() {
-    let (base_url, server) = start_server().await.unwrap();
-    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
-    let client = Client::new();
-
-    let content = b"test content for range validation";
-    let oid = hex::encode(sha2::Sha256::digest(content));
-
-    let upload = client
-        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(upload.status(), 200, "upload failed");
-
-    let download = client
-        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Range", "bytes=9999-10000")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(download.status(), 416, "expected 416 Range Not Satisfiable");
-
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_suffix_range_returns_last_n_bytes() {
-    let (base_url, server) = start_server().await.unwrap();
-    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
-    let client = Client::new();
-    let content = b"test content for suffix range verification";
-    let oid = hex::encode(sha2::Sha256::digest(content));
-    let upload = client
-        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(upload.status(), 200, "upload failed");
-    let download = client
-        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Range", "bytes=-10")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        download.status(),
-        206,
-        "suffix range should return 206 Partial Content"
-    );
-    let body = download.bytes().await.unwrap();
-    let expected = &content[content.len() - 10..];
-    assert_eq!(body.as_ref(), expected, "suffix range bytes mismatch");
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_open_ended_range_returns_from_offset_to_end() {
-    let (base_url, server) = start_server().await.unwrap();
-    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
-    let client = Client::new();
-
-    let content = b"open ended range test content here";
-    let oid = hex::encode(sha2::Sha256::digest(content));
-
-    client
-        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-
-    let resp = client
-        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Range", "bytes=5-")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 206, "open ended range");
-    let body = resp.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), &content[5..], "open ended range bytes");
-
-    server.abort();
+    let beyond_end = b"test content for range validation";
+    let suffix = b"test content for suffix range verification";
+    let open_ended = b"open ended range test content here";
+    let cases = [
+        (
+            "first ten bytes",
+            content.as_slice(),
+            "bytes=0-9",
+            206,
+            Some(&content[..10]),
+        ),
+        (
+            "middle bytes",
+            content.as_slice(),
+            "bytes=10-30",
+            206,
+            Some(&content[10..31]),
+        ),
+        ("beyond end", beyond_end, "bytes=9999-10000", 416, None),
+        (
+            "suffix",
+            suffix.as_slice(),
+            "bytes=-10",
+            206,
+            Some(&suffix[suffix.len() - 10..]),
+        ),
+        (
+            "open ended",
+            open_ended.as_slice(),
+            "bytes=5-",
+            206,
+            Some(&open_ended[5..]),
+        ),
+    ];
+    for (name, content, range, status, expected) in cases {
+        let (base_url, server) = start_server().await.unwrap();
+        let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+        let client = Client::new();
+        let oid = hex::encode(sha2::Sha256::digest(content));
+        let url = format!("{base_url}/v1/lfs/objects/{oid}");
+        let upload = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(content.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(upload.status(), 200, "{name}: upload failed");
+        let download = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Range", range)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(download.status(), status, "{name}: response status");
+        if let Some(expected) = expected {
+            assert_eq!(
+                download.bytes().await.unwrap().as_ref(),
+                expected,
+                "{name}: response bytes"
+            );
+        }
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
