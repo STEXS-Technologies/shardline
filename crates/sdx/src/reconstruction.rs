@@ -453,96 +453,95 @@ mod tests {
         terms: serde_json::Value,
         xorbs: serde_json::Value,
     ) -> serde_json::Value {
-        let mut body = serde_json::Map::new();
-        body.insert(
-            "offset_into_first_range".to_owned(),
-            serde_json::Value::from(offset),
-        );
-        body.insert("terms".to_owned(), terms);
-        body.insert("xorbs".to_owned(), xorbs);
-        serde_json::Value::Object(body)
+        serde_json::Value::Object(serde_json::Map::from_iter([
+            ("offset_into_first_range".to_owned(), offset.into()),
+            ("terms".to_owned(), terms),
+            ("xorbs".to_owned(), xorbs),
+        ]))
     }
 
     #[test]
-    fn plan_from_v2_merges_contiguous_ranges_and_resolves_terms() {
-        let xorbs = json!({
-            XORB_HASH: [{
-                "url": format!("http://cas/transfer/xorb/default/{XORB_HASH}"),
-                "ranges": [
-                    {"chunks": {"start": 1, "end": 3}, "bytes": {"start": 50, "end": 149}},
-                    {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 49}},
-                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 99}},
-                    {"chunks": {"start": 2, "end": 4}, "bytes": {"start": 100, "end": 199}}
-                ]
-            }]
-        });
-        let terms = json!([
-            {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 2}},
-            {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 2, "end": 4}}
-        ]);
-        let body = v2_response_body(0, terms, xorbs);
-        let response: shardline_xet_adapter::FileReconstructionV2Response =
-            serde_json::from_value(body).unwrap();
-        let plan = Reconstruction::from_v2(response).unwrap();
-        // Contiguous chunk ranges in one xorb coalesce into a single fetch.
-        assert_eq!(plan.fetches.len(), 1);
-        assert_eq!(plan.fetches[0].chunks, (0, 4));
-        assert_eq!(plan.fetches[0].bytes, super::ByteRange::new(0, 199));
-        assert_eq!(plan.terms.len(), 2);
-        assert_eq!(plan.terms[0].fetch_index, 0);
-        assert_eq!(plan.terms[1].fetch_index, 0);
-    }
-
-    #[test]
-    fn plan_keeps_disjoint_chunk_ranges_as_separate_fetches() {
-        let xorbs = json!({
-            XORB_HASH: [{
-                "url": format!("http://cas/transfer/xorb/default/{XORB_HASH}"),
-                "ranges": [
-                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 99}},
-                    {"chunks": {"start": 5, "end": 7}, "bytes": {"start": 300, "end": 399}}
-                ]
-            }]
-        });
-        let terms = json!([
-            {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 2}},
-            {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 5, "end": 7}}
-        ]);
-        let body = v2_response_body(0, terms, xorbs);
-        let response: shardline_xet_adapter::FileReconstructionV2Response =
-            serde_json::from_value(body).unwrap();
-        let plan = Reconstruction::from_v2(response).unwrap();
-        // A gap between chunk ranges keeps them as separate fetches.
-        assert_eq!(plan.fetches.len(), 2);
-        assert_eq!(plan.terms[0].fetch_index, 0);
-        assert_eq!(plan.terms[1].fetch_index, 1);
-    }
-
-    #[test]
-    fn plan_from_v2_deduplicates_identical_fetch_ranges() {
-        let xorbs = json!({
-            XORB_HASH: [{
-                "url": format!("http://cas/transfer/xorb/default/{XORB_HASH}"),
-                "ranges": [
-                    {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 9}},
-                    {"chunks": {"start": 1, "end": 2}, "bytes": {"start": 0, "end": 9}}
-                ]
-            }]
-        });
-        let terms = json!([
-            {"hash": XORB_HASH, "unpacked_length": 5, "range": {"start": 0, "end": 1}},
-            {"hash": XORB_HASH, "unpacked_length": 5, "range": {"start": 1, "end": 2}}
-        ]);
-        let body = v2_response_body(0, terms, xorbs);
-        let response: shardline_xet_adapter::FileReconstructionV2Response =
-            serde_json::from_value(body).unwrap();
-        let plan = Reconstruction::from_v2(response).unwrap();
-        // Both descriptors point at the same byte range → one fetch whose chunk
-        // range is the union covering both terms.
-        assert_eq!(plan.fetches.len(), 1);
-        assert_eq!(plan.fetches[0].chunks, (0, 2));
-        assert_eq!(plan.terms[0].fetch_index, 0);
-        assert_eq!(plan.terms[1].fetch_index, 0);
+    fn v2_planning_coalesces_overlaps_but_preserves_gaps() {
+        // Descriptors: (chunk start, chunk end, byte start, byte end).
+        // Terms: (chunk start, chunk end, unpacked length).
+        for (name, descriptors, terms, expected_fetches, expected_indexes) in [
+            (
+                "overlapping and contiguous ranges",
+                vec![
+                    (1, 3, 50, 149),
+                    (0, 1, 0, 49),
+                    (0, 2, 0, 99),
+                    (2, 4, 100, 199),
+                ],
+                vec![(0, 2, 64), (2, 4, 64)],
+                vec![((0, 4), super::ByteRange::new(0, 199))],
+                vec![0, 0],
+            ),
+            (
+                "disjoint ranges",
+                vec![(0, 2, 0, 99), (5, 7, 300, 399)],
+                vec![(0, 2, 64), (5, 7, 64)],
+                vec![
+                    ((0, 2), super::ByteRange::new(0, 99)),
+                    ((5, 7), super::ByteRange::new(300, 399)),
+                ],
+                vec![0, 1],
+            ),
+            (
+                "identical byte ranges",
+                vec![(0, 1, 0, 9), (1, 2, 0, 9)],
+                vec![(0, 1, 5), (1, 2, 5)],
+                vec![((0, 2), super::ByteRange::new(0, 9))],
+                vec![0, 0],
+            ),
+        ] {
+            let ranges: Vec<_> = descriptors
+                .into_iter()
+                .map(|(start, end, first, last)| {
+                    json!({
+                        "chunks": {"start": start, "end": end},
+                        "bytes": {"start": first, "end": last}
+                    })
+                })
+                .collect();
+            let terms: Vec<_> = terms
+                .into_iter()
+                .map(|(start, end, length)| {
+                    json!({
+                        "hash": XORB_HASH, "unpacked_length": length,
+                        "range": {"start": start, "end": end}
+                    })
+                })
+                .collect();
+            let body = v2_response_body(
+                0,
+                json!(terms),
+                json!({
+                    XORB_HASH: [{
+                        "url": format!("http://cas/transfer/xorb/default/{XORB_HASH}"),
+                        "ranges": ranges
+                    }]
+                }),
+            );
+            let response = serde_json::from_value(body).unwrap();
+            let plan = Reconstruction::from_v2(response).unwrap();
+            assert_eq!(
+                plan.fetches
+                    .iter()
+                    .map(|fetch| (fetch.chunks, fetch.bytes))
+                    .collect::<Vec<_>>(),
+                expected_fetches,
+                "{name}"
+            );
+            assert_eq!(
+                plan.terms
+                    .iter()
+                    .map(|term| term.fetch_index)
+                    .collect::<Vec<_>>(),
+                expected_indexes,
+                "{name}"
+            );
+        }
     }
 
     #[test]
