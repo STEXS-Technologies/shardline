@@ -70,12 +70,7 @@ impl DurableUploadChunks {
                 .skip(self.next_record)
                 .take(MAX_READ_AHEAD_CHUNKS)
                 .skip(1)
-                .any(|next| {
-                    next.hash == record.hash
-                        && next.length == record.length
-                        && next.packed_start == record.packed_start
-                        && next.packed_end == record.packed_end
-                });
+                .any(|next| read_cache::same_stored_chunk(next, record));
             let cell = self.cache.cell(record, retain)?;
             let store = self.store.clone();
             let record = record.clone();

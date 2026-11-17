@@ -47,12 +47,11 @@ impl ReadCache {
         record: &FileChunkRecord,
         retain: bool,
     ) -> Result<Option<VerifiedRead>, ServerError> {
-        if let Some((_, cell)) = self.entries.iter().find(|(existing, _)| {
-            existing.hash == record.hash
-                && existing.length == record.length
-                && existing.packed_start == record.packed_start
-                && existing.packed_end == record.packed_end
-        }) {
+        if let Some((_, cell)) = self
+            .entries
+            .iter()
+            .find(|(existing, _)| same_stored_chunk(existing, record))
+        {
             return Ok(Some(Arc::clone(cell)));
         }
         // An oversized chunk retains the original one-read behavior and must
@@ -81,6 +80,14 @@ impl ReadCache {
         self.entries.push_back((record.clone(), Arc::clone(&cell)));
         Ok(Some(cell))
     }
+}
+
+// Logical file offsets do not change the durable bytes being verified.
+pub(super) fn same_stored_chunk(left: &FileChunkRecord, right: &FileChunkRecord) -> bool {
+    left.hash == right.hash
+        && left.length == right.length
+        && left.packed_start == right.packed_start
+        && left.packed_end == right.packed_end
 }
 
 #[cfg(test)]
