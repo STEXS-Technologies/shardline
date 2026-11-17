@@ -5767,3 +5767,41 @@ early without their infrastructure do not constitute infrastructure
 qualification. PostgreSQL and distributed qualifications retain their separately
 recorded source revisions. This run does not resolve the historical hosted SDK
 RSS failure or establish hosted-CI success or production capacity.
+
+#### PostgreSQL refresh and deadline regression
+
+Revision `d2d48dff` completed `scripts/test-postgres.sh` against a fresh
+PostgreSQL 16 Alpine database with required PostgreSQL and native-client
+prerequisites, pinned 1.12.1/1.11.3 compatibility binaries and local object
+storage. The schema bootstrap used the frozen release executable from
+`6c8f0d58`, SHA-256
+`45645d17d63d353ebd8b0a0c29a386347b3fa0b467ce7b4e6d77864c58168cf0`.
+Only documentation and the deadline regression tests changed between those
+revisions; production code was identical.
+
+| Test stage | Passed |
+| --- | ---: |
+| Index library | 813 |
+| PostgreSQL provider events | 2 |
+| Server library | 3,215 |
+| Explicit PostgreSQL copy/reference integrity contracts | 6 |
+| CLI migration application/status/reversal | 1 |
+
+All 4,037 selected tests passed. The default library stages excluded six
+normally ignored index tests and 45 normally ignored server tests; the six
+explicit integrity contracts were selected separately.
+
+The preceding database run failed one publication-timeout assertion: it
+required the client deadline to beat the equally bounded database statement
+deadline. The corrected tests preserve either specific timeout cause, reject
+unrelated errors, and exercise a forced 100 ms statement timeout. Original
+evidence and retirement-marker preservation, successful retry, and connection
+acquisition diagnostics remain checked. All four deadline tests passed both
+in a focused fresh-database run and in this complete rerun.
+
+The frozen executable's checksum was unchanged after qualification and the
+owned database container was removed. The restored isolated checkout and
+verification fixtures were kept outside the host's cache-cleanup directory.
+This remains local PostgreSQL/local-object-storage correctness evidence;
+it does not qualify MinIO, hosted CI, production capacity or the historical
+hosted SDK RSS failure.
