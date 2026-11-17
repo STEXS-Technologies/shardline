@@ -804,32 +804,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // print_lifecycle_repair_summary / prefixed / cli
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn lifecycle_repair_summary_runs() {
-        print_lifecycle_repair_summary(&LifecycleRepairReport::default());
-    }
-
-    #[test]
-    fn lifecycle_repair_summary_prefixed_runs() {
-        let report = LifecycleRepairReport::default();
-        print_lifecycle_repair_summary_prefixed(&report, "repair");
-        // empty prefix — no dot separator
-        print_lifecycle_repair_summary_prefixed(&report, "");
-    }
-
-    #[test]
-    fn lifecycle_repair_cli_summary_runs() {
-        print_lifecycle_repair_cli_summary(
-            &LifecycleRepairReport::default(),
-            Path::new("/root"),
-            2592000,
-        );
-    }
-
-    // -----------------------------------------------------------------------
     // print_backup_manifest_summary / cli
     // -----------------------------------------------------------------------
 
@@ -1094,14 +1068,58 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_summary_propagates_write_and_flush_errors() {
+    fn lifecycle_summary_preserves_output_and_propagates_errors() {
+        let report = LifecycleRepairReport {
+            scanned_records: 1,
+            referenced_objects: 2,
+            scanned_quarantine_candidates: 3,
+            removed_missing_quarantine_candidates: 4,
+            removed_reachable_quarantine_candidates: 5,
+            removed_held_quarantine_candidates: 6,
+            scanned_retention_holds: 7,
+            removed_expired_retention_holds: 8,
+            removed_missing_retention_holds: 9,
+            scanned_webhook_deliveries: 10,
+            removed_stale_webhook_deliveries: 11,
+            removed_future_webhook_deliveries: 12,
+        };
+        let expected = concat!(
+            "scanned_records: 1\nreferenced_objects: 2\n",
+            "scanned_quarantine_candidates: 3\n",
+            "removed_missing_quarantine_candidates: 4\n",
+            "removed_reachable_quarantine_candidates: 5\n",
+            "removed_held_quarantine_candidates: 6\n",
+            "scanned_retention_holds: 7\n",
+            "removed_expired_retention_holds: 8\n",
+            "removed_missing_retention_holds: 9\n",
+            "scanned_webhook_deliveries: 10\n",
+            "removed_stale_webhook_deliveries: 11\n",
+            "removed_future_webhook_deliveries: 12\n",
+        );
+        for prefix in ["", "repair"] {
+            let mut output = Vec::new();
+            write_lifecycle_repair_summary_prefixed(&mut output, &report, prefix).unwrap();
+            let expected = if prefix.is_empty() {
+                expected.to_owned()
+            } else {
+                expected
+                    .lines()
+                    .map(|line| format!("repair.{line}\n"))
+                    .collect()
+            };
+            assert_eq!(output, expected.as_bytes());
+            assert_writer_errors(|writer| {
+                write_lifecycle_repair_summary_prefixed(writer, &report, prefix)
+            });
+        }
+        let mut output = Vec::new();
+        write_lifecycle_repair_cli_summary(&mut output, &report, Path::new("/root"), 3600).unwrap();
+        assert_eq!(
+            output,
+            format!("root: /root\nwebhook_retention_seconds: 3600\n{expected}").as_bytes()
+        );
         assert_writer_errors(|writer| {
-            write_lifecycle_repair_cli_summary(
-                writer,
-                &LifecycleRepairReport::default(),
-                Path::new("/root"),
-                3600,
-            )
+            write_lifecycle_repair_cli_summary(writer, &report, Path::new("/root"), 3600)
         });
     }
 }
