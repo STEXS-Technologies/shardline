@@ -6132,3 +6132,34 @@ other consumers. It is not a measured cold/warm build improvement.
 Tracked Rust inventory is 567,094 lines: 36,555 fewer (6.06%) than the
 603,649-line baseline. Hosted SDK memory and production-scale qualification
 remain open.
+
+## Configuration, Hub and S3 integrated checkpoint (2026-11-17)
+
+Frozen source: `a3b20bd32a56d274a38e95ae466c09e5b520f808`.
+`cargo +1.99.0 make ci` passed in 501.440 seconds with four build jobs,
+four Nextest threads, dev/test debug info disabled, `RUSTC_WRAPPER` empty,
+offline dependency resolution and the existing shared target directory.
+This is a warm developer-gate sample, not a controlled build-speed comparison.
+
+- Workspace library suite: 8,064 passed in 249.718 seconds; 45 normally
+  ignored tests excluded.
+- Reliability contract suites: 39 passed.
+- Release CLI and maintenance suites: 41 passed; five ignored tests excluded.
+- Total selected tests: 8,144 passed. Formatting, strict workspace Clippy
+  (the gate's existing Xet-core exclusion), dependency exception checks, root
+  and E2E dependency policy checks, release help/manpage/completion smoke checks
+  and all 44 migration-version parity checks passed.
+
+Local artifacts: `.shardline-cleanup-state/ci-a3b20bd3/gate.log` and
+`result.json` in the parent projects directory.
+
+The lower library test count reflects the recent table-driven consolidation;
+case coverage is documented in the individual changes. Persisted S3 checksum
+coverage now explicitly checks absence, composite omission, valid full-object
+metadata, duplicate keys, malformed JSON, invalid Base64, incorrect digest length
+and noncanonical encoding.
+
+Tracked Rust inventory is 567,084 lines, including tests, comments and blank
+lines: 36,565 fewer (6.06%) than the 603,649-line baseline. This gate does not
+include a fresh required PostgreSQL/MinIO deployment qualification or resolve
+the historical hosted SDK memory failure. Those remain open.
