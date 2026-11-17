@@ -34,8 +34,7 @@ pub(super) async fn publish(
             // cannot resolve as a historical commit. Missing branches stay gone.
             parent = state
                 .store
-                .resolve_revision(repo_id, &format!("refs/heads/{}", target.ref_name))
-                .map_err(|error| HubApiError::CasError(error.to_string()))?
+                .resolve_revision(repo_id, &format!("refs/heads/{}", target.ref_name))?
                 .ok_or(HubApiError::RevisionNotFound)?;
         }
         if let Some(response) = try_apply_commit_to_ref(

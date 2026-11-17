@@ -81,8 +81,7 @@ pub(super) fn create(
                 // error when no durable repository exists.
                 state
                     .store
-                    .get_repo(name)
-                    .map_err(|read_error| HubApiError::CasError(read_error.to_string()))?
+                    .get_repo(name)?
                     .ok_or_else(|| HubApiError::CasError(error.to_string()))?
             }
         };

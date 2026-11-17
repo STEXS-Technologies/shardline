@@ -224,8 +224,7 @@ async fn resolve_file_for_repository(
             if let Some(hash) = xet_hash {
                 let stored_repo = state
                     .store
-                    .get_repo(&name)
-                    .map_err(|error| HubApiError::CasError(error.to_string()))?
+                    .get_repo(&name)?
                     .ok_or(HubApiError::RepoNotFound)?;
                 let mut refresh = url::Url::parse(&state.public_base_url)
                     .map_err(|error| HubApiError::CasError(error.to_string()))?;

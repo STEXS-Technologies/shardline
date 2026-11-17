@@ -42,8 +42,7 @@ pub(crate) async fn canonical_name_for_claims(
     let exact = format!("{namespace}/{name}");
     let exists = tokio::task::spawn_blocking(move || store.get_repo(&exact))
         .await
-        .map_err(|error| HubApiError::CasError(error.to_string()))?
-        .map_err(|error| HubApiError::CasError(error.to_string()))?
+        .map_err(|error| HubApiError::CasError(error.to_string()))??
         .is_some();
     Ok(if exists { name } else { without_suffix }.to_owned())
 }

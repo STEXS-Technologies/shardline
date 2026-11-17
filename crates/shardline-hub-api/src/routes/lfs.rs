@@ -319,10 +319,7 @@ async fn lfs_batch_inner(
         // uploading a body there. Keep the CAS base in its dedicated header.
         let scope = claims.repository();
         let name = format!("{}/{}", scope.owner(), scope.name());
-        let stored_repo = state
-            .store
-            .get_repo(&name)
-            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        let stored_repo = state.store.get_repo(&name)?;
         let repo_type = stored_repo.map_or("models", |repo| super::repo_type_path(repo.repo_type));
         let mut refresh = url::Url::parse(&state.public_base_url)
             .map_err(|error| HubApiError::CasError(error.to_string()))?;

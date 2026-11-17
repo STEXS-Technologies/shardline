@@ -40,10 +40,7 @@ pub(crate) async fn preupload(
     crate::revision_access::authorize_read(&state, &name, &rev, &commit_sha, repo.capability())
         .await?;
 
-    let existing_files = state
-        .store
-        .get_files(&commit_sha)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let existing_files = state.store.get_files(&commit_sha)?;
 
     let existing_paths: std::collections::HashSet<&str> = existing_files
         .iter()
@@ -133,8 +130,7 @@ pub(crate) async fn commit(
     if !explicit_commit
         && state
             .store
-            .resolve_revision(&name, &format!("refs/heads/{target_ref}"))
-            .map_err(|error| HubApiError::CasError(error.to_string()))?
+            .resolve_revision(&name, &format!("refs/heads/{target_ref}"))?
             .is_none()
     {
         return Err(HubApiError::BadRequest(
@@ -326,11 +322,7 @@ async fn try_apply_commit_to_ref(
     .await?;
     // Every payload read, Git limit check and archive write has succeeded.
     // Only the existing metadata/evidence transaction may now advance the ref.
-    match state
-        .store
-        .publish_prepared_revision(&prepared.revision)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
-    {
+    match state.store.publish_prepared_revision(&prepared.revision)? {
         HubRefUpdateOutcome::Updated(_) => {}
         HubRefUpdateOutcome::Conflict => {
             return Ok(None);

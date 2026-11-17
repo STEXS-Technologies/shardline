@@ -99,10 +99,7 @@ pub(super) fn filter_refs(
         // HEAD is an alias for the repository default, not for the caller's branch.
         // HubRepo.default_branch is a legacy commit identity, not a ref name.
         // collect_refs_sync synthesizes HEAD from the live main ref.
-        let default = state
-            .store
-            .resolve_revision(repo_id, "main")
-            .map_err(|e| HubApiError::CasError(e.to_string()))?;
+        let default = state.store.resolve_revision(repo_id, "main")?;
         refs.retain(|reference| {
             if reference.name == "HEAD" {
                 visible.contains("main") && default.as_deref() == Some(reference.sha1.as_str())
