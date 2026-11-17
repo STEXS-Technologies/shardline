@@ -75,11 +75,42 @@ code.
    need measurement before claiming the RFC's 30% contributor critical-path target. Review the sequential 150-minute
    E2E job for reusable compatible artifacts and measured scheduling opportunities;
    retain every required qualification gate.
-5. **Review configuration and lifecycle branching.** Server `config/env.rs`
-   contains 3,125 lines. Identify repeated conversion/validation and unnecessary
-   intermediate state using existing owners. Preserve precedence, defaults,
-   diagnostics, cancellation, admission and durability boundaries. Only remove
-   branches after showing why supported behavior cannot require them.
+5. **Review remaining lifecycle orchestration.** Configuration environment loading
+   has a reviewed disposition below. Continue with lifecycle callers where
+   unnecessary intermediate state can be removed using existing owners. Preserve
+   cancellation, admission and durability boundaries. Only remove branches after
+   showing why supported behavior cannot require them.
+
+## Reviewed configuration disposition
+
+Reviewed at `1c2c219d9c5f5265898e9d8fd2e6ec76bfd8c4d0`. The environment
+loader is retained after inspecting its numeric parsing, frontend selection,
+secret-source loading and TOML-default application. No code change is required
+for those reviewed responsibilities:
+
+- `load_non_zero_usize_env` and `load_non_zero_u64_env` share the same short
+  structure but preserve different integer widths and field-specific parse/zero
+  diagnostics. A generic conversion layer would add machinery to two small
+  functions. In-flight limits additionally clamp accepted values; bounded pool
+  sizes warn and fall back instead of failing startup. Those policies differ.
+- The shared secret loader already owns source conflicts, empty values and size
+  checks. File reads additionally enforce bounded reads, file identity and
+  permissions; newline handling deliberately differs for fixed-length keys and
+  variable-length secrets. Retain those checks and their error ordering.
+- Frontend parsing preserves input order, ignores empty comma-separated tokens
+  and removes duplicates. The small supported frontend set does not justify an
+  extra hash set or a new parser abstraction.
+- TOML defaults use quoted dotenv assignments and interpolation before the
+  existing environment loader. The environment precedence, admin-token source
+  exception and thread-local test environment are observable contracts. Do not
+  replace this with raw string assignment or remove quoting as cleanup.
+
+The interpolation implementation and its repeated tests were already simplified
+in `d49752c3` and `ff414cd1`. The latest code-equivalent full contributor gate at
+`99bde68e` passed its configuration tests with the rest of the 8,018 library
+cases. This disposition closes the environment-loader review, not all server
+configuration or lifecycle work. Further changes need a concrete redundant path
+or unnecessary allocation rather than file size alone.
 
 ## Completion criteria
 
