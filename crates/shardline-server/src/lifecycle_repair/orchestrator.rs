@@ -62,12 +62,13 @@ pub async fn run_lifecycle_repair(
     let object_store = object_store_from_config(&config)?;
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
     let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
-    run_lifecycle_repair_with_stores(
+    run_lifecycle_repair_with_stores_at_time(
         &record_store,
         &index_store,
         &object_store,
         config.server_frontends(),
         options,
+        unix_now_seconds_checked()?,
     )
     .await
 }
@@ -85,37 +86,13 @@ pub async fn run_local_lifecycle_repair(
     let object_store = ServerObjectStore::local(root.join("chunks"))?;
     let index_store = LocalIndexStore::open(root.clone());
     let record_store = LocalRecordStore::open(root);
-    run_lifecycle_repair_with_stores(
+    run_lifecycle_repair_with_stores_at_time(
         &record_store,
         &index_store,
         &object_store,
         &[ServerFrontend::Xet],
         options,
-    )
-    .await
-}
-
-async fn run_lifecycle_repair_with_stores<RecordAdapter, IndexAdapter>(
-    record_store: &RecordAdapter,
-    index_store: &IndexAdapter,
-    object_store: &ServerObjectStore,
-    frontends: &[ServerFrontend],
-    options: LifecycleRepairOptions,
-) -> Result<LifecycleRepairReport, ServerError>
-where
-    RecordAdapter: RecordStore + Sync,
-    RecordAdapter::Error: Into<ServerError>,
-    IndexAdapter: AsyncIndexStore + Sync,
-    IndexAdapter::Error: Into<ServerError>,
-{
-    let now_unix_seconds = unix_now_seconds_checked()?;
-    run_lifecycle_repair_with_stores_at_time(
-        record_store,
-        index_store,
-        object_store,
-        frontends,
-        options,
-        now_unix_seconds,
+        unix_now_seconds_checked()?,
     )
     .await
 }
