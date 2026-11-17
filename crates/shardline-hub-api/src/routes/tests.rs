@@ -87,95 +87,60 @@ pub(super) fn make_test_state() -> (tempfile::TempDir, HubState) {
 }
 
 #[test]
-fn repo_delete_cleans_up_revisions() {
-    let (_ts, store) = make_delete_test_store();
-
-    use shardline_index::hub::{HubFileEntry, HubRepoType};
-
-    store
-        .create_repo(HubRepoType::Model, "org/model", false)
-        .unwrap();
-    let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
-
-    // Add a commit
-    store
-        .create_revision(
-            "org/model",
-            Some(initial_sha),
-            "sha1",
-            "main",
-            "first commit",
-        )
-        .unwrap();
-
-    // Store files for the commit
-    let files = vec![HubFileEntry {
-        path: "README.md".into(),
-        size: 100,
-        sha: "sha_readme".into(),
-        is_lfs: false,
-    }];
-    store.store_files("sha1", &files).unwrap();
-
-    // Verify data exists
-    assert_eq!(store.list_revisions("org/model").unwrap().len(), 2);
-    assert_eq!(store.get_files("sha1").unwrap().len(), 1);
-
-    // Delete — mirrors what repo_delete handler does
-    store.delete_repo("org/model").unwrap();
-
-    // Verify everything is gone
-    assert!(store.get_repo("org/model").unwrap().is_none());
-    assert!(store.list_revisions("org/model").unwrap().is_empty());
-    assert!(store.get_files("sha1").unwrap().is_empty());
-}
-
-#[test]
-fn repo_delete_cleans_up_webhooks() {
-    let (_ts, store) = make_delete_test_store();
-
-    use shardline_index::hub::HubRepoType;
-
-    store
-        .create_repo(HubRepoType::Model, "org/model", false)
-        .unwrap();
-
-    // Create webhook
-    store
-        .create_webhook(
-            "org/model",
-            "https://example.com/hook",
-            &["push".into()],
-            None,
-        )
-        .unwrap();
-
-    assert_eq!(store.list_webhooks("org/model").unwrap().len(), 1);
-
-    // Delete
-    store.delete_repo("org/model").unwrap();
-
-    // Verify webhook is gone
-    assert!(store.list_webhooks("org/model").unwrap().is_empty());
-}
-
-#[test]
-fn repo_delete_idempotent() {
-    let (_ts, store) = make_delete_test_store();
-
-    use shardline_index::hub::HubRepoType;
-
-    store
-        .create_repo(HubRepoType::Model, "org/model", false)
-        .unwrap();
-
-    // First delete succeeds
-    store.delete_repo("org/model").unwrap();
-    assert!(store.get_repo("org/model").unwrap().is_none());
-
-    // Second delete is also fine (no-op, no rows affected)
-    store.delete_repo("org/model").unwrap();
-    assert!(store.get_repo("org/model").unwrap().is_none());
+fn repo_delete_cleans_up_related_rows_and_remains_idempotent() {
+    for (with_revision, with_webhook) in
+        [(true, false), (false, true), (false, false), (true, true)]
+    {
+        let (_td, store) = make_delete_test_store();
+        store
+            .create_repo(HubRepoType::Model, "org/model", false)
+            .unwrap();
+        if with_revision {
+            store
+                .create_revision(
+                    "org/model",
+                    Some("4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3"),
+                    "sha1",
+                    "main",
+                    "first commit",
+                )
+                .unwrap();
+            store
+                .store_files(
+                    "sha1",
+                    &[HubFileEntry {
+                        path: "README.md".into(),
+                        size: 100,
+                        sha: "sha_readme".into(),
+                        is_lfs: false,
+                    }],
+                )
+                .unwrap();
+            assert_eq!(store.list_revisions("org/model").unwrap().len(), 2);
+            assert_eq!(store.get_files("sha1").unwrap().len(), 1);
+        }
+        if with_webhook {
+            store
+                .create_webhook(
+                    "org/model",
+                    "https://example.com/hook",
+                    &["push".into()],
+                    None,
+                )
+                .unwrap();
+            assert_eq!(store.list_webhooks("org/model").unwrap().len(), 1);
+        }
+        for deletion in 1..=2 {
+            store.delete_repo("org/model").unwrap();
+            assert!(
+                store.get_repo("org/model").unwrap().is_none(),
+                "revision={with_revision}, webhook={with_webhook}, deletion={deletion}"
+            );
+            assert!(store.list_revisions("org/model").unwrap().is_empty());
+            assert!(store.get_files("sha1").unwrap().is_empty());
+            assert!(store.list_webhooks("org/model").unwrap().is_empty());
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
