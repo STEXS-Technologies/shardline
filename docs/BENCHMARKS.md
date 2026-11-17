@@ -6492,3 +6492,31 @@ Local raw results, build logs and changed-help output are retained outside the
 repository in `.shardline-cleanup-state/build-dev-edit-5433f032/`, under the parent
 projects directory; the reproducible orchestration script is
 `.shardline-cleanup-state/build-dev-edit-5433f032.py`.
+
+### Full contributor checkpoint at 99bde68e (2026-11-17)
+
+Frozen source `99bde68ea3eadf0f37c37b3ff9b1029da109f25d` passed
+`cargo +1.99.0 make ci` in 548.852 seconds on the shared development host.
+The run used four build jobs and four Nextest workers, cached dependencies,
+no compiler wrapper, offline dependencies, and disabled dev/test debug
+information. This is a functional checkpoint, not a build-speed comparison.
+
+The uninterrupted gate passed formatting, strict workspace Clippy with its
+existing Xet-core exclusion, dependency exception checks, root and standalone-E2E
+Cargo deny checks, 8,018 selected workspace library tests, 39 reliability contract
+tests, and 41 release CLI maintenance contract tests: 8,098 selected tests total.
+The library stage took 249.783 seconds. Its 45 configured ignored tests and the
+maintenance suite's five ignored tests were excluded. Release help, manual-page
+and completion generation passed, as did SQLite/PostgreSQL migration parity
+across all 44 versions.
+
+This checkpoint includes the shared SQLite appended-evidence persistence and
+quarantine/OCI tag callers. It does not repeat required PostgreSQL/MinIO fixtures,
+standalone E2E suites, or hosted SDK memory qualification. Conditional PostgreSQL
+unit tests in the contributor suite are not new database qualification.
+The historical hosted SDK memory failure remains unresolved.
+
+The source contains 566,249 tracked Rust lines, including tests, comments and
+blank lines: 37,400 fewer (6.20%) than the 603,649-line baseline. Local gate logs,
+exit status, timings and source inventory are retained in
+`.shardline-cleanup-state/ci-99bde68e/`, under the parent projects directory.

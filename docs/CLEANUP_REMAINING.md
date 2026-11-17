@@ -1,23 +1,23 @@
 # Remaining maintenance cleanup
 
-Inventory source: `89d8801f5a9a778ca9b558ab670cced2346686c3` (2026-11-17).
+Inventory source: `99bde68ea3eadf0f37c37b3ff9b1029da109f25d` (2026-11-17).
 This is a review queue, not evidence that the listed code is redundant.
 
 ## Measured position
 
-Tracked Rust source contains 566,513 lines, including comments, blank lines and
-tests: 37,136 fewer lines (6.15%) than the 603,649-line baseline. Reproduce with
+Tracked Rust source contains 566,249 lines, including comments, blank lines and
+tests: 37,400 fewer lines (6.20%) than the 603,649-line baseline. Reproduce with
 `git ls-files '*.rs'` and count each tracked file's lines at the source commit.
 These totals exclude untracked files and unrelated working-tree changes.
 
 | Area | Rust lines | Next review |
 | --- | ---: | --- |
 | Server | 208,722 | Protocol fixtures, configuration parsing and lifecycle orchestration |
-| Index | 68,304 | Repeated adapter preparation and validation; retain adapter-owned transactions |
-| Standalone E2E | 45,790 | Repeated setup and scenario coverage across real-client suites |
-| Hub API | 40,883 | Route fixtures and repeated response construction |
+| Index | 68,264 | Repeated adapter preparation and validation; retain adapter-owned transactions |
+| Standalone E2E | 45,590 | Repeated setup and scenario coverage across real-client suites |
+| Hub API | 40,854 | Route fixtures and repeated response construction |
 | CLI | 36,578 | Remaining orchestration after shared report formatting cleanup |
-| SDK | 24,185 | Remaining allocation and dependency costs after shared CDC and reconstruction cleanup |
+| SDK | 24,190 | Remaining allocation and dependency costs after shared CDC and reconstruction cleanup |
 
 There is no evidence-backed percentage of cleanup remaining. A further 3–7%
 reduction is not an established forecast. File size and test count cannot prove
@@ -27,7 +27,7 @@ code.
 ## Prioritized work
 
 1. **Close qualification gaps.** The latest full contributor checkpoint passed
-   8,102 selected tests at `89d8801f`. Required PostgreSQL index qualification
+   8,098 selected tests at `99bde68e`. Required PostgreSQL index qualification
    passed 813 tests at `e5d4f3af`; PostgreSQL/MinIO qualification passed all
    157 integration cases and three additional copy-integrity cases at `b080738d`.
    See `BENCHMARKS.md` for commands, frozen sources and limits. These checkpoints
@@ -38,7 +38,7 @@ code.
    upload, GC, source deletion, restart and byte-identity coverage.
 2. **Review large protocol fixtures for overlap.** Start with server
    `app/e2e_tests.rs` (11,574 lines), S3 route `tests.rs` (5,994), Hub route
-   `tests.rs` (4,883), and standalone `data_integrity.rs` (12,769). For each
+   `tests.rs` (4,854), and standalone `data_integrity.rs` (12,569). For each
    consolidation, record which assertions and failure boundaries survive. Keep
    real-client, wire-level, adapter and concurrency tests when they exercise
    different boundaries. Splitting a file alone is not a reduction in complexity.
@@ -51,13 +51,16 @@ code.
    `.shardline-cleanup-state/http-shared-routes-deferred.patch` (parent projects
    directory). It is not part of the branch's reduction or qualification claims.
 3. **Simplify metadata adapters locally.** SQLite and PostgreSQL `index_store.rs`
-   contain 4,645 and 4,801 lines respectively. Compare repeated preparation and
+   contain 4,597 and 4,801 lines respectively. Compare repeated preparation and
    decoding with existing shared helpers before introducing abstractions. Preserve
    snapshot semantics, error propagation, locking and atomic publication. Similar
    SQL operations across engines are not automatically interchangeable. Shared
    SQLite row decoding and batch verification, plus PostgreSQL listing, lookup
    and create-retry decoding, are already consolidated; review other operations
-   rather than reopening those completed changes.
+   rather than reopening those completed changes. Shared SQLite appended-evidence
+   persistence now also owns the baseline-versus-head rule for lifecycle and OCI
+   tag mutations; quarantine empty-log validation and OCI object database-clock
+   behavior remain explicit.
 4. **Finish measured build-cost work.** Ordinary build targets already avoid
    unconditional clean, Nextest is pinned without forced reinstall, and SDK tests
    no longer require the server graph. A controlled empty-target release-build
