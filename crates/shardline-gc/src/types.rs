@@ -9,10 +9,9 @@ pub use shardline_server_core::DEFAULT_LOCAL_GC_RETENTION_SECONDS;
 ///
 /// Prevents data loss from the TOCTOU race between the GC mark phase and
 /// concurrent uploads that have written chunks on disk but not yet committed
-/// their file records.  A non-zero retention gives concurrent uploads time
-/// to finish before orphaned chunks are physically deleted.
-///
-/// See [`crate::run_gc_with_stores`] for the clamping logic.
+/// their file records. The CLI enforces this minimum; low-level callers set
+/// retention through [`LocalGcOptions`] and must honor the writer-exclusion
+/// contract of [`crate::run_gc_with_stores`].
 pub const MINIMUM_GC_RETENTION_SECONDS: u64 = 3600; // 1 hour
 
 /// Local filesystem garbage-collection execution options.

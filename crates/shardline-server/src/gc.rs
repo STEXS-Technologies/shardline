@@ -1,6 +1,7 @@
 pub(crate) use shardline_gc::run_gc_with_oci_tombstones;
 pub use shardline_gc::{
     DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
+    MINIMUM_GC_RETENTION_SECONDS,
 };
 
 #[cfg(test)]

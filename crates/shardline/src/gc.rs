@@ -13,12 +13,7 @@ use crate::{
     local_output::{validate_deployment_outputs, write_output_bytes},
 };
 
-/// Minimum retention window in seconds for GC quarantine entries.
-///
-/// Prevents data loss from the TOCTOU race between the GC mark phase and
-/// concurrent uploads that have written chunks on disk but not yet committed
-/// their file records.
-pub const MINIMUM_GC_RETENTION_SECONDS: u64 = 3600; // 1 hour
+pub use shardline_server::MINIMUM_GC_RETENTION_SECONDS;
 
 /// Garbage-collection runtime failure.
 #[derive(Debug, Error)]

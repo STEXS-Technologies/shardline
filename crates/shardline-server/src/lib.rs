@@ -196,6 +196,7 @@ pub use fuzz::{
 };
 pub use gc::{
     DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
+    MINIMUM_GC_RETENTION_SECONDS,
 };
 pub use gc_runtime::{run_gc, run_gc_diagnostics};
 pub use ingest_bench::ingest_without_storage_with_parallelism;
