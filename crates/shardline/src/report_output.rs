@@ -929,37 +929,61 @@ mod tests {
     }
 
     #[test]
-    fn local_gc_cli_summary_runs() {
-        // mark=true — retention_seconds printed
-        print_local_gc_cli_summary(
-            &LocalGcReport::default(),
-            "mark",
-            Path::new("/root"),
-            7200,
-            true,
-            Some(Path::new("/ret.json")),
-            None,
-        );
-        // mark=false — retention_seconds not printed, orphan_inventory printed
-        print_local_gc_cli_summary(
-            &LocalGcReport::default(),
-            "sweep",
-            Path::new("/root"),
-            3600,
-            false,
-            None,
-            Some(Path::new("/orphans.json")),
-        );
-        // Both optional paths present
-        print_local_gc_cli_summary(
-            &LocalGcReport::default(),
-            "mark-and-sweep",
-            Path::new("/root"),
-            3600,
-            true,
-            Some(Path::new("/ret.json")),
-            Some(Path::new("/orphans.json")),
-        );
+    fn local_gc_cli_summary_preserves_mode_headers_and_errors() {
+        let report = LocalGcReport::default();
+        let mut summary = Vec::new();
+        write_local_gc_summary(&mut summary, &report).unwrap();
+        for (mode, retention, mark, retention_report, orphan_inventory, header) in [
+            (
+                "mark",
+                7200,
+                true,
+                Some("/ret.json"),
+                None,
+                "mode: mark\nroot: /root\nretention_seconds: 7200\nretention_report: /ret.json\n",
+            ),
+            (
+                "sweep",
+                3600,
+                false,
+                None,
+                Some("/orphans.json"),
+                "mode: sweep\nroot: /root\norphan_inventory: /orphans.json\n",
+            ),
+            (
+                "mark-and-sweep",
+                3600,
+                true,
+                Some("/ret.json"),
+                Some("/orphans.json"),
+                "mode: mark-and-sweep\nroot: /root\nretention_seconds: 3600\nretention_report: /ret.json\norphan_inventory: /orphans.json\n",
+            ),
+            (
+                "dry-run",
+                3600,
+                false,
+                None,
+                None,
+                "mode: dry-run\nroot: /root\n",
+            ),
+        ] {
+            let write = |writer: &mut dyn Write| {
+                write_local_gc_cli_summary(
+                    writer,
+                    &report,
+                    mode,
+                    Path::new("/root"),
+                    retention,
+                    mark,
+                    retention_report.map(Path::new),
+                    orphan_inventory.map(Path::new),
+                )
+            };
+            let mut bytes = Vec::new();
+            write(&mut bytes).unwrap();
+            assert_eq!(bytes, [header.as_bytes(), &summary].concat(), "{mode}");
+            assert_writer_errors(write);
+        }
     }
 
     #[test]
@@ -1050,25 +1074,13 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_and_gc_summaries_propagate_write_and_flush_errors() {
+    fn lifecycle_summary_propagates_write_and_flush_errors() {
         assert_writer_errors(|writer| {
             write_lifecycle_repair_cli_summary(
                 writer,
                 &LifecycleRepairReport::default(),
                 Path::new("/root"),
                 3600,
-            )
-        });
-        assert_writer_errors(|writer| {
-            write_local_gc_cli_summary(
-                writer,
-                &LocalGcReport::default(),
-                "dry-run",
-                Path::new("/root"),
-                3600,
-                false,
-                None,
-                None,
             )
         });
     }
