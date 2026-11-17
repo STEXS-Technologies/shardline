@@ -268,13 +268,6 @@ fn build_form(fields: &[(String, String)]) -> Result<S3PostObjectForm, S3Error> 
             payload_headers.append(header, value);
         }
     }
-    if payload_headers.keys().any(|name| {
-        name.as_str()
-            .strip_prefix("x-amz-meta-")
-            .is_some_and(super::checksum::is_internal_metadata)
-    }) {
-        return Err(S3Error::invalid_argument("Reserved S3 user metadata name"));
-    }
     let mut user_metadata = super::object::capture_user_metadata(&payload_headers)?;
     super::object_headers::capture_headers(&payload_headers, &mut user_metadata)?;
     if let Some(tags) = super::tagging::parse_header(&payload_headers)? {
@@ -317,7 +310,7 @@ fn supported_field(name: &str) -> bool {
                 | "acl"
                 | "x-amz-acl"
         )
-        || name.to_ascii_lowercase().starts_with("x-amz-meta-")
+        || lower_name.starts_with("x-amz-meta-")
 }
 
 /// S3 ignores redirect values it cannot interpret. Restrict redirects to
@@ -369,5 +362,32 @@ fn entity_too_large() -> S3Error {
         code: "EntityTooLarge",
         message: "Your proposed upload exceeds the maximum allowed object size".to_owned(),
         status: axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn form_metadata_uses_shared_reserved_name_validation() {
+        let mut fields = vec![("key".to_owned(), "object".to_owned())];
+        fields.push(("X-Amz-Meta-Description".to_owned(), "value".to_owned()));
+        assert_eq!(
+            super::build_form(&fields).unwrap().user_metadata,
+            vec![("description".to_owned(), "value".to_owned())]
+        );
+        for suffix in [
+            "ShArDlInE-InTeRnAl-S3-CoNtEnT-TyPe-V1",
+            "shardline-internal-s3-tagging-v1",
+            "shardline-internal-s3-multipart-checksum-v1",
+            "shardline-internal-s3-checksum-v1",
+        ] {
+            fields[1].0 = format!("X-Amz-Meta-{suffix}");
+            let error = super::build_form(&fields).err().unwrap();
+            assert_eq!(
+                error,
+                shardline_s3_adapter::S3Error::invalid_argument("Reserved S3 user metadata name"),
+                "{suffix}"
+            );
+        }
     }
 }
