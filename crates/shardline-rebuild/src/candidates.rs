@@ -585,89 +585,38 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn collect_candidate_older_version_does_not_replace_newer() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let store = LocalRecordStore::open(root.clone());
+    #[tokio::test]
+    async fn collect_candidate_selects_latest_epoch_then_content_hash() {
+        for (epoch_a, epoch_b, expected_hash) in [(100, 100, "b"), (100, 1, "a"), (1, 100, "b")] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let store = LocalRecordStore::open(root.to_path_buf());
+            // Insert in reverse hash order; pin timestamps so wall-clock drift
+            // cannot change which comparison decides the winner.
+            for (hash, epoch) in [("b", epoch_b), ("a", epoch_a)] {
+                let record = make_file_record("versions.txt", &hash.repeat(64));
+                store.write_version_record(&record).await.unwrap();
+                pin_modified_since_epoch(root, &record, epoch);
+            }
 
-        // Both records are pinned to the SAME `modified_since_epoch`, so the
-        // content-hash tiebreaker decides ("b" > "a") regardless of wall-clock
-        // drift between the two writes.
-        let record_newer = make_file_record("older.txt", &"b".repeat(64));
-        store.write_version_record(&record_newer).await.unwrap();
-        let record_older = make_file_record("older.txt", &valid_hex_hash());
-        store.write_version_record(&record_older).await.unwrap();
-        pin_modified_since_epoch(&root, &record_newer, 1_700_000_000);
-        pin_modified_since_epoch(&root, &record_older, 1_700_000_000);
+            let mut candidates = HashMap::new();
+            let mut xorbs = HashSet::new();
+            let mut report = IndexRebuildReport::default();
+            RecordTraversal::visit_version_records(&store, |entry| {
+                collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
+                Ok::<(), crate::RebuildError>(())
+            })
+            .await
+            .unwrap();
 
-        let mut candidates = HashMap::new();
-        let mut xorbs = HashSet::new();
-        let mut report = IndexRebuildReport::default();
-
-        RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
-            Ok::<(), crate::RebuildError>(())
-        })
-        .await
-        .unwrap();
-
-        assert!(report.is_clean());
-        assert_eq!(candidates.len(), 1);
-        // The candidate should have content_hash "b" because it was seen first
-        // and "a" doesn't beat "b" in the tiebreaker
-        let candidate = candidates.values().next().unwrap();
-        assert_eq!(
-            candidate.record.content_hash,
-            "b".repeat(64),
-            "expected the first-seen record with higher content hash to remain"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn collect_candidate_older_record_does_not_replace_newer_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let store = LocalRecordStore::open(root.clone());
-
-        // Two records with the same file_id and EXPLICIT epochs. Record "a" has
-        // the higher epoch (100) and — because its lower content hash sorts
-        // first — is processed first, so it wins; record "b" (epoch 1) is
-        // processed second and hits the `Some(_) => {}` arm (not newer). The
-        // explicit epochs make the comparison deterministic regardless of the
-        // wall clock.
-        let record_a = make_file_record("collide.txt", &"a".repeat(64));
-        store.write_version_record(&record_a).await.unwrap();
-        let record_b = make_file_record("collide.txt", &"b".repeat(64));
-        store.write_version_record(&record_b).await.unwrap();
-        pin_modified_since_epoch(&root, &record_a, 100);
-        pin_modified_since_epoch(&root, &record_b, 1);
-
-        let mut candidates = HashMap::new();
-        let mut xorbs = HashSet::new();
-        let mut report = IndexRebuildReport::default();
-
-        RecordTraversal::visit_version_records(&store, |entry| {
-            collect_candidate(&store, entry, &mut candidates, &mut xorbs, &mut report);
-            Ok::<(), crate::RebuildError>(())
-        })
-        .await
-        .unwrap();
-
-        assert!(report.is_clean(), "report: {report:?}");
-        assert_eq!(candidates.len(), 1);
-        // The candidate should have content_hash "a" (the one with higher epoch).
-        let candidate = candidates.values().next().unwrap();
-        assert_eq!(candidate.record.content_hash, "a".repeat(64));
-
-        // Verify that the newer content_hash record "b" was NOT selected
-        // (because epoch 1 < epoch 100). This confirms the Some(_) => {} arm
-        // fired for the second record (not newer, not replaced).
-        assert_ne!(
-            candidate.record.content_hash,
-            "b".repeat(64),
-            "content_hash 'b' should have been rejected due to lower epoch"
-        );
+            assert!(report.is_clean(), "{report:?}");
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(
+                candidates.values().next().unwrap().record.content_hash,
+                expected_hash.repeat(64),
+                "epochs: a={epoch_a}, b={epoch_b}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
