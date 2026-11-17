@@ -6297,3 +6297,44 @@ This is a local contributor-gate result, not a build-speed comparison, required
 PostgreSQL/MinIO qualification or resolution of the historical hosted SDK memory
 failure. The separately recorded database/object-storage checkpoints retain their
 own frozen sources and coverage limits.
+
+## Release-mode CLI edit comparison (2026-11-17)
+
+Compared baseline `401dcac4f95c61a41104df3ee6e222d93c0b18fb` with
+`d49752c358ff6f7cf9a75f68c5092d31b078246b`. This measures a small CLI
+source edit, not an unchanged rebuild or a clean build. Both revisions used
+Rust 1.99.0, cores 0–3, four build jobs, incremental compilation disabled,
+an empty `RUSTC_WRAPPER`, offline resolution and separate warmed Cargo targets:
+
+```text
+cargo +1.99.0 build --offline --locked --release -p shardline --bin shardline
+```
+
+First build each unmodified revision to prepare its target; exclude that time.
+For samples 1–3, replace the top-level `about` string in
+`crates/shardline/src/command/definition.rs` with the original text followed by
+` Build iteration N.`. Change N for each sample so each build processes a new
+source edit. Run baseline/current, current/baseline, baseline/current in order.
+After every timed build, run the executable with `-h` and assert that the
+changed text appears. Restore the original source files after the sequence.
+
+| Edited-source sample | Baseline | Current |
+| --- | ---: | ---: |
+| 1 | 126.614 s | 122.763 s |
+| 2 | 130.910 s | 128.704 s |
+| 3 | 129.033 s | 127.761 s |
+| Median | 129.033 s | 127.761 s |
+
+All six builds and changed-help assertions passed; both source files were
+restored. The current median was 1.272 s (0.99%) shorter. With three samples
+per revision on a shared host, this does not establish a statistically reliable
+speedup. It does show that this release-mode edit still costs roughly two
+minutes. Do not generalize this result to development-profile incremental
+builds, server-core edits, container builds or the 30% contributor critical-path
+target. Preparation builds took 221.627 s and 182.516 s respectively; their
+cache invalidation differed and they are not clean-build comparison samples.
+
+Raw source hashes, settings, per-sample times, build logs and changed-help
+outputs are in `.shardline-cleanup-state/build-edit-d49752c3/` in the parent
+projects directory. The restoring orchestrator is
+`.shardline-cleanup-state/build-edit-d49752c3.py`.

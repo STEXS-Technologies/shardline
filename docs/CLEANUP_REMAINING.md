@@ -55,8 +55,10 @@ code.
    no longer require the server graph. A controlled empty-target release-build
    pair measured 243.923 s at the baseline versus 234.337 s at `b367232d`
    (3.93% shorter in that sample). This is not a statistically established
-   improvement or a cold-machine/container measurement. Repeat comparisons and
-   measure edited-source iteration and container builds before claiming the
+   improvement or a cold-machine/container measurement. Three release-mode CLI
+   edit samples per revision measured medians of 129.033 s baseline versus
+   127.761 s at `d49752c3` (0.99% shorter; not a proven speedup). Development-profile
+   iteration and container builds still need measurement before claiming the
    RFC's 30% contributor critical-path target. Review the sequential 150-minute
    E2E job for reusable compatible artifacts and measured scheduling opportunities;
    retain every required qualification gate.
