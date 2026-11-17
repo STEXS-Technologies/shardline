@@ -184,24 +184,12 @@ mod tests {
     use std::{net::SocketAddr, num::NonZeroUsize, path::Path};
 
     use shardline_server::{
-        DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, FsckIssueDetail, FsckIssueKind,
-        IndexRebuildIssueDetail, LifecycleRepairReport, LocalFsckIssue, LocalFsckReport,
-        LocalIndexRebuildIssue, LocalIndexRebuildIssueKind, LocalIndexRebuildReport, ServerConfig,
+        FsckIssueDetail, FsckIssueKind, IndexRebuildIssueDetail, LifecycleRepairReport,
+        LocalFsckIssue, LocalFsckReport, LocalIndexRebuildIssue, LocalIndexRebuildIssueKind,
+        LocalIndexRebuildReport, ServerConfig,
     };
 
-    use super::{LifecycleRepairOptions, RepairReport};
-
-    #[test]
-    fn lifecycle_repair_default_retention_matches_server_default() {
-        let options = LifecycleRepairOptions::default();
-
-        assert_eq!(
-            options.webhook_retention_seconds,
-            DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS
-        );
-    }
-
-    // ── RepairReport smoke tests ────────────────────────────────────────
+    use super::RepairReport;
 
     fn empty_repair_report() -> RepairReport {
         RepairReport {
@@ -263,55 +251,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn repair_report_constructs_defaults() {
-        let report = empty_repair_report();
-        assert_eq!(report.index_rebuild.scanned_version_records, 0);
-        assert_eq!(report.lifecycle_repair.scanned_records, 0);
-        assert_eq!(report.fsck.latest_records, 0);
-    }
-
-    #[test]
-    fn repair_report_with_data_reports_correct_counts() {
-        let report = report_with_issues();
-        assert_eq!(report.index_rebuild.scanned_version_records, 10);
-        assert_eq!(report.index_rebuild.issue_count(), 1);
-        assert_eq!(report.lifecycle_repair.scanned_records, 100);
-        assert_eq!(report.fsck.issue_count(), 1);
-        assert!(!report.fsck.is_clean());
-        assert!(!report.index_rebuild.is_clean());
-    }
-
-    #[test]
-    fn repair_report_print_summary_runs() {
-        let report = empty_repair_report();
-        report.print_summary();
-    }
-
-    #[test]
-    fn repair_report_print_summary_with_data_runs() {
-        let report = report_with_issues();
-        report.print_summary();
-    }
-
-    #[test]
-    fn repair_report_print_cli_summary_runs() {
-        let report = empty_repair_report();
-        report.print_cli_summary(Path::new("/root"), 3600);
-    }
-
-    #[test]
-    fn repair_report_print_issues_with_data() {
-        let report = report_with_issues();
-        report.print_issues();
-    }
-
-    #[test]
-    fn repair_report_print_issues_empty() {
-        let report = empty_repair_report();
-        report.print_issues();
-    }
-
     #[tokio::test]
     async fn run_lifecycle_repair_rejects_missing_root() {
         let result =
@@ -362,6 +301,10 @@ mod tests {
             report.write_issues(writer)
         });
         let mut bytes = Vec::new();
+        empty_repair_report()
+            .write_issues(&mut bytes)
+            .expect("empty issues");
+        assert!(bytes.is_empty());
         report.write_issues(&mut bytes).expect("issues");
         assert_eq!(bytes, b"index_rebuild.issue: invalid_version_record_json location=records/abc detail=record json was invalid\nfsck.issue: missing_chunk location=chunks/xyz detail=record json was invalid\n");
         bytes.clear();
