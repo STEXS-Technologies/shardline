@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use shardline_index::{
-    FileRecord, LocalRecordStore, OciObjectKey, OciObjectKind, OciObjectStore, PostgresRecordStore,
-    RecordStore, RecordTraversal,
+    FileRecord, LocalRecordStore, OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone,
+    PostgresRecordStore, RecordStore, RecordTraversal,
 };
 use shardline_oci_adapter::{
     oci_blob_key_from_namespace, oci_manifest_key_from_namespace,
@@ -38,18 +38,31 @@ pub trait OciRecordReclaimer {
     ) -> impl std::future::Future<Output = Result<(), GcError>> + Send;
 }
 
-async fn latest_records_by_file_id<RecordAdapter>(
+async fn blob_records_for_tombstones<RecordAdapter>(
     record_store: &RecordAdapter,
-) -> Result<HashMap<String, FileRecord>, GcError>
+    tombstones: &[OciObjectTombstone],
+) -> Result<HashMap<String, Option<FileRecord>>, GcError>
 where
     RecordAdapter: RecordTraversal + Sync,
     RecordAdapter::Error: Into<GcError>,
 {
     let mut records = HashMap::new();
+    for tombstone in tombstones
+        .iter()
+        .filter(|entry| entry.key.kind == OciObjectKind::Blob)
+    {
+        let key = &tombstone.key;
+        let object_key =
+            oci_blob_key_from_namespace(&key.repository, &key.digest_hex, &key.scope_namespace)?;
+        records.insert(protocol_object_file_id(&object_key), None);
+    }
     record_store
         .visit_latest_records(|entry| {
+            // Validate every record, but retain only metadata needed for reclamation.
             let record = parse_stored_file_record_bytes(&entry.bytes)?;
-            records.insert(record.file_id.clone(), record);
+            if let Some(slot) = records.get_mut(&record.file_id) {
+                *slot = Some(record);
+            }
             Ok::<(), GcError>(())
         })
         .await?;
@@ -131,7 +144,7 @@ where
         return Ok(report);
     }
     let held_keys = read_active_retention_hold_object_keys(index_store, now, false).await?;
-    let mut latest_records = latest_records_by_file_id(record_store).await?;
+    let mut latest_records = blob_records_for_tombstones(record_store, &tombstones).await?;
 
     for tombstone in tombstones {
         let Some(delete_after) = tombstone
@@ -157,7 +170,7 @@ where
             crate::remote_delete::delete_gc_object(object_store, object_key, remote_guard).await?;
             if key.kind == OciObjectKind::Blob {
                 let file_id = protocol_object_file_id(object_key);
-                if let Some(record) = latest_records.remove(&file_id) {
+                if let Some(record) = latest_records.remove(&file_id).flatten() {
                     record_store.delete_protocol_record(&record).await?;
                 }
             }
@@ -307,7 +320,11 @@ mod tests {
         let blocked_root = root.join("unavailable-records");
         std::fs::write(&blocked_root, b"not a directory").unwrap();
         let record_store = LocalRecordStore::open(blocked_root);
-        assert!(latest_records_by_file_id(&record_store).await.is_err());
+        assert!(
+            blob_records_for_tombstones(&record_store, &[])
+                .await
+                .is_err()
+        );
 
         let report =
             reclaim_oci_tombstones(&record_store, &index_store, &object_store, sweep_now())
@@ -581,6 +598,20 @@ mod tests {
             .delete_oci_object(&tombstone(OciObjectKind::Blob, &digest_hex))
             .await
             .unwrap();
+
+        let pending = index_store.list_oci_object_tombstones().await.unwrap();
+        let retained = blob_records_for_tombstones(&record_store, &pending)
+            .await
+            .unwrap();
+        assert_eq!(
+            retained.len(),
+            1,
+            "unrelated records must not accumulate in GC memory"
+        );
+        assert_eq!(
+            retained[&deleted_file_id].as_ref().unwrap().file_id,
+            deleted_file_id
+        );
 
         let diagnostics = run_gc_with_oci_tombstones(
             &record_store,
