@@ -6200,3 +6200,36 @@ Tracked Rust inventory is 567,008 lines, including tests, comments and blank
 lines: 36,641 fewer (6.07%) than the 603,649-line baseline. This checkpoint
 qualifies index behavior with PostgreSQL; fresh server/MinIO deployment
 qualification and the historical hosted SDK memory issue remain open.
+
+## Full server release-build comparison (2026-11-17)
+
+Compared cleanup baseline `401dcac4f95c61a41104df3ee6e222d93c0b18fb` with
+`b367232d0ed6cc02f9c12c9ab52f0014d88595e5`. Both used Rust 1.99.0, four
+build jobs, CPU affinity restricted to cores 0–3, incremental compilation
+disabled, an empty `RUSTC_WRAPPER`, offline dependency resolution and separate
+initially nonexistent Cargo target directories on the same host. Command:
+
+```text
+cargo +1.99.0 build --offline --locked --release -p shardline --bin shardline
+```
+
+| Sample | Baseline | Current |
+| --- | ---: | ---: |
+| Empty Cargo target directory | 243.923 s | 234.337 s |
+| Immediate unchanged warm rebuild | 0.414 s | 0.319 s |
+
+Both release builds and both warm rebuilds passed. Both generated binaries
+also passed `--version` and `--help` smoke checks. The current empty-target
+sample took 9.587 seconds less (3.93%). This single sequential pair is not a
+statistically established speedup: dependency sources and OS caches were warm,
+the baseline ran first, and shared-host contention was not eliminated. Warm
+samples measure unchanged-build overhead, not compilation after a source edit.
+This does not establish the aspirational 30% full-build reduction, container
+build performance or a cold-machine result. Earlier SDK iteration measurements
+remain a separate, narrower benefit.
+
+Commands, CPU affinity, source hashes, exit codes and elapsed times are saved
+in the parent projects directory at
+`.shardline-cleanup-state/build-comparison-b367232d/result.json`; individual
+build/smoke logs and binary hashes/sizes are alongside it. The orchestrator is
+`.shardline-cleanup-state/build-comparison-b367232d.py`.
