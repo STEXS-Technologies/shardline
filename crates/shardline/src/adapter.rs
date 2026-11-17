@@ -116,28 +116,22 @@ mod tests {
 
     #[test]
     fn endpoint_joins_base_url_and_path() {
-        assert_eq!(
-            endpoint("http://127.0.0.1:8080/", "/v1/stats"),
-            "http://127.0.0.1:8080/v1/stats"
-        );
-    }
-
-    #[test]
-    fn endpoint_no_trailing_slash_on_base() {
-        assert_eq!(
-            endpoint("http://127.0.0.1:8080", "healthz"),
-            "http://127.0.0.1:8080/healthz"
-        );
-    }
-
-    #[test]
-    fn endpoint_both_slashes_trimmed() {
-        assert_eq!(endpoint("http://host/", "/path/"), "http://host/path/");
-    }
-
-    #[test]
-    fn endpoint_empty_path_returns_base_with_slash() {
-        assert_eq!(endpoint("http://host", ""), "http://host/");
+        for (base, path, expected) in [
+            (
+                "http://127.0.0.1:8080/",
+                "/v1/stats",
+                "http://127.0.0.1:8080/v1/stats",
+            ),
+            (
+                "http://127.0.0.1:8080",
+                "healthz",
+                "http://127.0.0.1:8080/healthz",
+            ),
+            ("http://host/", "/path/", "http://host/path/"),
+            ("http://host", "", "http://host/"),
+        ] {
+            assert_eq!(endpoint(base, path), expected, "{base:?} + {path:?}");
+        }
     }
 
     // ── CliRuntimeError Display / Debug ─────────────────────────────────
@@ -158,12 +152,9 @@ mod tests {
 
     #[test]
     fn cli_runtime_error_http_from_reqwest_error() {
-        // Verify the From<ReqwestError> impl by constructing a reqwest::Error
-        // via a builder that produces an error from an invalid URL.
-        let result = reqwest::Url::parse("not a url");
-        assert!(result.is_err());
-        // The From<reqwest::Error> conversion is verified at compile time
-        // through the `#[from]` attribute on CliRuntimeError::Http.
+        let error = reqwest::Client::new().get("not a url").build().unwrap_err();
+        let converted = CliRuntimeError::from(error);
+        assert!(matches!(converted, CliRuntimeError::Http(_)));
     }
 
     #[test]
