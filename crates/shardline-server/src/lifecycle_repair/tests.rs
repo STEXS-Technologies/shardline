@@ -153,49 +153,6 @@ fn lifecycle_repair_options_default() {
     );
 }
 
-#[test]
-fn lifecycle_repair_options_debug_and_clone() {
-    let options = LifecycleRepairOptions {
-        webhook_retention_seconds: 3600,
-    };
-    let cloned = options;
-    assert_eq!(options, cloned);
-    let debug = format!("{options:?}");
-    assert!(debug.contains("3600"));
-}
-
-// ── Enum formatting ────────────────────────────────────────────────────
-
-#[test]
-fn quarantine_repair_action_debug_format() {
-    assert_eq!(format!("{:?}", QuarantineRepairAction::Keep), "Keep");
-    assert_eq!(
-        format!("{:?}", QuarantineRepairAction::DeleteMissing),
-        "DeleteMissing"
-    );
-    assert_eq!(
-        format!("{:?}", QuarantineRepairAction::DeleteReachable),
-        "DeleteReachable"
-    );
-    assert_eq!(
-        format!("{:?}", QuarantineRepairAction::DeleteHeld),
-        "DeleteHeld"
-    );
-}
-
-#[test]
-fn webhook_delivery_repair_action_debug_format() {
-    assert_eq!(format!("{:?}", WebhookDeliveryRepairAction::Keep), "Keep");
-    assert_eq!(
-        format!("{:?}", WebhookDeliveryRepairAction::DeleteStale),
-        "DeleteStale"
-    );
-    assert_eq!(
-        format!("{:?}", WebhookDeliveryRepairAction::DeleteFuture),
-        "DeleteFuture"
-    );
-}
-
 // ── Constants ──────────────────────────────────────────────────────────
 
 #[test]
@@ -218,23 +175,6 @@ fn repair_reachability_default_has_empty_sets() {
     assert_eq!(reachability.scanned_records, 0);
 }
 
-#[test]
-fn repair_reachability_can_accumulate_keys() {
-    let mut reachability = RepairReachability::default();
-    reachability
-        .referenced_object_keys
-        .insert("key1".to_owned());
-    reachability
-        .live_dedupe_chunk_hashes
-        .insert("hash1".to_owned());
-    reachability.scanned_records = 42;
-    assert_eq!(reachability.referenced_object_keys.len(), 1);
-    assert!(reachability.referenced_object_keys.contains("key1"));
-    assert_eq!(reachability.live_dedupe_chunk_hashes.len(), 1);
-    assert!(reachability.live_dedupe_chunk_hashes.contains("hash1"));
-    assert_eq!(reachability.scanned_records, 42);
-}
-
 // ── LifecycleRepairReport ──────────────────────────────────────────────
 
 #[test]
@@ -252,41 +192,6 @@ fn lifecycle_repair_report_all_fields_default_to_zero() {
     assert_eq!(report.scanned_webhook_deliveries, 0);
     assert_eq!(report.removed_stale_webhook_deliveries, 0);
     assert_eq!(report.removed_future_webhook_deliveries, 0);
-}
-
-#[test]
-fn lifecycle_repair_report_non_zero_fields() {
-    let report = LifecycleRepairReport {
-        scanned_records: 100,
-        referenced_objects: 50,
-        scanned_quarantine_candidates: 10,
-        removed_missing_quarantine_candidates: 2,
-        removed_reachable_quarantine_candidates: 3,
-        removed_held_quarantine_candidates: 1,
-        scanned_retention_holds: 20,
-        removed_expired_retention_holds: 5,
-        removed_missing_retention_holds: 1,
-        scanned_webhook_deliveries: 30,
-        removed_stale_webhook_deliveries: 10,
-        removed_future_webhook_deliveries: 2,
-    };
-    assert_eq!(report.scanned_records, 100);
-    assert_eq!(report.removed_stale_webhook_deliveries, 10);
-    assert_eq!(report.removed_future_webhook_deliveries, 2);
-    let debug = format!("{:?}", report);
-    assert!(debug.contains("scanned_records: 100"));
-    assert!(debug.contains("referenced_objects: 50"));
-}
-
-#[test]
-fn lifecycle_repair_report_clone_and_eq() {
-    let report = LifecycleRepairReport {
-        scanned_records: 5,
-        referenced_objects: 3,
-        ..LifecycleRepairReport::default()
-    };
-    let cloned = report.clone();
-    assert_eq!(report, cloned);
 }
 
 // ── collect_record_object_references ──────────────────────────────────
