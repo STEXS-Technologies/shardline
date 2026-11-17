@@ -80,26 +80,7 @@ impl From<FsckError> for ServerError {
             FsckError::Overflow => Self::Overflow,
             FsckError::LocalObjectStore(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
             FsckError::S3ObjectStore(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
-            FsckError::ObjectStore(e) => match e {
-                shardline_server_core::ServerObjectStoreError::NotFound => Self::NotFound,
-                shardline_server_core::ServerObjectStoreError::Overflow => Self::Overflow,
-                shardline_server_core::ServerObjectStoreError::InvalidContentHash => {
-                    Self::InvalidContentHash
-                }
-                shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch => {
-                    Self::ObjectStore(ObjectStoreError::StoredLengthMismatch)
-                }
-                shardline_server_core::ServerObjectStoreError::Local(e) => {
-                    Self::ObjectStore(ObjectStoreError::Local(e))
-                }
-                shardline_server_core::ServerObjectStoreError::S3(e) => {
-                    Self::ObjectStore(ObjectStoreError::S3(e))
-                }
-                shardline_server_core::ServerObjectStoreError::Io(e) => Self::Io(e),
-                shardline_server_core::ServerObjectStoreError::NumericConversion(e) => {
-                    Self::NumericConversion(e)
-                }
-            },
+            FsckError::ObjectStore(e) => Self::from(e),
             FsckError::XetAdapter(e) => Self::from(e),
             FsckError::LocalIndexStore(e) => Self::Index(IndexError::Local(e)),
             FsckError::MemoryIndexStore(e) => Self::Index(IndexError::MemoryIndex(e)),
@@ -122,28 +103,6 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use super::*;
-
-    #[test]
-    fn run_fsck_with_local_stores_succeeds() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let root = temp.path().to_path_buf();
-        let bind_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let chunk_size = NonZeroUsize::new(4096).unwrap();
-        let _config = ServerConfig::new(
-            bind_addr,
-            "http://127.0.0.1:8080".to_owned(),
-            root,
-            chunk_size,
-        );
-        let result = tempfile::tempdir();
-        assert!(result.is_ok());
-        let report = tempfile::tempdir().map(|_dir| {
-            // Just verify the type compiles and the function is reachable.
-            // The actual call requires valid stores.
-            true
-        });
-        assert!(report.is_ok());
-    }
 
     #[test]
     fn from_fsck_error_io_maps_correctly() {
@@ -215,25 +174,10 @@ mod tests {
             tmp.path().to_path_buf(),
             chunk_size,
         );
-        let result = run_fsck(config).await;
-        // With a valid temp directory, fsck should succeed (no records to scan)
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn fsck_re_exports_are_accessible() {
-        // Verify that the re-exported types compile and are accessible.
-        let _report = LocalFsckReport {
-            latest_records: 0,
-            version_records: 0,
-            inspected_chunk_references: 0,
-            inspected_dedupe_shard_mappings: 0,
-            inspected_reconstructions: 0,
-            inspected_webhook_deliveries: 0,
-            inspected_provider_repository_states: 0,
-            issues: Vec::new(),
-        };
-        assert_eq!(_report.latest_records, 0);
+        let report = run_fsck(config).await.unwrap();
+        assert!(report.is_clean());
+        assert_eq!(report.latest_records, 0);
+        assert_eq!(report.version_records, 0);
     }
 
     // -----------------------------------------------------------------------
