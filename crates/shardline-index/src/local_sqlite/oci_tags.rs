@@ -1,13 +1,10 @@
-use super::helpers::run_blocking_store;
+use super::helpers::{persist_appended_reliability_events, run_blocking_store};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows};
 use crate::{
     OciTagEntry, OciTagStore,
-    local_sqlite::{
-        current_oci_tag_evidence, oci_tag_snapshot, persist_reliability_event,
-        verify_oci_tag_evidence,
-    },
+    local_sqlite::{current_oci_tag_evidence, oci_tag_snapshot, verify_oci_tag_evidence},
 };
 use shardline_reliability::{
     OciTagLifecycleEvent, OperationKind, SnapshotEvidence, verify_and_append_snapshot_transition,
@@ -45,14 +42,7 @@ pub(crate) fn record_tag_transition(
         current_oci_tag_evidence(transaction, scope_namespace, repository, tag, before)?;
     let evidence =
         verify_and_append_snapshot_transition(stored_evidence, before_snapshot, after_snapshot)?.0;
-    if evidence_was_missing {
-        for event in evidence.events() {
-            persist_reliability_event(transaction, event)?;
-        }
-    } else if let Some(event) = evidence.events().last() {
-        persist_reliability_event(transaction, event)?;
-    }
-    Ok(())
+    persist_appended_reliability_events(transaction, evidence.events(), evidence_was_missing)
 }
 
 fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OciTagEntry> {
@@ -669,7 +659,7 @@ mod tests {
                 "INSERT INTO shardline_oci_tags(scope_namespace,repository,tag,digest_hex) VALUES('chunk-fixture','team/assets',?1,?2)",
                 params![tag,digest]).unwrap();
             for event in evidence.events() {
-                persist_reliability_event(&transaction, event).unwrap();
+                super::super::helpers::persist_reliability_event(&transaction, event).unwrap();
             }
         }
         transaction.commit().unwrap();

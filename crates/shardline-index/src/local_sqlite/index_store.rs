@@ -1019,18 +1019,12 @@ impl LifecycleStore for LocalIndexStore {
         } else {
             verify_and_reactivate_quarantine(evidence, snapshot)?
         };
-        let event = evidence.events().last().ok_or_else(|| {
+        evidence.events().last().ok_or_else(|| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
                 "quarantine evidence event",
             ))
         })?;
-        if evidence_was_empty {
-            for stored_event in evidence.events() {
-                super::helpers::persist_reliability_event(&transaction, stored_event)?;
-            }
-        } else {
-            super::helpers::persist_reliability_event(&transaction, event)?;
-        }
+        persist_appended_reliability_events(&transaction, evidence.events(), evidence_was_empty)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1062,20 +1056,18 @@ impl LifecycleStore for LocalIndexStore {
                 super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
             let (evidence, evidence_was_empty) =
                 verify_and_append_snapshot_transition(evidence, active, released)?;
-            let event = evidence.events().last().ok_or_else(|| {
+            evidence.events().last().ok_or_else(|| {
                 LocalIndexStoreError::Reliability(
                     shardline_reliability::ReliabilityError::EmptyField(
                         "quarantine evidence event",
                     ),
                 )
             })?;
-            if evidence_was_empty {
-                for stored_event in evidence.events() {
-                    super::helpers::persist_reliability_event(&transaction, stored_event)?;
-                }
-            } else {
-                super::helpers::persist_reliability_event(&transaction, event)?;
-            }
+            persist_appended_reliability_events(
+                &transaction,
+                evidence.events(),
+                evidence_was_empty,
+            )?;
         }
         transaction.commit()?;
         Ok(changed > 0)
@@ -1128,18 +1120,12 @@ impl LifecycleStore for LocalIndexStore {
             transaction.commit()?;
             return Ok(false);
         }
-        let event = evidence.events().last().ok_or_else(|| {
+        evidence.events().last().ok_or_else(|| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
                 "quarantine evidence event",
             ))
         })?;
-        if evidence_was_empty {
-            for stored_event in evidence.events() {
-                super::helpers::persist_reliability_event(&transaction, stored_event)?;
-            }
-        } else {
-            super::helpers::persist_reliability_event(&transaction, event)?;
-        }
+        persist_appended_reliability_events(&transaction, evidence.events(), evidence_was_empty)?;
         transaction.commit()?;
         Ok(true)
     }
