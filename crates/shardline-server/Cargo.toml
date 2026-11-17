@@ -54,7 +54,7 @@ md-5.workspace = true
 multer.workspace = true
 crc-fast = "1.10"
 sha1.workspace = true
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["rustls-tls"] }
 sha2.workspace = true
 hmac.workspace = true
 sqlx = { workspace = true, features = [
@@ -84,7 +84,7 @@ tokio = { workspace = true, features = ["test-util"] }
 shardline-cas = { workspace = true, features = ["test-fault-injection"] }
 shardline-storage = { workspace = true, features = ["test-fault-injection"] }
 proptest.workspace = true
-reqwest = { workspace = true, features = ["blocking", "stream"] }
+reqwest = { workspace = true, features = ["blocking", "json", "stream"] }
 rusqlite = { workspace = true, features = ["bundled"] }
 shardline-test-support.workspace = true
 wiremock = "0.6"
