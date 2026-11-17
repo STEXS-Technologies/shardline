@@ -1767,72 +1767,45 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── env-provided secrets are never newline-trimmed ─────────────────────
 
     #[test]
-    fn hub_webhook_secret_from_env_is_not_newline_trimmed() {
-        // Trailing-newline stripping applies only to secret *files*. An
-        // env-provided value (32 key bytes + `\n` = 33 bytes) must exceed the
-        // 32-byte bound and be rejected, proving env values are left untouched.
-        // SAFETY: serialized env test
-        set_env_var(
-            "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
-            "0123456789abcdef0123456789abcdef\n",
-        );
-        remove_env_var("SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE");
-        let result = super::load_secret_from_env_or_file_with_conflict_check(
+    fn fixed_length_secrets_from_env_are_not_newline_trimmed() {
+        for (env, file_env) in [
             (
                 "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
                 "SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE",
             ),
-            super::HUB_WEBHOOK_SECRET_KEY_BYTES,
-            true,
-            super::ServerConfigError::EmptyHubWebhookSecretKey,
-            super::ServerConfigError::HubWebhookSecretKey,
-            |observed, maximum| super::ServerConfigError::HubWebhookSecretKeyTooLarge {
-                observed_bytes: observed,
-                maximum_bytes: maximum,
-            },
-            |expected, observed| super::ServerConfigError::HubWebhookSecretKeyLengthMismatch {
-                expected_bytes: expected,
-                observed_bytes: observed,
-            },
-        );
-        remove_env_var("SHARDLINE_HUB_WEBHOOK_SECRET_KEY");
-        assert!(result.is_err());
-    }
-
-    // ── provider-config secret key env handling ────────────────────────────
-
-    #[test]
-    fn config_secret_from_env_is_not_newline_trimmed() {
-        // Trailing-newline stripping applies only to secret *files*. An
-        // env-provided value (32 key bytes + `\n` = 33 bytes) must exceed the
-        // 32-byte bound and be rejected, proving env values are left untouched.
-        // SAFETY: serialized env test
-        set_env_var(
-            "SHARDLINE_CONFIG_SECRET_KEY",
-            "0123456789abcdef0123456789abcdef\n",
-        );
-        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
-        let result = super::load_secret_from_env_or_file_with_conflict_check(
             (
                 "SHARDLINE_CONFIG_SECRET_KEY",
                 "SHARDLINE_CONFIG_SECRET_KEY_FILE",
             ),
-            super::CONFIG_SECRET_KEY_BYTES,
-            true,
-            super::ServerConfigError::EmptyConfigSecretKey,
-            super::ServerConfigError::ConfigSecretKey,
-            |observed, maximum| super::ServerConfigError::ConfigSecretKeyTooLarge {
-                observed_bytes: observed,
-                maximum_bytes: maximum,
-            },
-            |expected, observed| super::ServerConfigError::ConfigSecretKeyLengthMismatch {
-                expected_bytes: expected,
-                observed_bytes: observed,
-            },
-        );
-        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
-        assert!(result.is_err());
+        ] {
+            // File newline stripping must never alter a direct environment value.
+            set_env_var(env, "0123456789abcdef0123456789abcdef\n");
+            remove_env_var(file_env);
+            let result = super::load_server_config_from_env();
+            remove_env_var(env);
+            assert!(
+                matches!(
+                    (env, &result),
+                    (
+                        "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
+                        Err(super::ServerConfigError::HubWebhookSecretKeyTooLarge {
+                            observed_bytes: 33,
+                            maximum_bytes: 32,
+                        }),
+                    ) | (
+                        "SHARDLINE_CONFIG_SECRET_KEY",
+                        Err(super::ServerConfigError::ConfigSecretKeyTooLarge {
+                            observed_bytes: 33,
+                            maximum_bytes: 32,
+                        }),
+                    )
+                ),
+                "unexpected result for {env}: {result:?}"
+            );
+        }
     }
+
+    // ── provider-config secret key env handling ────────────────────────────
 
     #[test]
     fn config_secret_key_from_env_is_applied_to_config() {
