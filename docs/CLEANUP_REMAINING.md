@@ -1,12 +1,12 @@
 # Remaining maintenance cleanup
 
-Inventory source: `99bde68ea3eadf0f37c37b3ff9b1029da109f25d` (2026-11-17).
+Inventory source: `3d23a44653cfdfb11e1afba16a7ba66afc70154f` (2026-11-17).
 This is a review queue, not evidence that the listed code is redundant.
 
 ## Measured position
 
-Tracked Rust source contains 566,249 lines, including comments, blank lines and
-tests: 37,400 fewer lines (6.20%) than the 603,649-line baseline. Reproduce with
+Tracked Rust source contains 566,172 lines, including comments, blank lines and
+tests: 37,477 fewer lines (6.21%) than the 603,649-line baseline. Reproduce with
 `git ls-files '*.rs'` and count each tracked file's lines at the source commit.
 These totals exclude untracked files and unrelated working-tree changes.
 
@@ -14,9 +14,9 @@ These totals exclude untracked files and unrelated working-tree changes.
 | --- | ---: | --- |
 | Server | 208,722 | Protocol fixtures, configuration parsing and lifecycle orchestration |
 | Index | 68,264 | Repeated adapter preparation and validation; retain adapter-owned transactions |
-| Standalone E2E | 45,590 | Repeated setup and scenario coverage across real-client suites |
+| Standalone E2E | 45,547 | Repeated setup and scenario coverage across real-client suites |
 | Hub API | 40,854 | Route fixtures and repeated response construction |
-| CLI | 36,578 | Remaining orchestration after shared report formatting cleanup |
+| CLI | 36,544 | Remaining orchestration after shared report formatting cleanup |
 | SDK | 24,190 | Remaining allocation and dependency costs after shared CDC and reconstruction cleanup |
 
 There is no evidence-backed percentage of cleanup remaining. A further 3–7%
@@ -32,8 +32,13 @@ code.
    157 integration cases and three additional copy-integrity cases at `df0d63fd`.
    See `BENCHMARKS.md` for commands, frozen sources and limits. These checkpoints
    do not qualify the final branch or close the historical hosted SDK memory
-   failure. Local matching experiments have not reproduced it. Obtain current hosted evidence without relaxing the
-   memory bound or opening a pull request. Repeat integrated PostgreSQL/object
+   failure. Local matching experiments have not reproduced it. Manual hosted
+   qualification at `39c86a9e` has passed the owned PostgreSQL process-cut job and
+   all 59 distributed-integrity/mixed-version tests. The contributor job failed
+   `cargo deny check` on the `chrono` and `humantime` unmaintained advisories;
+   no exception was added. Configured PostgreSQL and E2E jobs were still running
+   at this checkpoint. Complete those jobs and resolve the dependency-policy
+   failure without relaxing the memory bound or opening a pull request. Repeat integrated PostgreSQL/object
    storage qualification after changes affecting those paths; preserve concurrent
    upload, GC, source deletion, restart and byte-identity coverage.
 2. **Review large protocol fixtures for overlap.** Start with server

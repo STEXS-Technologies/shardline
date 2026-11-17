@@ -6667,3 +6667,35 @@ directory. Its orchestration script is
 `.shardline-cleanup-state/container-edit-b6780921.py`. Local benchmark image tags
 `shardline-cleanup-container-{baseline,current}:b6780921` contain the temporary
 help text and are measurement artifacts, not release candidates.
+
+
+### Hosted cleanup qualification in progress (2026-11-17)
+
+Manual workflow dispatches test frozen source
+`39c86a9e5134b54f43a3f6410d9160f652a632f5`, without a pull request:
+[CI run 44065549505](https://github.com/STEXS-Technologies/shardline/actions/runs/44065549505)
+and [E2E run 44065552584](https://github.com/STEXS-Technologies/shardline/actions/runs/44065552584).
+At this checkpoint, the owned PostgreSQL process-cut job passed. The distributed
+integrity job passed 51 deployment-fault/mixed-version tests and eight multi-node
+role tests: 59 passed, zero skipped. Its downloaded current and released 1.12.1
+binaries match the artifact's recorded SHA-256 checksums.
+
+The contributor job failed at `cargo deny check`: `RUSTSEC-2026-0542`
+(`humantime` 2.3.0) and `RUSTSEC-2026-0543` (`chrono` 0.4.44) mark all versions
+unmaintained and list no patched version. Both direct and transitive usage are
+present; removing direct Shardline usage alone would not clear this gate. No
+advisory exception or dependency-policy relaxation was applied. This result does
+not replace the earlier passing local contributor checkpoint.
+
+Configured PostgreSQL contracts and the E2E job were still running when this
+checkpoint was recorded. Their outcome, including the dedicated SDK memory step,
+is unresolved here. Passing individual steps does not qualify the complete branch.
+The later workflow-only commit `3d23a446` removes the duplicate 256 MiB SDK memory
+test from the broad E2E step; both memory sizes remain in the dedicated step.
+Nextest listing confirmed that exactly one of 30 SDK cases changes selection.
+The running workflows continue to test their original source, not that later
+workflow change.
+
+Logs, upstream advisory snapshots, dependency trees, downloaded distributed
+artifacts and binary-checksum verification are retained in
+`.shardline-cleanup-state/hosted-39c86a9e/`, under the parent projects directory.
