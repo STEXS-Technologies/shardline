@@ -392,6 +392,23 @@ type UploadIntentRow = (
     chrono::DateTime<chrono::Utc>,
 );
 
+fn upload_intent_from_row(
+    (id, key, hash, length, state_str, created, updated): UploadIntentRow,
+) -> Result<UploadIntent, PostgresMetadataStoreError> {
+    let state = UploadIntentState::parse(&state_str).ok_or(
+        PostgresMetadataStoreError::InvalidUploadIntentState(state_str),
+    )?;
+    Ok(UploadIntent::from_parts(
+        id,
+        key,
+        hash,
+        i64_to_u64(length)?,
+        state,
+        std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
+        std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
+    ))
+}
+
 /// Decode and verify a complete listing inside the caller's read snapshot.
 async fn verified_upload_intent_listing(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -399,20 +416,7 @@ async fn verified_upload_intent_listing(
 ) -> Result<Vec<UploadIntent>, PostgresMetadataStoreError> {
     let intents = rows
         .into_iter()
-        .map(|(id, key, hash, length, state_str, created, updated)| {
-            let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
-                PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
-            })?;
-            Ok(UploadIntent::from_parts(
-                id,
-                key,
-                hash,
-                i64_to_u64(length)?,
-                s,
-                std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
-                std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
-            ))
-        })
+        .map(upload_intent_from_row)
         .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
     let operation_ids = intents
         .iter()
@@ -2055,21 +2059,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .fetch_optional(&self.pool)
         .await?;
         match row {
-            Some((id, key, hash, length, state_str, created, updated)) => {
-                let state = UploadIntentState::parse(&state_str).ok_or_else(|| {
-                    PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
-                })?;
-                let created_dur = std::time::Duration::from_secs(i64_to_u64(created.timestamp())?);
-                let updated_dur = std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?);
-                let intent = UploadIntent::from_parts(
-                    id,
-                    key,
-                    hash,
-                    i64_to_u64(length)?,
-                    state,
-                    created_dur,
-                    updated_dur,
-                );
+            Some(row) => {
+                let intent = upload_intent_from_row(row)?;
                 verify_postgres_intent_evidence(self, &intent).await?;
                 Ok(Some(intent))
             }
