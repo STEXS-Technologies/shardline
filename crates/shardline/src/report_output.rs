@@ -627,23 +627,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn fsck_summary_runs() {
-        let report = LocalFsckReport {
-            latest_records: 100,
-            version_records: 200,
-            inspected_chunk_references: 1500,
-            inspected_dedupe_shard_mappings: 50,
-            inspected_reconstructions: 25,
-            inspected_webhook_deliveries: 10,
-            inspected_provider_repository_states: 5,
-            ..LocalFsckReport::default()
-        };
-        print_fsck_summary(&report);
-    }
-
-    #[test]
-    fn fsck_cli_summary_runs() {
-        let report = LocalFsckReport {
+    fn fsck_summaries_preserve_fields_order_and_issue_counts() {
+        let mut report = LocalFsckReport {
             latest_records: 1,
             version_records: 2,
             inspected_chunk_references: 3,
@@ -653,32 +638,45 @@ mod tests {
             inspected_provider_repository_states: 7,
             ..LocalFsckReport::default()
         };
-        print_fsck_cli_summary(&report, Path::new("/root"));
-    }
-
-    #[test]
-    fn fsck_summary_reports_issue_count() {
-        let report = LocalFsckReport {
-            issues: vec![
-                LocalFsckIssue {
-                    kind: FsckIssueKind::MissingChunk,
-                    location: "chunks/a".to_owned(),
-                    detail: FsckIssueDetail::MissingVersionRecord {
-                        version_locator: "r/a".to_owned(),
+        for (issue_count, issues) in [
+            (0, vec![]),
+            (
+                2,
+                vec![
+                    LocalFsckIssue {
+                        kind: FsckIssueKind::MissingChunk,
+                        location: "chunks/a".to_owned(),
+                        detail: FsckIssueDetail::MissingVersionRecord {
+                            version_locator: "r/a".to_owned(),
+                        },
                     },
-                },
-                LocalFsckIssue {
-                    kind: FsckIssueKind::ChunkHashMismatch,
-                    location: "chunks/b".to_owned(),
-                    detail: FsckIssueDetail::RecordJsonInvalid,
-                },
-            ],
-            ..LocalFsckReport::default()
-        };
-        assert_eq!(report.issue_count(), 2);
-        print_fsck_summary(&report);
-        // issue_count() is internally derived from issues.len()
-        assert!(!report.is_clean());
+                    LocalFsckIssue {
+                        kind: FsckIssueKind::ChunkHashMismatch,
+                        location: "chunks/b".to_owned(),
+                        detail: FsckIssueDetail::RecordJsonInvalid,
+                    },
+                ],
+            ),
+        ] {
+            report.issues = issues;
+            let expected = format!(
+                concat!(
+                    "latest_records: 1\nversion_records: 2\n",
+                    "inspected_chunk_references: 3\ninspected_dedupe_shard_mappings: 4\n",
+                    "inspected_reconstructions: 5\ninspected_webhook_deliveries: 6\n",
+                    "inspected_provider_repository_states: 7\nissue_count: {}\n",
+                ),
+                issue_count
+            );
+            let mut bytes = Vec::new();
+            write_fsck_summary(&mut bytes, &report).unwrap();
+            assert_eq!(bytes, expected.as_bytes());
+            bytes.clear();
+            write_fsck_cli_summary(&mut bytes, &report, Path::new("/root")).unwrap();
+            assert_eq!(bytes, format!("root: /root\n{expected}").as_bytes());
+            assert_eq!(report.issue_count(), issue_count);
+            assert_eq!(report.is_clean(), issue_count == 0);
+        }
     }
 
     #[test]
@@ -696,23 +694,9 @@ mod tests {
         print_fsck_issues(&report);
     }
 
-    #[test]
-    fn fsck_empty_issues_is_clean() {
-        let report = LocalFsckReport {
-            issues: vec![],
-            ..empty_fsck_report()
-        };
-        assert!(report.is_clean());
-        assert_eq!(report.issue_count(), 0);
-    }
-
     // -----------------------------------------------------------------------
     // print_index_rebuild_summary / cli / issues
     // -----------------------------------------------------------------------
-
-    fn empty_index_rebuild_report() -> LocalIndexRebuildReport {
-        LocalIndexRebuildReport::default()
-    }
 
     #[test]
     fn index_rebuild_summary_preserves_fields_and_order() {
@@ -729,7 +713,7 @@ mod tests {
             rebuilt_dedupe_shard_mappings: 9,
             unchanged_dedupe_shard_mappings: 10,
             removed_stale_dedupe_shard_mappings: 11,
-            ..empty_index_rebuild_report()
+            ..LocalIndexRebuildReport::default()
         };
         let mut bytes = Vec::new();
         write_index_rebuild_cli_summary(&mut bytes, &report, Path::new("/root")).unwrap();
@@ -763,7 +747,7 @@ mod tests {
                 location: "records/abc".to_owned(),
                 detail: IndexRebuildIssueDetail::RecordJsonInvalid,
             }],
-            ..empty_index_rebuild_report()
+            ..LocalIndexRebuildReport::default()
         };
         print_index_rebuild_issues(&report);
     }
@@ -776,12 +760,12 @@ mod tests {
                 location: "r".to_owned(),
                 detail: IndexRebuildIssueDetail::RecordJsonInvalid,
             }],
-            ..empty_index_rebuild_report()
+            ..LocalIndexRebuildReport::default()
         };
         assert_eq!(report.issue_count(), 1);
         assert!(!report.is_clean());
 
-        let clean = empty_index_rebuild_report();
+        let clean = LocalIndexRebuildReport::default();
         assert_eq!(clean.issue_count(), 0);
         assert!(clean.is_clean());
     }
@@ -790,18 +774,14 @@ mod tests {
     // print_lifecycle_repair_summary / prefixed / cli
     // -----------------------------------------------------------------------
 
-    fn empty_lifecycle_repair_report() -> LifecycleRepairReport {
-        LifecycleRepairReport::default()
-    }
-
     #[test]
     fn lifecycle_repair_summary_runs() {
-        print_lifecycle_repair_summary(&empty_lifecycle_repair_report());
+        print_lifecycle_repair_summary(&LifecycleRepairReport::default());
     }
 
     #[test]
     fn lifecycle_repair_summary_prefixed_runs() {
-        let report = empty_lifecycle_repair_report();
+        let report = LifecycleRepairReport::default();
         print_lifecycle_repair_summary_prefixed(&report, "repair");
         // empty prefix — no dot separator
         print_lifecycle_repair_summary_prefixed(&report, "");
@@ -810,7 +790,7 @@ mod tests {
     #[test]
     fn lifecycle_repair_cli_summary_runs() {
         print_lifecycle_repair_cli_summary(
-            &empty_lifecycle_repair_report(),
+            &LifecycleRepairReport::default(),
             Path::new("/root"),
             2592000,
         );
@@ -862,20 +842,16 @@ mod tests {
     // print_local_gc_summary / cli
     // -----------------------------------------------------------------------
 
-    fn empty_gc_report() -> LocalGcReport {
-        LocalGcReport::default()
-    }
-
     #[test]
     fn local_gc_summary_runs() {
-        print_local_gc_summary(&empty_gc_report());
+        print_local_gc_summary(&LocalGcReport::default());
     }
 
     #[test]
     fn local_gc_cli_summary_runs() {
         // mark=true — retention_seconds printed
         print_local_gc_cli_summary(
-            &empty_gc_report(),
+            &LocalGcReport::default(),
             "mark",
             Path::new("/root"),
             7200,
@@ -885,7 +861,7 @@ mod tests {
         );
         // mark=false — retention_seconds not printed, orphan_inventory printed
         print_local_gc_cli_summary(
-            &empty_gc_report(),
+            &LocalGcReport::default(),
             "sweep",
             Path::new("/root"),
             3600,
@@ -895,7 +871,7 @@ mod tests {
         );
         // Both optional paths present
         print_local_gc_cli_summary(
-            &empty_gc_report(),
+            &LocalGcReport::default(),
             "mark-and-sweep",
             Path::new("/root"),
             3600,
@@ -905,22 +881,15 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Helper: empty default report for fsck
-    // -----------------------------------------------------------------------
-
-    fn empty_fsck_report() -> LocalFsckReport {
-        LocalFsckReport::default()
-    }
     #[test]
     fn fallible_cli_summaries_propagate_write_and_flush_errors() {
         assert_writer_errors(|writer| {
-            write_fsck_cli_summary(writer, &empty_fsck_report(), Path::new("/root"))
+            write_fsck_cli_summary(writer, &LocalFsckReport::default(), Path::new("/root"))
         });
         assert_writer_errors(|writer| {
             write_index_rebuild_cli_summary(
                 writer,
-                &empty_index_rebuild_report(),
+                &LocalIndexRebuildReport::default(),
                 Path::new("/root"),
             )
         });
@@ -942,7 +911,7 @@ mod tests {
                 location: "chunks/abc".to_owned(),
                 detail: FsckIssueDetail::RecordJsonInvalid,
             }],
-            ..empty_fsck_report()
+            ..LocalFsckReport::default()
         };
         let rebuild = LocalIndexRebuildReport {
             issues: vec![LocalIndexRebuildIssue {
@@ -950,7 +919,7 @@ mod tests {
                 location: "records/abc".to_owned(),
                 detail: IndexRebuildIssueDetail::RecordJsonInvalid,
             }],
-            ..empty_index_rebuild_report()
+            ..LocalIndexRebuildReport::default()
         };
         assert_writer_errors(|writer| write_fsck_issues(writer, &fsck));
         assert_writer_errors(|writer| write_index_rebuild_issues(writer, &rebuild));
@@ -1042,7 +1011,7 @@ mod tests {
         assert_writer_errors(|writer| {
             write_lifecycle_repair_cli_summary(
                 writer,
-                &empty_lifecycle_repair_report(),
+                &LifecycleRepairReport::default(),
                 Path::new("/root"),
                 3600,
             )
@@ -1050,7 +1019,7 @@ mod tests {
         assert_writer_errors(|writer| {
             write_local_gc_cli_summary(
                 writer,
-                &empty_gc_report(),
+                &LocalGcReport::default(),
                 "dry-run",
                 Path::new("/root"),
                 3600,
