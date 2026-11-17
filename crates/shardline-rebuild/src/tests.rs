@@ -1426,10 +1426,12 @@ async fn rebuild_dedupe_shard_mappings_preserves_existing_mappings_after_invalid
     // function returned early due to issues.
     let remaining = DedupeStore::list_dedupe_shard_mappings(&index_store).unwrap();
     assert_eq!(
-        remaining.len(),
-        1,
-        "stale mapping should not be removed when early-returning due to issues"
+        remaining,
+        [mapping],
+        "invalid scans must preserve the original mapping"
     );
+    assert_eq!(report.rebuilt_dedupe_shard_mappings, 0);
+    assert_eq!(report.removed_stale_dedupe_shard_mappings, 0);
 }
 
 // ---- run_index_rebuild_with_stores through reconstruction path ----

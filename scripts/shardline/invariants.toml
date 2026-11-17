@@ -151,3 +151,20 @@ tests = [
   { file = "crates/shardline-server/src/task_tracking/tests.rs", name = "batched_local_retention_preserves_conflicting_legacy_identity", backend = "sqlite" },
   { file = "crates/shardline-server/src/task_tracking/tests.rs", name = "full_automatic_metadata_capacity_preserves_inspection_and_cleanup", backend = "sqlite-scale", prerequisites = ["explicit ignored test in release mode", "scripts/shardline/verify_maintenance_history_capacity.sh"] },
 ]
+
+[[invariant]]
+id = "I-REBUILD"
+guarantee = "Rebuild selects repository-specific latest versions deterministically. Incomplete version inventories preserve heads and reconstructions; invalid shard inventories preserve existing dedupe mappings."
+owners = ["crates/shardline-rebuild/src/candidates.rs", "crates/shardline-rebuild/src/runner.rs"]
+failure_boundaries = ["repository and revision identity", "timestamp and hash ordering", "unreadable newest version", "missing latest row during incomplete scan", "dirty reconstruction inventory", "invalid retained shard"]
+# These local SQLite and memory fixtures cover rebuild policy. They do not
+# qualify PostgreSQL transactions, remote durability or maintenance ownership.
+tests = [
+  { file = "crates/shardline-rebuild/src/candidates.rs", name = "candidate_grouping_preserves_repository_identity_revision_and_file_id", backend = "sqlite" },
+  { file = "crates/shardline-rebuild/src/candidates.rs", name = "collect_candidate_selects_latest_epoch_then_content_hash", backend = "sqlite" },
+  { file = "crates/shardline-rebuild/src/candidates.rs", name = "candidate_ordering_uses_epoch_then_hash_then_locator", backend = "pure-policy" },
+  { file = "crates/shardline-rebuild/src/tests.rs", name = "run_index_rebuild_keeps_latest_record_when_version_record_unreadable", backend = "sqlite/memory-index" },
+  { file = "crates/shardline-rebuild/src/tests.rs", name = "rebuild_does_not_roll_back_latest_when_newest_version_is_corrupt", backend = "sqlite/memory-index" },
+  { file = "crates/shardline-rebuild/src/tests.rs", name = "prune_stale_reconstructions_returns_early_when_report_is_dirty", backend = "memory-index" },
+  { file = "crates/shardline-rebuild/src/tests.rs", name = "rebuild_dedupe_shard_mappings_preserves_existing_mappings_after_invalid_shard_scan", backend = "local-objects/memory-index" },
+]
