@@ -3684,18 +3684,8 @@ fn route_authorize_with_auth_and_no_header_is_err() {
             Ok("token".into())
         }
     }
-    let (object_store_td, store) = make_delete_test_store();
-    let object_store =
-        shardline_server_core::ServerObjectStore::local(object_store_td.path().join("lfs"))
-            .expect("local object store");
-    let state = HubState {
-        store,
-        object_store,
-        auth: Some(HubAuth::new(Box::new(MockProvider))),
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let (_td, mut state) = make_test_state();
+    state.auth = Some(HubAuth::new(Box::new(MockProvider)));
     let headers = HeaderMap::new();
     let result = authorize(&state, &headers, TokenScope::Read);
     let err = result.unwrap_err();
@@ -4495,20 +4485,12 @@ fn make_revision_scoped_xet_token_state(
     }
 
     let (td, store) = make_store_with_revision(HubRepoType::Model, "alice/own", "sha_main", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
-        .expect("local object store");
     let minted = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let state = HubState {
-        store,
-        object_store,
-        auth: Some(HubAuth::new(Box::new(CapturingProvider {
-            token_revision: token_revision.map(ToOwned::to_owned),
-            minted: minted.clone(),
-        }))),
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let mut state = state_with_store(td.path(), store);
+    state.auth = Some(HubAuth::new(Box::new(CapturingProvider {
+        token_revision: token_revision.map(ToOwned::to_owned),
+        minted: minted.clone(),
+    })));
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::AUTHORIZATION,
@@ -4872,16 +4854,7 @@ async fn handler_large_lfs_upload_roundtrips_through_local_filesystem_staging() 
     let oid = hex::encode(sha2::Sha256::digest(&data));
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/lfs-large-local");
     let object_root = _td.path().join("lfs");
-    let object_store = shardline_server_core::ServerObjectStore::local(object_root.clone())
-        .expect("local object store");
-    let state = HubState {
-        store: store.clone(),
-        object_store,
-        auth: None,
-        http_client: None,
-        webhook_secret_cipher: None,
-        public_base_url: "http://127.0.0.1:8080".to_owned(),
-    };
+    let state = state_with_store(_td.path(), store.clone());
 
     let result = lfs_upload(
         State(state.clone()),
