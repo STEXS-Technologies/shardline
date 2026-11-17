@@ -118,9 +118,8 @@ where
             .map_err(Into::into)?;
     }
 
-    let desired_reconstructions = desired_reconstruction_file_ids(candidates.values());
-    // Later phases need only file IDs, not complete records or latest paths.
-    drop(candidates);
+    // Consume complete records; later phases need only file IDs.
+    let desired_reconstructions = desired_reconstruction_file_ids(candidates.into_values());
     prune_stale_reconstructions(index_store, &desired_reconstructions, &mut report).await?;
 
     rebuild_dedupe_shard_mappings(
@@ -146,12 +145,11 @@ where
     Ok(report)
 }
 
-pub(super) fn desired_reconstruction_file_ids<'record, Locator, Records>(
+pub(super) fn desired_reconstruction_file_ids<Locator, Records>(
     records: Records,
 ) -> HashSet<ShardlineHash>
 where
-    Records: IntoIterator<Item = &'record VersionCandidate<Locator>>,
-    Locator: 'record,
+    Records: IntoIterator<Item = VersionCandidate<Locator>>,
 {
     records
         .into_iter()

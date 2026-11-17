@@ -172,7 +172,7 @@ fn reconstruction_ids_filter_and_deduplicate_candidates() {
             .map(|hash| shardline_index::parse_xet_hash_hex(hash).unwrap())
             .collect::<HashSet<_>>();
         assert_eq!(
-            desired_reconstruction_file_ids(&candidates),
+            desired_reconstruction_file_ids(candidates),
             expected,
             "{ids:?}"
         );
