@@ -27,7 +27,7 @@ code.
 ## Prioritized work
 
 1. **Close qualification gaps.** The latest full contributor checkpoint passed
-   8,144 selected tests at `a3b20bd3`. Required PostgreSQL index qualification
+   8,142 selected tests at `d4d6b2d6`. Required PostgreSQL index qualification
    passed 813 tests at `4a037718`; PostgreSQL/MinIO qualification passed all
    157 integration cases and three additional copy-integrity cases at `711de39c`.
    See `BENCHMARKS.md` for commands, frozen sources and limits. These checkpoints

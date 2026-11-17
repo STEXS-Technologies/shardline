@@ -6267,3 +6267,33 @@ This refresh replaces the older split-run evidence for the same integration
 selection. It qualifies these local remote-storage correctness paths after the
 configuration, Hub, checksum and index changes; it does not establish production
 throughput/cost or close the historical hosted SDK memory issue.
+
+## Maintenance and S3 shared-boundary checkpoint (2026-11-17)
+
+Frozen source: `d4d6b2d6b218356b9f447185380b273487cd2179`.
+`cargo +1.99.0 make ci` passed in 517.849 seconds with four build jobs,
+four Nextest threads, dev/test debug info disabled, an empty compiler wrapper,
+offline dependency resolution and the existing shared target directory.
+
+- Workspace library suite: 8,062 passed in 249.526 seconds; 45 normally
+  ignored tests excluded.
+- Reliability contract suites: 39 passed.
+- Release CLI and maintenance suites: 41 passed; five ignored tests excluded.
+- Total selected tests: 8,142 passed. Formatting, strict workspace Clippy
+  (with the gate's existing Xet-core exclusion), dependency exception checks,
+  root and E2E dependency policy checks, release help/manpage/completion smoke
+  checks and all 44 migration-version parity checks passed.
+
+This checkpoint includes the recent SQLite/PostgreSQL upload-intent decoding,
+shared maintenance file hashing, CLI test consolidation and S3 metadata/attributes
+validation cleanup. The S3 regressions explicitly exercise reserved form metadata
+and unsupported encryption options on attributes requests. Source inventory is
+566,953 tracked Rust lines: 36,696 fewer (6.08%) than the 603,649-line baseline,
+including tests, comments and blank lines.
+
+Artifacts in the parent projects directory:
+`.shardline-cleanup-state/ci-d4d6b2d6/{gate.log,result.json,inventory.json}`.
+This is a local contributor-gate result, not a build-speed comparison, required
+PostgreSQL/MinIO qualification or resolution of the historical hosted SDK memory
+failure. The separately recorded database/object-storage checkpoints retain their
+own frozen sources and coverage limits.
