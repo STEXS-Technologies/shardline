@@ -2,6 +2,7 @@ use crate::{
     config::ServerConfig,
     error, gc, maintenance_barrier,
     object_store::{ServerObjectStore, object_store_from_config},
+    overflow::{checked_add, checked_increment},
     postgres_backend::connect_postgres_metadata_pool,
 };
 use shardline_index::{LocalIndexStore, LocalRecordStore, PostgresIndexStore, PostgresRecordStore};
@@ -27,7 +28,7 @@ async fn reclaim_postgres_resumable_staging(
         .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let mut report = reclaim_unprotected_resumable_staging_objects_with_guard(
+    let mut report = reclaim_unprotected_resumable_staging_objects(
         object_store,
         &protected,
         sweep,
@@ -42,17 +43,7 @@ async fn reclaim_postgres_resumable_staging(
     Ok(report)
 }
 
-#[cfg(test)]
 async fn reclaim_unprotected_resumable_staging_objects(
-    object_store: &ServerObjectStore,
-    protected: &std::collections::HashSet<String>,
-    sweep: bool,
-) -> Result<ResumableStagingGcReport, error::ServerError> {
-    reclaim_unprotected_resumable_staging_objects_with_guard(object_store, protected, sweep, None)
-        .await
-}
-
-async fn reclaim_unprotected_resumable_staging_objects_with_guard(
     object_store: &ServerObjectStore,
     protected: &std::collections::HashSet<String>,
     sweep: bool,
@@ -63,19 +54,14 @@ async fn reclaim_unprotected_resumable_staging_objects_with_guard(
     let objects = object_store.list_prefix(&prefix).await?;
     let mut report = ResumableStagingGcReport {
         scanned_objects: u64::try_from(objects.len())?,
-        protected_objects: u64::try_from(
-            objects
-                .iter()
-                .filter(|metadata| protected.contains(metadata.key().as_str()))
-                .count(),
-        )?,
         ..ResumableStagingGcReport::default()
     };
-    if !sweep {
-        return Ok(report);
-    }
     for metadata in objects {
         if protected.contains(metadata.key().as_str()) {
+            report.protected_objects = checked_increment(report.protected_objects)?;
+            continue;
+        }
+        if !sweep {
             continue;
         }
         if let Some(index) = remote_guard {
@@ -96,14 +82,8 @@ async fn reclaim_unprotected_resumable_staging_objects_with_guard(
         } else {
             object_store.delete_if_present(metadata.key()).await?;
         }
-        report.reclaimed_objects = report
-            .reclaimed_objects
-            .checked_add(1)
-            .ok_or(error::ServerError::Overflow)?;
-        report.reclaimed_bytes = report
-            .reclaimed_bytes
-            .checked_add(metadata.length())
-            .ok_or(error::ServerError::Overflow)?;
+        report.reclaimed_objects = checked_increment(report.reclaimed_objects)?;
+        report.reclaimed_bytes = checked_add(report.reclaimed_bytes, metadata.length())?;
     }
     Ok(report)
 }
@@ -395,16 +375,29 @@ mod lib_tests {
         put_test_staging_object(&object_store, &receiving_key, b"partial");
         let protected = HashSet::from([protected_key.as_str().to_owned()]);
 
-        let report = reclaim_unprotected_resumable_staging_objects(&object_store, &protected, true)
+        for sweep in [false, true] {
+            let report = reclaim_unprotected_resumable_staging_objects(
+                &object_store,
+                &protected,
+                sweep,
+                None,
+            )
             .await
             .unwrap();
-        assert_eq!(report.scanned_objects, 4);
-        assert_eq!(report.protected_objects, 1);
-        assert_eq!(report.reclaimed_objects, 3);
-        assert_eq!(report.reclaimed_bytes, 18);
-        assert!(shardline_storage::ObjectStore::contains(&object_store, &protected_key).unwrap());
-        assert!(!shardline_storage::ObjectStore::contains(&object_store, &replaced_key).unwrap());
-        assert!(!shardline_storage::ObjectStore::contains(&object_store, &terminal_key).unwrap());
-        assert!(!shardline_storage::ObjectStore::contains(&object_store, &receiving_key).unwrap());
+            assert_eq!(report.scanned_objects, 4);
+            assert_eq!(report.protected_objects, 1);
+            assert_eq!(report.reclaimed_objects, if sweep { 3 } else { 0 });
+            assert_eq!(report.reclaimed_bytes, if sweep { 18 } else { 0 });
+            assert!(
+                shardline_storage::ObjectStore::contains(&object_store, &protected_key).unwrap()
+            );
+            for key in [&replaced_key, &terminal_key, &receiving_key] {
+                assert_eq!(
+                    shardline_storage::ObjectStore::contains(&object_store, key).unwrap(),
+                    !sweep,
+                    "{key:?}",
+                );
+            }
+        }
     }
 }
