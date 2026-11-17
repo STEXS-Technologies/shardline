@@ -9,7 +9,10 @@ ARG RUST_VERSION
 
 WORKDIR /workspace
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
-COPY . .
+COPY Cargo.toml Cargo.lock README.md ./
+COPY .cargo/ .cargo/
+COPY crates/ crates/
+COPY migrations/ migrations/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \

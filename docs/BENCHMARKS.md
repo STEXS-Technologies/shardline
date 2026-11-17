@@ -6338,3 +6338,29 @@ Raw source hashes, settings, per-sample times, build logs and changed-help
 outputs are in `.shardline-cleanup-state/build-edit-d49752c3/` in the parent
 projects directory. The restoring orchestrator is
 `.shardline-cleanup-state/build-edit-d49752c3.py`.
+
+## Container input-cache qualification (2026-11-17)
+
+On source `ff414cd114fab382872cfdbf526466419f34cf99`, replaced the Docker
+builder's whole-context copy with explicit copies of `Cargo.toml`, `Cargo.lock`,
+`README.md`, `.cargo/`, `crates/` and `migrations/`. Changes to root developer
+files such as `Makefile.toml` therefore no longer invalidate the Cargo RUN
+layer. Source changes still rebuild through the existing Cargo cache mounts.
+
+Validation used the pinned Rust and Debian images in the Dockerfile. The first
+full build used a temporary Dockerfile with `CARGO_BUILD_JOBS=4` to limit shared-host
+resource use. A subsequent full build used the checked-in Dockerfile with its
+normal defaults and the warmed Cargo cache. Both produced a runnable image.
+`docker buildx build --check .` passed without warnings. The resulting image,
+configured as UID/GID `10001:10001`, passed `--version` and `--help`.
+
+After the checked-in build, appended a temporary comment to `Makefile.toml`
+and rebuilt with the same Dockerfile. BuildKit reported the Cargo RUN layer
+`CACHED`. The image configuration digest stayed
+`sha256:ad5233ea6be7bcf8cebc775c7fa67271aba197731b45e08e4a7b0c0308129595`;
+provenance manifest digests can differ between builds. Restored the Makefile
+byte-for-byte afterward. This demonstrates avoided layer invalidation for an
+unrelated input, not a measured cold-container or edited-Rust speedup.
+
+Logs are in the parent projects directory at
+`.shardline-cleanup-state/container-inputs-{build,default-build,cache,version,help,final-check}.log`.
