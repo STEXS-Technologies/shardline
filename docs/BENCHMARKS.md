@@ -5940,3 +5940,26 @@ Runs used Rust 1.99.0, disabled compiler wrapping and dev/test debug information
 four build jobs, and `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1`; integration execution
 used four test workers. These are local remote-storage correctness checks,
 not production throughput, capacity, cost, or hosted SDK memory qualification.
+
+#### Metadata-backlog phase timing (2026-11-17)
+
+At `1ae584d7`, the existing 1,026-run metadata fixture was measured with its
+phase diagnostics exposed (`--success-output final`). The single selected
+`larger_metadata_backlog_preserves_pagination_and_safe_retention` test passed,
+with all retention, deleted-cursor, unfinished/corrupt-history and payload
+preservation assertions intact.
+
+| Existing timer | Observed wall time |
+| --- | ---: |
+| Entire test | 102.54 s |
+| Full paginated inspection | 13.27 s |
+| 17 retention calls combined | 57.20 s |
+| Slowest retention call | 4.51 s |
+
+The untimed remainder includes fixture construction and additional assertions;
+it cannot be attributed to setup alone. This is one shared-host debug-profile
+sample (Rust 1.99.0, debug information disabled, one selected test worker), not a
+production latency estimate or before/after speedup. No source changes, test
+removals or relaxed limits were used. Retention is the largest explicitly timed
+phase; further optimization must preserve verification before retirement,
+oldest-first selection, resumable markers and the existing artifact budgets.
