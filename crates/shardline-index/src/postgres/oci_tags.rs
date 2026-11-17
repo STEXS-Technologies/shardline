@@ -1,16 +1,15 @@
-use serde_json::{from_value, to_value};
-use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
+use serde_json::from_value;
+use sqlx::{PgConnection, Row, postgres::PgRow, query};
 
 use super::{
-    PostgresIndexStore, PostgresMetadataStoreError,
-    index_store::{insert_reliability_event_value, load_previous_reliability_commit},
+    PostgresIndexStore, PostgresMetadataStoreError, index_store::persist_appended_events,
     u64_to_i64,
 };
 use crate::{OciTagEntry, OciTagStore};
 use shardline_reliability::{
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind, SnapshotEvidence,
-    reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_snapshot_event, verify_snapshot_evidence,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -28,10 +27,10 @@ async fn current_tag_evidence(
     repository: &str,
     tag: &str,
     digest_hex: Option<String>,
-) -> Result<OciTagEvidenceLog, PostgresMetadataStoreError> {
+) -> Result<(OciTagEvidenceLog, bool), PostgresMetadataStoreError> {
     let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
     let loaded = super::load_postgres_snapshot_evidence_for(connection, &snapshot).await?;
-    Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?.0)
+    Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?)
 }
 
 async fn verify_tag_evidence(
@@ -88,64 +87,6 @@ async fn verify_tag_listing_evidence(
     Ok(())
 }
 
-async fn persist_tag_evidence(
-    connection: &mut PgConnection,
-    evidence: &OciTagEvidenceLog,
-) -> Result<(), PostgresMetadataStoreError> {
-    let Some(first) = evidence.events().first() else {
-        return Ok(());
-    };
-    let persisted_sequence: Option<i64> = query_scalar(
-        "SELECT MAX(sequence)
-         FROM shardline_reliability_events
-         WHERE operation_kind = $1 AND operation_id = $2",
-    )
-    .bind(first.operation.kind.as_str())
-    .bind(&first.operation.operation_id)
-    .fetch_one(&mut *connection)
-    .await?;
-    let persisted_sequence = persisted_sequence.unwrap_or(-1);
-    if let Some(event) = evidence.events().last()
-        && persisted_sequence >= 0
-    {
-        let event_sequence = u64_to_i64(event.sequence)?;
-        if event_sequence <= persisted_sequence {
-            return Ok(());
-        }
-        if event_sequence == persisted_sequence.saturating_add(1) {
-            persist_tag_event(connection, event).await?;
-            return Ok(());
-        }
-    }
-    for event in evidence.events() {
-        if u64_to_i64(event.sequence)? <= persisted_sequence {
-            continue;
-        }
-        persist_tag_event(connection, event).await?;
-    }
-    Ok(())
-}
-
-async fn persist_tag_event(
-    connection: &mut PgConnection,
-    event: &OciTagLifecycleEvent,
-) -> Result<(), PostgresMetadataStoreError> {
-    event.verify_integrity()?;
-    let sequence = u64_to_i64(event.sequence)?;
-    let previous = load_previous_reliability_commit(connection, &event.operation, sequence).await?;
-    let merkle_commit_json =
-        reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
-    insert_reliability_event_value(
-        connection,
-        &event.operation,
-        event.sequence,
-        to_value(event)?,
-        merkle_commit_json,
-    )
-    .await?;
-    Ok(())
-}
-
 pub(super) async fn record_tag_transition(
     connection: &mut PgConnection,
     scope_namespace: &str,
@@ -156,13 +97,11 @@ pub(super) async fn record_tag_transition(
 ) -> Result<(), PostgresMetadataStoreError> {
     let before_snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, before.clone())?;
     let after_snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, after)?;
-    let evidence = verify_and_append_snapshot_transition(
-        current_tag_evidence(connection, scope_namespace, repository, tag, before).await?,
-        before_snapshot,
-        after_snapshot,
-    )?
-    .0;
-    persist_tag_evidence(connection, &evidence).await
+    let (stored_evidence, evidence_was_missing) =
+        current_tag_evidence(connection, scope_namespace, repository, tag, before).await?;
+    let evidence =
+        verify_and_append_snapshot_transition(stored_evidence, before_snapshot, after_snapshot)?.0;
+    persist_appended_events(connection, evidence.events(), evidence_was_missing).await
 }
 
 pub(super) async fn current_tag(
@@ -739,7 +678,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pg_oci_tag_read_rejects_missing_baseline_evidence_without_writing() {
+    async fn pg_oci_tag_reads_reject_missing_evidence_and_writes_restore_baseline() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
@@ -781,6 +720,25 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 0);
+
+        store.upsert_oci_tag(&value).await.unwrap();
+        let repaired_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM shardline_reliability_events WHERE operation_kind = 'OciTag'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            repaired_count, 2,
+            "writer must persist baseline and transition"
+        );
+        assert_eq!(
+            store
+                .oci_tag(&value.scope_namespace, &value.repository, &value.tag)
+                .await
+                .unwrap(),
+            Some(value)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -78,19 +78,13 @@ async fn record_oci_evidence(
     };
     let (evidence, evidence_was_empty) =
         verify_and_append_snapshot_transition(evidence, fallback, after)?;
-    let event = evidence.events().last().ok_or_else(|| {
+    let _ = evidence.events().last().ok_or_else(|| {
         PostgresMetadataStoreError::Reliability(
             shardline_reliability::ReliabilityError::EmptyField("OCI object evidence event"),
         )
     })?;
-    if evidence_was_empty {
-        for stored_event in evidence.events() {
-            insert_reliability_event(&mut *executor, stored_event).await?;
-        }
-        Ok(())
-    } else {
-        insert_reliability_event(executor, event).await
-    }
+    super::index_store::persist_appended_events(executor, evidence.events(), evidence_was_empty)
+        .await
 }
 use crate::{
     OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry,
