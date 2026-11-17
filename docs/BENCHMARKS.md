@@ -5845,3 +5845,37 @@ External fixture requirements were not enabled for this contributor gate.
 Infrastructure-dependent tests that return early do not qualify their
 backends. Required PostgreSQL/object-storage topology, hosted CI, production
 capacity and the historical hosted SDK RSS failure remain separate gates.
+
+### Contributor CI refresh after ingestion and rebuild cleanup (2026-11-17)
+
+Frozen source `4c95fa7215e793c4067f275f60ee7779928a078f` completed
+`cargo make ci` successfully in 504.71 seconds in the isolated cleanup checkout.
+Rust 1.99.0 used four build jobs, four Nextest workers, disabled dev/test debug
+information, offline dependencies and an explicitly disabled compiler wrapper.
+Release checks retained thin LTO and one code-generation unit. Existing build
+artifacts were available; this is not a cold-build timing or a controlled speed
+comparison with earlier checkpoints.
+
+| Test stage | Passed | Normally ignored tests excluded |
+| --- | ---: | ---: |
+| Workspace library tests | 8,121 | 45 |
+| Reliability contracts | 39 | 0 |
+| Release CLI API and maintenance contracts | 41 | 5 |
+
+All 8,201 selected tests passed. Workspace formatting, strict Clippy, dependency
+exceptions, root and E2E cargo-deny policies, release help/manpage/completion
+checks and parity across 44 migrations passed. This covers the combined GC,
+maintenance-error, rebuild and ingestion changes since `8f648825`, including
+the consolidated test cases and shared durable-chunk identity comparison.
+
+The frozen release executable has SHA-256
+`1ae5353ad0f6291e9731b2e7aefb4c130d70ac9cd9848f917e62305c1fc94818`.
+Tracked Rust inventory at this source is 567,534 lines, down 36,115 (5.98%)
+from the 603,649-line baseline, including comments, tests and blank lines.
+Unrelated uncommitted changes were excluded.
+
+Required external-fixture flags were not enabled. Tests returning early do not
+qualify PostgreSQL or object-storage topology. The earlier intermittent webhook
+TLS failure and historical hosted SDK RSS failure remain unexplained; this
+successful local gate does not establish either issue is fixed, production
+capacity, or hosted qualification.
