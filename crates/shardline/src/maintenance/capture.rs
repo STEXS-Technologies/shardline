@@ -1,7 +1,6 @@
-use super::{Result, artifact};
+use super::{Result, artifact, artifact::Stream};
 use penelope::core::task::{Digest, TaskGeneration};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::{
     fs::File,
     io::{BufRead, Write},
@@ -18,13 +17,6 @@ struct Manifest {
     stderr: Stream,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Stream {
-    digest: Digest,
-    bytes: u64,
-}
-
 pub(crate) struct CapturedOutput {
     pub stdout: File,
     pub stderr: File,
@@ -33,29 +25,6 @@ pub(crate) struct CapturedOutput {
 
 fn path(directory: &Path, generation: TaskGeneration, stream: &str) -> PathBuf {
     directory.join(format!("{stream}-{}", generation.get()))
-}
-
-fn inspect(file: &mut File) -> Result<Stream> {
-    use std::io::{Seek, SeekFrom};
-    file.seek(SeekFrom::Start(0))?;
-    let mut hash = Sha256::new();
-    let bytes = std::io::copy(file, &mut HashWriter(&mut hash))?;
-    file.seek(SeekFrom::Start(0))?;
-    Ok(Stream {
-        digest: Digest(hash.finalize().into()),
-        bytes,
-    })
-}
-
-struct HashWriter<'hash>(&'hash mut Sha256);
-impl Write for HashWriter<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 pub(super) fn publish(
@@ -70,8 +39,8 @@ pub(super) fn publish(
     let manifest = Manifest {
         schema: 1,
         exit_code,
-        stdout: inspect(&mut stdout)?,
-        stderr: inspect(&mut stderr)?,
+        stdout: artifact::inspect_stream(&mut stdout)?,
+        stderr: artifact::inspect_stream(&mut stderr)?,
     };
     writeln!(writer, "maintenance.success: {}", exit_code == 0)?;
     serde_json::to_writer(writer, &manifest)?;
@@ -105,7 +74,9 @@ pub(super) fn verify(
         &path(directory, generation, "stderr"),
         manifest.stderr.bytes,
     )?;
-    if inspect(&mut stdout)? != manifest.stdout || inspect(&mut stderr)? != manifest.stderr {
+    if artifact::inspect_stream(&mut stdout)? != manifest.stdout
+        || artifact::inspect_stream(&mut stderr)? != manifest.stderr
+    {
         return Err("captured command output does not match its signed result".into());
     }
     Ok(CapturedOutput {

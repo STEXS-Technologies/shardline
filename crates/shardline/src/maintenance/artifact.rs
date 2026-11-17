@@ -1,6 +1,8 @@
 use super::{Error, Result};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use penelope::core::task::{Digest, TaskGeneration, TaskScope};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use shardline_reliability::{
     MaintenanceArtifact, MaintenanceArtifactKind, MaintenanceArtifactProof,
     sign_maintenance_artifact, verify_maintenance_artifact,
@@ -12,6 +14,36 @@ use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Stream {
+    pub digest: Digest,
+    pub bytes: u64,
+}
+
+pub(super) fn inspect_stream(file: &mut File) -> Result<Stream> {
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))?;
+    let mut hash = Sha256::new();
+    let bytes = std::io::copy(file, &mut HashWriter(&mut hash))?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(Stream {
+        digest: Digest(hash.finalize().into()),
+        bytes,
+    })
+}
+
+struct HashWriter<'hash>(&'hash mut Sha256);
+impl Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 pub(super) fn private_directory(path: &Path) -> Result<()> {
     crate::local_path::ensure_directory_path_components_are_not_symlinked(path)?;
@@ -167,27 +199,16 @@ pub(super) fn publish_file(
     step: u32,
     file: &File,
 ) -> Result<Vec<u8>> {
-    use sha2::{Digest as _, Sha256};
-    use std::io::{Seek, SeekFrom};
     file.sync_all()?;
     let mut reader = file.try_clone()?;
-    reader.seek(SeekFrom::Start(0))?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 16384];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(buffer.get(..count).ok_or("invalid report read")?);
-    }
+    let stream = inspect_stream(&mut reader)?;
     let artifact = MaintenanceArtifact {
         schema_version: 1,
         scope,
         generation,
         step,
         kind,
-        digest: Digest(hash.finalize().into()),
+        digest: stream.digest,
         bytes: file.metadata()?.len(),
     };
     let artifacts = directory.join("artifacts");
@@ -195,7 +216,6 @@ pub(super) fn publish_file(
     let destination = artifact_path(directory, artifact.digest);
     if !destination.exists() {
         let mut temporary = tempfile::NamedTempFile::new_in(&artifacts)?;
-        reader.seek(SeekFrom::Start(0))?;
         std::io::copy(&mut reader, temporary.as_file_mut())?;
         temporary.as_file().sync_all()?;
         temporary.persist_noclobber(&destination)?;
