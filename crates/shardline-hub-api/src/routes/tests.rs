@@ -279,6 +279,11 @@ fn parse_yaml_frontmatter_preserves_scalar_types_and_quoting() {
             "---\nname: \"hello world\"\n---\nbody",
             serde_json::json!({"name": "hello world"}),
         ),
+        ("---\nkey: value\n---", serde_json::json!({"key": "value"})),
+        (
+            "---\ncount: 42\nactive: true\n---\n",
+            serde_json::json!({"count": 42, "active": true}),
+        ),
     ] {
         assert_eq!(
             parse_yaml_frontmatter(content.as_bytes()),
@@ -295,6 +300,8 @@ fn parse_yaml_frontmatter_omits_absent_empty_and_non_utf8_metadata() {
         b"---\n---\nbody",
         b"---\n# just a comment\n---\nbody",
         b"\xff\xfe\x00\x01",
+        b"---\nkey: value\n",
+        b"---\nkey: value\nno_colon_line\nother: val\n---\n",
     ] {
         assert!(parse_yaml_frontmatter(content).is_none(), "{content:?}");
     }
@@ -545,38 +552,6 @@ fn hub_state_debug_redacts_auth() {
 // parse_yaml_frontmatter — additional edge cases
 // -----------------------------------------------------------------------
 
-#[test]
-fn parse_yaml_frontmatter_no_closing_delimiter() {
-    let content = b"---\nkey: value\n";
-    assert!(parse_yaml_frontmatter(content).is_none());
-}
-
-#[test]
-fn parse_yaml_frontmatter_closing_on_same_line() {
-    // Closing --- on its own line (no trailing newline) is valid.
-    let content = b"---\nkey: value\n---";
-    let result = parse_yaml_frontmatter(content);
-    assert!(result.is_some(), "closing --- on its own line is valid");
-    assert_eq!(
-        result.unwrap().get("key").and_then(|v| v.as_str()),
-        Some("value")
-    );
-}
-
-#[test]
-fn parse_yaml_frontmatter_malformed_line_omits_metadata() {
-    let content = b"---\nkey: value\nno_colon_line\nother: val\n---\n";
-    assert!(parse_yaml_frontmatter(content).is_none());
-}
-
-#[test]
-fn parse_yaml_frontmatter_json_number_and_bool_values() {
-    let content = b"---\ncount: 42\nactive: true\n---\n";
-    let result = parse_yaml_frontmatter(content).unwrap();
-    assert_eq!(result.get("count").and_then(|v| v.as_u64()), Some(42));
-    assert_eq!(result.get("active").and_then(|v| v.as_bool()), Some(true));
-}
-
 // -----------------------------------------------------------------------
 // tree_entries_at_path — LFS file at root level
 // -----------------------------------------------------------------------
@@ -671,10 +646,6 @@ fn store_test_content(td: &tempfile::TempDir, sha: &str, content: &[u8]) {
         .expect("store test content");
 }
 
-fn default_headers() -> HeaderMap {
-    HeaderMap::new()
-}
-
 // ------------------------------------------------------------------
 // health
 // ------------------------------------------------------------------
@@ -700,7 +671,7 @@ async fn handler_whoami_returns_identity_without_admin_privileges() {
         let headers = if authenticated {
             alice_headers()
         } else {
-            default_headers()
+            HeaderMap::new()
         };
         let response = whoami(State(state), headers).await.unwrap();
         assert_eq!(response.name, expected_name);
@@ -716,7 +687,7 @@ async fn handler_whoami_returns_identity_without_admin_privileges() {
 #[tokio::test]
 async fn handler_repo_list_empty() {
     let (_td, state) = make_test_state();
-    let result = repo_list(State(state.clone()), test_repo(&state, &default_headers()))
+    let result = repo_list(State(state.clone()), test_repo(&state, &HeaderMap::new()))
         .await
         .unwrap();
     assert!(result.repos.is_empty());
@@ -729,7 +700,7 @@ async fn handler_repo_list_with_repos() {
         .create_repo(HubRepoType::Dataset, "org/data-b", false)
         .unwrap();
     let state = state_with_store(_td.path(), store);
-    let result = repo_list(State(state.clone()), test_repo(&state, &default_headers()))
+    let result = repo_list(State(state.clone()), test_repo(&state, &HeaderMap::new()))
         .await
         .unwrap();
     assert_eq!(result.repos.len(), 2);
@@ -744,7 +715,7 @@ async fn handler_repo_search_short_query_rejected() {
     let (_td, state) = make_test_state();
     let result = repo_search(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "x".into(),
@@ -767,7 +738,7 @@ async fn handler_repo_search_invalid_type() {
     let (_td, state) = make_test_state();
     let result = repo_search(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path("invalid".to_string()),
         Query(RepoSearchQuery {
             q: "test".into(),
@@ -795,7 +766,7 @@ async fn handler_repo_search_finds_matching() {
     // The search uses LIKE 'q%' on repo_id, so prefix-match the full ID.
     let result = repo_search(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/my-model".into(),
@@ -1232,7 +1203,7 @@ async fn handler_repo_info_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_info(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "missing".into(), "nope".into())),
     )
     .await;
@@ -1245,7 +1216,7 @@ async fn handler_repo_info_returns_repo() {
     let state = state_with_store(_td.path(), store);
     let result = repo_info(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "existing".into())),
     )
     .await
@@ -1277,7 +1248,7 @@ async fn handler_repo_info_with_card_data() {
     let state = state_with_store(_td.path(), store);
     let result = repo_info(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "card-model".into())),
     )
     .await
@@ -1299,7 +1270,7 @@ async fn handler_repo_modelcard_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_modelcard(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "no".into(), "such".into())),
     )
     .await;
@@ -1312,7 +1283,7 @@ async fn handler_repo_modelcard_no_readme() {
     let state = state_with_store(_td.path(), store);
     let result = repo_modelcard(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "no-readme".into())),
     )
     .await;
@@ -1341,7 +1312,7 @@ async fn handler_repo_modelcard_with_readme() {
     let state = state_with_store(_td.path(), store);
     let result = repo_modelcard(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "my-model".into())),
     )
     .await
@@ -1368,7 +1339,7 @@ async fn handler_repo_revisions_with_revisions() {
     let state = state_with_store(_td.path(), store);
     let result = repo_revisions(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "has-revs".into())),
     )
     .await
@@ -1400,7 +1371,7 @@ async fn handler_repo_create_model_with_optional_organization() {
         let (status, json) = decode_creation_response(
             repo_create(
                 State(state.clone()),
-                test_repo(&state, &default_headers()),
+                test_repo(&state, &HeaderMap::new()),
                 Json(request),
             )
             .await
@@ -1421,7 +1392,7 @@ async fn handler_repo_create_type_invalid_type() {
     let (_td, state) = make_test_state();
     let result = repo_create_type(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("invalid".into(), "ns".into(), "repo".into())),
         Json(serde_json::json!({})),
     )
@@ -1449,7 +1420,7 @@ async fn handler_repo_create_type_preserves_type_and_privacy() {
         let (status, json) = decode_creation_response(
             repo_create_type(
                 State(state.clone()),
-                test_repo(&state, &default_headers()),
+                test_repo(&state, &HeaderMap::new()),
                 Path((api_type.into(), "ns".into(), name.into())),
                 Json(options),
             )
@@ -1473,7 +1444,7 @@ async fn handler_repo_delete_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_delete(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "no".into(), "exist".into())),
     )
     .await;
@@ -1486,7 +1457,7 @@ async fn handler_repo_delete_success() {
     let state = state_with_store(_td.path(), store);
     let result = repo_delete(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "to-delete".into())),
     )
     .await;
@@ -1512,7 +1483,7 @@ async fn handler_preupload_too_many_files() {
         .collect();
     let result = preupload(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "ns".into(), "r".into(), "main".into())),
         Json(PreuploadRequest {
             files,
@@ -1545,7 +1516,7 @@ async fn handler_preupload_checks_existence() {
     let state = state_with_store(_td.path(), store);
     let result = preupload(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -1594,8 +1565,8 @@ async fn handler_commit_wrong_content_type() {
     // No Content-Type header → rejection
     let result = commit(
         State(state.clone()),
-        default_headers(),
-        test_repo(&state, &default_headers()),
+        HeaderMap::new(),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "ns".into(), "r".into(), "main".into())),
         axum::body::Body::from("{}"),
     )
@@ -1902,7 +1873,7 @@ async fn handler_file_tree_basic() {
     materialize_tree_fixture(&state, "sha_tree");
     let entries = file_tree(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -1971,7 +1942,7 @@ async fn handler_file_tree_recursive() {
     materialize_tree_fixture(&state, "sha_tree_rec");
     let entries = file_tree(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -2023,7 +1994,7 @@ async fn handler_file_tree_with_limit_and_cursor() {
     materialize_tree_fixture(&state, "sha_tree_lim");
     let entries = file_tree(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -2068,7 +2039,7 @@ async fn handler_resolve_file_inline() {
     let state = state_with_store(_td.path(), store);
     let result = resolve_file(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -2111,7 +2082,7 @@ async fn handler_resolve_large_lfs_file_returns_absolute_redirect_and_metadata()
 
     let response = resolve_file(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -2155,7 +2126,7 @@ async fn handler_resolve_file_not_found() {
     let state = state_with_store(_td.path(), store);
     let result = resolve_file(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -2184,7 +2155,7 @@ async fn handler_lfs_batch_upload_new_object() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2230,7 +2201,7 @@ async fn handler_lfs_batch_propagates_object_store_existence_failures() {
 
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2317,7 +2288,7 @@ async fn handler_lfs_batch_download_existing_object() {
         .unwrap();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Download,
             ref_: LfsBatchRef {
@@ -2353,7 +2324,7 @@ async fn handler_lfs_batch_download_missing_object() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Download,
             ref_: LfsBatchRef {
@@ -2399,7 +2370,7 @@ async fn handler_lfs_batch_verify_existing() {
         .unwrap();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Verify,
             ref_: LfsBatchRef {
@@ -2425,7 +2396,7 @@ async fn handler_lfs_batch_verify_missing() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Verify,
             ref_: LfsBatchRef {
@@ -2518,7 +2489,7 @@ async fn handler_lfs_batch_xet_transfer_falls_back_without_auth() {
 
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2545,7 +2516,7 @@ async fn handler_lfs_batch_rejects_xet_only_without_cas_auth() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2572,7 +2543,7 @@ async fn handler_lfs_batch_xet_transfer_with_basic_fallback() {
 
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2599,7 +2570,7 @@ async fn handler_lfs_batch_accepts_official_javascript_sha256_alias() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2624,7 +2595,7 @@ async fn handler_lfs_batch_rejects_unsupported_hash_algo() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2653,7 +2624,7 @@ async fn handler_lfs_batch_rejects_too_many_objects() {
         .collect();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2726,7 +2697,7 @@ async fn handler_lfs_batch_returns_hash_algo() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2973,7 +2944,7 @@ async fn handler_lfs_download_missing() {
     let (_td, state) = make_test_state();
     let result = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path("b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5".to_string()),
         axum::http::Method::GET,
         HeaderMap::new(),
@@ -3003,7 +2974,7 @@ async fn handler_lfs_download_success() {
         .unwrap();
     let response = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(oid.to_string()),
         axum::http::Method::GET,
         HeaderMap::new(),
@@ -3042,7 +3013,7 @@ async fn handler_lfs_download_supports_single_ranges_and_if_range() {
     headers.insert(axum::http::header::RANGE, "bytes=3-7".parse().unwrap());
     let response = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(oid.to_owned()),
         axum::http::Method::GET,
         headers,
@@ -3082,7 +3053,7 @@ async fn handler_lfs_download_supports_single_ranges_and_if_range() {
     );
     let response = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(oid.to_owned()),
         axum::http::Method::GET,
         headers,
@@ -3103,7 +3074,7 @@ async fn handler_lfs_download_supports_single_ranges_and_if_range() {
     );
     let response = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(oid.to_owned()),
         axum::http::Method::GET,
         headers,
@@ -3129,7 +3100,7 @@ async fn handler_lfs_download_supports_single_ranges_and_if_range() {
     );
     let response = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(oid.to_owned()),
         axum::http::Method::GET,
         headers,
@@ -3144,7 +3115,7 @@ async fn handler_lfs_download_supports_single_ranges_and_if_range() {
     headers.insert(axum::http::header::RANGE, "bytes=99-".parse().unwrap());
     let response = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(oid.to_owned()),
         axum::http::Method::GET,
         headers,
@@ -3171,7 +3142,7 @@ async fn handler_repo_revisions_has_initial() {
     let state = state_with_store(_td.path(), store);
     let result = repo_revisions(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "init-rev".into())),
     )
     .await
@@ -3188,7 +3159,7 @@ async fn handler_git_head_with_revision() {
     let state = state_with_store(_td.path(), store);
     let result = git_head(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "has-head".into())),
     )
     .await
@@ -3246,7 +3217,7 @@ async fn handler_dataset_parquet_lists_files() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_parquet(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "data".into())),
     )
     .await
@@ -3285,7 +3256,7 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_parquet(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "multi".into())),
     )
     .await
@@ -3304,7 +3275,7 @@ async fn handler_dataset_first_rows_empty_dataset() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_first_rows(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "empty-ds".into())),
         Query(DatasetFirstRowsQuery {
             config: "default".into(),
@@ -3340,7 +3311,7 @@ async fn handler_dataset_first_rows_with_jsonl() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_first_rows(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "jsonl-ds".into())),
         Query(DatasetFirstRowsQuery {
             config: "default".into(),
@@ -3382,7 +3353,7 @@ async fn handler_dataset_viewer_with_data() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_viewer(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "viewer-ds".into(), "train".into())),
         Query(DatasetViewerQuery {
             config: "default".into(),
@@ -3420,7 +3391,7 @@ async fn handler_dataset_viewer_pagination() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_viewer(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "viewer-pag".into(), "test".into())),
         Query(DatasetViewerQuery {
             config: "data".into(),
@@ -3446,7 +3417,7 @@ async fn handler_webhook_create_success() {
     let state = state_with_store(_td.path(), store);
     let (status, resp) = webhook_create(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "wh-test".into())),
         Json(WebhookCreateRequest {
             url: "https://example.com/hook".into(),
@@ -3467,7 +3438,7 @@ async fn handler_webhook_create_invalid_url() {
     let state = state_with_store(_td.path(), store);
     let result = webhook_create(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "wh-badurl".into())),
         Json(WebhookCreateRequest {
             url: "ftp://bad.com/hook".into(),
@@ -3490,7 +3461,7 @@ async fn handler_webhook_create_too_many_events() {
     let events: Vec<String> = (0..51).map(|i| format!("event_{i}")).collect();
     let result = webhook_create(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "wh-toomany".into())),
         Json(WebhookCreateRequest {
             url: "https://example.com/hook".into(),
@@ -3516,7 +3487,7 @@ async fn handler_webhook_list_empty() {
     let state = state_with_store(_td.path(), store);
     let result = webhook_list(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "wh-list-empty".into())),
     )
     .await
@@ -3546,7 +3517,7 @@ async fn handler_webhook_list_with_webhooks() {
     let state = state_with_store(_td.path(), store);
     let result = webhook_list(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "wh-list-full".into())),
     )
     .await
@@ -3572,7 +3543,7 @@ async fn handler_webhook_delete_success() {
     let state = state_with_store(_td.path(), store);
     let result = webhook_delete(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -3660,7 +3631,7 @@ async fn handler_dataset_parquet_non_dataset_repo_errors() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_parquet(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "model-repo".into())),
     )
     .await;
@@ -3682,7 +3653,7 @@ async fn handler_dataset_first_rows_non_dataset_errors() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_first_rows(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "model-ds".into())),
         Query(DatasetFirstRowsQuery {
             config: "default".into(),
@@ -3709,7 +3680,7 @@ async fn handler_dataset_viewer_non_dataset_errors() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_viewer(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "model-view".into(), "train".into())),
         Query(DatasetViewerQuery {
             config: "default".into(),
@@ -3738,7 +3709,7 @@ async fn handler_repo_search_sort_by_last_modified_asc() {
     let state = state_with_store(_td.path(), store);
     let result = repo_search(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/".into(),
@@ -3763,7 +3734,7 @@ async fn handler_repo_search_sort_likes_noop() {
     // "likes" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/likes".into(),
@@ -3788,7 +3759,7 @@ async fn handler_repo_search_sort_downloads_noop() {
     // "downloads" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/dl".into(),
@@ -3816,7 +3787,7 @@ async fn handler_repo_search_unknown_sort_keeps_default_order() {
     let state = state_with_store(_td.path(), store);
     let result = repo_search(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/order".into(),
@@ -3840,7 +3811,7 @@ async fn handler_repo_info_invalid_type() {
     let (_td, state) = make_test_state();
     let result = repo_info(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("invalid_type".into(), "ns".into(), "repo".into())),
     )
     .await;
@@ -3871,7 +3842,7 @@ async fn handler_dataset_first_rows_content_not_inline() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_first_rows(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "no-inline".into())),
         Query(DatasetFirstRowsQuery {
             config: "default".into(),
@@ -3894,7 +3865,7 @@ async fn handler_dataset_viewer_split_not_found() {
     let state = state_with_store(_td.path(), store);
     let result = dataset_viewer(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "no-split".into(), "nonexistent".into())),
         Query(DatasetViewerQuery {
             config: "default".into(),
@@ -3919,7 +3890,7 @@ async fn handler_webhook_create_repo_not_found() {
     let (_td, state) = make_test_state();
     let result = webhook_create(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "no".into(), "repo".into())),
         Json(WebhookCreateRequest {
             url: "https://example.com/hook".into(),
@@ -3951,7 +3922,7 @@ async fn handler_webhook_list_repo_not_found_returns_empty() {
     let (_td, state) = make_test_state();
     let result = webhook_list(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "no".into(), "repo".into())),
     )
     .await
@@ -3968,7 +3939,7 @@ async fn handler_repo_revisions_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_revisions(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "no".into(), "such_repo".into())),
     )
     .await;
@@ -3997,7 +3968,7 @@ async fn handler_repo_revision_info_returns_siblings() {
     store_test_content(&_td, blake3::hash(content).to_hex().as_str(), content);
     let result = repo_revision_info(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -4019,7 +3990,7 @@ async fn handler_repo_revision_info_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_revision_info(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "no".into(), "repo".into(), "main".into())),
     )
     .await;
@@ -4036,7 +4007,7 @@ async fn handler_repo_delete_compat_success() {
     let state = state_with_store(_td.path(), store.clone());
     let result = repo_delete_compat(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(RepoDeleteRequest {
             repo_type: Some(RepoType::Model),
             name: "org/compat-del".to_owned(),
@@ -4054,7 +4025,7 @@ async fn handler_repo_delete_compat_with_organization() {
     let state = state_with_store(_td.path(), store.clone());
     let result = repo_delete_compat(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(RepoDeleteRequest {
             repo_type: Some(RepoType::Model),
             name: "compat-org".to_owned(),
@@ -4087,7 +4058,7 @@ async fn handler_file_tree_at_root_returns_files() {
     materialize_tree_fixture(&state, "sha_root_tree");
     let entries = file_tree_at_root(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path((
             "models".into(),
             "org".into(),
@@ -4116,7 +4087,7 @@ async fn handler_git_head_returns_ref() {
     let state = state_with_store(_td.path(), store);
     let result = git_head(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "git-head".into())),
     )
     .await
@@ -4130,7 +4101,7 @@ async fn handler_git_head_nonexistent_repo_returns_zero_sha() {
     let (_td, state) = make_test_state();
     let result = git_head(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "no".into(), "repo".into())),
     )
     .await
@@ -4156,7 +4127,7 @@ async fn handler_repo_create_conflict() {
     };
     let result = repo_create(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Json(req),
     )
     .await;
@@ -4347,7 +4318,7 @@ async fn type_specific_repo_creation_uses_the_same_namespace_boundary() {
 #[tokio::test]
 async fn handler_xet_read_token_missing_auth_returns_unauthorized() {
     let (_td, state) = make_test_state();
-    let repo = test_repo::<false, true>(&state, &default_headers());
+    let repo = test_repo::<false, true>(&state, &HeaderMap::new());
     let result = xet_read_token(
         State(state),
         repo,
@@ -4361,7 +4332,7 @@ async fn handler_xet_read_token_missing_auth_returns_unauthorized() {
 #[tokio::test]
 async fn handler_xet_write_token_missing_auth_returns_unauthorized() {
     let (_td, state) = make_test_state();
-    let repo = test_repo::<true, true>(&state, &default_headers());
+    let repo = test_repo::<true, true>(&state, &HeaderMap::new());
     let result = xet_write_token(
         State(state),
         repo,
@@ -4724,7 +4695,7 @@ async fn handler_webhook_create_duplicate_url() {
     let state = state_with_store(_td.path(), store);
     let result = webhook_create(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "wh-dup".into())),
         Json(WebhookCreateRequest {
             url: "https://example.com/dup".into(),
@@ -4760,7 +4731,7 @@ async fn handler_lfs_upload_and_download_roundtrip() {
     // Download
     let response = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(oid),
         axum::http::Method::GET,
         HeaderMap::new(),
@@ -4795,7 +4766,7 @@ async fn handler_large_lfs_upload_roundtrips_through_local_filesystem_staging() 
 
     let response = lfs_download(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(oid),
         axum::http::Method::GET,
         HeaderMap::new(),
@@ -4835,7 +4806,7 @@ async fn handler_dataset_parquet_finds_data_files() {
     let state = state_with_store(_td.path(), store);
     let resp = dataset_parquet(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("org".into(), "ds-parquet".into())),
     )
     .await
@@ -4870,7 +4841,7 @@ async fn handler_webhook_list_with_hooks() {
     let state = state_with_store(_td.path(), store);
     let resp = webhook_list(
         State(state.clone()),
-        test_repo(&state, &default_headers()),
+        test_repo(&state, &HeaderMap::new()),
         Path(("models".into(), "org".into(), "wh-list".into())),
     )
     .await
