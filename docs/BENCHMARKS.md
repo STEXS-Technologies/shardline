@@ -6163,3 +6163,40 @@ Tracked Rust inventory is 567,084 lines, including tests, comments and blank
 lines: 36,565 fewer (6.06%) than the 603,649-line baseline. This gate does not
 include a fresh required PostgreSQL/MinIO deployment qualification or resolve
 the historical hosted SDK memory failure. Those remain open.
+
+## Index adapter and checksum cleanup checkpoint (2026-11-17)
+
+Frozen source: `4a0377182731bd892030eb8e420c29beca77e356`. Compared with
+`13b12372`, the batch removes 79 production Rust lines and adds three test
+lines, for 76 fewer Rust lines overall. SQLite upload-intent row decoding and
+batch evidence verification now each have one implementation. PostgreSQL tuple
+decoding is shared by listing and lookup. S3 manifest readers share parsing,
+and multipart composite checksums consume decoded parts directly rather than
+allocating an aggregate checksum buffer. The existing multipart regression test
+now uses two parts and an independently computed fixed CRC32 result.
+
+All 813 selected index library tests passed against a disposable PostgreSQL 16
+Alpine database with `SHARDLINE_REQUIRE_POSTGRES_TESTS=1`, four build jobs and
+four Nextest threads. Six normally ignored tests were excluded. Nextest reported
+125.126 seconds; the Cargo invocation took 126.023 seconds. The container was
+removed after the run. Base migrations were applied with the previously qualified
+`4c95fa72` binary; both migration directories are unchanged since that source.
+The tested index code was built from the frozen source above.
+
+Command: `cargo +1.99.0 nextest run --locked -p shardline-index --lib --no-fail-fast`.
+Local artifacts are in the parent projects directory at
+`.shardline-cleanup-state/postgres-index-4a037718/{migration.log,tests.log,result.json}`.
+The earlier isolated 39-test PostgreSQL adapter run also passed after correcting
+a missing base-schema setup; its initial fixture failure is retained separately.
+All 179 selected S3 library tests, strict index/server Clippy and formatting
+passed for the corresponding source changes.
+
+The shared CI action also drops unused LLVM/libclang development package
+requests and path discovery (20 fewer YAML lines). Clang remains for fuzzing;
+coverage still requests Rust's `llvm-tools-preview`. YAML parsing, Bash syntax
+and both lockfiles were checked; no hosted timing improvement is established.
+
+Tracked Rust inventory is 567,008 lines, including tests, comments and blank
+lines: 36,641 fewer (6.07%) than the 603,649-line baseline. This checkpoint
+qualifies index behavior with PostgreSQL; fresh server/MinIO deployment
+qualification and the historical hosted SDK memory issue remain open.
