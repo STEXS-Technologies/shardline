@@ -1031,6 +1031,57 @@ mod tests {
     use futures_util::stream;
 
     #[test]
+    fn object_checksum_metadata_distinguishes_absence_composite_and_corruption() {
+        let metadata = |kind: &str, value: &str| {
+            vec![(
+                super::MULTIPART_MANIFEST_KEY.to_owned(),
+                serde_json::json!({
+                    "algorithm": "CRC32", "checksum_type": kind,
+                    "checksum_value": value, "parts": [],
+                })
+                .to_string(),
+            )]
+        };
+        let valid = metadata("FULL_OBJECT", "AQIDBA==");
+        assert_eq!(
+            super::read_object_checksum(&valid).unwrap(),
+            Some(super::ObjectChecksum {
+                algorithm: MultipartChecksumAlgorithm::Crc32,
+                checksum_type: MultipartChecksumType::FullObject,
+                checksum_value: "AQIDBA==".to_owned(),
+            })
+        );
+        assert_eq!(super::read_object_checksum(&[]).unwrap(), None);
+        // Composite checksums are validated by their multipart reader, not
+        // advertised as full-object checksums by this reader.
+        assert_eq!(
+            super::read_object_checksum(&metadata("COMPOSITE", "not-full-object")).unwrap(),
+            None
+        );
+        let mut duplicate = valid.clone();
+        duplicate.push((
+            super::MULTIPART_MANIFEST_KEY.to_uppercase(),
+            valid[0].1.clone(),
+        ));
+        for (case, entries) in [
+            ("duplicate names ignoring case", duplicate),
+            (
+                "malformed manifest",
+                vec![(super::MULTIPART_MANIFEST_KEY.to_owned(), "{".to_owned())],
+            ),
+            ("invalid base64", metadata("FULL_OBJECT", "!")),
+            ("incorrect digest length", metadata("FULL_OBJECT", "AQ==")),
+            ("noncanonical base64", metadata("FULL_OBJECT", "AQIDBB==")),
+        ] {
+            assert_eq!(
+                super::read_object_checksum(&entries),
+                Err(shardline_s3_adapter::S3Error::internal()),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
     fn checksum_algorithms_match_standard_vectors() {
         for (name, expected) in [
             ("x-amz-checksum-crc32", "y/Q5Jg=="),
