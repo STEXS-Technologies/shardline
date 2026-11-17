@@ -12,134 +12,48 @@ use super::{
     types::{QuarantineRepairAction, RepairReachability, WebhookDeliveryRepairAction},
 };
 
-// ── classify_quarantine_repair_action ──────────────────────────────────
-
 #[test]
-fn classify_quarantine_missing_object_is_delete_missing() {
-    assert_eq!(
-        classify_quarantine_repair_action(false, false, false),
-        QuarantineRepairAction::DeleteMissing
-    );
+fn quarantine_classification_covers_all_flags_and_precedence() {
+    use QuarantineRepairAction::{DeleteHeld, DeleteMissing, DeleteReachable, Keep};
+    for (exists, reachable, held, expected) in [
+        (false, false, false, DeleteMissing),
+        (false, false, true, DeleteMissing),
+        (false, true, false, DeleteMissing),
+        (false, true, true, DeleteMissing),
+        (true, false, false, Keep),
+        (true, false, true, DeleteHeld),
+        (true, true, false, DeleteReachable),
+        (true, true, true, DeleteReachable),
+    ] {
+        assert_eq!(
+            classify_quarantine_repair_action(exists, reachable, held),
+            expected,
+            "exists={exists}, reachable={reachable}, held={held}"
+        );
+    }
 }
 
 #[test]
-fn classify_quarantine_reachable_object_is_delete_reachable() {
-    assert_eq!(
-        classify_quarantine_repair_action(true, true, false),
-        QuarantineRepairAction::DeleteReachable
-    );
-}
-
-#[test]
-fn classify_quarantine_held_object_is_delete_held() {
-    assert_eq!(
-        classify_quarantine_repair_action(true, false, true),
-        QuarantineRepairAction::DeleteHeld
-    );
-}
-
-#[test]
-fn classify_quarantine_keep_when_none_apply() {
-    assert_eq!(
-        classify_quarantine_repair_action(true, false, false),
-        QuarantineRepairAction::Keep
-    );
-}
-
-#[test]
-fn classify_quarantine_missing_takes_precedence_over_reachable() {
-    // object does not exist → DeleteMissing regardless of reachability
-    assert_eq!(
-        classify_quarantine_repair_action(false, true, false),
-        QuarantineRepairAction::DeleteMissing
-    );
-}
-
-// ── classify_webhook_delivery_repair_action ────────────────────────────
-
-#[test]
-fn classify_webhook_delivery_future_is_delete_future() {
-    assert_eq!(
-        classify_webhook_delivery_repair_action(500, 100, 400),
-        WebhookDeliveryRepairAction::DeleteFuture
-    );
-}
-
-#[test]
-fn classify_webhook_delivery_stale_is_delete_stale() {
-    assert_eq!(
-        classify_webhook_delivery_repair_action(50, 100, 400),
-        WebhookDeliveryRepairAction::DeleteStale
-    );
-}
-
-#[test]
-fn classify_webhook_delivery_keep_when_within_window() {
-    assert_eq!(
-        classify_webhook_delivery_repair_action(200, 100, 400),
-        WebhookDeliveryRepairAction::Keep
-    );
-}
-
-#[test]
-fn classify_webhook_delivery_future_takes_precedence_over_stale() {
-    // processed_at (500) > max_processed_at (400) → DeleteFuture
-    // even though it would also be stale (cutoff=100)
-    assert_eq!(
-        classify_webhook_delivery_repair_action(500, 100, 400),
-        WebhookDeliveryRepairAction::DeleteFuture
-    );
-}
-
-#[test]
-fn classify_webhook_delivery_exact_stale_cutoff_is_delete_stale() {
-    assert_eq!(
-        classify_webhook_delivery_repair_action(100, 100, 400),
-        WebhookDeliveryRepairAction::DeleteStale
-    );
-}
-
-#[test]
-fn classify_webhook_delivery_zero_processed_is_keep_when_within_window() {
-    assert_eq!(
-        classify_webhook_delivery_repair_action(0, 100, 400),
-        WebhookDeliveryRepairAction::DeleteStale
-    );
-}
-
-#[test]
-fn classify_webhook_delivery_all_zero_boundaries() {
-    // All zero: not future (0 <= 0) and not stale (0 <= 0) → DeleteStale
-    assert_eq!(
-        classify_webhook_delivery_repair_action(0, 0, 0),
-        WebhookDeliveryRepairAction::DeleteStale
-    );
-}
-
-#[test]
-fn classify_quarantine_all_false_is_delete_missing() {
-    assert_eq!(
-        classify_quarantine_repair_action(false, false, false),
-        QuarantineRepairAction::DeleteMissing
-    );
-}
-
-#[test]
-fn classify_quarantine_all_true_is_delete_missing_precedence() {
-    // object_exists=false takes precedence, even if reachable and held
-    assert_eq!(
-        classify_quarantine_repair_action(false, true, true),
-        QuarantineRepairAction::DeleteMissing
-    );
-}
-
-#[test]
-fn classify_quarantine_reachable_and_held_is_delete_reachable() {
-    // is_reachable checked before is_held → DeleteReachable
-    assert_eq!(
-        classify_quarantine_repair_action(true, true, true),
-        QuarantineRepairAction::DeleteReachable
-    );
+fn webhook_classification_covers_cutoffs_and_future_precedence() {
+    use WebhookDeliveryRepairAction::{DeleteFuture, DeleteStale, Keep};
+    for (processed, stale_cutoff, future_cutoff, expected) in [
+        (500, 100, 400, DeleteFuture),
+        (50, 100, 400, DeleteStale),
+        (200, 100, 400, Keep),
+        (100, 100, 400, DeleteStale),
+        (101, 100, 400, Keep),
+        (400, 100, 400, Keep),
+        (401, 100, 400, DeleteFuture),
+        (0, 100, 400, DeleteStale),
+        (0, 0, 0, DeleteStale),
+        (500, 600, 400, DeleteFuture),
+    ] {
+        assert_eq!(
+            classify_webhook_delivery_repair_action(processed, stale_cutoff, future_cutoff),
+            expected,
+            "processed={processed}, stale_cutoff={stale_cutoff}, future_cutoff={future_cutoff}"
+        );
+    }
 }
 
 // ── LifecycleRepairOptions ─────────────────────────────────────────────
