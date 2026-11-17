@@ -160,7 +160,8 @@ impl FileUploadIngestor {
         while self.pending.len() >= self.cdc_chunker.min_chunk()
             && let Some(boundary) = self.cdc_chunker.find_boundary(&self.pending)
         {
-            self.flush_pending_chunk_at(object_store, boundary).await?;
+            let chunk = self.pending.split_to(boundary);
+            self.submit_chunk(object_store, chunk).await?;
         }
 
         Ok(())
@@ -176,7 +177,8 @@ impl FileUploadIngestor {
         expected_sha256: Option<&str>,
     ) -> Result<(FileRecord, UploadFileResponse), ServerError> {
         if !self.pending.is_empty() {
-            self.flush_pending_chunk(object_store).await?;
+            let chunk = mem::take(&mut self.pending);
+            self.submit_chunk(object_store, chunk).await?;
         }
         self.drain_all_completed_chunks().await?;
         if self.packed_protocol.is_none() {
@@ -288,26 +290,6 @@ impl FileUploadIngestor {
         );
 
         Ok((record, response))
-    }
-
-    async fn flush_pending_chunk(
-        &mut self,
-        object_store: &ServerObjectStore,
-    ) -> Result<(), ServerError> {
-        let chunk = mem::take(&mut self.pending);
-        self.submit_chunk(object_store, chunk).await
-    }
-
-    /// Flush a chunk of exactly `boundary` bytes from the front of
-    /// `self.pending`.  The remaining bytes stay in `self.pending` for
-    /// the next chunk (used by CDC mode).
-    async fn flush_pending_chunk_at(
-        &mut self,
-        object_store: &ServerObjectStore,
-        boundary: usize,
-    ) -> Result<(), ServerError> {
-        let chunk = self.pending.split_to(boundary);
-        self.submit_chunk(object_store, chunk).await
     }
 
     async fn submit_chunk(
