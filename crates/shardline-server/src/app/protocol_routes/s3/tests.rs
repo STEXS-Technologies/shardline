@@ -1322,14 +1322,11 @@ async fn s3_bucket_stubs_create_head_location() {
     // CreateBucket → 200 no-op.
     let create = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/{BUCKET}"))
-                .header(header::AUTHORIZATION, &write_auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "PUT",
+            format!("/{BUCKET}"),
+            &write_auth,
+        ))
         .await
         .unwrap();
     assert_eq!(create.status(), StatusCode::OK);
@@ -1366,14 +1363,11 @@ async fn s3_bucket_stubs_create_head_location() {
     // HeadBucket → 200.
     let head = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri(format!("/{BUCKET}"))
-                .header(header::AUTHORIZATION, &read_auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "HEAD",
+            format!("/{BUCKET}"),
+            &read_auth,
+        ))
         .await
         .unwrap();
     assert_eq!(head.status(), StatusCode::OK);
@@ -1381,14 +1375,11 @@ async fn s3_bucket_stubs_create_head_location() {
     // GetBucketLocation → XML stub.
     let location = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}?location"))
-                .header(header::AUTHORIZATION, &read_auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}?location"),
+            &read_auth,
+        ))
         .await
         .unwrap();
     assert_eq!(location.status(), StatusCode::OK);
@@ -3330,14 +3321,11 @@ async fn s3_overwrite_is_atomic_no_transient_404_for_readers() {
             for _ in 0..12 {
                 let response = app
                     .clone()
-                    .oneshot(
-                        Request::builder()
-                            .method("GET")
-                            .uri(format!("/{BUCKET}/{KEY}"))
-                            .header(header::AUTHORIZATION, &read_auth)
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
+                    .oneshot(authenticated_empty_request(
+                        "GET",
+                        format!("/{BUCKET}/{KEY}"),
+                        &read_auth,
+                    ))
                     .await
                     .unwrap();
                 let body = body_bytes(response).await;
@@ -3397,14 +3385,11 @@ async fn s3_overwrite_stress_readers_never_see_torn_or_absent_object() {
                     let read_auth = read_auth.clone();
                     tasks.push(tokio::spawn(async move {
                         let response = app
-                            .oneshot(
-                                Request::builder()
-                                    .method("GET")
-                                    .uri(format!("/{BUCKET}/{KEY}"))
-                                    .header(header::AUTHORIZATION, &read_auth)
-                                    .body(Body::empty())
-                                    .unwrap(),
-                            )
+                            .oneshot(authenticated_empty_request(
+                                "GET",
+                                format!("/{BUCKET}/{KEY}"),
+                                &read_auth,
+                            ))
                             .await
                             .unwrap();
                         let status = response.status();
