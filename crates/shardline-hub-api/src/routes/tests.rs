@@ -299,6 +299,7 @@ fn parse_yaml_frontmatter_omits_absent_empty_and_non_utf8_metadata() {
         b"Just a README\nno frontmatter".as_slice(),
         b"---\n---\nbody",
         b"---\n# just a comment\n---\nbody",
+        b"---\nno-colon-here\n---\nbody",
         b"\xff\xfe\x00\x01",
         b"---\nkey: value\n",
         b"---\nkey: value\nno_colon_line\nother: val\n---\n",
@@ -3900,17 +3901,6 @@ async fn handler_webhook_create_repo_not_found() {
     )
     .await;
     assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
-}
-
-// ------------------------------------------------------------------
-// parse_yaml_frontmatter — key without colon separator
-// ------------------------------------------------------------------
-
-#[test]
-fn parse_yaml_frontmatter_line_without_colon_skipped_and_map_empty() {
-    // Only a line without colon → map is empty → None
-    let content = b"---\nno-colon-here\n---\nbody";
-    assert!(parse_yaml_frontmatter(content).is_none());
 }
 
 // ------------------------------------------------------------------
