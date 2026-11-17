@@ -5999,3 +5999,31 @@ Normally ignored tests remained excluded (45 library and five release tests).
 The command exited zero in 363.80 s with existing artifacts and rebuilds;
 that elapsed time is not a controlled whole-CI comparison. The exact candidate
 patch was held unchanged throughout this gate. No test cases were removed.
+
+### SDK qualification after cache and CLI report cleanup (2026-11-17)
+
+At `91dbd4a5`, the full SDK library suite passed with all features enabled:
+
+```sh
+cargo +1.99.0 nextest run --offline --locked -p sdx --all-features --lib --no-fail-fast
+```
+
+All 321 selected tests passed, with zero skipped, in 1.336 s of test execution.
+The run used four Cargo build jobs, existing build artifacts, disabled debug
+information and no compiler wrapper on the shared development host. This checks
+SDK unit and mock-protocol behavior; it does not run the separate real-server E2E
+workspace or resolve the outstanding hosted memory qualification.
+
+The preceding focused runs passed all 69 cache/stream tests and all 18 CLI
+report-output tests. Strict Clippy passed for each affected package's library
+and tests. Cache removal accounting is now shared by corrupt reads and both
+eviction paths. Cache serialization hashes the already serialized offset table
+in one call instead of hashing each offset separately; a fixed-byte fixture
+checks compatibility with the existing cache format. No end-to-end throughput
+improvement is claimed from that change.
+
+Tracked Rust inventory is 567,575 lines, including tests, comments and blank
+lines: 36,074 fewer (5.98%) than the 603,649-line baseline. This is 41 more lines
+than the preceding 567,534-line checkpoint: stronger output and byte-format
+assertions outweigh the small production reductions in this batch. These changes
+improve shared ownership and verification; they are not a net source reduction.
