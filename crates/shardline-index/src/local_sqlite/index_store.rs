@@ -647,6 +647,39 @@ pub(super) fn load_verified_sqlite_intent(
     Ok(intent)
 }
 
+fn verify_sqlite_intent_evidence_batch(
+    transaction: &Transaction<'_>,
+    intents: &[UploadIntent],
+) -> Result<(), LocalIndexStoreError> {
+    let operation_ids = intents
+        .iter()
+        .map(|intent| intent.intent_id().to_owned())
+        .collect::<Vec<_>>();
+    let heads = super::helpers::load_latest_verified_event_json_batch(
+        transaction,
+        shardline_reliability::OperationKind::Upload,
+        &operation_ids,
+    )?;
+    for intent in intents {
+        let event_json = heads
+            .get(intent.intent_id())
+            .ok_or(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ))?;
+        let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
+        verify_upload_lifecycle_head(
+            &event,
+            event.operation.tenant.as_str(),
+            event.operation.repository.as_str(),
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            intent.state(),
+        )?;
+    }
+    Ok(())
+}
+
 fn verify_sqlite_intent_evidence(
     transaction: &Transaction<'_>,
     intent: &UploadIntent,
@@ -2114,38 +2147,11 @@ impl UploadIntentStore for super::LocalIndexStore {
             let mut stmt = transaction.prepare(
                 "SELECT intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds FROM shardline_upload_intents WHERE state = ?1 ORDER BY created_at_unix_seconds"
             )?;
-            let intents = stmt
-                .query_map(rusqlite::params![state.as_str()], upload_intent_from_row)
-                .map_err(LocalIndexStoreError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(LocalIndexStoreError::from)?;
-            drop(stmt);
-            let operation_ids = intents
-                .iter()
-                .map(|intent| intent.intent_id().to_owned())
-                .collect::<Vec<_>>();
-            let heads = super::helpers::load_latest_verified_event_json_batch(
-                &transaction,
-                shardline_reliability::OperationKind::Upload,
-                &operation_ids,
+            let intents = collect_rows(
+                stmt.query_map(rusqlite::params![state.as_str()], upload_intent_from_row)?,
             )?;
-            for intent in &intents {
-                let event_json = heads.get(intent.intent_id()).ok_or(
-                    LocalIndexStoreError::Reliability(
-                        shardline_reliability::ReliabilityError::OperationMismatch,
-                    ),
-                )?;
-                let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
-                verify_upload_lifecycle_head(
-                    &event,
-                    event.operation.tenant.as_str(),
-                    event.operation.repository.as_str(),
-                    intent.intent_id(),
-                    intent.object_key(),
-                    intent.object_hash(),
-                    intent.state(),
-                )?;
-            }
+            drop(stmt);
+            verify_sqlite_intent_evidence_batch(&transaction, &intents)?;
             transaction.commit()?;
             Ok(intents)
         })
@@ -2170,38 +2176,11 @@ impl UploadIntentStore for super::LocalIndexStore {
             let mut stmt = transaction.prepare(
                 "SELECT intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds FROM shardline_upload_intents WHERE state = ?1 AND created_at_unix_seconds < ?2 ORDER BY created_at_unix_seconds"
             )?;
-            let intents = stmt
-                .query_map(rusqlite::params![state.as_str(), cutoff], upload_intent_from_row)
-                .map_err(LocalIndexStoreError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(LocalIndexStoreError::from)?;
-            drop(stmt);
-            let operation_ids = intents
-                .iter()
-                .map(|intent| intent.intent_id().to_owned())
-                .collect::<Vec<_>>();
-            let heads = super::helpers::load_latest_verified_event_json_batch(
-                &transaction,
-                shardline_reliability::OperationKind::Upload,
-                &operation_ids,
+            let intents = collect_rows(
+                stmt.query_map(rusqlite::params![state.as_str(), cutoff], upload_intent_from_row)?,
             )?;
-            for intent in &intents {
-                let event_json = heads.get(intent.intent_id()).ok_or(
-                    LocalIndexStoreError::Reliability(
-                        shardline_reliability::ReliabilityError::OperationMismatch,
-                    ),
-                )?;
-                let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
-                verify_upload_lifecycle_head(
-                    &event,
-                    event.operation.tenant.as_str(),
-                    event.operation.repository.as_str(),
-                    intent.intent_id(),
-                    intent.object_key(),
-                    intent.object_hash(),
-                    intent.state(),
-                )?;
-            }
+            drop(stmt);
+            verify_sqlite_intent_evidence_batch(&transaction, &intents)?;
             transaction.commit()?;
             Ok(intents)
         })
