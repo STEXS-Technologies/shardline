@@ -1679,22 +1679,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
-    #[test]
-    fn load_server_config_max_revisions_per_repo_rejects_unparsable() {
-        set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "not-a-number");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::MaxRevisionsPerRepo(_))
-        ));
-
-        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
     // ── SHARDLINE_MAX_TREE_ENTRIES_PER_REPO ────────────────────────────────
 
     #[test]
@@ -1741,22 +1725,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroMaxTreeEntriesPerRepo)
-        ));
-
-        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_max_tree_entries_per_repo_rejects_unparsable() {
-        set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "not-a-number");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::MaxTreeEntriesPerRepo(_))
         ));
 
         remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
@@ -2297,7 +2265,23 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     fn load_server_config_rejects_invalid_environment_values() {
         use super::ServerConfigError::*;
 
+        let invalid_integer = "not-a-number".parse::<usize>().unwrap_err();
         for (name, value, expected) in [
+            (
+                "SHARDLINE_MAX_REVISIONS_PER_REPO",
+                "not-a-number",
+                MaxRevisionsPerRepo(invalid_integer.clone()),
+            ),
+            (
+                "SHARDLINE_MAX_TREE_ENTRIES_PER_REPO",
+                "not-a-number",
+                MaxTreeEntriesPerRepo(invalid_integer.clone()),
+            ),
+            (
+                "SHARDLINE_MAX_REQUEST_BODY_BYTES",
+                "not-a-number",
+                MaxRequestBodyBytes(invalid_integer),
+            ),
             (
                 "SHARDLINE_MAX_REQUEST_BODY_BYTES",
                 "0",
@@ -2381,18 +2365,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
                 "{name}={value:?}: {error:?}"
             );
         }
-    }
-
-    #[test]
-    fn load_server_config_invalid_max_request_body_bytes() {
-        set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "not-a-number");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(result.is_err());
-        remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
