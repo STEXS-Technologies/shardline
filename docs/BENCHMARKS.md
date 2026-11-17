@@ -6027,3 +6027,36 @@ lines: 36,074 fewer (5.98%) than the 603,649-line baseline. This is 41 more line
 than the preceding 567,534-line checkpoint: stronger output and byte-format
 assertions outweigh the small production reductions in this batch. These changes
 improve shared ownership and verification; they are not a net source reduction.
+
+### Integrated SDK and CLI cleanup checkpoint (2026-11-17)
+
+At `e1096951654cbea0756d3e56b23fd36598a27e16`, `cargo +1.99.0 make ci`
+completed successfully with the tracked source held unchanged throughout the run.
+The isolated checkout used four Cargo jobs and Nextest workers, disabled dev/test
+debug information, no compiler wrapper, offline dependencies and existing build
+artifacts.
+
+- All 8,117 selected workspace library tests passed in 251.699 s; 45 normally
+  ignored tests remained excluded.
+- All 39 reliability contracts and 41 release CLI/maintenance tests passed;
+  five normally ignored release tests remained excluded.
+- Formatting, strict workspace Clippy, dependency exceptions, root and E2E
+  dependency policies, release help/manpage/completion checks and 44-version
+  migration parity passed.
+
+The 8,197 selected tests cover the recent CLI report, SDK cache, reconstruction,
+transfer and shard-constant cleanup together with the existing workspace
+contracts. The SDK's separate all-feature library run also passed all 319 tests
+at this source. Consolidating three planner functions into one retained their
+three scenarios and all original descriptors and terms; the new assertions check
+complete fetch ranges and term indexes.
+
+Total gate elapsed time was 421.73 s, including a 2m 18s release rebuild. This is
+not a controlled cold-build or before/after performance measurement. External
+PostgreSQL/MinIO qualification and the hosted SDK memory gap are separate from
+this contributor gate; another passing local run does not resolve the historical
+intermittent TLS failure's cause.
+
+Tracked Rust inventory is 567,554 lines, including tests, comments and blanks:
+36,095 fewer (5.98%) than the 603,649-line baseline and 21 fewer than the preceding
+SDK checkpoint.
