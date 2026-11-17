@@ -517,37 +517,26 @@ async fn s3_get_open_ended_and_suffix_ranges() {
         .unwrap();
     assert_eq!(put.status(), StatusCode::OK);
 
-    let open_ended = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .header(header::RANGE, "bytes=14-")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(open_ended.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(body_bytes(open_ended).await, b"ef");
-
-    let suffix = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .header(header::RANGE, "bytes=-3")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(suffix.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(body_bytes(suffix).await, b"def");
+    for (range, expected) in [
+        ("bytes=14-", b"ef".as_slice()),
+        ("bytes=-3", b"def".as_slice()),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/{BUCKET}/{KEY}"))
+                    .header(header::AUTHORIZATION, &auth)
+                    .header(header::RANGE, range)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
+        assert_eq!(body_bytes(response).await, expected, "{range}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -564,38 +553,31 @@ async fn s3_get_unsatisfiable_range_returns_416_invalid_range() {
         .unwrap();
     assert_eq!(put.status(), StatusCode::OK);
 
-    let get = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .header(header::RANGE, "bytes=100-200")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(get.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-    let body = String::from_utf8(body_bytes(get).await).unwrap();
-    assert!(body.contains("<Code>InvalidRange</Code>"), "{body}");
-
-    let multi_range = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .header(header::RANGE, "bytes=0-1,4-5")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(multi_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-    let body = String::from_utf8(body_bytes(multi_range).await).unwrap();
-    assert!(body.contains("<Code>InvalidRange</Code>"), "{body}");
+    for range in ["bytes=100-200", "bytes=0-1,4-5"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/{BUCKET}/{KEY}"))
+                    .header(header::AUTHORIZATION, &auth)
+                    .header(header::RANGE, range)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "{range}"
+        );
+        let body = String::from_utf8(body_bytes(response).await).unwrap();
+        assert!(
+            body.contains("<Code>InvalidRange</Code>"),
+            "{range}: {body}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
