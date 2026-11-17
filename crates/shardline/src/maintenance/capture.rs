@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -87,12 +87,10 @@ pub(super) fn verify(
         &directory.join("artifacts").join(hex::encode(digest.0)),
         65536,
     )?;
-    let mut reader = BufReader::new(bytes.as_slice());
+    let mut body = bytes.as_slice();
     let mut header = String::new();
-    reader.read_line(&mut header)?;
-    let mut body = Vec::new();
-    reader.read_to_end(&mut body)?;
-    let manifest: Manifest = serde_json::from_slice(&body)?;
+    body.read_line(&mut header)?;
+    let manifest: Manifest = serde_json::from_slice(body)?;
     if manifest.schema != 1
         || manifest.exit_code > 2
         || header != format!("maintenance.success: {}\n", manifest.exit_code == 0)
