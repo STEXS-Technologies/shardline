@@ -6417,3 +6417,34 @@ required PostgreSQL index suite or resolve the hosted SDK memory failure.
 
 Commands, versions, source hashes, exit codes, durations and raw logs are in the
 parent projects directory at `.shardline-cleanup-state/minio-b080738d/`.
+
+## Required PostgreSQL index refresh at `e5d4f3af` (2026-11-17)
+
+Frozen source: `e5d4f3afe96255a5cc474c2d1503f95c6acc85d4`.
+All 813 selected `shardline-index` library tests passed with
+`SHARDLINE_REQUIRE_POSTGRES_TESTS=1` and a real disposable PostgreSQL 16 Alpine
+database. Six configured ignored tests were excluded. Command:
+
+```text
+cargo +1.99.0 nextest run --locked -p shardline-index --lib --no-fail-fast
+```
+
+Total invocation time was 125.338 s. Builds used Rust 1.99.0, four build jobs,
+four test workers, dev/test debug information disabled, an empty compiler wrapper,
+offline resolution and the existing target directory. PostgreSQL tests used the
+suite's isolated-schema fixtures and configured coordination rules.
+
+The first fixture attempt failed during migration startup with a connection
+reset, before any tests ran. Its local-socket readiness probe could observe the
+initialization server before external TCP service was ready. Removed that
+container, started a fresh fixture and waited using `pg_isready -h 127.0.0.1`;
+migration and the complete subsequent test invocation passed. No product code,
+test assertions or retry settings changed. The final fixture was removed.
+
+The migration executable's SHA-256 was verified as
+`1ae5353ad0f6291e9731b2e7aefb4c130d70ac9cd9848f917e62305c1fc94818`;
+both migration trees were checked unchanged from its source. Tests compiled and
+ran the frozen current index code. This qualifies the selected PostgreSQL index
+contracts, not production throughput or the historical hosted SDK memory issue.
+Logs, command, source hash, duration, result and fixture runner are in the parent
+projects directory at `.shardline-cleanup-state/postgres-index-e5d4f3af/`.
