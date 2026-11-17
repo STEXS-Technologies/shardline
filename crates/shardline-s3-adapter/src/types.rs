@@ -226,6 +226,24 @@ fn listing_xml_value(value: &str, url_encoding: bool) -> String {
     }
 }
 
+fn listing_rows_xml(
+    contents: &[Contents],
+    prefixes: &[String],
+    owner_id: Option<&str>,
+    url_encoding: bool,
+) -> String {
+    contents
+        .iter()
+        .map(|content| content.to_xml(owner_id, url_encoding))
+        .chain(prefixes.iter().map(|prefix| {
+            format!(
+                "  <CommonPrefixes>\n    <Prefix>{}</Prefix>\n  </CommonPrefixes>\n",
+                listing_xml_value(prefix, url_encoding)
+            )
+        }))
+        .collect()
+}
+
 fn append_listing_fields(xml: &mut String, fields: &str) {
     if let Some(end) = xml.rfind("</ListBucketResult>") {
         xml.insert_str(end, fields);
@@ -286,21 +304,12 @@ impl ListBucketResult {
     }
 
     fn to_xml_with_owner(&self, owner_id: Option<&str>, url_encoding: bool) -> String {
-        let contents = self
-            .contents
-            .iter()
-            .map(|content| content.to_xml(owner_id, url_encoding))
-            .collect::<String>();
-        let common_prefixes = self
-            .common_prefixes
-            .iter()
-            .map(|prefix| {
-                format!(
-                    "  <CommonPrefixes>\n    <Prefix>{}</Prefix>\n  </CommonPrefixes>\n",
-                    listing_xml_value(prefix, url_encoding)
-                )
-            })
-            .collect::<String>();
+        let rows = listing_rows_xml(
+            &self.contents,
+            &self.common_prefixes,
+            owner_id,
+            url_encoding,
+        );
         let continuation = self
             .next_continuation_token
             .as_ref()
@@ -312,7 +321,7 @@ impl ListBucketResult {
             })
             .unwrap_or_default();
         format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n{contents}{common_prefixes}  <IsTruncated>{}</IsTruncated>\n{continuation}</ListBucketResult>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n{rows}  <IsTruncated>{}</IsTruncated>\n{continuation}</ListBucketResult>\n",
             self.is_truncated,
         )
     }
@@ -346,21 +355,7 @@ impl ListBucketResultV1 {
     /// keys, prefix, delimiter and markers. Bucket names are unchanged.
     #[must_use]
     pub fn to_xml_with_url_encoding(&self, url_encoding: bool) -> String {
-        let contents = self
-            .contents
-            .iter()
-            .map(|content| content.to_xml(None, url_encoding))
-            .collect::<String>();
-        let common_prefixes = self
-            .common_prefixes
-            .iter()
-            .map(|prefix| {
-                format!(
-                    "  <CommonPrefixes>\n    <Prefix>{}</Prefix>\n  </CommonPrefixes>\n",
-                    listing_xml_value(prefix, url_encoding)
-                )
-            })
-            .collect::<String>();
+        let rows = listing_rows_xml(&self.contents, &self.common_prefixes, None, url_encoding);
         let delimiter = self
             .delimiter
             .as_ref()
@@ -382,7 +377,7 @@ impl ListBucketResultV1 {
             })
             .unwrap_or_default();
         let mut xml = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n  <Name>{}</Name>\n  <Prefix>{}</Prefix>\n  <Marker>{}</Marker>\n  <MaxKeys>{}</MaxKeys>\n{delimiter}{contents}{common_prefixes}  <IsTruncated>{}</IsTruncated>\n{next_marker}</ListBucketResult>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n  <Name>{}</Name>\n  <Prefix>{}</Prefix>\n  <Marker>{}</Marker>\n  <MaxKeys>{}</MaxKeys>\n{delimiter}{rows}  <IsTruncated>{}</IsTruncated>\n{next_marker}</ListBucketResult>\n",
             xml_escape(&self.name),
             listing_xml_value(&self.prefix, url_encoding),
             listing_xml_value(&self.marker, url_encoding),
