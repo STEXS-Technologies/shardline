@@ -975,34 +975,23 @@ pub fn load_index_postgres_url_from_toml(toml: &ShardlineTomlConfig) -> Option<S
 /// environment. Returns the original value when no patterns are found.
 fn interpolate_env_vars(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-
-    'outer: while let Some(ch) = chars.next() {
-        if ch == '$' && chars.peek() == Some(&'{') {
-            chars.next(); // consume '{'
-            let mut var_name = String::new();
-            loop {
-                match chars.next() {
-                    Some('}') => {
-                        let resolved =
-                            var(&var_name).unwrap_or_else(|_| format!("${{{var_name}}}"));
-                        result.push_str(&resolved);
-                        break;
-                    }
-                    Some(c) => var_name.push(c),
-                    None => {
-                        // Unclosed ${ — preserve original text
-                        result.push('$');
-                        result.push('{');
-                        result.push_str(&var_name);
-                        break 'outer;
-                    }
-                }
+    let mut remaining = value;
+    while let Some(start) = remaining.find("${") {
+        let placeholder = &remaining[start..];
+        let Some((expression, tail)) = placeholder.split_once('}') else {
+            break;
+        };
+        result.push_str(&remaining[..start]);
+        match var(&expression[2..]) {
+            Ok(resolved) => result.push_str(&resolved),
+            Err(_) => {
+                result.push_str(expression);
+                result.push('}');
             }
-        } else {
-            result.push(ch);
         }
+        remaining = tail;
     }
+    result.push_str(remaining);
     result
 }
 
@@ -1090,8 +1079,22 @@ mod interpolate_tests {
     }
 
     #[test]
-    fn test_only_brace_no_var() {
-        assert_eq!(interpolate_env_vars("${}"), "${}");
+    fn interpolation_preserves_unicode_and_does_not_expand_resolved_values() {
+        super::super::environment::set_test_var("_TEST_INTERP_LITERAL", "${_TEST_INTERP_LITERAL}");
+        for (input, expected) in [
+            (
+                "雪-${_TEST_INTERP_LITERAL}-é",
+                "雪-${_TEST_INTERP_LITERAL}-é",
+            ),
+            (
+                "${_TEST_INTERP_LITERAL}${unfinished",
+                "${_TEST_INTERP_LITERAL}${unfinished",
+            ),
+            ("é-${_MISSING_INTERP_雪}-雪", "é-${_MISSING_INTERP_雪}-雪"),
+        ] {
+            assert_eq!(interpolate_env_vars(input), expected);
+        }
+        super::super::environment::remove_test_var("_TEST_INTERP_LITERAL");
     }
 }
 
