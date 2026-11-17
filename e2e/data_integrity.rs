@@ -1422,20 +1422,29 @@ async fn upload_thousand_small_files() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn upload_exact_chunk_size_boundary() {
+async fn lfs_uploads_round_trip_around_cdc_boundaries() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-
-    // Chunk size is 4 bytes (from ServerConfig::new 5th arg)
-    // Test exactly 4 bytes (1 full chunk) and exactly 8 bytes (2 full chunks)
+    let source: Vec<u8> = (0_u8..=250).cycle().take(1024).collect();
+    let mut chunker = shardline_xet_core::cdc::CdcChunker::new(128);
+    let first = chunker.find_boundary(&source).unwrap();
+    let second = first + chunker.find_boundary(&source[first..]).unwrap();
+    assert!(first > 0 && second < source.len());
     for (label, content) in [
-        ("one_chunk", vec![0xABu8; 4]),
-        ("two_chunks", vec![0xBCu8; 8]),
+        ("four bytes", vec![0xABu8; 4]),
+        ("eight bytes", vec![0xBCu8; 8]),
+        ("three bytes", vec![0xDDu8; 3]),
+        ("five bytes", vec![0xEEu8; 5]),
+        ("before first boundary", source[..first - 1].to_vec()),
+        ("one complete chunk", source[..first].to_vec()),
+        ("one byte after boundary", source[..first + 1].to_vec()),
+        ("two complete chunks", source[..second].to_vec()),
     ] {
         let oid = hex::encode(sha2::Sha256::digest(&content));
+        let url = format!("{base_url}/v1/lfs/objects/{oid}");
         let upload = client
-            .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .put(&url)
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/octet-stream")
             .body(content.clone())
@@ -1443,75 +1452,21 @@ async fn upload_exact_chunk_size_boundary() {
             .await
             .unwrap();
         assert_eq!(upload.status(), 200, "upload {label} failed");
-
         let download = client
-            .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .get(&url)
             .header("Authorization", format!("Bearer {token}"))
             .send()
             .await
             .unwrap();
         assert_eq!(download.status(), 200, "download {label} failed");
-        let body = download.bytes().await.unwrap();
         assert_eq!(
-            body.as_ref(),
+            download.bytes().await.unwrap().as_ref(),
             content.as_slice(),
             "round trip mismatch for {label}"
         );
     }
-
-    let partial: Vec<u8> = vec![0xDDu8; 3];
-    let partial_oid = hex::encode(sha2::Sha256::digest(&partial));
-    let upload = client
-        .put(format!("{base_url}/v1/lfs/objects/{partial_oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(partial.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(upload.status(), 200, "upload partial chunk failed");
-
-    let download = client
-        .get(format!("{base_url}/v1/lfs/objects/{partial_oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(download.status(), 200, "download partial chunk failed");
-    let body = download.bytes().await.unwrap();
-    assert_eq!(
-        body.as_ref(),
-        partial.as_slice(),
-        "partial chunk round trip mismatch"
-    );
-
-    let oversized: Vec<u8> = vec![0xEEu8; 5];
-    let oversized_oid = hex::encode(sha2::Sha256::digest(&oversized));
-    let upload = client
-        .put(format!("{base_url}/v1/lfs/objects/{oversized_oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(oversized.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(upload.status(), 200, "upload 1-byte-over chunk failed");
-
-    let download = client
-        .get(format!("{base_url}/v1/lfs/objects/{oversized_oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(download.status(), 200, "download 1-byte-over chunk failed");
-    let body = download.bytes().await.unwrap();
-    assert_eq!(
-        body.as_ref(),
-        oversized.as_slice(),
-        "1-byte-over chunk round trip mismatch"
-    );
-
     server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
