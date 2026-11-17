@@ -413,8 +413,7 @@ pub(super) fn attach_multipart_manifest(
         return Err(shardline_s3_adapter::S3Error::invalid_part());
     }
     let mut previous = 0;
-    let mut checksum_bytes =
-        Vec::with_capacity(parts.len().saturating_mul(algorithm.encoded_len()));
+    let mut digest = DigestState::new(algorithm.header());
     for part in &parts {
         let decoded = STANDARD
             .decode(&part.checksum_value)
@@ -428,12 +427,12 @@ pub(super) fn attach_multipart_manifest(
             return Err(shardline_s3_adapter::S3Error::invalid_part());
         }
         previous = part.part_number;
-        checksum_bytes.extend_from_slice(&decoded);
+        if checksum_type == MultipartChecksumType::Composite {
+            digest.update(&decoded);
+        }
     }
     let checksum_value = match checksum_type {
         MultipartChecksumType::Composite => {
-            let mut digest = DigestState::new(algorithm.header());
-            digest.update(&checksum_bytes);
             format!("{}-{}", digest.encoded(), parts.len())
         }
         MultipartChecksumType::FullObject => {
@@ -480,12 +479,7 @@ fn validate_multipart_manifest(
     if let Some(manifest) = &manifest {
         let mut total_size = 0_u64;
         let mut previous = 0_u32;
-        let mut checksum_bytes = Vec::with_capacity(
-            manifest
-                .parts
-                .len()
-                .saturating_mul(manifest.algorithm.encoded_len()),
-        );
+        let mut digest = DigestState::new(manifest.algorithm.header());
         for part in &manifest.parts {
             let decoded = STANDARD
                 .decode(&part.checksum_value)
@@ -499,7 +493,9 @@ fn validate_multipart_manifest(
                 return Err(shardline_s3_adapter::S3Error::internal());
             }
             previous = part.part_number;
-            checksum_bytes.extend_from_slice(&decoded);
+            if manifest.checksum_type == MultipartChecksumType::Composite {
+                digest.update(&decoded);
+            }
             total_size = total_size
                 .checked_add(part.size_bytes)
                 .ok_or_else(shardline_s3_adapter::S3Error::internal)?;
@@ -516,8 +512,6 @@ fn validate_multipart_manifest(
         }
         let checksum_matches = match manifest.checksum_type {
             MultipartChecksumType::Composite => {
-                let mut digest = DigestState::new(manifest.algorithm.header());
-                digest.update(&checksum_bytes);
                 manifest.checksum_value == format!("{}-{}", digest.encoded(), manifest.parts.len())
             }
             MultipartChecksumType::FullObject => {
@@ -1164,30 +1158,33 @@ mod tests {
     #[test]
     fn multipart_manifest_round_trips_and_detects_tampering() {
         let mut metadata = Vec::new();
-        let part_checksum = STANDARD.encode([1_u8, 2, 3, 4]);
         let manifest = attach_multipart_manifest(
             &mut metadata,
             MultipartChecksumAlgorithm::Crc32,
             MultipartChecksumType::Composite,
             None,
-            vec![MultipartPartChecksum {
-                part_number: 1,
-                size_bytes: 17,
-                checksum_value: part_checksum,
-            }],
+            [([1_u8, 2, 3, 4], 1), ([5_u8, 6, 7, 8], 2)]
+                .into_iter()
+                .map(|(bytes, part_number)| MultipartPartChecksum {
+                    part_number,
+                    size_bytes: 17,
+                    checksum_value: STANDARD.encode(bytes),
+                })
+                .collect(),
         )
         .unwrap();
+        assert_eq!(manifest.checksum_value, "P8qIxQ==-2");
         assert_eq!(
-            read_multipart_manifest(&metadata, 1, 17).unwrap(),
+            read_multipart_manifest(&metadata, 2, 34).unwrap(),
             Some(manifest)
         );
 
         let mut tampered = metadata;
         let (_, value) = tampered.first_mut().unwrap();
         let mut manifest: super::MultipartChecksumManifest = serde_json::from_str(value).unwrap();
-        manifest.checksum_value = format!("{}-1", STANDARD.encode([0_u8, 0, 0, 0]));
+        manifest.checksum_value = format!("{}-2", STANDARD.encode([0_u8, 0, 0, 0]));
         *value = serde_json::to_string(&manifest).unwrap();
-        assert!(read_multipart_manifest(&tampered, 1, 17).is_err());
+        assert!(read_multipart_manifest(&tampered, 2, 34).is_err());
     }
 
     #[test]
