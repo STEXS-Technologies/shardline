@@ -193,47 +193,23 @@ where
                 .contains(candidate.object_key().as_str()),
             active_hold_object_keys.contains(candidate.object_key()),
         );
-        match action {
-            QuarantineRepairAction::Keep => {}
+        let removed = match action {
+            QuarantineRepairAction::Keep => continue,
             QuarantineRepairAction::DeleteMissing => {
-                let deleted = index_store
-                    .delete_quarantine_candidate_if_matches(&candidate)
-                    .await
-                    .map_err(Into::into)?;
-                if deleted {
-                    report.removed_missing_quarantine_candidates =
-                        checked_increment(report.removed_missing_quarantine_candidates)?;
-                    lifecycle_repair_failpoint(
-                        LifecycleRepairBoundary::AfterQuarantineCandidateMutation,
-                    )?;
-                }
+                &mut report.removed_missing_quarantine_candidates
             }
             QuarantineRepairAction::DeleteReachable => {
-                let deleted = index_store
-                    .delete_quarantine_candidate_if_matches(&candidate)
-                    .await
-                    .map_err(Into::into)?;
-                if deleted {
-                    report.removed_reachable_quarantine_candidates =
-                        checked_increment(report.removed_reachable_quarantine_candidates)?;
-                    lifecycle_repair_failpoint(
-                        LifecycleRepairBoundary::AfterQuarantineCandidateMutation,
-                    )?;
-                }
+                &mut report.removed_reachable_quarantine_candidates
             }
-            QuarantineRepairAction::DeleteHeld => {
-                let deleted = index_store
-                    .delete_quarantine_candidate_if_matches(&candidate)
-                    .await
-                    .map_err(Into::into)?;
-                if deleted {
-                    report.removed_held_quarantine_candidates =
-                        checked_increment(report.removed_held_quarantine_candidates)?;
-                    lifecycle_repair_failpoint(
-                        LifecycleRepairBoundary::AfterQuarantineCandidateMutation,
-                    )?;
-                }
-            }
+            QuarantineRepairAction::DeleteHeld => &mut report.removed_held_quarantine_candidates,
+        };
+        if index_store
+            .delete_quarantine_candidate_if_matches(&candidate)
+            .await
+            .map_err(Into::into)?
+        {
+            *removed = checked_increment(*removed)?;
+            lifecycle_repair_failpoint(LifecycleRepairBoundary::AfterQuarantineCandidateMutation)?;
         }
     }
 
@@ -243,38 +219,26 @@ where
         .map_err(Into::into)?;
     for delivery in webhook_deliveries {
         report.scanned_webhook_deliveries = checked_increment(report.scanned_webhook_deliveries)?;
-        match classify_webhook_delivery_repair_action(
+        let removed = match classify_webhook_delivery_repair_action(
             delivery.processed_at_unix_seconds(),
             stale_webhook_cutoff,
             max_processed_at_unix_seconds,
         ) {
-            WebhookDeliveryRepairAction::Keep => {}
+            WebhookDeliveryRepairAction::Keep => continue,
             WebhookDeliveryRepairAction::DeleteStale => {
-                let deleted = index_store
-                    .delete_webhook_delivery_if_matches(&delivery)
-                    .await
-                    .map_err(Into::into)?;
-                if deleted {
-                    report.removed_stale_webhook_deliveries =
-                        checked_increment(report.removed_stale_webhook_deliveries)?;
-                    lifecycle_repair_failpoint(
-                        LifecycleRepairBoundary::AfterWebhookDeliveryMutation,
-                    )?;
-                }
+                &mut report.removed_stale_webhook_deliveries
             }
             WebhookDeliveryRepairAction::DeleteFuture => {
-                let deleted = index_store
-                    .delete_webhook_delivery_if_matches(&delivery)
-                    .await
-                    .map_err(Into::into)?;
-                if deleted {
-                    report.removed_future_webhook_deliveries =
-                        checked_increment(report.removed_future_webhook_deliveries)?;
-                    lifecycle_repair_failpoint(
-                        LifecycleRepairBoundary::AfterWebhookDeliveryMutation,
-                    )?;
-                }
+                &mut report.removed_future_webhook_deliveries
             }
+        };
+        if index_store
+            .delete_webhook_delivery_if_matches(&delivery)
+            .await
+            .map_err(Into::into)?
+        {
+            *removed = checked_increment(*removed)?;
+            lifecycle_repair_failpoint(LifecycleRepairBoundary::AfterWebhookDeliveryMutation)?;
         }
     }
 
