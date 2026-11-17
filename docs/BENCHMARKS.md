@@ -6364,3 +6364,29 @@ unrelated input, not a measured cold-container or edited-Rust speedup.
 
 Logs are in the parent projects directory at
 `.shardline-cleanup-state/container-inputs-{build,default-build,cache,version,help,final-check}.log`.
+
+## Full contributor checkpoint at `89d8801f` (2026-11-17)
+
+Frozen source: `89d8801f5a9a778ca9b558ab670cced2346686c3`.
+`cargo +1.99.0 make ci` passed in 550.958 s with an empty `RUSTC_WRAPPER`,
+four build jobs, four Nextest workers, dev/test debug information disabled,
+offline dependency resolution and the existing warmed cleanup target directory.
+This is a qualification run, not a build-speed comparison.
+
+- All 8,022 selected workspace library tests passed in 249.642 s; 45 tests
+  configured as ignored were excluded.
+- All 39 reliability contracts passed across the six selected integration targets.
+- All 41 selected release CLI/maintenance contracts passed; five configured
+  ignored maintenance tests were excluded.
+- Formatting, strict workspace Clippy (with its existing Xet-core exclusion),
+  dependency exceptions, root/E2E dependency policy, release help/manpage/completion
+  checks and parity across all 44 migrations passed.
+
+The total is 8,102 passing selected tests. This run does not freshly qualify
+required PostgreSQL/MinIO fixtures, production capacity or the historical hosted
+SDK memory failure. Existing infrastructure-specific checkpoints remain separate.
+Tracked Rust inventory is 566,513 lines including comments, blank lines and tests:
+37,136 fewer (6.15%) than the 603,649-line baseline.
+
+Raw gate output, exit status, elapsed time and per-area inventory are in the
+parent projects directory at `.shardline-cleanup-state/ci-89d8801f/`.

@@ -1,22 +1,22 @@
 # Remaining maintenance cleanup
 
-Inventory source: `c6e62a9efbe72a7efbd317e4cb1f27c1d94aaa30` (2026-11-17).
+Inventory source: `89d8801f5a9a778ca9b558ab670cced2346686c3` (2026-11-17).
 This is a review queue, not evidence that the listed code is redundant.
 
 ## Measured position
 
-Tracked Rust source contains 566,951 lines, including comments, blank lines and
-tests: 36,698 fewer lines (6.08%) than the 603,649-line baseline. Reproduce with
+Tracked Rust source contains 566,513 lines, including comments, blank lines and
+tests: 37,136 fewer lines (6.15%) than the 603,649-line baseline. Reproduce with
 `git ls-files '*.rs'` and count each tracked file's lines at the source commit.
 These totals exclude untracked files and unrelated working-tree changes.
 
 | Area | Rust lines | Next review |
 | --- | ---: | --- |
-| Server | 209,002 | Protocol fixtures, configuration parsing and lifecycle orchestration |
-| Index | 68,307 | Repeated adapter preparation and validation; retain adapter-owned transactions |
+| Server | 208,722 | Protocol fixtures, configuration parsing and lifecycle orchestration |
+| Index | 68,304 | Repeated adapter preparation and validation; retain adapter-owned transactions |
 | Standalone E2E | 45,790 | Repeated setup and scenario coverage across real-client suites |
 | Hub API | 40,883 | Route fixtures and repeated response construction |
-| CLI | 36,702 | Remaining orchestration after shared report formatting cleanup |
+| CLI | 36,578 | Remaining orchestration after shared report formatting cleanup |
 | SDK | 24,185 | Remaining allocation and dependency costs after shared CDC and reconstruction cleanup |
 
 There is no evidence-backed percentage of cleanup remaining. A further 3–7%
@@ -27,7 +27,7 @@ code.
 ## Prioritized work
 
 1. **Close qualification gaps.** The latest full contributor checkpoint passed
-   8,142 selected tests at `d4d6b2d6`. Required PostgreSQL index qualification
+   8,102 selected tests at `89d8801f`. Required PostgreSQL index qualification
    passed 813 tests at `4a037718`; PostgreSQL/MinIO qualification passed all
    157 integration cases and three additional copy-integrity cases at `711de39c`.
    See `BENCHMARKS.md` for commands, frozen sources and limits. These checkpoints
@@ -37,7 +37,7 @@ code.
    storage qualification after changes affecting those paths; preserve concurrent
    upload, GC, source deletion, restart and byte-identity coverage.
 2. **Review large protocol fixtures for overlap.** Start with server
-   `app/e2e_tests.rs` (11,574 lines), S3 route `tests.rs` (5,991), Hub route
+   `app/e2e_tests.rs` (11,574 lines), S3 route `tests.rs` (5,994), Hub route
    `tests.rs` (4,883), and standalone `data_integrity.rs` (12,769). For each
    consolidation, record which assertions and failure boundaries survive. Keep
    real-client, wire-level, adapter and concurrency tests when they exercise
@@ -63,7 +63,7 @@ code.
    E2E job for reusable compatible artifacts and measured scheduling opportunities;
    retain every required qualification gate.
 5. **Review configuration and lifecycle branching.** Server `config/env.rs`
-   contains 3,152 lines. Identify repeated conversion/validation and unnecessary
+   contains 3,125 lines. Identify repeated conversion/validation and unnecessary
    intermediate state using existing owners. Preserve precedence, defaults,
    diagnostics, cancellation, admission and durability boundaries. Only remove
    branches after showing why supported behavior cannot require them.
