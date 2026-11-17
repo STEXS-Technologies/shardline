@@ -277,7 +277,7 @@ pub(super) fn read_secret_file_bytes(
 
     run_before_secret_file_read_hook_for_tests(path);
 
-    let mut bytes = Vec::with_capacity(initial_len.min(size_bound) as usize);
+    let mut bytes = Vec::with_capacity(initial_len as usize);
     // Bounded read: limit to size_bound + 1 bytes so we can detect growth
     // between stat and read (TOCTOU). The extra byte allows us to detect
     // whether the file grew beyond the bound without allocating unboundedly.
@@ -305,15 +305,11 @@ pub(super) fn read_secret_file_bytes(
 /// removed; any other bytes — including newlines embedded elsewhere in the
 /// secret — are left untouched so legitimate key material is never altered.
 fn strip_one_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
-    let Some(&last) = bytes.last() else {
-        return bytes;
-    };
-    if last != b'\n' {
-        return bytes;
-    }
-    bytes.pop();
-    if bytes.last() == Some(&b'\r') {
+    if bytes.last() == Some(&b'\n') {
         bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
     }
     bytes
 }
