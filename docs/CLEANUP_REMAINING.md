@@ -71,7 +71,9 @@ code.
    127.761 s at `d49752c3` (0.99% shorter; not a proven speedup). A normal-development-profile CLI edit comparison at `5433f032` measured
    medians of 7.811 s baseline versus 3.735 s current (52.2% shorter for that
    narrow workload, with full debug information and checked-in incremental
-   settings). Server-library edits and cold/edited-Rust container builds still
+   settings). A server-library error-message edit at `1b02136b` measured
+   medians of 21.733 s versus 7.442 s (65.8% shorter for that narrow workload).
+   Cold/edited-Rust container builds and broader contributor workloads still
    need measurement before claiming the RFC's 30% contributor critical-path target. Review the sequential 150-minute
    E2E job for reusable compatible artifacts and measured scheduling opportunities;
    retain every required qualification gate.

@@ -6592,3 +6592,42 @@ measurement. The separate required backend checkpoints above remain applicable
 to unchanged production code. Hosted SDK memory qualification remains open.
 The local log is `.shardline-cleanup-state/data-integrity-d2d9df5f.log` under
 the parent projects directory.
+
+### Development server-library edit checkpoint (2026-11-17)
+
+Compared baseline `401dcac4f95c61a41104df3ee6e222d93c0b18fb` with
+`1b02136b7eedfa3f99629b70ca7f725cf2ac4a3b` using Rust/Cargo 1.99.0,
+four jobs pinned to CPU cores 0–3, no compiler wrapper, offline locked
+dependencies and each revision's checked-in development profile. Full debug
+information, runtime checks and repository-default incremental settings remained
+enabled as configured; no profile or incremental environment overrides were set.
+
+The benchmark reused the separate targets from the development CLI experiment,
+primed both revisions, then changed the `InvalidContentHash` display message in
+`crates/shardline-server/src/error/server.rs` for each sample. It rebuilt the
+complete CLI with `cargo +1.99.0 build --offline --locked -p shardline --bin
+shardline`, alternating baseline/current, current/baseline, baseline/current.
+Every edited executable contained the distinct message and passed `--version`.
+All eight builds and six marker/version checks passed; source bytes were restored.
+
+| Server-library edit | Baseline | Cleanup branch |
+| --- | ---: | ---: |
+| Sample 1 | 22.933 s | 7.442 s |
+| Sample 2 | 21.733 s | 6.547 s |
+| Sample 3 | 21.636 s | 7.914 s |
+| Median | 21.733 s | 7.442 s |
+
+The median was approximately 65.8% shorter for this narrow error-message edit,
+which recompiles the server library and CLI. This measures accumulated branch
+changes, including restored incremental compilation, rather than attributing
+all savings to code removal. Preparation builds took 8.475 s and 16.041 s and
+are excluded from the medians; warm targets and unequal invalidation make them
+unsuitable for a fresh-build comparison. This does not establish an overall
+contributor critical-path improvement, a large structural-edit speedup, or a
+container build improvement. The rebuilt diagnostic was checked in the binary,
+not triggered through an HTTP request.
+
+Local logs and raw results are in
+`.shardline-cleanup-state/build-server-edit-1b02136b/`, under the parent projects
+directory. The orchestration script is
+`.shardline-cleanup-state/build-server-edit-1b02136b.py`.
