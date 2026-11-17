@@ -290,17 +290,14 @@ struct Reconstruction {
 
 impl Reconstruction {
     fn from_v1(response: FileReconstructionResponse) -> Result<Self, SdxError> {
-        let mut raw_fetches = Vec::new();
-        for (hash, entries) in response.fetch_info {
-            for entry in entries {
-                raw_fetches.push(FetchEntry {
-                    xorb_hash: hash.clone(),
-                    url: entry.url,
-                    bytes: ByteRange::new(entry.url_range.start, entry.url_range.end),
-                    chunks: (entry.range.start, entry.range.end),
-                });
-            }
-        }
+        let raw_fetches = response.fetch_info.into_iter().flat_map(|(hash, entries)| {
+            entries.into_iter().map(move |entry| FetchEntry {
+                xorb_hash: hash.clone(),
+                url: entry.url,
+                bytes: ByteRange::new(entry.url_range.start, entry.url_range.end),
+                chunks: (entry.range.start, entry.range.end),
+            })
+        });
         Self::build(
             response.offset_into_first_range,
             response.terms,
@@ -309,19 +306,17 @@ impl Reconstruction {
     }
 
     fn from_v2(response: FileReconstructionV2Response) -> Result<Self, SdxError> {
-        let mut raw_fetches = Vec::new();
-        for (hash, entries) in response.xorbs {
-            for entry in entries {
-                for descriptor in entry.ranges {
-                    raw_fetches.push(FetchEntry {
-                        xorb_hash: hash.clone(),
-                        url: entry.url.clone(),
-                        bytes: ByteRange::new(descriptor.bytes.start, descriptor.bytes.end),
-                        chunks: (descriptor.chunks.start, descriptor.chunks.end),
-                    });
-                }
-            }
-        }
+        let raw_fetches = response.xorbs.into_iter().flat_map(|(hash, entries)| {
+            entries.into_iter().flat_map(move |entry| {
+                let hash = hash.clone();
+                entry.ranges.into_iter().map(move |descriptor| FetchEntry {
+                    xorb_hash: hash.clone(),
+                    url: entry.url.clone(),
+                    bytes: ByteRange::new(descriptor.bytes.start, descriptor.bytes.end),
+                    chunks: (descriptor.chunks.start, descriptor.chunks.end),
+                })
+            })
+        });
         Self::build(
             response.offset_into_first_range,
             response.terms,
@@ -332,7 +327,7 @@ impl Reconstruction {
     fn build(
         offset_into_first_range: u64,
         terms: Vec<ReconstructionTerm>,
-        raw_fetches: Vec<FetchEntry>,
+        raw_fetches: impl IntoIterator<Item = FetchEntry>,
     ) -> Result<Self, SdxError> {
         // Coalesce fetch entries per xorb: shardline's reconstruction emits one
         // fetch entry per chunk, so a large file would otherwise produce one
