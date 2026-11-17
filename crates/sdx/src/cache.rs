@@ -522,13 +522,6 @@ fn serialize_entry_metadata(
     chunk_offsets: &[u32],
     data: &[u8],
 ) -> Vec<u8> {
-    // The checksum covers offsets and data without copying the decoded payload.
-    let mut checksum = crc32fast::Hasher::new();
-    for offset in chunk_offsets {
-        checksum.update(&offset.to_le_bytes());
-    }
-    checksum.update(data);
-    let crc = checksum.finalize();
     let num_offsets = u32::try_from(chunk_offsets.len()).unwrap_or(u32::MAX);
     let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
     let mut out =
@@ -538,10 +531,17 @@ fn serialize_entry_metadata(
     out.extend_from_slice(&chunk_range.1.to_le_bytes());
     out.extend_from_slice(&num_offsets.to_le_bytes());
     out.extend_from_slice(&data_len.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&[0; 4]); // Filled after the offsets are serialized.
     for offset in chunk_offsets {
         out.extend_from_slice(&offset.to_le_bytes());
     }
+    // Hash the serialized offsets in one call, without copying the payload.
+    let (header, offsets) = out.split_at_mut(HEADER_LEN);
+    let mut checksum = crc32fast::Hasher::new();
+    checksum.update(offsets);
+    checksum.update(data);
+    let (_, crc) = header.split_at_mut(HEADER_LEN - 4);
+    crc.copy_from_slice(&checksum.finalize().to_le_bytes());
     out
 }
 
@@ -844,6 +844,21 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn serialized_metadata_preserves_v1_bytes_and_payload_checksum() {
+        // SDXCHNK1; range 2..4; three offsets; five payload bytes; CRC32;
+        // little-endian offsets [0, 2, 5]. The payload is stored separately.
+        let expected = b"SDXCHNK1\x02\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\xc1.\x81\xa0\x00\x00\x00\x00\x02\x00\x00\x00\x05\x00\x00\x00";
+        assert_eq!(
+            serialize_entry_metadata((2, 4), &[0, 2, 5], b"abcde"),
+            expected
+        );
+        assert_ne!(
+            serialize_entry_metadata((2, 4), &[0, 2, 5], b"abcdf"),
+            expected
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_cache_worker_keeps_executor_responsive_and_retains_cancelled_permit() {
