@@ -177,9 +177,9 @@ pub(super) fn attach_object_checksum(
     Ok(checksum)
 }
 
-pub(super) fn read_object_checksum(
+fn parse_checksum_manifest(
     user_metadata: &[(String, String)],
-) -> Result<Option<ObjectChecksum>, shardline_s3_adapter::S3Error> {
+) -> Result<Option<MultipartChecksumManifest>, shardline_s3_adapter::S3Error> {
     let mut found = None;
     for (name, value) in user_metadata {
         if !name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY) {
@@ -190,11 +190,17 @@ pub(super) fn read_object_checksum(
         }
         found = Some(value);
     }
-    let manifest: Option<MultipartChecksumManifest> = found
+    found
         .map(|value| {
             serde_json::from_str(value).map_err(|_error| shardline_s3_adapter::S3Error::internal())
         })
-        .transpose()?;
+        .transpose()
+}
+
+pub(super) fn read_object_checksum(
+    user_metadata: &[(String, String)],
+) -> Result<Option<ObjectChecksum>, shardline_s3_adapter::S3Error> {
+    let manifest = parse_checksum_manifest(user_metadata)?;
     let Some(manifest) = manifest else {
         return Ok(None);
     };
@@ -462,21 +468,15 @@ pub(super) fn read_multipart_manifest(
     expected_count: u32,
     expected_size: u64,
 ) -> Result<Option<MultipartChecksumManifest>, shardline_s3_adapter::S3Error> {
-    let mut found = None;
-    for (name, value) in user_metadata {
-        if !name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY) {
-            continue;
-        }
-        if found.is_some() {
-            return Err(shardline_s3_adapter::S3Error::internal());
-        }
-        found = Some(value);
-    }
-    let manifest: Option<MultipartChecksumManifest> = found
-        .map(|value| {
-            serde_json::from_str(value).map_err(|_error| shardline_s3_adapter::S3Error::internal())
-        })
-        .transpose()?;
+    let manifest = parse_checksum_manifest(user_metadata)?;
+    validate_multipart_manifest(manifest, expected_count, expected_size)
+}
+
+fn validate_multipart_manifest(
+    manifest: Option<MultipartChecksumManifest>,
+    expected_count: u32,
+    expected_size: u64,
+) -> Result<Option<MultipartChecksumManifest>, shardline_s3_adapter::S3Error> {
     if let Some(manifest) = &manifest {
         let mut total_size = 0_u64;
         let mut previous = 0_u32;
@@ -541,17 +541,9 @@ pub(super) fn read_multipart_manifest_for_object(
     user_metadata: &[(String, String)],
     expected_size: u64,
 ) -> Result<Option<MultipartChecksumManifest>, shardline_s3_adapter::S3Error> {
-    let mut found = None;
-    for (name, value) in user_metadata {
-        if name.eq_ignore_ascii_case(MULTIPART_MANIFEST_KEY) && found.replace(value).is_some() {
-            return Err(shardline_s3_adapter::S3Error::internal());
-        }
-    }
-    let Some(value) = found else {
+    let Some(manifest) = parse_checksum_manifest(user_metadata)? else {
         return Ok(None);
     };
-    let manifest: MultipartChecksumManifest =
-        serde_json::from_str(value).map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
     if manifest.parts.is_empty() {
         if manifest.checksum_type != MultipartChecksumType::FullObject {
             return Err(shardline_s3_adapter::S3Error::internal());
@@ -560,7 +552,7 @@ pub(super) fn read_multipart_manifest_for_object(
     }
     let count = u32::try_from(manifest.parts.len())
         .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
-    read_multipart_manifest(user_metadata, count, expected_size)
+    validate_multipart_manifest(Some(manifest), count, expected_size)
 }
 
 fn singleton_header<'header>(
