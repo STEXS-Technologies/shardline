@@ -6233,3 +6233,37 @@ in the parent projects directory at
 `.shardline-cleanup-state/build-comparison-b367232d/result.json`; individual
 build/smoke logs and binary hashes/sizes are alongside it. The orchestrator is
 `.shardline-cleanup-state/build-comparison-b367232d.py`.
+
+## Current PostgreSQL/MinIO qualification (2026-11-17)
+
+Frozen source: `711de39c468099f8c77e08b50baa2bbc00e4a967`. The complete
+157-case integration selection passed in one uninterrupted invocation, with
+zero skipped tests: server `postgres_s3_e2e_http` (52), server `s3_integration`
+(69), storage `s3_integration` (36). Nextest execution took 159.407 seconds;
+including Cargo preparation the command took 186.228 seconds.
+
+```text
+cargo +1.99.0 nextest run --locked -p shardline-server -p shardline-storage \
+  --features docker --test postgres_s3_e2e_http --test s3_integration --no-fail-fast
+```
+
+The three additional server-library copy-integrity cases also passed in a
+separate run (11.415 seconds test execution, 52.603 seconds including Cargo).
+Selection: `test(copy_integrity::minio_) or test(copy_integrity::postgres_minio_)`,
+with `--features docker --lib --run-ignored all --no-fail-fast` and one test worker.
+These cover source replacement and uncertain copy-part acknowledgements that
+can be reconciled through list-parts, including PostgreSQL-backed metadata.
+
+Both runs required native clients (`SHARDLINE_REQUIRE_NATIVE_CLIENTS=1`) and
+used the suites' disposable Docker service fixtures. DuckDB 1.5.5 and PyArrow
+25.0.0 were checked before execution. Integration execution used four workers.
+Builds used Rust 1.99.0, four build jobs, dev/test debug info disabled, an empty
+compiler wrapper and the existing shared target directory. No source changes
+or assertion relaxations were needed. No Docker containers remained afterward.
+Logs, exact commands, source hash and exit codes are in the parent projects
+directory at `.shardline-cleanup-state/minio-711de39c/`.
+
+This refresh replaces the older split-run evidence for the same integration
+selection. It qualifies these local remote-storage correctness paths after the
+configuration, Hub, checksum and index changes; it does not establish production
+throughput/cost or close the historical hosted SDK memory issue.
