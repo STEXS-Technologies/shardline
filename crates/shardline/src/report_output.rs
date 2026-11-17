@@ -442,77 +442,59 @@ pub(crate) fn write_local_gc_summary(
         "retention_deferred_clock: {}",
         report.retention_deferred_clock
     )?;
-    writeln!(writer, "scanned_records: {}", report.scanned_records)?;
-    writeln!(writer, "referenced_chunks: {}", report.referenced_chunks)?;
-    writeln!(writer, "orphan_chunks: {}", report.orphan_chunks)?;
-    writeln!(writer, "orphan_chunk_bytes: {}", report.orphan_chunk_bytes)?;
-    writeln!(
-        writer,
-        "active_quarantine_candidates: {}",
-        report.active_quarantine_candidates
-    )?;
-    writeln!(
-        writer,
-        "new_quarantine_candidates: {}",
-        report.new_quarantine_candidates
-    )?;
-    writeln!(
-        writer,
-        "retained_quarantine_candidates: {}",
-        report.retained_quarantine_candidates
-    )?;
-    writeln!(
-        writer,
-        "released_quarantine_candidates: {}",
-        report.released_quarantine_candidates
-    )?;
-    writeln!(writer, "deleted_chunks: {}", report.deleted_chunks)?;
-    writeln!(writer, "deleted_bytes: {}", report.deleted_bytes)?;
-    writeln!(
-        writer,
-        "pruned_revisions_over_cap: {}",
-        report.pruned_revisions_over_cap
-    )?;
-    writeln!(
-        writer,
-        "scanned_oci_tombstones: {}",
-        report.scanned_oci_tombstones
-    )?;
-    writeln!(
-        writer,
-        "eligible_oci_tombstones: {}",
-        report.eligible_oci_tombstones
-    )?;
-    writeln!(
-        writer,
-        "reclaimed_oci_tombstones: {}",
-        report.reclaimed_oci_tombstones
-    )?;
-    writeln!(
-        writer,
-        "scanned_resumable_staging_objects: {}",
-        report.scanned_resumable_staging_objects
-    )?;
-    writeln!(
-        writer,
-        "protected_resumable_staging_objects: {}",
-        report.protected_resumable_staging_objects
-    )?;
-    writeln!(
-        writer,
-        "reclaimed_resumable_staging_objects: {}",
-        report.reclaimed_resumable_staging_objects
-    )?;
-    writeln!(
-        writer,
-        "reclaimed_resumable_staging_bytes: {}",
-        report.reclaimed_resumable_staging_bytes
-    )?;
-    writeln!(
-        writer,
-        "reclaimed_resumable_sessions: {}",
-        report.reclaimed_resumable_sessions
-    )?;
+    for (name, value) in [
+        ("scanned_records", report.scanned_records),
+        ("referenced_chunks", report.referenced_chunks),
+        ("orphan_chunks", report.orphan_chunks),
+        ("orphan_chunk_bytes", report.orphan_chunk_bytes),
+        (
+            "active_quarantine_candidates",
+            report.active_quarantine_candidates,
+        ),
+        (
+            "new_quarantine_candidates",
+            report.new_quarantine_candidates,
+        ),
+        (
+            "retained_quarantine_candidates",
+            report.retained_quarantine_candidates,
+        ),
+        (
+            "released_quarantine_candidates",
+            report.released_quarantine_candidates,
+        ),
+        ("deleted_chunks", report.deleted_chunks),
+        ("deleted_bytes", report.deleted_bytes),
+        (
+            "pruned_revisions_over_cap",
+            report.pruned_revisions_over_cap,
+        ),
+        ("scanned_oci_tombstones", report.scanned_oci_tombstones),
+        ("eligible_oci_tombstones", report.eligible_oci_tombstones),
+        ("reclaimed_oci_tombstones", report.reclaimed_oci_tombstones),
+        (
+            "scanned_resumable_staging_objects",
+            report.scanned_resumable_staging_objects,
+        ),
+        (
+            "protected_resumable_staging_objects",
+            report.protected_resumable_staging_objects,
+        ),
+        (
+            "reclaimed_resumable_staging_objects",
+            report.reclaimed_resumable_staging_objects,
+        ),
+        (
+            "reclaimed_resumable_staging_bytes",
+            report.reclaimed_resumable_staging_bytes,
+        ),
+        (
+            "reclaimed_resumable_sessions",
+            report.reclaimed_resumable_sessions,
+        ),
+    ] {
+        writeln!(writer, "{name}: {value}")?;
+    }
 
     writer.flush()
 }
@@ -891,8 +873,59 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn local_gc_summary_runs() {
-        print_local_gc_summary(&LocalGcReport::default());
+    fn local_gc_summary_preserves_fields_and_order() {
+        let report = LocalGcReport {
+            retention_deferred_clock: true,
+            scanned_records: 1,
+            referenced_chunks: 2,
+            orphan_chunks: 3,
+            orphan_chunk_bytes: 4,
+            active_quarantine_candidates: 5,
+            new_quarantine_candidates: 6,
+            retained_quarantine_candidates: 7,
+            released_quarantine_candidates: 8,
+            deleted_chunks: 9,
+            deleted_bytes: 10,
+            pruned_revisions_over_cap: 11,
+            scanned_oci_tombstones: 12,
+            eligible_oci_tombstones: 13,
+            reclaimed_oci_tombstones: 14,
+            scanned_resumable_staging_objects: 15,
+            protected_resumable_staging_objects: 16,
+            reclaimed_resumable_staging_objects: 17,
+            reclaimed_resumable_staging_bytes: 18,
+            reclaimed_resumable_sessions: 19,
+            ..LocalGcReport::default()
+        };
+        let mut bytes = Vec::new();
+        write_local_gc_summary(&mut bytes, &report).unwrap();
+        assert_eq!(
+            bytes,
+            concat!(
+                "retention_deferred_clock: true\n",
+                "scanned_records: 1\n",
+                "referenced_chunks: 2\n",
+                "orphan_chunks: 3\n",
+                "orphan_chunk_bytes: 4\n",
+                "active_quarantine_candidates: 5\n",
+                "new_quarantine_candidates: 6\n",
+                "retained_quarantine_candidates: 7\n",
+                "released_quarantine_candidates: 8\n",
+                "deleted_chunks: 9\n",
+                "deleted_bytes: 10\n",
+                "pruned_revisions_over_cap: 11\n",
+                "scanned_oci_tombstones: 12\n",
+                "eligible_oci_tombstones: 13\n",
+                "reclaimed_oci_tombstones: 14\n",
+                "scanned_resumable_staging_objects: 15\n",
+                "protected_resumable_staging_objects: 16\n",
+                "reclaimed_resumable_staging_objects: 17\n",
+                "reclaimed_resumable_staging_bytes: 18\n",
+                "reclaimed_resumable_sessions: 19\n",
+            )
+            .as_bytes()
+        );
+        assert_writer_errors(|writer| write_local_gc_summary(writer, &report));
     }
 
     #[test]
