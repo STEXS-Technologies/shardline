@@ -117,24 +117,18 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let Some(chunk_size) = NonZeroUsize::new(raw_chunk_size) else {
         return Err(ServerConfigError::ZeroChunkSize);
     };
-    let raw_upload_max_in_flight_chunks = var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS")
-        .unwrap_or_else(|_error| default_upload_max_in_flight_chunks().get().to_string())
-        .parse::<usize>()
-        .map_err(ServerConfigError::UploadMaxInFlightChunks)?;
-    let raw_upload_max_in_flight_chunks = raw_upload_max_in_flight_chunks.min(1_000_000);
-    let Some(upload_max_in_flight_chunks) = NonZeroUsize::new(raw_upload_max_in_flight_chunks)
-    else {
-        return Err(ServerConfigError::ZeroUploadMaxInFlightChunks);
-    };
-    let raw_transfer_max_in_flight_chunks = var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS")
-        .unwrap_or_else(|_error| default_transfer_max_in_flight_chunks().get().to_string())
-        .parse::<usize>()
-        .map_err(ServerConfigError::TransferMaxInFlightChunks)?;
-    let raw_transfer_max_in_flight_chunks = raw_transfer_max_in_flight_chunks.min(1_000_000);
-    let Some(transfer_max_in_flight_chunks) = NonZeroUsize::new(raw_transfer_max_in_flight_chunks)
-    else {
-        return Err(ServerConfigError::ZeroTransferMaxInFlightChunks);
-    };
+    let upload_max_in_flight_chunks = load_in_flight_limit_env(
+        "SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS",
+        default_upload_max_in_flight_chunks(),
+        ServerConfigError::UploadMaxInFlightChunks,
+        ServerConfigError::ZeroUploadMaxInFlightChunks,
+    )?;
+    let transfer_max_in_flight_chunks = load_in_flight_limit_env(
+        "SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS",
+        default_transfer_max_in_flight_chunks(),
+        ServerConfigError::TransferMaxInFlightChunks,
+        ServerConfigError::ZeroTransferMaxInFlightChunks,
+    )?;
     let reconstruction_cache_adapter = ReconstructionCacheAdapter::parse(
         &var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER").unwrap_or_else(|_error| "memory".to_owned()),
     )?;
@@ -168,18 +162,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         ServerConfigError::OciRegistryTokenTtl,
         ServerConfigError::ZeroOciRegistryTokenTtlSeconds,
     )?;
-    let raw_oci_registry_token_max_in_flight_requests =
-        var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS")
-            .unwrap_or_else(|_error| "64".to_owned())
-            .parse::<usize>()
-            .map_err(ServerConfigError::OciRegistryTokenMaxInFlightRequests)?;
-    let raw_oci_registry_token_max_in_flight_requests =
-        raw_oci_registry_token_max_in_flight_requests.min(1_000_000);
-    let Some(oci_registry_token_max_in_flight_requests) =
-        NonZeroUsize::new(raw_oci_registry_token_max_in_flight_requests)
-    else {
-        return Err(ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests);
-    };
+    let oci_registry_token_max_in_flight_requests = load_in_flight_limit_env(
+        "SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS",
+        super::DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
+        ServerConfigError::OciRegistryTokenMaxInFlightRequests,
+        ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests,
+    )?;
     let s3_max_part_bytes = load_non_zero_u64_env(
         "SHARDLINE_S3_MAX_PART_BYTES",
         DEFAULT_S3_MAX_PART_BYTES,
@@ -776,6 +764,16 @@ fn load_non_zero_usize_env(
     }
 }
 
+fn load_in_flight_limit_env(
+    name: &str,
+    default: NonZeroUsize,
+    parse_error: fn(ParseIntError) -> ServerConfigError,
+    zero_error: ServerConfigError,
+) -> Result<NonZeroUsize, ServerConfigError> {
+    let limit = load_non_zero_usize_env(name, default, parse_error, zero_error)?;
+    Ok(limit.min(NonZeroUsize::new(1_000_000).unwrap_or(NonZeroUsize::MIN)))
+}
+
 fn load_non_zero_u64_env(
     name: &str,
     default: NonZeroU64,
@@ -1154,6 +1152,38 @@ mod tests {
             );
         }
         remove_env_var("SHARDLINE_CHUNK_SIZE");
+    }
+
+    #[test]
+    fn in_flight_limit_preserves_default_errors_and_clamping() {
+        let name = "SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS";
+        let load = || {
+            super::load_in_flight_limit_env(
+                name,
+                std::num::NonZeroUsize::MIN,
+                super::ServerConfigError::UploadMaxInFlightChunks,
+                super::ServerConfigError::ZeroUploadMaxInFlightChunks,
+            )
+        };
+        remove_env_var(name);
+        assert_eq!(load().unwrap().get(), 1);
+        for (input, expected) in [("17", 17), ("1000000", 1_000_000), ("1000001", 1_000_000)] {
+            set_env_var(name, input);
+            assert_eq!(load().unwrap().get(), expected);
+        }
+        set_env_var(name, "0");
+        assert!(matches!(
+            load(),
+            Err(super::ServerConfigError::ZeroUploadMaxInFlightChunks)
+        ));
+        for input in ["invalid", "-1", "18446744073709551616"] {
+            set_env_var(name, input);
+            assert!(matches!(
+                load(),
+                Err(super::ServerConfigError::UploadMaxInFlightChunks(_))
+            ));
+        }
+        remove_env_var(name);
     }
 
     #[test]
