@@ -41,7 +41,11 @@ code.
    RSS delta, but the 1 GiB case timed out at 300 seconds before reporting an
    isolated-client measurement. Later workflow steps were skipped. Investigate
    that timeout and resolve the dependency-policy failure without relaxing the
-   memory bound or opening a pull request. Repeat integrated PostgreSQL/object
+   memory bound or opening a pull request. Local profiling identified repeated
+   record-level JSON parsing in SQLite membership triggers. An additive migration
+   reduced a local 1 GiB case from 210.20 s to 56.812 s while preserving byte
+   identity and the memory bound; hosted requalification is still required.
+   Repeat integrated PostgreSQL/object
    storage qualification after changes affecting those paths; preserve concurrent
    upload, GC, source deletion, restart and byte-identity coverage.
 2. **Review large protocol fixtures for overlap.** Start with server

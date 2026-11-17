@@ -6731,3 +6731,44 @@ delta edits and native Bazel flows, were skipped after the memory-step failure.
 The workflow is not a passing release qualification, and does not qualify later
 Hub source changes. Final job status and the complete E2E log are retained as
 `e2e-final-status.json` and `e2e-job.log` in the evidence directory above.
+
+### SQLite record-membership parsing checkpoint (2026-11-17)
+
+Investigated the hosted 1 GiB SDK timeout above on source `16a1da06`.
+An unchanged local reproduction passed in 210.20 seconds: isolated client
+transfer 8,232 ms, baseline RSS 24,572 KiB, peak high-water RSS 77,096 KiB,
+streaming delta 52,524 KiB. An eight-second CPU sample during fixture preparation
+attributed 75.22% of samples to SQLite `jsonTranslateTextToBlob`. The domain
+membership trigger extracted the same record-level domain inside the per-chunk
+projection, repeatedly parsing the complete file record.
+
+The additive `20261117000000_record_membership_domain_once` migration moves
+that expression into an uncorrelated scalar subquery. Insert/update triggers
+retain the same domain fallback, member validation, distinct membership rows,
+replay guard and transaction boundaries. Historical migrations are unchanged;
+the down migration restores the prior triggers. PostgreSQL already passes the
+domain as one expansion parameter, so its paired migration is a no-op.
+
+With this patch, both SDK sizes passed together under the same local Rust 1.99.0,
+four-build-job, debug-information-disabled test configuration:
+
+| File size | Complete case | Client transfer | Added client RSS |
+| --- | ---: | ---: | ---: |
+| 256 MiB | 13.106 s | 1,068 ms | 49,804 KiB |
+| 1 GiB | 56.812 s | 8,468 ms | 46,964 KiB |
+
+Both cases verify every byte and total length, and retain the 65,536 KiB bound
+and 300-second Nextest timeout. The before/after 1 GiB samples suggest reduced
+fixture-publication cost, not faster downloads. They are single samples on a
+shared host with different competing work; they do not establish production
+throughput or resolve the hosted timeout without a new hosted run.
+
+The patch passed 350 selected SQLite library tests, 44 server migration tests,
+strict all-target/all-feature index/server Clippy, formatting and migration
+parity (45 versions). Conditional PostgreSQL cases in the migration selection
+are not a new required-PostgreSQL qualification. The new regression exercises
+upgrade/downgrade, malformed records, legacy fallback, explicit domains, key and
+scope updates, exact replay, authoritative payload retention and rollback.
+Logs, the CPU profile and preliminary SQL experiments are retained in the
+`hosted-39c86a9e` evidence directory above under `domain-once-*`,
+`gib-timeout-local-reproduction.log`, and `gib-setup*`.

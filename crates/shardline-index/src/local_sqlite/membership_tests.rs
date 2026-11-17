@@ -199,3 +199,89 @@ async fn explicit_domain_migration_backfills_without_relocating_or_reassigning_l
         serde_json::to_vec(&protocol).unwrap()
     );
 }
+
+#[test]
+fn domain_once_migration_preserves_membership_and_transaction_boundaries() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch("CREATE TABLE shardline_file_records (record_key TEXT PRIMARY KEY, scope_key TEXT, record TEXT);
+        CREATE TABLE shardline_record_membership (record_key TEXT, scope_key TEXT, member_hash TEXT);").unwrap();
+    let previous =
+        include_str!("../../migrations/20261117000000_record_membership_domain_once.down.sql");
+    let optimized =
+        include_str!("../../migrations/20261117000000_record_membership_domain_once.up.sql");
+    let membership = |db: &rusqlite::Connection| -> Vec<(String, String, String)> {
+        db.prepare("SELECT record_key, scope_key, member_hash FROM shardline_record_membership ORDER BY 1, 2, 3")
+            .unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap().collect::<Result<_, _>>().unwrap()
+    };
+    // Both historical SQL writers and current writers must retain the same
+    // domain fallback and malformed-record behavior after upgrade or downgrade.
+    for payload in [
+        "invalid",
+        "null",
+        "[]",
+        "{}",
+        r#"{"chunks":[{"hash":"a"},{"hash":"a"},{"hash":4},null,[],true]}"#,
+        r#"{"deduplication_domain":null,"chunks":[{"hash":"a"}]}"#,
+        r#"{"deduplication_domain":"tenant/repo/main","chunks":[{"hash":"a"},{"hash":"b"}]}"#,
+    ] {
+        let mut expected = None;
+        for triggers in [previous, optimized, previous, optimized] {
+            connection
+                .execute_batch(
+                    "DELETE FROM shardline_file_records; DELETE FROM shardline_record_membership;",
+                )
+                .unwrap();
+            connection.execute_batch(triggers).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO shardline_file_records VALUES ('key','legacy',?1)",
+                    [payload],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE shardline_file_records SET scope_key='changed', record_key='renamed'",
+                    [],
+                )
+                .unwrap();
+            let rows = membership(&connection);
+            if let Some(expected) = &expected {
+                assert_eq!(&rows, expected, "payload: {payload}");
+            } else {
+                expected = Some(rows.clone());
+            }
+            let changes = connection.total_changes();
+            connection
+                .execute("UPDATE shardline_file_records SET record=record", [])
+                .unwrap();
+            assert_eq!(
+                connection.total_changes() - changes,
+                1,
+                "replay must not rewrite membership"
+            );
+            let transaction = connection.transaction().unwrap();
+            transaction
+                .execute(
+                    "UPDATE shardline_file_records SET record=?1",
+                    [r#"{"deduplication_domain":"uncommitted","chunks":[{"hash":"x"}]}"#],
+                )
+                .unwrap();
+            assert_eq!(
+                membership(&transaction),
+                vec![("renamed".into(), "uncommitted".into(), "x".into())]
+            );
+            transaction.rollback().unwrap();
+            assert_eq!(membership(&connection), rows);
+            let retained: String = connection
+                .query_row("SELECT record FROM shardline_file_records", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                retained, payload,
+                "authoritative payload must remain unchanged"
+            );
+        }
+    }
+}
