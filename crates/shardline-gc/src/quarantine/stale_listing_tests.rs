@@ -37,6 +37,7 @@ async fn sweep_settles_a_listed_object_deleted_before_sweep() {
         3,
         &mut candidates,
         &mut report,
+        None,
     )
     .await
     .unwrap();
@@ -53,6 +54,7 @@ async fn sweep_settles_a_listed_object_deleted_before_sweep() {
         4,
         &mut candidates,
         &mut report,
+        None,
     )
     .await
     .unwrap();

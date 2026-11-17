@@ -56,8 +56,7 @@ use crate::{
     quarantine::{
         gc_boot_observation, read_active_retention_hold_object_keys, read_gc_clock_anchor,
         read_newest_stored_creation_timestamp, read_quarantine_entries,
-        reconcile_quarantine_entries, sweep_quarantine_entries_with_guard,
-        write_last_gc_clock_anchor,
+        reconcile_quarantine_entries, sweep_quarantine_entries, write_last_gc_clock_anchor,
     },
     reachability::{
         OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys,
@@ -287,7 +286,7 @@ where
             );
         } else {
             let sweep_start = std::time::Instant::now();
-            sweep_quarantine_entries_with_guard(
+            sweep_quarantine_entries(
                 record_store,
                 object_store,
                 index_store,
