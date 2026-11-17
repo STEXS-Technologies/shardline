@@ -6520,3 +6520,54 @@ The source contains 566,249 tracked Rust lines, including tests, comments and
 blank lines: 37,400 fewer (6.20%) than the 603,649-line baseline. Local gate logs,
 exit status, timings and source inventory are retained in
 `.shardline-cleanup-state/ci-99bde68e/`, under the parent projects directory.
+
+### PostgreSQL and MinIO checkpoint at df0d63fd (2026-11-17)
+
+Frozen source `df0d63fdc7137258ef921881ee88957327d4a856` passed the
+required PostgreSQL index gate and PostgreSQL/MinIO integration gates. Its Rust
+sources and manifests are identical to the full contributor checkpoint at
+`99bde68e`; the intervening commit only documents that checkpoint.
+
+A fresh PostgreSQL 16 Alpine database received all current migrations using the
+release executable built by that contributor gate. Readiness was checked over
+TCP before migration. With `SHARDLINE_REQUIRE_POSTGRES_TESTS=1`, the full index
+library suite passed all 813 selected tests in 136.647 seconds (137.179 seconds
+including compilation and runner setup); six configured ignored tests were
+excluded. The owned database container was removed afterward.
+
+```bash
+# DATABASE_URL points to that disposable, migrated database.
+SHARDLINE_REQUIRE_POSTGRES_TESTS=1 cargo +1.99.0 nextest run --locked \
+  -p shardline-index --lib --no-fail-fast
+```
+
+In one uninterrupted run, all 157 PostgreSQL/S3 integration cases passed with
+zero skipped: 52 server PostgreSQL HTTP cases, 69 server S3 cases and 36 storage
+S3 cases. Test execution took 183.937 seconds, or 212.021 seconds including
+compilation and runner setup. All three copy-integrity fault cases then passed
+with one worker in 12.048 seconds, or 61.086 seconds including compilation and
+runner setup. These preserve source-replacement snapshot bytes and reconcile
+disconnected copy-part responses through ListParts, including PostgreSQL.
+
+```bash
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo +1.99.0 nextest run --locked \
+  -p shardline-server -p shardline-storage --features docker \
+  --test postgres_s3_e2e_http --test s3_integration --no-fail-fast
+SHARDLINE_REQUIRE_NATIVE_CLIENTS=1 cargo +1.99.0 nextest run --locked \
+  -p shardline-server --features docker --lib --run-ignored all --no-fail-fast \
+  -E 'test(copy_integrity::minio_) or test(copy_integrity::postgres_minio_)' \
+  --test-threads 1
+```
+
+The shared-host runs used Rust 1.99.0, four build jobs, four Nextest workers
+except the fault gate, cached dependencies, offline mode, no compiler wrapper,
+and disabled dev/test debug information. Native clients were required; DuckDB
+1.5.5 and PyArrow 25.0.0 were available. No test containers remained afterward.
+These are functional qualification results, not throughput or production-scale
+measurements. Hosted SDK memory qualification remains unresolved.
+
+Local logs, exact commands, exit statuses and timings are retained under the
+parent projects directory in `.shardline-cleanup-state/postgres-index-df0d63fd/`
+and `.shardline-cleanup-state/minio-df0d63fd/`. Their orchestration scripts are
+`.shardline-cleanup-state/postgres-index-df0d63fd.py` and
+`.shardline-cleanup-state/minio-df0d63fd.py`.

@@ -28,8 +28,8 @@ code.
 
 1. **Close qualification gaps.** The latest full contributor checkpoint passed
    8,098 selected tests at `99bde68e`. Required PostgreSQL index qualification
-   passed 813 tests at `e5d4f3af`; PostgreSQL/MinIO qualification passed all
-   157 integration cases and three additional copy-integrity cases at `b080738d`.
+   passed 813 tests at `df0d63fd`; PostgreSQL/MinIO qualification passed all
+   157 integration cases and three additional copy-integrity cases at `df0d63fd`.
    See `BENCHMARKS.md` for commands, frozen sources and limits. These checkpoints
    do not qualify the final branch or close the historical hosted SDK memory
    failure. Local matching experiments have not reproduced it. Obtain current hosted evidence without relaxing the
