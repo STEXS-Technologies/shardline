@@ -6390,3 +6390,30 @@ Tracked Rust inventory is 566,513 lines including comments, blank lines and test
 
 Raw gate output, exit status, elapsed time and per-area inventory are in the
 parent projects directory at `.shardline-cleanup-state/ci-89d8801f/`.
+
+## PostgreSQL/MinIO refresh at `b080738d` (2026-11-17)
+
+Frozen source: `b080738dbf49e918cc589c68d108c91952f43fae`. Repeated the
+complete integration and copy-integrity selections from the earlier
+PostgreSQL/MinIO checkpoint, with the same commands and required native clients
+(`SHARDLINE_REQUIRE_NATIVE_CLIENTS=1`). DuckDB 1.5.5 and PyArrow 25.0.0 were
+available. Disposable Docker fixtures supplied the actual backing services.
+
+All 157 integration cases passed in one uninterrupted invocation, zero skipped:
+52 server PostgreSQL/S3 HTTP cases, 69 server S3 cases and 36 storage S3 cases.
+Nextest execution took 172.039 s; total invocation time was 197.169 s.
+All three explicitly selected copy-integrity cases also passed in a separate
+single-worker run (51.190 s including compilation). These exercise source
+replacement and uncertain copy-part acknowledgement reconciliation, including
+PostgreSQL-backed metadata. The library selection excludes unrelated tests.
+
+Both runs used Rust 1.99.0, four build jobs, dev/test debug information disabled,
+an empty compiler wrapper, offline dependency resolution and the existing target
+directory; integration used four test workers. No source or assertion changes
+were required. No Docker containers were running before or after the runs.
+This refresh qualifies the selected remote-storage correctness paths at the
+frozen source; it does not prove production capacity, replace the standalone
+required PostgreSQL index suite or resolve the hosted SDK memory failure.
+
+Commands, versions, source hashes, exit codes, durations and raw logs are in the
+parent projects directory at `.shardline-cleanup-state/minio-b080738d/`.
