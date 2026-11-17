@@ -2770,47 +2770,49 @@ async fn lfs_overlapping_ranges() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_range_exact_chunk_boundary() {
+async fn lfs_ranges_at_a_cdc_boundary() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-
-    // Chunk size is 4 bytes. Create 8 bytes, request bytes 3-4 (spans boundary)
-    let content = b"abcdefgh";
-    let oid = hex::encode(sha2::Sha256::digest(content));
-
-    client
-        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let content: Vec<u8> = (0_u8..=250).cycle().take(1024).collect();
+    // Match the fixture's CDC target and derive an actual content boundary.
+    let boundary = shardline_xet_core::cdc::CdcChunker::new(128)
+        .find_boundary(&content)
+        .unwrap();
+    assert!(boundary > 0 && boundary < content.len());
+    let oid = hex::encode(sha2::Sha256::digest(&content));
+    let url = format!("{base_url}/v1/lfs/objects/{oid}");
+    let upload = client
+        .put(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec())
+        .body(content.clone())
         .send()
         .await
         .unwrap();
+    assert_eq!(upload.status(), 200);
 
-    // Range exactly at chunk boundary start (byte 4 = start of chunk 2)
-    let resp = client
-        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Range", "bytes=4-7")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 206);
-    assert_eq!(resp.bytes().await.unwrap().as_ref(), &content[4..=7]);
-
-    // Range exactly at chunk boundary end (byte 3 = end of chunk 1)
-    let resp = client
-        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Range", "bytes=0-3")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 206);
-    assert_eq!(resp.bytes().await.unwrap().as_ref(), &content[0..=3]);
-
+    for (label, start, end) in [
+        ("ends at boundary", 0, boundary - 1),
+        ("starts at boundary", boundary, content.len() - 1),
+        ("crosses boundary", boundary - 1, boundary),
+    ] {
+        let response = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Range", format!("bytes={start}-{end}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 206, "{label}");
+        assert_eq!(
+            response.bytes().await.unwrap().as_ref(),
+            &content[start..=end],
+            "{label}"
+        );
+    }
     server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
