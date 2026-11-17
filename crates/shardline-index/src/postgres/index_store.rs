@@ -1076,20 +1076,15 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             } else {
                 verify_and_reactivate_quarantine(evidence, snapshot)?
             };
-            let event = evidence.events().last().ok_or_else(|| {
+            let _ = evidence.events().last().ok_or_else(|| {
                 PostgresMetadataStoreError::Reliability(
                     shardline_reliability::ReliabilityError::EmptyField(
                         "quarantine evidence event",
                     ),
                 )
             })?;
-            if evidence_was_empty {
-                for stored_event in evidence.events() {
-                    insert_reliability_event(&mut transaction, stored_event).await?;
-                }
-            } else {
-                insert_reliability_event(&mut transaction, event).await?;
-            }
+            persist_appended_events(&mut transaction, evidence.events(), evidence_was_empty)
+                .await?;
             transaction.commit().await?;
             Ok(())
         })
@@ -1121,20 +1116,15 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                         .await?;
                 let (evidence, evidence_was_empty) =
                     verify_and_append_snapshot_transition(evidence, active, released)?;
-                let event = evidence.events().last().ok_or_else(|| {
+                let _ = evidence.events().last().ok_or_else(|| {
                     PostgresMetadataStoreError::Reliability(
                         shardline_reliability::ReliabilityError::EmptyField(
                             "quarantine evidence event",
                         ),
                     )
                 })?;
-                if evidence_was_empty {
-                    for stored_event in evidence.events() {
-                        insert_reliability_event(&mut transaction, stored_event).await?;
-                    }
-                } else {
-                    insert_reliability_event(&mut transaction, event).await?;
-                }
+                persist_appended_events(&mut transaction, evidence.events(), evidence_was_empty)
+                    .await?;
             }
             transaction.commit().await?;
             Ok(deleted)
@@ -1190,20 +1180,15 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 transaction.commit().await?;
                 return Ok(false);
             }
-            let event = evidence.events().last().ok_or_else(|| {
+            let _ = evidence.events().last().ok_or_else(|| {
                 PostgresMetadataStoreError::Reliability(
                     shardline_reliability::ReliabilityError::EmptyField(
                         "quarantine evidence event",
                     ),
                 )
             })?;
-            if evidence_was_empty {
-                for stored_event in evidence.events() {
-                    insert_reliability_event(&mut transaction, stored_event).await?;
-                }
-            } else {
-                insert_reliability_event(&mut transaction, event).await?;
-            }
+            persist_appended_events(&mut transaction, evidence.events(), evidence_was_empty)
+                .await?;
             transaction.commit().await?;
             Ok(true)
         })
@@ -1319,13 +1304,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                         .await?;
                 let (evidence, evidence_was_empty) =
                     verify_and_append_snapshot_transition(evidence, active, released)?;
-                if evidence_was_empty {
-                    for event in evidence.events() {
-                        insert_reliability_event(&mut transaction, event).await?;
-                    }
-                } else if let Some(event) = evidence.events().last() {
-                    insert_reliability_event(&mut transaction, event).await?;
-                }
+                persist_appended_events(&mut transaction, evidence.events(), evidence_was_empty)
+                    .await?;
             }
             transaction.commit().await?;
             Ok(deleted)
@@ -1386,13 +1366,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 transaction.commit().await?;
                 return Ok(false);
             }
-            if evidence_was_empty {
-                for event in evidence.events() {
-                    insert_reliability_event(&mut transaction, event).await?;
-                }
-            } else if let Some(event) = evidence.events().last() {
-                insert_reliability_event(&mut transaction, event).await?;
-            }
+            persist_appended_events(&mut transaction, evidence.events(), evidence_was_empty)
+                .await?;
             transaction.commit().await?;
             Ok(true)
         })
@@ -1479,13 +1454,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .bind(existing.delivery_id())
             .execute(&mut *transaction)
             .await?;
-            if evidence_was_empty {
-                for event in evidence.events() {
-                    insert_reliability_event(&mut transaction, event).await?;
-                }
-            } else if let Some(event) = evidence.events().last() {
-                insert_reliability_event(&mut transaction, event).await?;
-            }
+            persist_appended_events(&mut transaction, evidence.events(), evidence_was_empty)
+                .await?;
             transaction.commit().await?;
             Ok(result.rows_affected() > 0)
         })
@@ -1539,13 +1509,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 transaction.commit().await?;
                 return Ok(false);
             }
-            if evidence_was_empty {
-                for event in evidence.events() {
-                    insert_reliability_event(&mut transaction, event).await?;
-                }
-            } else if let Some(event) = evidence.events().last() {
-                insert_reliability_event(&mut transaction, event).await?;
-            }
+            persist_appended_events(&mut transaction, evidence.events(), evidence_was_empty)
+                .await?;
             transaction.commit().await?;
             Ok(true)
         })
@@ -1613,13 +1578,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .bind(delivery.delivery_id())
                 .execute(&mut *transaction)
                 .await?;
-                if evidence_was_empty {
-                    for event in evidence.events() {
-                        insert_reliability_event(&mut transaction, event).await?;
-                    }
-                } else if let Some(event) = evidence.events().last() {
-                    insert_reliability_event(&mut transaction, event).await?;
-                }
+                persist_appended_events(&mut transaction, evidence.events(), evidence_was_empty)
+                    .await?;
             }
             transaction.commit().await?;
             Ok(u64::try_from(deliveries.len()).unwrap_or(u64::MAX))
@@ -2213,6 +2173,24 @@ impl UploadIntentStore for super::PostgresIndexStore {
         transaction.commit().await?;
         Ok(events)
     }
+}
+
+// The caller owns the state mutation and transaction. New logs need their
+// baseline and transition; existing logs need only the newly appended head.
+pub(super) async fn persist_appended_events<T: EvidenceEventMetadata>(
+    connection: &mut PgConnection,
+    events: &[T],
+    was_empty: bool,
+) -> Result<(), PostgresMetadataStoreError> {
+    let pending = if was_empty {
+        events
+    } else {
+        events.last().map(std::slice::from_ref).unwrap_or_default()
+    };
+    for event in pending {
+        insert_reliability_event(connection, event).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn insert_reliability_event<T>(

@@ -396,13 +396,8 @@ pub(super) async fn upsert_retention_hold(
     )
     .execute(&mut **transaction)
     .await?;
-    if evidence_was_empty {
-        for event in evidence.events() {
-            super::insert_reliability_event(transaction, event).await?;
-        }
-    } else if let Some(event) = evidence.events().last() {
-        super::insert_reliability_event(transaction, event).await?;
-    }
+    super::index_store::persist_appended_events(transaction, evidence.events(), evidence_was_empty)
+        .await?;
     Ok(())
 }
 
