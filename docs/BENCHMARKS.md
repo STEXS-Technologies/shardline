@@ -6091,3 +6091,44 @@ relaxed.
 Tracked Rust inventory is 567,287 lines, 36,362 fewer (6.02%) than the
 603,649-line baseline. These counts include tests, comments and blank lines;
 they are not a measured build-time or throughput improvement.
+
+### Hub ownership and fixture cleanup checkpoint (2026-11-17)
+
+Source `a8c81020754f89e498d9616c689776356aec2bac` passed all 711 selected Hub
+library and integration tests in 41.518 s; four normally ignored integration
+tests remained excluded. The isolated checkout used Rust 1.99.0, four Cargo jobs
+and Nextest workers, disabled dev/test debug information, no compiler wrapper,
+offline dependencies and the existing external target directory:
+
+```sh
+cargo +1.99.0 nextest run --offline --locked -p shardline-hub-api --lib --tests
+cargo +1.99.0 clippy --offline --locked -p shardline-hub-api --lib --tests -- -D warnings
+```
+
+Formatting and strict Clippy passed. The final test selection includes the
+cross-tenant authorization contracts, repository search/creation, Git clients,
+webhook security and README metadata parsing. It is not a fresh required
+PostgreSQL/MinIO deployment qualification: tests that conditionally require
+external services do not establish those guarantees without the required gate.
+
+Compared with `94063b33`, Hub cleanup removes 193 Rust lines: three production
+lines and 190 test lines. Both authorization entrypoints now share optional
+provider dispatch. Response conversion consumes owned repository IDs, and
+webhook delivery moves owned URLs rather than cloning them. No end-to-end
+performance gain is claimed from those ownership changes.
+
+Fixture and table consolidation retains distinct address-classification,
+URL-redaction, repository-type and front-matter cases. Deletion coverage keeps
+empty, revision-only and webhook-only states and adds a combined state; all four
+check cleanup after repeated deletion. Exact front-matter objects replace weaker partial assertions.
+
+Reqwest JSON helpers are now a Hub dev-dependency feature. A production-only
+`cargo tree -p shardline-hub-api -e features,no-dev -i reqwest@0.12.28` no longer
+shows Hub enabling JSON. The production library check without that feature and
+all 13 dataset/webhook integration tests passed. This narrows the package feature
+request; feature unification in the complete server may still enable JSON through
+other consumers. It is not a measured cold/warm build improvement.
+
+Tracked Rust inventory is 567,094 lines: 36,555 fewer (6.06%) than the
+603,649-line baseline. Hosted SDK memory and production-scale qualification
+remain open.
