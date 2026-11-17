@@ -816,35 +816,41 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_empty_upload_succeeds() {
-        // Empty file upload with no body chunks.
+    async fn blackhole_finalization_preserves_empty_and_sha256_accounting() {
         let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128).unwrap();
-        let ingestor = FileUploadIngestor::new(chunk_size, false);
-
-        let (record, response) = ingestor
-            .finish(&object_store, "empty.bin", None, None)
-            .await
-            .unwrap();
-        assert_eq!(record.total_bytes, 0);
-        assert_eq!(response.inserted_chunks, 0);
-        assert_eq!(response.reused_chunks, 0);
-        assert!(record.chunks.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_empty_upload_with_sha256_and_expected_hash() {
-        // Empty file with SHA256 computed and matching expected hash.
-        let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128).unwrap();
-        let ingestor = FileUploadIngestor::new(chunk_size, true);
-
-        // SHA256 of empty string
-        let empty_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let finished = ingestor
-            .finish(&object_store, "empty-sha256.bin", None, Some(empty_sha256))
-            .await;
-        assert!(finished.is_ok());
+        for (body, expected) in [
+            (b"".as_slice(), None),
+            (
+                b"".as_slice(),
+                Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+            ),
+            (
+                b"abcd".as_slice(),
+                Some("88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589"),
+            ),
+        ] {
+            let mut ingestor =
+                FileUploadIngestor::new(NonZeroUsize::new(128).unwrap(), expected.is_some());
+            // Empty uploads reach EOF without any request frames.
+            if !body.is_empty() {
+                ingestor
+                    .ingest_body_chunk(&object_store, &Bytes::from_static(body))
+                    .await
+                    .unwrap();
+            }
+            let (record, response) = ingestor
+                .finish(&object_store, "verified.bin", None, expected)
+                .await
+                .unwrap();
+            let chunks = usize::from(!body.is_empty());
+            assert_eq!(record.total_bytes, body.len() as u64);
+            assert_eq!(response.total_bytes, record.total_bytes);
+            assert_eq!(response.stored_bytes, record.total_bytes);
+            assert_eq!(response.inserted_chunks, chunks as u64);
+            assert_eq!(response.reused_chunks, 0);
+            assert_eq!(record.chunks.len(), chunks);
+            assert_eq!(response.chunks.len(), chunks);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -896,27 +902,6 @@ mod tests {
         assert_eq!(ingestor.records.len(), 3);
         assert_eq!(ingestor.stored_bytes, 384);
         assert!(ingestor.in_flight_chunks.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ingestor_finish_with_blackhole_and_sha256_match() {
-        // Verify the SHA256 hash is computed correctly when expected matches.
-        // Use blackhole to avoid spawn_blocking complexity.
-        let object_store = ServerObjectStore::blackhole();
-        let chunk_size = NonZeroUsize::new(128).unwrap();
-        let mut ingestor = FileUploadIngestor::new(chunk_size, true);
-
-        ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"abcd"))
-            .await
-            .unwrap();
-
-        // SHA256 of "abcd"
-        let expected = "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589";
-        let finished = ingestor
-            .finish(&object_store, "sha256-check.bin", None, Some(expected))
-            .await;
-        assert!(finished.is_ok());
     }
 
     #[test]
