@@ -55,7 +55,7 @@ pub(crate) async fn deliver_webhook_events(
     static WEBHOOK_DELIVERY_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(16));
 
     let client = match &state.http_client {
-        Some(client) => client.clone(),
+        Some(client) => client,
         None => return,
     };
     let webhooks = match state.store.webhooks_for_event(repo_id, event) {
@@ -85,14 +85,11 @@ pub(crate) async fn deliver_webhook_events(
             return;
         }
     };
-    for webhook in &webhooks {
-        let url = webhook.url.clone();
-        let body = body.clone();
-        let client = client.clone();
-        let url_for_log = sanitize_log_url(&url);
+    for webhook in webhooks {
+        let url_for_log = sanitize_log_url(&webhook.url);
         // Resolve the plaintext signing secret, decrypting at-rest ciphertext
         // and lazily upgrading legacy plaintext rows when a key is configured.
-        let secret = match resolve_webhook_secret(state, webhook) {
+        let secret = match resolve_webhook_secret(state, &webhook) {
             Ok(secret) => secret,
             Err(e) => {
                 tracing::warn!("failed to resolve secret for webhook {url_for_log}: {e}");
@@ -103,6 +100,9 @@ pub(crate) async fn deliver_webhook_events(
             tracing::warn!("webhook delivery semaphore closed");
             return;
         };
+        let url = webhook.url;
+        let body = body.clone();
+        let client = client.clone();
         // Spawn a delivery task and a separate monitoring task that holds the
         // semaphore permit and logs panics. If the delivery task panics, tokio
         // catches it and the JoinHandle returns Err, which we log here.
