@@ -118,6 +118,12 @@ struct CacheState {
 }
 
 impl CacheState {
+    fn remove(&mut self, key: &CacheKey) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.size);
+        }
+    }
+
     // The state mutex serializes access. Seed from restored mtimes, then use
     // logical ticks so wall-clock changes cannot reverse eviction order.
     const fn next_access(&mut self) -> u64 {
@@ -254,9 +260,7 @@ impl ChunkCache {
                 Ok(Some(_)) | Err(_) => {
                     drop(remove_entry_file(&path));
                     // Remove stale accounting when discarding a corrupt file.
-                    if let Some(existing) = state.entries.remove(&key) {
-                        state.total_bytes = state.total_bytes.saturating_sub(existing.size);
-                    }
+                    state.remove(&key);
                     return Ok(None);
                 }
             };
@@ -365,16 +369,15 @@ impl ChunkCache {
             }
             state.total_bytes = state.total_bytes.saturating_add(size);
             while state.total_bytes > budget_bytes {
-                let Some((oldest_key, oldest_size)) = state
+                let Some(oldest_key) = state
                     .entries
                     .iter()
                     .min_by_key(|(_, entry)| entry.last_accessed)
-                    .map(|(oldest_key, entry)| (oldest_key.clone(), entry.size))
+                    .map(|(oldest_key, _)| oldest_key.clone())
                 else {
                     break;
                 };
-                state.entries.remove(&oldest_key);
-                state.total_bytes = state.total_bytes.saturating_sub(oldest_size);
+                state.remove(&oldest_key);
                 // Keep physical eviction under the same lock as publication:
                 // another writer must not recreate a file before its deletion.
                 if let Ok(evicted_path) = item_path(&cache_dir, &oldest_key) {
@@ -792,12 +795,11 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
             .map(|(key, entry)| (key.clone(), *entry))
             .collect();
         oldest_first.sort_unstable_by_key(|(_, entry)| entry.last_accessed);
-        for (key, entry) in oldest_first {
+        for (key, _) in oldest_first {
             if state.total_bytes <= budget_bytes {
                 break;
             }
-            state.entries.remove(&key);
-            state.total_bytes = state.total_bytes.saturating_sub(entry.size);
+            state.remove(&key);
             if let Ok(path) = item_path(cache_dir, &key) {
                 drop(std::fs::remove_file(path));
             }
