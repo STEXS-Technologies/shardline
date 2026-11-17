@@ -116,16 +116,16 @@ pub(super) fn publish(
     private_directory(&artifacts)?;
     let digest = Digest::of(bytes);
     let path = artifact_path(directory, digest);
+    let artifact = MaintenanceArtifact {
+        schema_version: 1,
+        scope,
+        generation,
+        step,
+        kind,
+        digest,
+        bytes: u64::try_from(bytes.len())?,
+    };
     if path.exists() {
-        let artifact = MaintenanceArtifact {
-            schema_version: 1,
-            scope,
-            generation,
-            step,
-            kind,
-            digest,
-            bytes: u64::try_from(bytes.len())?,
-        };
         artifact.verify_materialized(open_private(&path, 64 * 1024 * 1024)?)?;
     } else {
         // Atomic publication; content identity makes exact re-publication harmless.
@@ -133,15 +133,7 @@ pub(super) fn publish(
     }
     let key = signer(directory, false)?;
     Ok(sign_maintenance_artifact(
-        MaintenanceArtifact {
-            schema_version: 1,
-            scope,
-            generation,
-            step,
-            kind,
-            digest,
-            bytes: u64::try_from(bytes.len())?,
-        },
+        artifact,
         chrono::Utc::now(),
         &key,
         key_id(&key.verifying_key()),
