@@ -313,15 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn effective_root_returns_override() {
-        let result = crate::config::effective_root(Some(&PathBuf::from("/tmp")));
-        // May fail if from_env fails in this environment
-        if let Ok(root) = result {
-            assert_eq!(root, PathBuf::from("/tmp"));
-        }
-    }
-
-    #[test]
     fn resolve_root_dir_uses_override_when_provided() {
         let override_root = PathBuf::from("/custom/root");
         let configured = PathBuf::from("/var/lib/shardline");
@@ -348,15 +339,6 @@ mod tests {
     fn is_deployment_root_rejects_empty_directory() {
         let temp = tempfile::tempdir().unwrap();
         assert!(!is_deployment_root(temp.path()));
-    }
-
-    #[tokio::test]
-    async fn run_config_check_from_env_rejects_when_no_config() {
-        // run_config_check_from_env requires env to be set up.
-        // If it works it returns a report; if not, it errors.
-        let result = crate::config::run_config_check_from_env().await;
-        // Either way, the function body is exercised
-        let _ = result;
     }
 
     #[test]

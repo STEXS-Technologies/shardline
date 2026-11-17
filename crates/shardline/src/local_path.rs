@@ -121,6 +121,6 @@ mod tests {
         let sandbox = tempfile::tempdir().unwrap();
         let result = resolve_root(Some(sandbox.path()));
         let root = result.unwrap();
-        assert!(root.is_absolute());
+        assert_eq!(root, sandbox.path());
     }
 }
