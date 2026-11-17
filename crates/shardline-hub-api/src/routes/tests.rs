@@ -712,49 +712,31 @@ async fn handler_repo_list_with_repos() {
 // ------------------------------------------------------------------
 
 #[tokio::test]
-async fn handler_repo_search_short_query_rejected() {
-    let (_td, state) = make_test_state();
-    let result = repo_search(
-        State(state.clone()),
-        test_repo(&state, &HeaderMap::new()),
-        Path("models".to_string()),
-        Query(RepoSearchQuery {
-            q: "x".into(),
-            author: None,
-            sort: None,
-            direction: None,
-            limit: 50,
-        }),
-    )
-    .await;
-    let err = result.unwrap_err();
-    assert!(
-        matches!(&err, HubApiError::PathValidation(msg) if msg.contains("at least 2")),
-        "expected PathValidation, got {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn handler_repo_search_invalid_type() {
-    let (_td, state) = make_test_state();
-    let result = repo_search(
-        State(state.clone()),
-        test_repo(&state, &HeaderMap::new()),
-        Path("invalid".to_string()),
-        Query(RepoSearchQuery {
-            q: "test".into(),
-            author: None,
-            sort: None,
-            direction: None,
-            limit: 50,
-        }),
-    )
-    .await;
-    let err = result.unwrap_err();
-    assert!(
-        matches!(&err, HubApiError::PathValidation(msg) if msg.contains("invalid repo type")),
-        "expected PathValidation, got {err:?}"
-    );
+async fn handler_repo_search_rejects_invalid_query_or_type() {
+    for (repo_type, query, message) in [
+        ("models", "x", "at least 2"),
+        ("invalid", "test", "invalid repo type"),
+    ] {
+        let (_td, state) = make_test_state();
+        let result = repo_search(
+            State(state.clone()),
+            test_repo(&state, &HeaderMap::new()),
+            Path(repo_type.to_owned()),
+            Query(RepoSearchQuery {
+                q: query.into(),
+                author: None,
+                sort: None,
+                direction: None,
+                limit: 50,
+            }),
+        )
+        .await;
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains(message)),
+            "repo_type={repo_type}, query={query}: expected {message}, got {err:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2145,15 +2127,9 @@ async fn handler_resolve_file_not_found() {
 // lfs_batch
 // ------------------------------------------------------------------
 
-fn make_lfs_state() -> (tempfile::TempDir, HubState) {
-    let (td, store) = make_delete_test_store();
-    let state = state_with_store(td.path(), store);
-    (td, state)
-}
-
 #[tokio::test]
 async fn handler_lfs_batch_upload_new_object() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let result = lfs_batch(
         State(state.clone()),
         test_repo(&state, &HeaderMap::new()),
@@ -2194,7 +2170,7 @@ async fn handler_lfs_batch_upload_new_object() {
 #[cfg(unix)]
 #[tokio::test]
 async fn handler_lfs_batch_propagates_object_store_existence_failures() {
-    let (td, state) = make_lfs_state();
+    let (td, state) = make_test_state();
     let root = td.path().join("lfs");
     let moved_root = td.path().join("lfs-real");
     std::fs::rename(&root, &moved_root).unwrap();
@@ -2248,7 +2224,7 @@ async fn handler_lfs_upload_rejects_content_that_does_not_match_its_sha256_oid()
     use sha2::Digest;
     use shardline_storage::ObjectStore;
 
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let content = b"actual uploaded bytes";
     let oid = hex::encode(sha2::Sha256::digest(b"different expected bytes"));
     let result = lfs_upload(
@@ -2270,7 +2246,7 @@ async fn handler_lfs_upload_rejects_content_that_does_not_match_its_sha256_oid()
 
 #[tokio::test]
 async fn handler_lfs_batch_download_existing_object() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     // Store an LFS object in the object store (global namespace, matching the
     // permissive-mode read path).
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
@@ -2322,7 +2298,7 @@ async fn handler_lfs_batch_download_existing_object() {
 
 #[tokio::test]
 async fn handler_lfs_batch_download_missing_object() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let result = lfs_batch(
         State(state.clone()),
         test_repo(&state, &HeaderMap::new()),
@@ -2353,7 +2329,7 @@ async fn handler_lfs_batch_download_missing_object() {
 
 #[tokio::test]
 async fn handler_lfs_batch_verify_existing() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     // Store an LFS object in the object store (global namespace).
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
     let key = crate::routes::lfs_object_key(
@@ -2394,7 +2370,7 @@ async fn handler_lfs_batch_verify_existing() {
 
 #[tokio::test]
 async fn handler_lfs_batch_verify_missing() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let result = lfs_batch(
         State(state.clone()),
         test_repo(&state, &HeaderMap::new()),
@@ -2486,7 +2462,7 @@ async fn handler_lfs_batch_prefers_xet_when_offered_with_write_auth() {
 
 #[tokio::test]
 async fn handler_lfs_batch_xet_transfer_falls_back_without_auth() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
 
     let result = lfs_batch(
         State(state.clone()),
@@ -2510,11 +2486,15 @@ async fn handler_lfs_batch_xet_transfer_falls_back_without_auth() {
         result.transfer, "basic",
         "should fall back to basic without auth"
     );
+    assert_eq!(result.objects.len(), 1);
+    let object = &result.objects[0];
+    assert!(object.error.is_none());
+    assert!(object.actions.as_ref().unwrap().upload.is_some());
 }
 
 #[tokio::test]
 async fn handler_lfs_batch_rejects_xet_only_without_cas_auth() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let result = lfs_batch(
         State(state.clone()),
         test_repo(&state, &HeaderMap::new()),
@@ -2539,36 +2519,8 @@ async fn handler_lfs_batch_rejects_xet_only_without_cas_auth() {
 }
 
 #[tokio::test]
-async fn handler_lfs_batch_xet_transfer_with_basic_fallback() {
-    let (_td, state) = make_lfs_state();
-
-    let result = lfs_batch(
-        State(state.clone()),
-        test_repo(&state, &HeaderMap::new()),
-        Json(LfsBatchRequest {
-            operation: LfsBatchOperation::Upload,
-            ref_: LfsBatchRef {
-                name: "main".into(),
-            },
-            objects: vec![LfsObjectRequest {
-                oid: "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0".into(),
-                size: 1000,
-            }],
-            transfers: vec!["xet".into(), "basic".into()],
-            hash_algo: None,
-        }),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        result.transfer, "basic",
-        "should fall back to basic when xet-only without auth"
-    );
-}
-
-#[tokio::test]
 async fn handler_lfs_batch_accepts_official_javascript_sha256_alias() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let result = lfs_batch(
         State(state.clone()),
         test_repo(&state, &HeaderMap::new()),
@@ -2593,7 +2545,7 @@ async fn handler_lfs_batch_accepts_official_javascript_sha256_alias() {
 
 #[tokio::test]
 async fn handler_lfs_batch_rejects_unsupported_hash_algo() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let result = lfs_batch(
         State(state.clone()),
         test_repo(&state, &HeaderMap::new()),
@@ -2616,7 +2568,7 @@ async fn handler_lfs_batch_rejects_unsupported_hash_algo() {
 
 #[tokio::test]
 async fn handler_lfs_batch_rejects_too_many_objects() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let objects: Vec<LfsObjectRequest> = (0..1025)
         .map(|i| LfsObjectRequest {
             oid: format!("{i:064x}"),
@@ -2695,7 +2647,7 @@ async fn handler_lfs_batch_xet_upload_missing_reconstruction_requires_upload_act
 
 #[tokio::test]
 async fn handler_lfs_batch_returns_hash_algo() {
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let result = lfs_batch(
         State(state.clone()),
         test_repo(&state, &HeaderMap::new()),
@@ -2813,7 +2765,7 @@ async fn handler_lfs_duplicate_local_upload_streams_without_tempfile_staging() {
     use shardline_protocol::ShardlineHash;
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let data: Vec<u8> = (0..2 * 1024 * 1024)
         .map(|index| ((index * 43 + index / 113) % 256) as u8)
         .collect();
@@ -2873,7 +2825,7 @@ async fn handler_lfs_duplicate_local_upload_rejects_corrupt_existing_content() {
     use shardline_protocol::ShardlineHash;
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 
-    let (_td, state) = make_lfs_state();
+    let (_td, state) = make_test_state();
     let uploaded = b"content addressed by the request oid";
     let corrupt = b"corrupt content at the same object key";
     let oid = hex::encode(sha2::Sha256::digest(uploaded));
