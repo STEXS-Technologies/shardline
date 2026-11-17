@@ -6060,3 +6060,34 @@ intermittent TLS failure's cause.
 Tracked Rust inventory is 567,554 lines, including tests, comments and blanks:
 36,095 fewer (5.98%) than the 603,649-line baseline and 21 fewer than the preceding
 SDK checkpoint.
+
+### Configuration cleanup checkpoint (2026-11-17)
+
+At `8ef6fa354fbac73b8f4da7cb13131cfb43a3417f`, the complete non-ignored
+server library selection passed: 3,107 tests in 174.317 s, with 28 normally
+ignored tests excluded. Command:
+
+```sh
+RUSTC_WRAPPER='' CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 \
+CARGO_PROFILE_TEST_DEBUG=0 NEXTEST_TEST_THREADS=4 \
+cargo +1.99.0 nextest run --offline --locked -p shardline-server --lib
+```
+
+The isolated checkout used the existing external target directory. Each source
+change also passed the selected configuration tests, formatting and strict
+`cargo +1.99.0 clippy --offline --locked -p shardline-server --lib --tests -- -D warnings`.
+This is server-library qualification, not a fresh required PostgreSQL/MinIO,
+hosted memory, complete workspace or production-scale run.
+
+Relative to `cba8ddc5`, this batch removes 267 tracked Rust lines: 15 from
+production code and 252 from tests and their comments. In-flight limits share
+existing numeric parsing and clamping, the secret loader owns its uniform source
+conflict error, and secret-read preparation has fewer redundant branches.
+Consolidated tests preserve all distinct input/error cases; one exact duplicate
+was removed. Direct secret newline rejection now checks precise errors through
+the full configuration loader. No memory bounds or verification checks were
+relaxed.
+
+Tracked Rust inventory is 567,287 lines, 36,362 fewer (6.02%) than the
+603,649-line baseline. These counts include tests, comments and blank lines;
+they are not a measured build-time or throughput improvement.
