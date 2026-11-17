@@ -1,22 +1,22 @@
 # Remaining maintenance cleanup
 
-Inventory source: `cba8ddc5d99181df3c2249ca2edb2c49c7169358` (2026-11-17).
+Inventory source: `c6e62a9efbe72a7efbd317e4cb1f27c1d94aaa30` (2026-11-17).
 This is a review queue, not evidence that the listed code is redundant.
 
 ## Measured position
 
-Tracked Rust source contains 567,554 lines, including comments, blank lines and
-tests: 36,095 fewer lines (5.98%) than the 603,649-line baseline. Reproduce with
+Tracked Rust source contains 566,951 lines, including comments, blank lines and
+tests: 36,698 fewer lines (6.08%) than the 603,649-line baseline. Reproduce with
 `git ls-files '*.rs'` and count each tracked file's lines at the source commit.
 These totals exclude untracked files and unrelated working-tree changes.
 
 | Area | Rust lines | Next review |
 | --- | ---: | --- |
-| Server | 209,308 | Protocol fixtures, configuration parsing and lifecycle orchestration |
-| Index | 68,392 | Repeated adapter preparation and validation; retain adapter-owned transactions |
+| Server | 209,002 | Protocol fixtures, configuration parsing and lifecycle orchestration |
+| Index | 68,307 | Repeated adapter preparation and validation; retain adapter-owned transactions |
 | Standalone E2E | 45,790 | Repeated setup and scenario coverage across real-client suites |
-| Hub API | 41,076 | Route fixtures and repeated response construction |
-| CLI | 36,721 | Remaining orchestration after shared report formatting cleanup |
+| Hub API | 40,883 | Route fixtures and repeated response construction |
+| CLI | 36,702 | Remaining orchestration after shared report formatting cleanup |
 | SDK | 24,185 | Remaining allocation and dependency costs after shared CDC and reconstruction cleanup |
 
 There is no evidence-backed percentage of cleanup remaining. A further 3–7%
@@ -26,33 +26,42 @@ code.
 
 ## Prioritized work
 
-1. **Close qualification gaps.** The full contributor gate passed 8,197 selected
-   tests at `e1096951`; see `BENCHMARKS.md` for commands and scope. This does not
-   close the historical hosted SDK memory failure. Local matching experiments
-   have not reproduced it. Obtain current hosted evidence without relaxing the
+1. **Close qualification gaps.** The latest full contributor checkpoint passed
+   8,144 selected tests at `a3b20bd3`. Required PostgreSQL index qualification
+   passed 813 tests at `4a037718`; PostgreSQL/MinIO qualification passed all
+   157 integration cases and three additional copy-integrity cases at `711de39c`.
+   See `BENCHMARKS.md` for commands, frozen sources and limits. These checkpoints
+   do not qualify the final branch or close the historical hosted SDK memory
+   failure. Local matching experiments have not reproduced it. Obtain current hosted evidence without relaxing the
    memory bound or opening a pull request. Repeat integrated PostgreSQL/object
    storage qualification after changes affecting those paths; preserve concurrent
    upload, GC, source deletion, restart and byte-identity coverage.
 2. **Review large protocol fixtures for overlap.** Start with server
-   `app/e2e_tests.rs` (11,574 lines), S3 route `tests.rs` (6,067), Hub route
-   `tests.rs` (4,983), and standalone `data_integrity.rs` (12,769). For each
+   `app/e2e_tests.rs` (11,574 lines), S3 route `tests.rs` (5,991), Hub route
+   `tests.rs` (4,883), and standalone `data_integrity.rs` (12,769). For each
    consolidation, record which assertions and failure boundaries survive. Keep
    real-client, wire-level, adapter and concurrency tests when they exercise
    different boundaries. Splitting a file alone is not a reduction in complexity.
 3. **Simplify metadata adapters locally.** SQLite and PostgreSQL `index_store.rs`
-   contain 4,701 and 4,830 lines respectively. Compare repeated preparation and
+   contain 4,645 and 4,801 lines respectively. Compare repeated preparation and
    decoding with existing shared helpers before introducing abstractions. Preserve
    snapshot semantics, error propagation, locking and atomic publication. Similar
-   SQL operations across engines are not automatically interchangeable.
+   SQL operations across engines are not automatically interchangeable. Shared
+   SQLite row decoding and batch verification, plus PostgreSQL listing, lookup
+   and create-retry decoding, are already consolidated; review other operations
+   rather than reopening those completed changes.
 4. **Finish measured build-cost work.** Ordinary build targets already avoid
    unconditional clean, Nextest is pinned without forced reinstall, and SDK tests
-   no longer require the server graph. Measure cold and warm project/container
-   builds under identical toolchains, caches and CPU limits before claiming the
+   no longer require the server graph. A controlled empty-target release-build
+   pair measured 243.923 s at the baseline versus 234.337 s at `b367232d`
+   (3.93% shorter in that sample). This is not a statistically established
+   improvement or a cold-machine/container measurement. Repeat comparisons and
+   measure edited-source iteration and container builds before claiming the
    RFC's 30% contributor critical-path target. Review the sequential 150-minute
    E2E job for reusable compatible artifacts and measured scheduling opportunities;
    retain every required qualification gate.
 5. **Review configuration and lifecycle branching.** Server `config/env.rs`
-   contains 3,415 lines. Identify repeated conversion/validation and unnecessary
+   contains 3,152 lines. Identify repeated conversion/validation and unnecessary
    intermediate state using existing owners. Preserve precedence, defaults,
    diagnostics, cancellation, admission and durability boundaries. Only remove
    branches after showing why supported behavior cannot require them.
