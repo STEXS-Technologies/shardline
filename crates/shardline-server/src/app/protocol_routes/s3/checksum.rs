@@ -195,28 +195,25 @@ pub(super) fn read_object_checksum(
             serde_json::from_str(value).map_err(|_error| shardline_s3_adapter::S3Error::internal())
         })
         .transpose()?;
-    let checksum = match manifest {
-        Some(manifest) if manifest.checksum_type == MultipartChecksumType::FullObject => {
-            Some(ObjectChecksum {
-                algorithm: manifest.algorithm,
-                checksum_type: manifest.checksum_type,
-                checksum_value: manifest.checksum_value,
-            })
-        }
-        Some(_) | None => None,
+    let Some(manifest) = manifest else {
+        return Ok(None);
     };
-    if let Some(checksum) = &checksum {
-        let decoded = STANDARD
-            .decode(&checksum.checksum_value)
-            .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
-        if checksum.checksum_type != MultipartChecksumType::FullObject
-            || decoded.len() != checksum.algorithm.encoded_len()
-            || STANDARD.encode(decoded) != checksum.checksum_value
-        {
-            return Err(shardline_s3_adapter::S3Error::internal());
-        }
+    if manifest.checksum_type != MultipartChecksumType::FullObject {
+        return Ok(None);
     }
-    Ok(checksum)
+    let decoded = STANDARD
+        .decode(&manifest.checksum_value)
+        .map_err(|_error| shardline_s3_adapter::S3Error::internal())?;
+    if decoded.len() != manifest.algorithm.encoded_len()
+        || STANDARD.encode(decoded) != manifest.checksum_value
+    {
+        return Err(shardline_s3_adapter::S3Error::internal());
+    }
+    Ok(Some(ObjectChecksum {
+        algorithm: manifest.algorithm,
+        checksum_type: manifest.checksum_type,
+        checksum_value: manifest.checksum_value,
+    }))
 }
 
 const fn default_multipart_checksum_algorithm() -> MultipartChecksumAlgorithm {
