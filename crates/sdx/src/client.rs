@@ -608,7 +608,12 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, RepositoryId), SdxError> {
         )));
     }
     let parsed = crate::url::XetUrl::from_parsed_url(&url, endpoint)?;
-    let repository = parsed.repository_id();
+    let repository = RepositoryId {
+        provider: parsed.provider,
+        owner: parsed.owner,
+        repo: parsed.repo,
+        revision: parsed.revision,
+    };
     Ok((parsed.api_base, repository))
 }
 
