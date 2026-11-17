@@ -108,6 +108,16 @@ pub(crate) fn write_fsck_summary(
     writer: &mut (impl Write + ?Sized),
     report: &LocalFsckReport,
 ) -> io::Result<()> {
+    write_fsck_summary_prefixed(writer, report, "")?;
+    writer.flush()
+}
+
+pub(crate) fn write_fsck_summary_prefixed(
+    writer: &mut (impl Write + ?Sized),
+    report: &LocalFsckReport,
+    prefix: &str,
+) -> io::Result<()> {
+    let sep = if prefix.is_empty() { "" } else { "." };
     for (name, value) in [
         ("latest_records", report.latest_records),
         ("version_records", report.version_records),
@@ -132,11 +142,11 @@ pub(crate) fn write_fsck_summary(
             report.inspected_provider_repository_states,
         ),
     ] {
-        writeln!(writer, "{name}: {value}")?;
+        writeln!(writer, "{prefix}{sep}{name}: {value}")?;
     }
 
-    writeln!(writer, "issue_count: {}", report.issue_count())?;
-    writer.flush()
+    writeln!(writer, "{prefix}{sep}issue_count: {}", report.issue_count())?;
+    Ok(())
 }
 
 pub(crate) fn write_fsck_cli_summary(
@@ -169,6 +179,16 @@ pub(crate) fn write_index_rebuild_summary(
     writer: &mut (impl Write + ?Sized),
     report: &LocalIndexRebuildReport,
 ) -> io::Result<()> {
+    write_index_rebuild_summary_prefixed(writer, report, "")?;
+    writer.flush()
+}
+
+pub(crate) fn write_index_rebuild_summary_prefixed(
+    writer: &mut (impl Write + ?Sized),
+    report: &LocalIndexRebuildReport,
+    prefix: &str,
+) -> io::Result<()> {
+    let sep = if prefix.is_empty() { "" } else { "." };
     for (name, value) in [
         ("scanned_version_records", report.scanned_version_records),
         ("scanned_retained_shards", report.scanned_retained_shards),
@@ -179,12 +199,12 @@ pub(crate) fn write_index_rebuild_summary(
             report.removed_stale_latest_records,
         ),
     ] {
-        writeln!(writer, "{name}: {value}")?;
+        writeln!(writer, "{prefix}{sep}{name}: {value}")?;
     }
     for location in &report.preserved_latest_records_unreadable_version {
         writeln!(
             writer,
-            "kept_latest_record_unreadable_version: {}",
+            "{prefix}{sep}kept_latest_record_unreadable_version: {}",
             location
         )?;
     }
@@ -211,11 +231,11 @@ pub(crate) fn write_index_rebuild_summary(
             report.removed_stale_dedupe_shard_mappings,
         ),
     ] {
-        writeln!(writer, "{name}: {value}")?;
+        writeln!(writer, "{prefix}{sep}{name}: {value}")?;
     }
-    writeln!(writer, "issue_count: {}", report.issue_count())?;
+    writeln!(writer, "{prefix}{sep}issue_count: {}", report.issue_count())?;
 
-    writer.flush()
+    Ok(())
 }
 
 pub(crate) fn write_index_rebuild_cli_summary(

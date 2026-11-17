@@ -32,113 +32,17 @@ impl RepairReport {
     /// # Errors
     /// Returns the first write or flush error.
     pub fn write_summary<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
-        writeln!(
+        report_output::write_index_rebuild_summary_prefixed(
             writer,
-            "index_rebuild.scanned_version_records: {}",
-            self.index_rebuild.scanned_version_records
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.scanned_retained_shards: {}",
-            self.index_rebuild.scanned_retained_shards
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.rebuilt_latest_records: {}",
-            self.index_rebuild.rebuilt_latest_records
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.unchanged_latest_records: {}",
-            self.index_rebuild.unchanged_latest_records
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.removed_stale_latest_records: {}",
-            self.index_rebuild.removed_stale_latest_records
-        )?;
-        for location in &self
-            .index_rebuild
-            .preserved_latest_records_unreadable_version
-        {
-            writeln!(
-                writer,
-                "index_rebuild.kept_latest_record_unreadable_version: {}",
-                location
-            )?;
-        }
-        writeln!(
-            writer,
-            "index_rebuild.scanned_reconstructions: {}",
-            self.index_rebuild.scanned_reconstructions
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.unchanged_reconstructions: {}",
-            self.index_rebuild.unchanged_reconstructions
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.removed_stale_reconstructions: {}",
-            self.index_rebuild.removed_stale_reconstructions
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.rebuilt_dedupe_shard_mappings: {}",
-            self.index_rebuild.rebuilt_dedupe_shard_mappings
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.unchanged_dedupe_shard_mappings: {}",
-            self.index_rebuild.unchanged_dedupe_shard_mappings
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.removed_stale_dedupe_shard_mappings: {}",
-            self.index_rebuild.removed_stale_dedupe_shard_mappings
-        )?;
-        writeln!(
-            writer,
-            "index_rebuild.issue_count: {}",
-            self.index_rebuild.issue_count()
+            &self.index_rebuild,
+            "index_rebuild",
         )?;
         report_output::write_lifecycle_repair_summary_prefixed(
             writer,
             &self.lifecycle_repair,
             "lifecycle_repair",
         )?;
-        writeln!(writer, "fsck.latest_records: {}", self.fsck.latest_records)?;
-        writeln!(
-            writer,
-            "fsck.version_records: {}",
-            self.fsck.version_records
-        )?;
-        writeln!(
-            writer,
-            "fsck.inspected_chunk_references: {}",
-            self.fsck.inspected_chunk_references
-        )?;
-        writeln!(
-            writer,
-            "fsck.inspected_dedupe_shard_mappings: {}",
-            self.fsck.inspected_dedupe_shard_mappings
-        )?;
-        writeln!(
-            writer,
-            "fsck.inspected_reconstructions: {}",
-            self.fsck.inspected_reconstructions
-        )?;
-        writeln!(
-            writer,
-            "fsck.inspected_webhook_deliveries: {}",
-            self.fsck.inspected_webhook_deliveries
-        )?;
-        writeln!(
-            writer,
-            "fsck.inspected_provider_repository_states: {}",
-            self.fsck.inspected_provider_repository_states
-        )?;
-        writeln!(writer, "fsck.issue_count: {}", self.fsck.issue_count())?;
+        report_output::write_fsck_summary_prefixed(writer, &self.fsck, "fsck")?;
         writer.flush()
     }
 
