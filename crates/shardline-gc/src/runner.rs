@@ -703,27 +703,26 @@ where
                 );
             }
 
-            if hold.is_active_at(now_unix_seconds) {
+            if hold.is_active_at(now_unix_seconds)
+                && quarantined_object_keys.contains(hold.object_key())
+            {
                 // Holds may protect future keys; a hold alone does not assert
                 // object existence. Independent record/evidence checks remain.
-                if quarantined_object_keys.contains(hold.object_key()) {
-                    // A held+quarantined object is a REPAIRABLE state, not a
-                    // hard abort. A hold and a quarantine entry on the same key
-                    // are contradictory: the hold keeps the data, and the
-                    // quarantine entry is stale. Let the run proceed so
-                    // `reconcile_quarantine_entries` (mark) or the sweep
-                    // releases the stale entry; erroring here gated run start
-                    // (before that repair code) and wedged every subsequent GC
-                    // run until the hold expired — permanently for holds with
-                    // `release_after = None`.
-                    tracing::warn!(
-                        "retention hold and quarantine entry both present for {}; \
-                         releasing the stale quarantine candidate this run \
-                         (the hold keeps the data)",
-                        hold.object_key().as_str(),
-                    );
-                    return Ok(());
-                }
+                // A held+quarantined object is a REPAIRABLE state, not a
+                // hard abort. A hold and a quarantine entry on the same key
+                // are contradictory: the hold keeps the data, and the
+                // quarantine entry is stale. Let the run proceed so
+                // `reconcile_quarantine_entries` (mark) or the sweep
+                // releases the stale entry; erroring here gated run start
+                // (before that repair code) and wedged every subsequent GC
+                // run until the hold expired — permanently for holds with
+                // `release_after = None`.
+                tracing::warn!(
+                    "retention hold and quarantine entry both present for {}; \
+                     releasing the stale quarantine candidate this run \
+                     (the hold keeps the data)",
+                    hold.object_key().as_str(),
+                );
             }
 
             Ok::<(), GcError>(())
@@ -1032,39 +1031,23 @@ mod tests {
     }
 
     #[test]
-    fn temp_reaping_clock_skewed_when_gc_clock_behind_embedded_nanos() {
-        // GC clock is 2h behind the newest writer-embedded temp timestamp
-        // (a backwards step on the GC host): reaping must be skipped.
-        let now_secs = 2_000_000_000_u64;
-        let future_nanos = u128::from(now_secs + 2 * 3600) * 1_000_000_000;
-        assert!(temp_reaping_clock_is_skewed(now_secs, Some(future_nanos)));
-    }
-
-    #[test]
-    fn temp_reaping_clock_not_skewed_within_slack() {
-        // A temp embedded a few seconds ahead (writer rounding / jitter) is
-        // within the slack and must NOT disable reaping.
-        let now_secs = 2_000_000_000_u64;
-        let near_future_nanos = u128::from(now_secs + 5) * 1_000_000_000;
-        assert!(!temp_reaping_clock_is_skewed(
-            now_secs,
-            Some(near_future_nanos)
-        ));
-    }
-
-    #[test]
-    fn temp_reaping_clock_not_skewed_when_embedded_is_past() {
-        // All embedded timestamps are in the past relative to the GC clock: a
-        // normal, trustworthy run.
-        let now_secs = 2_000_000_000_u64;
-        let past_nanos = u128::from(now_secs - 10) * 1_000_000_000;
-        assert!(!temp_reaping_clock_is_skewed(now_secs, Some(past_nanos)));
-    }
-
-    #[test]
-    fn temp_reaping_clock_not_skewed_without_observed_temps() {
-        // No chunk temp artifacts observed at all: nothing to guard against.
-        assert!(!temp_reaping_clock_is_skewed(2_000_000_000_u64, None));
+    fn temp_reaping_clock_respects_observation_and_slack() {
+        let now = 2_000_000_000_u64;
+        let nanos = u128::from(now) * 1_000_000_000;
+        for (case, observed, skewed) in [
+            ("no artifacts", None, false),
+            ("past writer", Some(nanos - 10_000_000_000), false),
+            ("writer jitter", Some(nanos + 5_000_000_000), false),
+            ("exact slack", Some(nanos + 60_000_000_000), false),
+            ("beyond slack", Some(nanos + 60_000_000_001), true),
+            ("two hours ahead", Some(nanos + 7_200_000_000_000), true),
+        ] {
+            assert_eq!(
+                temp_reaping_clock_is_skewed(now, observed),
+                skewed,
+                "{case}"
+            );
+        }
     }
 
     #[test]
@@ -1096,40 +1079,13 @@ mod tests {
     }
 
     #[test]
-    fn retention_clock_fires_on_forward_jump_despite_future_dated_hold() {
-        // F-57 regression: the guard reference must be CREATION timestamps
-        // only. The proven bypass put a candidate 1 day old (7-day retention)
-        // alongside an active hold with release_after = +30 days; the old
-        // guard's reference (max incl. delete_after/release_after) sat 30 days
-        // in the future, so a 10-day forward jump left it SILENT and the sweep
-        // deleted the candidate ~6 days before its real retention elapsed.
-        // With the creation-only reference (newest creation = first_seen, which
-        // is <= real now for a healthy clock) the same jump must fire and skip
-        // the sweep.
+    fn retention_clock_fires_on_ten_day_forward_jump() {
+        // Future deadlines are excluded by the metadata reader, covered by
+        // newest_stored_creation_timestamp_excludes_future_dated_fields.
         let real_now = 2_000_000_000_u64;
-        let first_seen = real_now - 86_400; // candidate is 1 day old
-        let jumped_now = real_now + 10 * 86_400; // 10-day forward jump
-        let _release_after = real_now + 30 * 86_400; // the future-dated hold field
-
-        assert!(
-            retention_clock_is_skewed_forward(jumped_now, Some(first_seen), None),
-            "a >1-day forward jump must fire even when the hold release_after is \
-             future-dated — the reference must be creation timestamps only"
-        );
-    }
-
-    #[test]
-    fn retention_clock_forward_jump_fires_identically_without_future_dated_entries() {
-        // Control for the F-57 regression: with the same forward jump but no
-        // future-dated entries at all (newest creation = first_seen, no hold),
-        // the guard fires exactly as before the fix — the creation-only
-        // reference is unchanged for deployments without future-dated rows.
-        let real_now = 2_000_000_000_u64;
-        let first_seen = real_now - 86_400; // candidate is 1 day old
-        let jumped_now = real_now + 10 * 86_400; // 10-day forward jump
         assert!(retention_clock_is_skewed_forward(
-            jumped_now,
-            Some(first_seen),
+            real_now + 10 * 86_400,
+            Some(real_now - 86_400),
             None
         ));
     }
