@@ -342,34 +342,24 @@ mod tests {
     }
 
     #[test]
-    fn scope_namespace_global_when_no_repository_scope() {
-        let ns = scope_namespace(None);
-        assert_eq!(ns, "global");
-    }
-
-    #[test]
-    fn scope_namespace_with_repository_scope() {
+    fn scope_namespace_preserves_global_and_revision_encoding() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
-                .unwrap();
-        let ns = scope_namespace(Some(&scope));
-        assert_eq!(
-            ns,
-            "dd80a080687cba3deddd237177f7f99484811e475ba6bac34ec5e4295fd8cb32"
-        );
-    }
-
-    #[test]
-    fn scope_namespace_without_revision() {
-        use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
-        let ns = scope_namespace(Some(&scope));
-        assert_eq!(
-            ns,
-            "d6db281729e70151c911326ac411108165abfc2bb78a3313c14d99cf7ec2cfd2"
-        );
+        assert_eq!(scope_namespace(None), "global");
+        for (revision, expected) in [
+            (
+                Some("main"),
+                "dd80a080687cba3deddd237177f7f99484811e475ba6bac34ec5e4295fd8cb32",
+            ),
+            (
+                None,
+                "d6db281729e70151c911326ac411108165abfc2bb78a3313c14d99cf7ec2cfd2",
+            ),
+        ] {
+            let scope =
+                RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", revision)
+                    .unwrap();
+            assert_eq!(scope_namespace(Some(&scope)), expected, "{revision:?}");
+        }
     }
 
     #[test]
