@@ -168,7 +168,10 @@ jobs:
         env:
           USE_BAZEL_VERSION: "8.7.0"
         working-directory: e2e
-        run: cargo nextest run --locked --all-features
+        # The dedicated memory step below runs both sizes with full success output.
+        run: >-
+          cargo nextest run --locked --all-features
+          -E 'not test(stream_large_file_memory_bounded_cat)'
 
       - name: Qualify repository creation races across PostgreSQL replicas
         run: >-
