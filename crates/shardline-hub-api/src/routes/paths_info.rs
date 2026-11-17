@@ -54,8 +54,7 @@ pub(crate) async fn paths_info(
     let repo_id = format!("{namespace}/{repo_name}");
     let stored_repo = state
         .store
-        .get_repo(&repo_id)
-        .map_err(|error| HubApiError::CasError(error.to_string()))?
+        .get_repo(&repo_id)?
         .ok_or(HubApiError::RepoNotFound)?;
     if RepoType::from(stored_repo.repo_type) != requested_type {
         return Err(HubApiError::RepoNotFound);
@@ -71,10 +70,7 @@ pub(crate) async fn paths_info(
         _repo.capability(),
     )
     .await?;
-    let files = state
-        .store
-        .get_files(&commit_sha)
-        .map_err(|error| HubApiError::CasError(error.to_string()))?;
+    let files = state.store.get_files(&commit_sha)?;
     let oids = crate::git::smart_http::path_oids(
         state.clone(),
         repo_id.clone(),

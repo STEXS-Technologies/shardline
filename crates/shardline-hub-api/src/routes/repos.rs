@@ -152,10 +152,7 @@ pub(crate) async fn repo_list(
         let r = claims.repository();
         format!("{}/{}", r.owner(), r.name())
     });
-    let repos = state
-        .store
-        .list_repos()
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let repos = state.store.list_repos()?;
     // Cross-tenant privacy: a caller must never see another tenant's private
     // repositories, even though the list endpoint is global. Public repos and
     // the caller's own private repos (exact `owner/name` match) remain visible.
@@ -217,19 +214,16 @@ pub(crate) async fn repo_search(
         _ if query.sort.is_some() && ascending => HubRepoSearchOrder::RepoIdDesc,
         _ => HubRepoSearchOrder::RepoIdAsc,
     };
-    let visible = state
-        .store
-        .search_repos_with_options(
-            Some(rt),
-            &query.q,
-            limit,
-            &HubRepoSearchOptions {
-                caller_repo_id,
-                author: query.author,
-                order,
-            },
-        )
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let visible = state.store.search_repos_with_options(
+        Some(rt),
+        &query.q,
+        limit,
+        &HubRepoSearchOptions {
+            caller_repo_id,
+            author: query.author,
+            order,
+        },
+    )?;
     let response = RepoListResponse {
         repos: visible.into_iter().map(repo_response_from_hub).collect(),
     };
@@ -291,20 +285,15 @@ pub(crate) async fn repo_modelcard(
     let name = format!("{ns}/{repo_name}");
     let entry = state
         .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(&name)?
         .ok_or(HubApiError::RepoNotFound)?;
     let commit_sha = state
         .store
-        .resolve_revision(&name, &entry.default_branch)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .resolve_revision(&name, &entry.default_branch)?
         .ok_or(HubApiError::RevisionNotFound)?;
     crate::revision_access::authorize_read(&state, &name, "main", &commit_sha, repo.capability())
         .await?;
-    let files = state
-        .store
-        .get_files(&commit_sha)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let files = state.store.get_files(&commit_sha)?;
     let readme = files
         .iter()
         .find(|f| f.path == "README.md")
@@ -355,19 +344,14 @@ pub(crate) async fn repo_revisions(
     let name = format!("{ns}/{repo_name}");
     let _ = state
         .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(&name)?
         .ok_or(HubApiError::RepoNotFound)?;
     let visible =
         crate::revision_access::visible_commits(&state, &name, _repo.capability()).await?;
     let revisions = if let Some(allowed) = &visible {
         let mut revisions = Vec::with_capacity(allowed.len());
         for sha in allowed {
-            if let Some(revision) = state
-                .store
-                .get_revision(&name, sha)
-                .map_err(|error| HubApiError::CasError(error.to_string()))?
-            {
+            if let Some(revision) = state.store.get_revision(&name, sha)? {
                 revisions.push(revision);
             }
         }
@@ -379,10 +363,7 @@ pub(crate) async fn repo_revisions(
         });
         revisions
     } else {
-        state
-            .store
-            .list_revisions(&name)
-            .map_err(|error| HubApiError::CasError(error.to_string()))?
+        state.store.list_revisions(&name)?
     };
     let scoped_revision = _repo
         .capability()
@@ -414,13 +395,9 @@ pub(crate) async fn repo_refs(
     let name = format!("{ns}/{repo_name}");
     state
         .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(&name)?
         .ok_or(HubApiError::RepoNotFound)?;
-    let refs = state
-        .store
-        .list_refs_bounded(&name, 10_000)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let refs = state.store.list_refs_bounded(&name, 10_000)?;
     let mut branches = Vec::new();
     let mut tags = Vec::new();
     let mut converts = Vec::new();
@@ -476,16 +453,12 @@ pub(crate) async fn repo_info(
     let name = format!("{ns}/{repo_name}");
     let entry = state
         .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(&name)?
         .ok_or(HubApiError::RepoNotFound)?;
 
     // SDK repo_info() needs the same current commit and siblings as the
     // explicit revision endpoint, rather than an apparently empty repository.
-    let current_sha = state
-        .store
-        .resolve_revision(&name, &entry.default_branch)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let current_sha = state.store.resolve_revision(&name, &entry.default_branch)?;
     let mut response = repo_response_from_hub(entry);
     if let Some(sha) = current_sha {
         crate::revision_access::authorize_read(&state, &name, "main", &sha, repo.capability())
@@ -506,8 +479,7 @@ pub(crate) async fn repo_revision_info(
     let name = format!("{ns}/{repo_name}");
     let entry = state
         .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(&name)?
         .ok_or(HubApiError::RepoNotFound)?;
     let commit_sha =
         crate::git::smart_http::resolve_commit_id(&state, &name, &rev, _repo.capability())?
@@ -535,10 +507,7 @@ async fn revision_response(
     commit: &str,
     mut response: RepoResponse,
 ) -> Result<RepoResponse, HubApiError> {
-    let files = state
-        .store
-        .get_files(commit)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let files = state.store.get_files(commit)?;
     response.sha = Some(crate::git::smart_http::public_commit_id(state, repo, commit, auth).await?);
     if files.iter().any(|file| file.path == "README.md")
         && let Some(content) =
@@ -639,12 +608,8 @@ fn delete_repository(
     // Verify repo exists
     let _repo = state
         .store
-        .get_repo(name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(name)?
         .ok_or(HubApiError::RepoNotFound)?;
-    state
-        .store
-        .delete_repo(name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    state.store.delete_repo(name)?;
     Ok(StatusCode::NO_CONTENT)
 }

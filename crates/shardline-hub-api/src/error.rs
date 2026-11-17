@@ -76,6 +76,12 @@ pub enum HubApiError {
     WebhookSecret(#[from] crate::secrets::WebhookSecretCipherError),
 }
 
+impl From<shardline_index::hub::HubStoreError> for HubApiError {
+    fn from(error: shardline_index::hub::HubStoreError) -> Self {
+        Self::CasError(error.to_string())
+    }
+}
+
 impl From<shardline_protocol_adapters::ProtocolError> for HubApiError {
     fn from(error: shardline_protocol_adapters::ProtocolError) -> Self {
         HubApiError::CasError(error.to_string())

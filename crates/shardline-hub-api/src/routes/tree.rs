@@ -81,20 +81,17 @@ pub(super) async fn file_tree_for_path(
         } else {
             format!("{file_path}/")
         };
-        let page = state
-            .store
-            .get_tree_page(
-                &commit_sha,
-                &HubTreePageOptions {
-                    path: file_path.clone(),
-                    recursive: query.recursive,
-                    cursor: query
-                        .cursor
-                        .map(|cursor| cursor.strip_prefix(&prefix).unwrap_or(&cursor).to_owned()),
-                    limit,
-                },
-            )
-            .map_err(|error| HubApiError::CasError(error.to_string()))?;
+        let page = state.store.get_tree_page(
+            &commit_sha,
+            &HubTreePageOptions {
+                path: file_path.clone(),
+                recursive: query.recursive,
+                cursor: query
+                    .cursor
+                    .map(|cursor| cursor.strip_prefix(&prefix).unwrap_or(&cursor).to_owned()),
+                limit,
+            },
+        )?;
         let has_more = page.has_more;
         let entries = page
             .entries
@@ -126,10 +123,7 @@ pub(super) async fn file_tree_for_path(
             has_more,
         });
     }
-    let files = state
-        .store
-        .get_files(&commit_sha)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let files = state.store.get_files(&commit_sha)?;
     let entries = if query.recursive {
         tree_entries_recursive(&files, &file_path)?
     } else {

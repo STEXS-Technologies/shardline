@@ -409,8 +409,7 @@ pub(crate) async fn webhook_create(
     validate_webhook_url(&request.url)?;
     let _ = state
         .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(&name)?
         .ok_or(HubApiError::RepoNotFound)?;
     // Encrypt the signing secret at rest when a cipher is configured.
     let secret_to_store: Option<String> =
@@ -422,18 +421,15 @@ pub(crate) async fn webhook_create(
             ),
             _ => None,
         };
-    let webhook = state
-        .store
-        .create_webhook_bounded(
-            &name,
-            &request.url,
-            &request.events,
-            secret_to_store
-                .as_deref()
-                .or_else(|| request.secret.as_ref().map(SecretString::expose_secret)),
-            MAX_WEBHOOKS_PER_REPO,
-        )
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let webhook = state.store.create_webhook_bounded(
+        &name,
+        &request.url,
+        &request.events,
+        secret_to_store
+            .as_deref()
+            .or_else(|| request.secret.as_ref().map(SecretString::expose_secret)),
+        MAX_WEBHOOKS_PER_REPO,
+    )?;
     let webhook = match webhook {
         shardline_index::hub::HubWebhookCreateOutcome::Created(webhook) => webhook,
         shardline_index::hub::HubWebhookCreateOutcome::Duplicate => {
@@ -468,10 +464,7 @@ pub(crate) async fn webhook_list(
     shardline_metrics::record_hub_api_request("webhook_list", "GET", 200);
     let name = format!("{ns}/{repo}");
     crate::revision_access::authorize_repository_wide(&name, _repo.capability())?;
-    let webhooks = state
-        .store
-        .list_webhooks(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let webhooks = state.store.list_webhooks(&name)?;
     let response = WebhookListResponse {
         webhooks: webhooks
             .into_iter()
@@ -490,10 +483,7 @@ pub(crate) async fn webhook_delete(
     shardline_metrics::record_hub_api_request("webhook_delete", "DELETE", 204);
     let name = format!("{ns}/{repo}");
     crate::revision_access::authorize_repository_wide(&name, _repo.capability())?;
-    state
-        .store
-        .delete_webhook(&name, &webhook_id)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    state.store.delete_webhook(&name, &webhook_id)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

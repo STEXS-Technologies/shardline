@@ -31,8 +31,7 @@ pub(crate) async fn repo_commits(
     let repo_id = format!("{ns}/{repo}");
     state
         .store
-        .get_repo(&repo_id)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(&repo_id)?
         .ok_or(HubApiError::RepoNotFound)?;
     let head = crate::git::smart_http::resolve_commit_id(
         &state,
@@ -59,8 +58,7 @@ pub(crate) async fn repo_commits(
     while let Some(sha) = next.take() {
         let revision = state
             .store
-            .get_revision(&repo_id, &sha)
-            .map_err(|error| HubApiError::CasError(error.to_string()))?
+            .get_revision(&repo_id, &sha)?
             .ok_or_else(|| HubApiError::CasError("incomplete repository history".to_owned()))?;
         let seconds = i64::try_from(revision.created_at_unix_seconds)
             .map_err(|e| HubApiError::CasError(e.to_string()))?;

@@ -77,8 +77,7 @@ async fn xet_token_response<const WRITE: bool>(
     let repo_id = format!("{namespace}/{repo_name}");
     let stored_repo = state
         .store
-        .get_repo(&repo_id)
-        .map_err(|error| HubApiError::CasError(error.to_string()))?
+        .get_repo(&repo_id)?
         .ok_or(HubApiError::RepoNotFound)?;
     if stored_repo.repo_type != hub_repo_type {
         return Err(HubApiError::RepoNotFound);

@@ -74,8 +74,7 @@ async fn default_dataset_files(
 ) -> Result<Vec<HubFileEntry>, HubApiError> {
     let entry = state
         .store
-        .get_repo(name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(name)?
         .ok_or(HubApiError::RepoNotFound)?;
     if entry.repo_type != HubRepoType::Dataset {
         return Err(HubApiError::PathValidation(
@@ -84,8 +83,7 @@ async fn default_dataset_files(
     }
     let commit_sha = state
         .store
-        .resolve_revision(name, &entry.default_branch)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .resolve_revision(name, &entry.default_branch)?
         .ok_or(HubApiError::RevisionNotFound)?;
     crate::revision_access::authorize_read(state, name, "main", &commit_sha, auth).await?;
     state
@@ -199,8 +197,7 @@ pub(crate) async fn dataset_query(
     }
     let entry = state
         .store
-        .get_repo(&name)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .get_repo(&name)?
         .ok_or(HubApiError::RepoNotFound)?;
     if entry.repo_type != HubRepoType::Dataset {
         return Err(HubApiError::PathValidation(
@@ -229,10 +226,7 @@ pub(crate) async fn dataset_query(
     {
         return Err(HubApiError::RevisionNotFound);
     }
-    let files = state
-        .store
-        .get_files(&revision)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let files = state.store.get_files(&revision)?;
     let file = find_dataset_file(&files, &request.config, &request.split).ok_or_else(|| {
         HubApiError::PathValidation("no data file found for config/split".to_owned())
     })?;

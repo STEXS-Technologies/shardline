@@ -157,10 +157,7 @@ async fn tree_response(
         .iter()
         .map(|entry| entry.path.clone())
         .collect();
-    let files = state
-        .store
-        .get_files(&listing.revision)
-        .map_err(|error| HubApiError::CasError(error.to_string()))?;
+    let files = state.store.get_files(&listing.revision)?;
     let mut last = super::path_history::last_path_commits(
         &state,
         &repo_id,
