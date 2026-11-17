@@ -166,6 +166,15 @@ fn s3_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+fn authenticated_empty_request(method: &str, uri: impl AsRef<str>, auth: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri.as_ref())
+        .header(header::AUTHORIZATION, auth)
+        .body(Body::empty())
+        .unwrap()
+}
+
 // =========================================================================
 // Object data path
 // =========================================================================
@@ -246,14 +255,7 @@ async fn s3_postgres_put_rejects_lost_request_barrier_and_preserves_previous_obj
     let auth = sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME));
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(&uri)
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request("GET", &uri, &auth))
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
@@ -294,14 +296,11 @@ async fn s3_put_get_head_delete_roundtrip() {
 
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
@@ -309,14 +308,11 @@ async fn s3_put_get_head_delete_roundtrip() {
 
     let head = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "HEAD",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(head.status(), StatusCode::OK);
@@ -336,28 +332,22 @@ async fn s3_put_get_head_delete_roundtrip() {
 
     let delete = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "DELETE",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(delete.status(), StatusCode::NO_CONTENT);
 
     let get_after = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(get_after.status(), StatusCode::NOT_FOUND);
@@ -455,14 +445,11 @@ async fn s3_get_and_head_response_overrides_follow_status_semantics() {
 
     let unsupported = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}?response-custom-header=value"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/{KEY}?response-custom-header=value"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(unsupported.status(), StatusCode::NOT_IMPLEMENTED);
@@ -619,14 +606,11 @@ async fn s3_get_missing_key_returns_404_no_such_key_xml() {
 
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/missing.pt"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/missing.pt"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::NOT_FOUND);
@@ -751,14 +735,11 @@ async fn s3_put_overwrite_returns_new_content() {
 
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
@@ -812,14 +793,11 @@ async fn s3_index_row_present_after_put_absent_after_delete() {
 
     let delete = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "DELETE",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(delete.status(), StatusCode::NO_CONTENT);
@@ -899,14 +877,11 @@ async fn s3_delete_object_is_idempotent() {
     // Deleting a key that never existed still returns 204.
     let delete = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/{BUCKET}/never-existed.pt"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "DELETE",
+            format!("/{BUCKET}/never-existed.pt"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(delete.status(), StatusCode::NO_CONTENT);
@@ -1930,14 +1905,11 @@ async fn s3_multipart_roundtrip_assembles_parts_and_ranges() {
     // Full GET returns the assembled bytes.
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
@@ -2561,14 +2533,11 @@ async fn s3_abort_multipart_leaves_no_object_and_no_index_row() {
 
     let abort = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/{BUCKET}/{KEY}?uploadId={upload_id}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "DELETE",
+            format!("/{BUCKET}/{KEY}?uploadId={upload_id}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(abort.status(), StatusCode::NO_CONTENT);
@@ -2576,14 +2545,11 @@ async fn s3_abort_multipart_leaves_no_object_and_no_index_row() {
     // No object…
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::NOT_FOUND);
@@ -2716,14 +2682,11 @@ async fn s3_list_parts_missing_upload_and_unsupported_upload_listing() {
 
     let list_uploads = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}?uploads"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}?uploads"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(list_uploads.status(), StatusCode::OK);
@@ -3309,14 +3272,11 @@ async fn s3_failed_overwrite_keeps_old_object_and_index() {
     // The old object is still readable and the index still points at it.
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
@@ -3543,14 +3503,11 @@ async fn s3_complete_accepts_small_last_part() {
     // The assembled object is byte-identical to the parts.
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/{BUCKET}/{KEY}"))
-                .header(header::AUTHORIZATION, &auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(authenticated_empty_request(
+            "GET",
+            format!("/{BUCKET}/{KEY}"),
+            &auth,
+        ))
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
