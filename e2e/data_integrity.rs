@@ -104,7 +104,10 @@ async fn try_start_server(
             NonZeroU64::new(3600).unwrap(),
         )?;
     let config = modify_config(config)?;
-    let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
+    let server = tokio::spawn(async move {
+        let _storage = storage;
+        serve_with_listener(config, listener).await
+    });
     let client = Client::new();
     if support::wait_for_endpoint(
         &client,
@@ -214,6 +217,26 @@ async fn migrate_postgres_database(database_url: &str) {
     panic!(
         "migrate Docker Postgres database after retries: {}",
         last_error.expect("migration attempt must record an error")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_fixture_retains_storage_until_task_stops() {
+    let root = Arc::new(std::sync::Mutex::new(std::path::PathBuf::new()));
+    let observed_root = Arc::clone(&root);
+    let (_base_url, server) = start_server_with(None, &[ServerFrontend::Xet], move |config| {
+        *observed_root.lock().unwrap() = config.root_dir().to_path_buf();
+        Ok(config)
+    })
+    .await
+    .unwrap();
+    let root = root.lock().unwrap().clone();
+    assert!(root.is_dir(), "running server lost its storage directory");
+    server.abort();
+    let _ = server.await;
+    assert!(
+        !root.exists(),
+        "stopped fixture leaked its storage directory"
     );
 }
 
