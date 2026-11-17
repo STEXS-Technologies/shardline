@@ -141,6 +141,11 @@ lto = false
 [profile.dev.package.sha2]
 opt-level = 3
 
+# Native history checks retain every signature verification in dev/test builds.
+# Optimize curve arithmetic so large evidence fixtures remain practical.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
 [workspace.lints.rust]
 rust_2024_prelude_collisions = "warn"
 rust_2024_incompatible_pat = "warn"

@@ -5963,3 +5963,39 @@ production latency estimate or before/after speedup. No source changes, test
 removals or relaxed limits were used. Retention is the largest explicitly timed
 phase; further optimization must preserve verification before retirement,
 oldest-first selection, resumable markers and the existing artifact budgets.
+
+#### Optimized development signature arithmetic
+
+A sampled rerun of the same backlog fixture at `a67bc3c3` passed and showed CPU
+cost in SQLite parsing and unoptimized Curve25519/vector arithmetic. The sampled
+run retained similar phase timings (inspection 13.42 s, retention 57.30 s).
+An initial override supplied to the outer Cargo invocation was not forwarded to
+Nextest's build and did not rebuild dependencies; it is not optimized evidence.
+
+Passing the override through Nextest's `--config` rebuilt both locked
+`curve25519-dalek` versions with `opt-level=3`. With the source, inputs and
+assertions unchanged, the selected test passed with these existing timers:
+
+| Timer | Original sample | Optimized-curve sample |
+| --- | ---: | ---: |
+| Entire test | 102.54 s | 61.61 s |
+| Paginated inspection | 13.27 s | 6.39 s |
+| 17 retention calls | 57.20 s | 32.67 s |
+| Slowest retention call | 4.51 s | 2.35 s |
+
+The dependency override is retained in the development profile, which tests
+inherit. Overflow checks and all verification remain enabled; the optimized
+release profile is unchanged. The first affected rebuild took 52.59 s, so its
+compilation cost must be considered separately from the approximately 40% lower
+test execution time in this sample. These sequential shared-host observations
+are a targeted development-feedback result, not a cold-build speedup,
+production throughput estimate or general CI timing guarantee.
+
+The retained profile candidate atop `a67bc3c3` subsequently passed full
+`cargo make ci`: 8,121 library tests, 39 reliability contracts and 41 release
+CLI/maintenance tests, with formatting, strict workspace Clippy, dependency
+policies, release smoke checks and 44-version migration parity passing.
+Normally ignored tests remained excluded (45 library and five release tests).
+The command exited zero in 363.80 s with existing artifacts and rebuilds;
+that elapsed time is not a controlled whole-CI comparison. The exact candidate
+patch was held unchanged throughout this gate. No test cases were removed.
