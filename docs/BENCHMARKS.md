@@ -5909,3 +5909,34 @@ container was removed after the terminal result. This refresh qualifies the
 selected PostgreSQL contracts; it does not establish production throughput,
 the complete remote-storage deployment matrix, hosted CI qualification or a
 resolution of the earlier webhook TLS and hosted SDK RSS failures.
+
+#### PostgreSQL/MinIO integration refresh after ingestion cleanup
+
+At `ba1b9ad1256e70dd3bbdad4c669111a60d77f9ae` (documentation-only changes
+since the qualified `4c95fa72` executable source), the existing required-fixture
+integration selection exercised these targets against disposable services:
+
+| Target | Cases with passing evidence |
+| --- | ---: |
+| Server `postgres_s3_e2e_http` | 52 |
+| Server `s3_integration` | 69 |
+| Storage `s3_integration` | 36 |
+
+The first complete invocation exited 100 in 187.19 seconds: 156 tests passed,
+one failed, none skipped. The failure was the DuckDB client's prerequisite
+check: the selected Python environment lacked DuckDB and PyArrow. After installing
+the repository E2E workflow pins (`duckdb==1.5.5`, `pyarrow==25.0.0`), that single
+failed test passed in a focused rerun (22.34 seconds including Cargo preparation).
+No source or assertions changed. Thus all 157 cases have passing evidence
+across the two invocations; this was not one uninterrupted green full run.
+
+A separate required-fixture library selection also passed all three
+`copy_integrity::minio_` / `copy_integrity::postgres_minio_` cases in 11.80 seconds
+with one test worker. These exercise source replacement during an in-flight copy
+and reconciliation of disconnected copy-part acknowledgement through list-parts,
+including PostgreSQL plus MinIO.
+
+Runs used Rust 1.99.0, disabled compiler wrapping and dev/test debug information,
+four build jobs, and `SHARDLINE_REQUIRE_NATIVE_CLIENTS=1`; integration execution
+used four test workers. These are local remote-storage correctness checks,
+not production throughput, capacity, cost, or hosted SDK memory qualification.
