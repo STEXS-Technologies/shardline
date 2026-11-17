@@ -43,7 +43,10 @@ async fn webhook_https_validates_ca_hostname_and_preserves_signed_payload() {
                     diagnostic.contains("certificate") || diagnostic.contains("unknownissuer");
                 cause = current.source();
             }
-            assert!(certificate_error, "failure must be certificate validation");
+            assert!(
+                certificate_error,
+                "failure for {host} must be certificate validation: {error:?}"
+            );
             assert!(
                 receiver.received().is_err(),
                 "untrusted receiver gets no body"
