@@ -42,6 +42,14 @@ code.
    consolidation, record which assertions and failure boundaries survive. Keep
    real-client, wire-level, adapter and concurrency tests when they exercise
    different boundaries. Splitting a file alone is not a reduction in complexity.
+   A shared route-registration patch for the three server HTTP fixtures was
+   verified separately: 201 fewer test-fixture lines, all test bodies unchanged,
+   238 selected HTTP tests passing, and strict server Clippy passing. Integration
+   is deferred because `app/e2e_tests.rs` contains unrelated uncommitted work;
+   that file was left byte-for-byte unchanged in the main workspace. The patch
+   is preserved outside the repository at
+   `.shardline-cleanup-state/http-shared-routes-deferred.patch` (parent projects
+   directory). It is not part of the branch's reduction or qualification claims.
 3. **Simplify metadata adapters locally.** SQLite and PostgreSQL `index_store.rs`
    contain 4,645 and 4,801 lines respectively. Compare repeated preparation and
    decoding with existing shared helpers before introducing abstractions. Preserve
