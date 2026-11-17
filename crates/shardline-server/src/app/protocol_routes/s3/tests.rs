@@ -1143,22 +1143,25 @@ async fn s3_unsupported_storage_acl_and_encryption_options_fail_closed() {
     let public_acl = String::from_utf8(body_bytes(public_acl).await).unwrap();
     assert!(public_acl.contains("<Code>AccessControlListNotSupported</Code>"));
 
-    let encrypted_read = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/{BUCKET}/{key}"))
-                .header(
-                    header::AUTHORIZATION,
-                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
-                )
-                .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(encrypted_read.status(), StatusCode::NOT_IMPLEMENTED);
+    for query in ["", "?attributes"] {
+        let encrypted_read = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{BUCKET}/{key}{query}"))
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                    )
+                    .header("x-amz-object-attributes", "ETag")
+                    .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(encrypted_read.status(), StatusCode::NOT_IMPLEMENTED);
+    }
 
     let unsupported_multipart = app
         .clone()

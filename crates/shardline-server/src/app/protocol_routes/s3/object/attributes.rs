@@ -40,18 +40,6 @@ pub(super) async fn get(
     if max_parts.is_some_and(|part_limit| part_limit > 1000) {
         return Err(S3Error::invalid_argument("Invalid x-amz-max-parts"));
     }
-    for unsupported in [
-        "x-amz-server-side-encryption",
-        "x-amz-server-side-encryption-customer-algorithm",
-        "x-amz-server-side-encryption-customer-key",
-        "x-amz-server-side-encryption-customer-key-md5",
-        "x-amz-request-payer",
-        "x-amz-expected-bucket-owner",
-    ] {
-        if headers.contains_key(unsupported) {
-            return Err(S3Error::not_implemented());
-        }
-    }
     let snapshot = match state
         .backend
         .s3_object_read_snapshot(&context.scope_namespace, &context.key, &context.object_key)
