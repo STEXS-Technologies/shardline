@@ -5879,3 +5879,33 @@ qualify PostgreSQL or object-storage topology. The earlier intermittent webhook
 TLS failure and historical hosted SDK RSS failure remain unexplained; this
 successful local gate does not establish either issue is fixed, production
 capacity, or hosted qualification.
+
+#### Required PostgreSQL refresh after ingestion and rebuild cleanup
+
+The same frozen `4c95fa72` release executable bootstrapped a fresh PostgreSQL
+16 Alpine container. The test harness source was
+`1bd714228d60a45cb654c16785e0c60de2d8aa27`, whose only changes from the executable
+source were documentation. `scripts/test-postgres.sh` exited successfully in
+644.91 seconds with PostgreSQL and native-client requirements enabled, four
+build jobs and four Nextest workers. Compatibility executables remained pinned
+to 1.12.1 and 1.11.3.
+
+| Required selection | Passed |
+| --- | ---: |
+| Complete index library, all features | 813 |
+| PostgreSQL provider-event integration | 2 |
+| Complete server library, all features | 3,211 |
+| Explicitly enabled PostgreSQL integrity contracts | 6 |
+| Live migration apply/status/revert E2E | 1 |
+
+All 4,033 selected tests passed. This includes the history-publication deadline
+regression, source-deletion and reference-lock contracts, recovery queries and
+router readiness during held file verification. Normally ignored or filtered
+checks outside these selections remain excluded. The explicit integrity
+selection covers local object storage, not PostgreSQL/MinIO publication.
+
+The frozen executable checksum remained unchanged, and the owned database
+container was removed after the terminal result. This refresh qualifies the
+selected PostgreSQL contracts; it does not establish production throughput,
+the complete remote-storage deployment matrix, hosted CI qualification or a
+resolution of the earlier webhook TLS and hosted SDK RSS failures.
