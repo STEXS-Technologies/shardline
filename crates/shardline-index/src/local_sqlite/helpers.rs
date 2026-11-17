@@ -87,17 +87,14 @@ pub(crate) fn load_verified_event_json(
          FROM shardline_reliability_events
          WHERE operation_kind = ?1 AND operation_id = ?2 ORDER BY sequence",
     )?;
-    let rows = statement.query_map(params![operation_kind.as_str(), operation_id], |row| {
+    let mut rows = statement.query(params![operation_kind.as_str(), operation_id])?;
+    let mut row_sequences = Vec::new();
+    let mut events = Vec::new();
+    let mut merkle_commits = Vec::new();
+    while let Some(row) = rows.next()? {
         let sequence: i64 = row.get(0)?;
         let event_json: String = row.get(1)?;
         let merkle_commit_json: Option<String> = row.get(2)?;
-        Ok((sequence, event_json, merkle_commit_json))
-    })?;
-    let rows = rows.collect::<Result<Vec<_>, _>>()?;
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut events = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
-    for (sequence, event_json, merkle_commit_json) in rows {
         if sequence < 0 {
             return Err(LocalIndexStoreError::Reliability(
                 shardline_reliability::ReliabilityError::Merkle(
