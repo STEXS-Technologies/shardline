@@ -2294,18 +2294,93 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    fn load_server_config_zero_max_request_body_bytes() {
-        set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroMaxRequestBodyBytes)
-        ));
-        remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    fn load_server_config_rejects_invalid_environment_values() {
+        use super::ServerConfigError::*;
+
+        for (name, value, expected) in [
+            (
+                "SHARDLINE_MAX_REQUEST_BODY_BYTES",
+                "0",
+                ZeroMaxRequestBodyBytes,
+            ),
+            ("SHARDLINE_CHUNK_SIZE_BYTES", "0", ZeroChunkSize),
+            ("SHARDLINE_SERVER_ROLE", "invalid-role", InvalidServerRole),
+            (
+                "SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS",
+                "0",
+                ZeroUploadMaxInFlightChunks,
+            ),
+            (
+                "SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS",
+                "0",
+                ZeroTransferMaxInFlightChunks,
+            ),
+            ("SHARDLINE_SERVER_FRONTENDS", "", MissingServerFrontends),
+            (
+                "SHARDLINE_SERVER_FRONTENDS",
+                "invalid-frontend",
+                InvalidServerFrontend,
+            ),
+            (
+                "SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS",
+                "0",
+                ZeroReconstructionCacheTtlSeconds,
+            ),
+            (
+                "SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS",
+                "0",
+                ZeroOciUploadSessionTtlSeconds,
+            ),
+            (
+                "SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS",
+                "0",
+                ZeroOciRegistryTokenTtlSeconds,
+            ),
+            (
+                "SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS",
+                "0",
+                ZeroOciUploadMaxActiveSessions,
+            ),
+            (
+                "SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS",
+                "0",
+                ZeroOciRegistryTokenMaxInFlightRequests,
+            ),
+            ("SHARDLINE_AUTH_PROVIDER", "oidc", MissingOidcIssuer),
+            ("SHARDLINE_AUTH_PROVIDER", "jwks", MissingJwksUrl),
+            ("SHARDLINE_MAX_SHARD_FILES", "0", ZeroMaxShardFiles),
+            ("SHARDLINE_MAX_SHARD_XORBS", "0", ZeroMaxShardXorbs),
+            (
+                "SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS",
+                "0",
+                ZeroMaxShardReconstructionTerms,
+            ),
+            (
+                "SHARDLINE_MAX_SHARD_XORB_CHUNKS",
+                "0",
+                ZeroMaxShardXorbChunks,
+            ),
+            (
+                "SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES",
+                "0",
+                ZeroReconstructionCacheMemoryMaxEntries,
+            ),
+            ("SHARDLINE_AUTH_PROVIDER", "invalid", InvalidAuthProvider),
+        ] {
+            set_env_var(name, value);
+            set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+            set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+            let result = super::load_server_config_from_env();
+            remove_env_var(name);
+            remove_env_var("SHARDLINE_ROOT_DIR");
+            remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+            let error = result.expect_err(name);
+            assert_eq!(
+                std::mem::discriminant(&error),
+                std::mem::discriminant(&expected),
+                "{name}={value:?}: {error:?}"
+            );
+        }
     }
 
     #[test]
@@ -2316,21 +2391,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         let result = super::load_server_config_from_env();
         assert!(result.is_err());
         remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_chunk_size() {
-        set_env_var("SHARDLINE_CHUNK_SIZE_BYTES", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroChunkSize)
-        ));
-        remove_env_var("SHARDLINE_CHUNK_SIZE_BYTES");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
@@ -2364,21 +2424,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    fn load_server_config_invalid_server_role() {
-        set_env_var("SHARDLINE_SERVER_ROLE", "invalid-role");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::InvalidServerRole)
-        ));
-        remove_env_var("SHARDLINE_SERVER_ROLE");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
     fn load_server_config_bind_addr_parse_error() {
         set_env_var("SHARDLINE_BIND_ADDR", "not-a-valid-addr");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2386,96 +2431,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         let result = super::load_server_config_from_env();
         assert!(result.is_err());
         remove_env_var("SHARDLINE_BIND_ADDR");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_upload_max_in_flight_zero() {
-        set_env_var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroUploadMaxInFlightChunks)
-        ));
-        remove_env_var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_transfer_max_in_flight_zero() {
-        set_env_var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroTransferMaxInFlightChunks)
-        ));
-        remove_env_var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_missing_server_frontends() {
-        set_env_var("SHARDLINE_SERVER_FRONTENDS", "");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::MissingServerFrontends)
-        ));
-        remove_env_var("SHARDLINE_SERVER_FRONTENDS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_invalid_server_frontends() {
-        set_env_var("SHARDLINE_SERVER_FRONTENDS", "invalid-frontend");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::InvalidServerFrontend)
-        ));
-        remove_env_var("SHARDLINE_SERVER_FRONTENDS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_reconstruction_cache_ttl() {
-        set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroReconstructionCacheTtlSeconds)
-        ));
-        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_oci_upload_session_ttl() {
-        set_env_var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroOciUploadSessionTtlSeconds)
-        ));
-        remove_env_var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
@@ -2559,69 +2514,7 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
-    // ── load_server_config_from_env: OCI zero-value edge cases ───────────
-
-    #[test]
-    fn load_server_config_zero_oci_registry_token_ttl() {
-        set_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroOciRegistryTokenTtlSeconds)
-        ));
-        remove_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_oci_upload_max_active_sessions() {
-        set_env_var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroOciUploadMaxActiveSessions)
-        ));
-        remove_env_var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_oci_registry_token_max_in_flight() {
-        set_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests)
-        ));
-        remove_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
     // ── load_server_config_from_env: auth provider branches ─────────────
-
-    #[test]
-    fn load_server_config_oidc_requires_issuer() {
-        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::MissingOidcIssuer)
-        ));
-        remove_env_var("SHARDLINE_AUTH_PROVIDER");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
 
     #[test]
     fn load_server_config_oidc_audience_from_env() {
@@ -2855,21 +2748,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    fn load_server_config_jwks_requires_url() {
-        set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::MissingJwksUrl)
-        ));
-        remove_env_var("SHARDLINE_AUTH_PROVIDER");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
     fn load_server_config_jwks_rejects_http_url() {
         // Regression (F-95): JWKS key transport must be https (RFC 8414 §2).
         // A plain-http non-loopback SHARDLINE_AUTH_JWKS_URL is a startup error
@@ -2935,96 +2813,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    fn load_server_config_lower_max_request_body_bytes_parse_error() {
-        set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroMaxRequestBodyBytes)
-        ));
-        remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_shard_metadata_limits() {
-        set_env_var("SHARDLINE_MAX_SHARD_FILES", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroMaxShardFiles)
-        ));
-        remove_env_var("SHARDLINE_MAX_SHARD_FILES");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_shard_xorbs() {
-        set_env_var("SHARDLINE_MAX_SHARD_XORBS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroMaxShardXorbs)
-        ));
-        remove_env_var("SHARDLINE_MAX_SHARD_XORBS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_shard_reconstruction_terms() {
-        set_env_var("SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroMaxShardReconstructionTerms)
-        ));
-        remove_env_var("SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_shard_xorb_chunks() {
-        set_env_var("SHARDLINE_MAX_SHARD_XORB_CHUNKS", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroMaxShardXorbChunks)
-        ));
-        remove_env_var("SHARDLINE_MAX_SHARD_XORB_CHUNKS");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_zero_reconstruction_cache_memory_max_entries() {
-        set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES", "0");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries)
-        ));
-        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
     fn load_server_config_hub_requires_auth() {
         set_env_var("SHARDLINE_SERVER_FRONTENDS", "hub");
         set_env_var("SHARDLINE_AUTH_PROVIDER", "local");
@@ -3037,21 +2825,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             Err(super::ServerConfigError::HubRequiresAuth)
         ));
         remove_env_var("SHARDLINE_SERVER_FRONTENDS");
-        remove_env_var("SHARDLINE_AUTH_PROVIDER");
-        remove_env_var("SHARDLINE_ROOT_DIR");
-        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-    }
-
-    #[test]
-    fn load_server_config_invalid_auth_provider() {
-        set_env_var("SHARDLINE_AUTH_PROVIDER", "invalid");
-        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::InvalidAuthProvider)
-        ));
         remove_env_var("SHARDLINE_AUTH_PROVIDER");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
