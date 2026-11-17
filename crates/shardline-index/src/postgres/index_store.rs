@@ -1760,7 +1760,7 @@ pub(super) async fn create_upload_intent_in_transaction(
         .bind(intent.intent_id())
         .execute(&mut *transaction)
         .await?;
-    let existing = query(
+    let existing = sqlx::query_as::<_, UploadIntentRow>(
         "SELECT intent_id, object_key, object_hash, object_length, state,
                     created_at, updated_at
              FROM shardline_upload_intents WHERE intent_id = $1 FOR UPDATE",
@@ -1790,27 +1790,7 @@ pub(super) async fn create_upload_intent_in_transaction(
         return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
     }
     if let Some(existing) = existing {
-        let state_text: String = existing.try_get("state")?;
-        let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
-            PostgresMetadataStoreError::InvalidUploadIntentState(state_text.clone())
-        })?;
-        let durable_intent = UploadIntent::from_parts(
-            existing.try_get("intent_id")?,
-            existing.try_get("object_key")?,
-            existing.try_get("object_hash")?,
-            i64_to_u64(existing.try_get("object_length")?)?,
-            state,
-            std::time::Duration::from_secs(i64_to_u64(
-                existing
-                    .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?
-                    .timestamp(),
-            )?),
-            std::time::Duration::from_secs(i64_to_u64(
-                existing
-                    .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")?
-                    .timestamp(),
-            )?),
-        );
+        let durable_intent = upload_intent_from_row(existing)?;
         let event_rows = query(
             "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
                  WHERE operation_kind = 'Upload' AND operation_id = $1
