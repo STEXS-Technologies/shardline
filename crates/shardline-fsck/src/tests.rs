@@ -143,7 +143,6 @@ fn reconstruction_plan_errors_preserve_issue_kind_and_detail() {
             FsckReconstructionPlanDetail::TotalBytesMismatch,
         ),
     ] {
-        assert_eq!(reconstruction_plan_error_detail(&error), detail);
         let mut report = clean_report();
         push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &error).unwrap();
         assert_eq!(report.issue_count(), 1);

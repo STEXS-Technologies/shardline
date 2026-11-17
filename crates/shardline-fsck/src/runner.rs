@@ -138,44 +138,35 @@ pub(crate) fn push_reconstruction_plan_issue(
     location: String,
     error: &FileRecordInvariantError,
 ) -> Result<(), FsckError> {
-    let kind = match error {
-        FileRecordInvariantError::ChunkHash(_) => FsckIssueKind::InvalidContentHash,
-        FileRecordInvariantError::EmptyChunk => FsckIssueKind::EmptyChunk,
-        FileRecordInvariantError::NonContiguousChunkOffsets => FsckIssueKind::NonContiguousChunks,
-        FileRecordInvariantError::InvalidChunkRange => FsckIssueKind::InvalidChunkRange,
-        FileRecordInvariantError::InvalidPackedRange => FsckIssueKind::InvalidPackedRange,
-        FileRecordInvariantError::LengthOverflow | FileRecordInvariantError::TotalBytesMismatch => {
-            FsckIssueKind::TotalBytesMismatch
+    use FsckIssueKind as Kind;
+    use FsckReconstructionPlanDetail as Detail;
+    let (kind, detail) = match error {
+        FileRecordInvariantError::ChunkHash(_) => {
+            (Kind::InvalidContentHash, Detail::ChunkHashInvalid)
+        }
+        FileRecordInvariantError::EmptyChunk => (Kind::EmptyChunk, Detail::EmptyChunk),
+        FileRecordInvariantError::NonContiguousChunkOffsets => {
+            (Kind::NonContiguousChunks, Detail::NonContiguousChunkOffsets)
+        }
+        FileRecordInvariantError::InvalidChunkRange => {
+            (Kind::InvalidChunkRange, Detail::InvalidChunkRange)
+        }
+        FileRecordInvariantError::InvalidPackedRange => {
+            (Kind::InvalidPackedRange, Detail::InvalidPackedRange)
+        }
+        FileRecordInvariantError::LengthOverflow => {
+            (Kind::TotalBytesMismatch, Detail::LengthOverflow)
+        }
+        FileRecordInvariantError::TotalBytesMismatch => {
+            (Kind::TotalBytesMismatch, Detail::TotalBytesMismatch)
         }
     };
     push_issue(
         report,
         kind,
         location,
-        FsckIssueDetail::InvalidReconstructionPlan(reconstruction_plan_error_detail(error)),
+        FsckIssueDetail::InvalidReconstructionPlan(detail),
     )
-}
-
-pub(crate) const fn reconstruction_plan_error_detail(
-    error: &FileRecordInvariantError,
-) -> FsckReconstructionPlanDetail {
-    match error {
-        FileRecordInvariantError::ChunkHash(_) => FsckReconstructionPlanDetail::ChunkHashInvalid,
-        FileRecordInvariantError::EmptyChunk => FsckReconstructionPlanDetail::EmptyChunk,
-        FileRecordInvariantError::NonContiguousChunkOffsets => {
-            FsckReconstructionPlanDetail::NonContiguousChunkOffsets
-        }
-        FileRecordInvariantError::InvalidChunkRange => {
-            FsckReconstructionPlanDetail::InvalidChunkRange
-        }
-        FileRecordInvariantError::InvalidPackedRange => {
-            FsckReconstructionPlanDetail::InvalidPackedRange
-        }
-        FileRecordInvariantError::LengthOverflow => FsckReconstructionPlanDetail::LengthOverflow,
-        FileRecordInvariantError::TotalBytesMismatch => {
-            FsckReconstructionPlanDetail::TotalBytesMismatch
-        }
-    }
 }
 
 pub(crate) fn record_path<RecordAdapter>(

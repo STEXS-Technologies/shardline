@@ -88,7 +88,7 @@ pub(crate) use runner::{
 };
 
 #[cfg(test)]
-pub(crate) use runner::{object_key_storage_path, reconstruction_plan_error_detail};
+pub(crate) use runner::object_key_storage_path;
 pub(crate) use types::{
     FsckObjectContext, FsckReachability, PendingVersionRecordCheck, RecordKind,
 };
