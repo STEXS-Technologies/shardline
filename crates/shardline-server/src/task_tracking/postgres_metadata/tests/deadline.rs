@@ -2,6 +2,31 @@
 use super::*;
 use crate::task_tracking::TASK_EVIDENCE_PREFIX;
 
+// The end-to-end client deadline and transaction-local statement deadline race.
+// Keep either timeout's typed cause; unrelated query cancellation is not a timeout.
+fn assert_execution_timeout<T: std::fmt::Debug>(result: &Result<T, ServerError>, operation: &str) {
+    let timed_out = match result {
+        Err(ServerError::Io(error)) => {
+            error.kind() == std::io::ErrorKind::TimedOut
+                && error
+                    .to_string()
+                    .contains(&format!("task metadata {operation} exceeded"))
+                && error.to_string().contains("phase=executing")
+                && error.to_string().contains("pool_size=")
+                && error.to_string().contains("pool_idle=")
+                && std::error::Error::source(error).is_some()
+        }
+        Err(ServerError::Index(crate::error::IndexError::PostgresMetadata(
+            shardline_index::PostgresMetadataStoreError::Sqlx(error),
+        ))) => error.as_database_error().is_some_and(|error| {
+            error.code().as_deref() == Some("57014")
+                && error.message() == "canceling statement due to statement timeout"
+        }),
+        _ => false,
+    };
+    assert!(timed_out, "unexpected {operation} timeout: {result:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exhausted_history_pool_reports_acquisition_timeout_and_recovers() {
     let Some(fixture) = Fixture::new().await else {
@@ -53,59 +78,63 @@ async fn exhausted_history_pool_reports_acquisition_timeout_and_recovers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocked_history_publish_times_out_and_preserves_original_evidence() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    fixture
-        .index()
-        .initialize_task_history_scope()
-        .await
-        .unwrap();
-    fixture
-        .index()
-        .publish_task_artifact(
-            TaskEvidenceStore::key("fixture/publication")
-                .unwrap()
-                .as_str(),
-            b"original",
-        )
-        .await
-        .unwrap();
-    let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
-        .await
-        .unwrap();
-    let mut lock = fixture.admin.begin().await.unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "LOCK TABLE {}.shardline_task_artifacts_v1 IN ACCESS EXCLUSIVE MODE",
-        fixture.schema
-    )))
-    .execute(&mut *lock)
-    .await
-    .unwrap();
-    let blocked = store.clone();
-    let result =
-        tokio::task::spawn_blocking(move || blocked.publish("fixture/publication", b"replacement"))
+    for statement_timeout in ["0", "100ms"] {
+        let Some(fixture) = Fixture::new().await else {
+            return;
+        };
+        fixture
+            .index()
+            .initialize_task_history_scope()
             .await
             .unwrap();
-    assert!(
-        matches!(&result, Err(ServerError::Io(error))
-        if error.kind() == std::io::ErrorKind::TimedOut
-            && error.to_string().contains("task metadata publish exceeded")
-            && error.to_string().contains("phase=executing")
-            && std::error::Error::source(error).is_some()),
-        "unexpected publication timeout: {result:?}"
-    );
-    lock.rollback().await.unwrap();
-    tokio::task::spawn_blocking(move || {
-        assert_eq!(
-            store.read("fixture/publication", 8).unwrap().unwrap(),
-            b"original"
-        );
-        store.publish("fixture/publication", b"original").unwrap();
-    })
-    .await
-    .unwrap();
-    fixture.finish().await;
+        fixture
+            .index()
+            .publish_task_artifact(
+                TaskEvidenceStore::key("fixture/publication")
+                    .unwrap()
+                    .as_str(),
+                b"original",
+            )
+            .await
+            .unwrap();
+        let (store, _) = TaskEvidenceStore::from_backend(&fixture.config, &fixture.backend)
+            .await
+            .unwrap();
+        sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+            .bind(statement_timeout)
+            .execute(fixture.index().pool())
+            .await
+            .unwrap();
+        let mut lock = fixture.admin.begin().await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE {}.shardline_task_artifacts_v1 IN ACCESS EXCLUSIVE MODE",
+            fixture.schema
+        )))
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+        let blocked = store.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            blocked.publish("fixture/publication", b"replacement")
+        })
+        .await
+        .unwrap();
+        assert_execution_timeout(&result, "publish");
+        if statement_timeout == "100ms" {
+            assert!(matches!(&result, Err(ServerError::Index(_))), "{result:?}");
+        }
+        lock.rollback().await.unwrap();
+        tokio::task::spawn_blocking(move || {
+            assert_eq!(
+                store.read("fixture/publication", 8).unwrap().unwrap(),
+                b"original"
+            );
+            store.publish("fixture/publication", b"original").unwrap();
+        })
+        .await
+        .unwrap();
+        fixture.finish().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -140,16 +169,7 @@ async fn blocked_history_read_times_out_and_recovers_after_lock_release() {
     let result = tokio::task::spawn_blocking(move || blocked.read("fixture/deadline", 8))
         .await
         .unwrap();
-    assert!(
-        matches!(&result, Err(ServerError::Io(error))
-        if error.kind() == std::io::ErrorKind::TimedOut
-            && error.to_string().contains("task metadata read exceeded")
-            && error.to_string().contains("phase=executing")
-            && error.to_string().contains("pool_size=")
-            && error.to_string().contains("pool_idle=")
-            && std::error::Error::source(error).is_some()),
-        "unexpected history timeout: {result:?}"
-    );
+    assert_execution_timeout(&result, "read");
     lock.commit().await.unwrap();
     tokio::task::spawn_blocking(move || {
         assert_eq!(
@@ -234,16 +254,7 @@ async fn blocked_history_delete_preserves_retirement_marker_and_resumes() {
     })
     .await
     .unwrap();
-    assert!(
-        matches!(&result, Err(ServerError::Io(error))
-        if error.kind() == std::io::ErrorKind::TimedOut
-            && error.to_string().contains("task metadata delete exceeded")
-            && error.to_string().contains("phase=executing")
-            && error.to_string().contains("pool_size=")
-            && error.to_string().contains("pool_idle=")
-            && std::error::Error::source(error).is_some()),
-        "unexpected retirement timeout: {result:?}"
-    );
+    assert_execution_timeout(&result, "delete");
     lock.rollback().await.unwrap();
     tokio::task::spawn_blocking(move || {
         for category in ["retiring", "scope-bindings"] {
