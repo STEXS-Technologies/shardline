@@ -6448,3 +6448,47 @@ ran the frozen current index code. This qualifies the selected PostgreSQL index
 contracts, not production throughput or the historical hosted SDK memory issue.
 Logs, command, source hash, duration, result and fixture runner are in the parent
 projects directory at `.shardline-cleanup-state/postgres-index-e5d4f3af/`.
+
+### Development CLI source-edit checkpoint (2026-11-17)
+
+Compared baseline `401dcac4f95c61a41104df3ee6e222d93c0b18fb` with
+`5433f0325cdd18a9e6c896a186f311805752b7a8` on the shared Linux host using
+Rust/Cargo 1.99.0, four jobs pinned to CPU cores 0–3, no compiler wrapper,
+offline locked dependencies, and separate initially empty target directories.
+Both revisions used their checked-in development profiles, including full debug
+information and runtime checks. No `CARGO_PROFILE_*` or `CARGO_INCREMENTAL`
+override was set. This measures the accumulated branch changes, including the
+restored default incremental compilation, rather than isolating one optimization.
+
+After a preparation build for each revision, three samples changed the CLI's
+actual help description in `crates/shardline/src/command/definition.rs` to a
+unique string and ran:
+
+```bash
+cargo +1.99.0 build --offline --locked -p shardline --bin shardline
+```
+
+Each rebuilt executable's `-h` output was checked for its new string. Execution
+order alternated baseline/current, current/baseline, baseline/current. Original
+source bytes were restored afterward. All eight builds and six changed-help
+checks passed.
+
+| Development CLI edit | Baseline | Cleanup branch |
+| --- | ---: | ---: |
+| Sample 1 | 8.498 s | 5.480 s |
+| Sample 2 | 7.811 s | 3.735 s |
+| Sample 3 | 7.380 s | 3.656 s |
+| Median | 7.811 s | 3.735 s |
+
+The median was approximately 52.2% shorter for this narrow source-edit workload.
+Preparation builds took 98.267 s and 100.614 s respectively and are excluded
+from those medians; they do not establish a fresh-build improvement. Dependencies
+and host filesystem caches were warm. This result does not establish an overall
+30% contributor critical-path improvement, a server-library edit speedup, a
+container build improvement, or production throughput. The release-mode CLI edit
+comparison above remains approximately unchanged.
+
+Local raw results, build logs and changed-help output are retained outside the
+repository in `.shardline-cleanup-state/build-dev-edit-5433f032/`, under the parent
+projects directory; the reproducible orchestration script is
+`.shardline-cleanup-state/build-dev-edit-5433f032.py`.

@@ -65,9 +65,11 @@ code.
    (3.93% shorter in that sample). This is not a statistically established
    improvement or a cold-machine/container measurement. Three release-mode CLI
    edit samples per revision measured medians of 129.033 s baseline versus
-   127.761 s at `d49752c3` (0.99% shorter; not a proven speedup). Development-profile
-   iteration and container builds still need measurement before claiming the
-   RFC's 30% contributor critical-path target. Review the sequential 150-minute
+   127.761 s at `d49752c3` (0.99% shorter; not a proven speedup). A normal-development-profile CLI edit comparison at `5433f032` measured
+   medians of 7.811 s baseline versus 3.735 s current (52.2% shorter for that
+   narrow workload, with full debug information and checked-in incremental
+   settings). Server-library edits and cold/edited-Rust container builds still
+   need measurement before claiming the RFC's 30% contributor critical-path target. Review the sequential 150-minute
    E2E job for reusable compatible artifacts and measured scheduling opportunities;
    retain every required qualification gate.
 5. **Review configuration and lifecycle branching.** Server `config/env.rs`
