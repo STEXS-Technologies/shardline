@@ -518,11 +518,13 @@ pub(crate) mod output_test_support {
     }
 
     pub(crate) fn assert_writer_errors(mut write: impl FnMut(&mut dyn Write) -> io::Result<()>) {
-        let mut partial = FaultWriter {
-            remaining: 7,
-            fail_flush: false,
-        };
-        assert!(matches!(write(&mut partial), Err(error) if error.raw_os_error() == Some(28)));
+        for remaining in [0, 7] {
+            let mut partial = FaultWriter {
+                remaining,
+                fail_flush: false,
+            };
+            assert!(matches!(write(&mut partial), Err(error) if error.raw_os_error() == Some(28)));
+        }
         let mut flush = FaultWriter {
             remaining: 0,
             fail_flush: true,

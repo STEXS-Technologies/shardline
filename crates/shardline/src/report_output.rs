@@ -545,7 +545,6 @@ pub(crate) fn write_local_gc_cli_summary(
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Write};
     use std::path::Path;
 
     use shardline_server::{
@@ -557,6 +556,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::hold::output_test_support::assert_writer_errors;
 
     // -----------------------------------------------------------------------
     // print_config_check_summary — smoke test (no panic)
@@ -912,61 +912,26 @@ mod tests {
     fn empty_fsck_report() -> LocalFsckReport {
         LocalFsckReport::default()
     }
-    struct FailingReportWriter {
-        fail_write: bool,
-        written: Vec<u8>,
-    }
-
-    impl Write for FailingReportWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self.fail_write {
-                return Err(io::Error::from_raw_os_error(28));
-            }
-            self.written.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Err(io::Error::from_raw_os_error(28))
-        }
-    }
-
     #[test]
     fn fallible_cli_summaries_propagate_write_and_flush_errors() {
-        for fail_write in [true, false] {
-            let mut writer = FailingReportWriter {
-                fail_write,
-                written: Vec::new(),
-            };
-            assert_eq!(
-                write_fsck_cli_summary(&mut writer, &empty_fsck_report(), Path::new("/root"))
-                    .unwrap_err()
-                    .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(
-                write_index_rebuild_cli_summary(
-                    &mut writer,
-                    &empty_index_rebuild_report(),
-                    Path::new("/root")
-                )
-                .unwrap_err()
-                .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(
-                write_backup_manifest_cli_summary(
-                    &mut writer,
-                    &empty_backup_report(),
-                    Path::new("/root"),
-                    Path::new("/manifest.json")
-                )
-                .unwrap_err()
-                .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(writer.written.is_empty(), fail_write);
-        }
+        assert_writer_errors(|writer| {
+            write_fsck_cli_summary(writer, &empty_fsck_report(), Path::new("/root"))
+        });
+        assert_writer_errors(|writer| {
+            write_index_rebuild_cli_summary(
+                writer,
+                &empty_index_rebuild_report(),
+                Path::new("/root"),
+            )
+        });
+        assert_writer_errors(|writer| {
+            write_backup_manifest_cli_summary(
+                writer,
+                &empty_backup_report(),
+                Path::new("/root"),
+                Path::new("/manifest.json"),
+            )
+        });
     }
 
     #[test]
@@ -987,25 +952,8 @@ mod tests {
             }],
             ..empty_index_rebuild_report()
         };
-        for fail_write in [true, false] {
-            let mut writer = FailingReportWriter {
-                fail_write,
-                written: Vec::new(),
-            };
-            assert_eq!(
-                write_fsck_issues(&mut writer, &fsck)
-                    .unwrap_err()
-                    .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(
-                write_index_rebuild_issues(&mut writer, &rebuild)
-                    .unwrap_err()
-                    .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(writer.written.is_empty(), fail_write);
-        }
+        assert_writer_errors(|writer| write_fsck_issues(writer, &fsck));
+        assert_writer_errors(|writer| write_index_rebuild_issues(writer, &rebuild));
     }
 
     #[test]
@@ -1088,56 +1036,28 @@ mod tests {
             already_present_objects: 0,
             copied_bytes: 0,
         };
-        for fail_write in [true, false] {
-            let mut writer = FailingReportWriter {
-                fail_write,
-                written: Vec::new(),
-            };
-            assert_eq!(
-                write_config_check_summary(&mut writer, &config)
-                    .unwrap_err()
-                    .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(
-                write_database_migration_summary(&mut writer, &database)
-                    .unwrap_err()
-                    .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(
-                write_storage_migration_summary(&mut writer, &storage)
-                    .unwrap_err()
-                    .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(
-                write_lifecycle_repair_cli_summary(
-                    &mut writer,
-                    &empty_lifecycle_repair_report(),
-                    Path::new("/root"),
-                    3600
-                )
-                .unwrap_err()
-                .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(
-                write_local_gc_cli_summary(
-                    &mut writer,
-                    &empty_gc_report(),
-                    "dry-run",
-                    Path::new("/root"),
-                    3600,
-                    false,
-                    None,
-                    None
-                )
-                .unwrap_err()
-                .raw_os_error(),
-                Some(28)
-            );
-            assert_eq!(writer.written.is_empty(), fail_write);
-        }
+        assert_writer_errors(|writer| write_config_check_summary(writer, &config));
+        assert_writer_errors(|writer| write_database_migration_summary(writer, &database));
+        assert_writer_errors(|writer| write_storage_migration_summary(writer, &storage));
+        assert_writer_errors(|writer| {
+            write_lifecycle_repair_cli_summary(
+                writer,
+                &empty_lifecycle_repair_report(),
+                Path::new("/root"),
+                3600,
+            )
+        });
+        assert_writer_errors(|writer| {
+            write_local_gc_cli_summary(
+                writer,
+                &empty_gc_report(),
+                "dry-run",
+                Path::new("/root"),
+                3600,
+                false,
+                None,
+                None,
+            )
+        });
     }
 }
