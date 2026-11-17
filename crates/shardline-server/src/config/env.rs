@@ -1016,72 +1016,35 @@ mod interpolate_tests {
     }
 
     #[test]
-    fn test_no_vars() {
-        assert_eq!(interpolate_env_vars("plain text"), "plain text");
-    }
+    fn interpolation_preserves_literals_and_expands_known_variables_once() {
+        use super::super::environment::{remove_test_var, set_test_var};
 
-    #[test]
-    fn test_known_var() {
-        let content = "_TEST_INTERP_VAR=resolved".to_owned();
-        let _ = dotenvy::from_read(std::io::Cursor::new(content.as_bytes()));
-        assert_eq!(
-            interpolate_env_vars("prefix-${_TEST_INTERP_VAR}-suffix"),
-            "prefix-resolved-suffix"
-        );
-    }
-
-    #[test]
-    fn test_missing_var() {
-        assert_eq!(
-            interpolate_env_vars("${_NONEXISTENT_VAR_XYZ}"),
-            "${_NONEXISTENT_VAR_XYZ}"
-        );
-    }
-
-    #[test]
-    fn test_empty_var_name() {
-        assert_eq!(interpolate_env_vars("${}"), "${}");
-    }
-
-    #[test]
-    fn test_dollar_without_brace() {
-        assert_eq!(interpolate_env_vars("$VAR"), "$VAR");
-        assert_eq!(interpolate_env_vars("$$"), "$$");
-    }
-
-    #[test]
-    fn test_multiple_vars() {
-        let content = "_TEST_A=hello\n_TEST_B=world";
-        let _ = dotenvy::from_read(std::io::Cursor::new(content.as_bytes()));
-        let result = interpolate_env_vars("${_TEST_A} ${_TEST_B}");
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn test_unclosed_brace_preserves_text() {
-        // Malformed input without closing } should be preserved
-        assert_eq!(interpolate_env_vars("${HOST"), "${HOST");
-    }
-
-    #[test]
-    fn test_unclosed_brace_at_end() {
-        assert_eq!(interpolate_env_vars("prefix-${VAR"), "prefix-${VAR");
-    }
-
-    #[test]
-    fn test_nested_dollar_signs() {
-        assert_eq!(interpolate_env_vars("$${VAR}"), "$${VAR}");
-    }
-
-    #[test]
-    fn test_empty_input() {
-        assert_eq!(interpolate_env_vars(""), "");
-    }
-
-    #[test]
-    fn interpolation_preserves_unicode_and_does_not_expand_resolved_values() {
-        super::super::environment::set_test_var("_TEST_INTERP_LITERAL", "${_TEST_INTERP_LITERAL}");
+        for (name, value) in [
+            ("_TEST_INTERP_VAR", "resolved"),
+            ("_TEST_A", "hello"),
+            ("_TEST_B", "world"),
+            ("_TEST_INTERP_LITERAL", "${_TEST_INTERP_LITERAL}"),
+        ] {
+            set_test_var(name, value);
+        }
+        for name in ["_NONEXISTENT_VAR_XYZ", "VAR", "_MISSING_INTERP_雪"] {
+            remove_test_var(name);
+        }
         for (input, expected) in [
+            ("plain text", "plain text"),
+            (
+                "prefix-${_TEST_INTERP_VAR}-suffix",
+                "prefix-resolved-suffix",
+            ),
+            ("${_NONEXISTENT_VAR_XYZ}", "${_NONEXISTENT_VAR_XYZ}"),
+            ("${}", "${}"),
+            ("$VAR", "$VAR"),
+            ("$$", "$$"),
+            ("${_TEST_A} ${_TEST_B}", "hello world"),
+            ("${HOST", "${HOST"),
+            ("prefix-${VAR", "prefix-${VAR"),
+            ("$${VAR}", "$${VAR}"),
+            ("", ""),
             (
                 "雪-${_TEST_INTERP_LITERAL}-é",
                 "雪-${_TEST_INTERP_LITERAL}-é",
@@ -1092,9 +1055,16 @@ mod interpolate_tests {
             ),
             ("é-${_MISSING_INTERP_雪}-雪", "é-${_MISSING_INTERP_雪}-雪"),
         ] {
-            assert_eq!(interpolate_env_vars(input), expected);
+            assert_eq!(interpolate_env_vars(input), expected, "input: {input:?}");
         }
-        super::super::environment::remove_test_var("_TEST_INTERP_LITERAL");
+        for name in [
+            "_TEST_INTERP_VAR",
+            "_TEST_A",
+            "_TEST_B",
+            "_TEST_INTERP_LITERAL",
+        ] {
+            remove_test_var(name);
+        }
     }
 }
 
