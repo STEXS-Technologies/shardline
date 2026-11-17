@@ -559,11 +559,11 @@ mod tests {
     use crate::hold::output_test_support::assert_writer_errors;
 
     // -----------------------------------------------------------------------
-    // print_config_check_summary — smoke test (no panic)
+    // Config check summary output and errors
     // -----------------------------------------------------------------------
 
     #[test]
-    fn config_check_summary_runs() {
+    fn config_check_summary_preserves_output_and_propagates_errors() {
         let report = ConfigCheckReport {
             status: "ok".to_owned(),
             server_role: "all".to_owned(),
@@ -574,15 +574,31 @@ mod tests {
             auth_enabled: true,
             provider_tokens_enabled: false,
         };
-        print_config_check_summary(&report);
+        let mut bytes = Vec::new();
+        write_config_check_summary(&mut bytes, &report).unwrap();
+        assert_eq!(
+            bytes,
+            concat!(
+                "status: ok\n",
+                "server_role: all\n",
+                "server_frontends: xet\n",
+                "metadata_backend: local\n",
+                "object_backend: local\n",
+                "cache_backend: memory\n",
+                "auth_enabled: true\n",
+                "provider_tokens_enabled: false\n",
+            )
+            .as_bytes()
+        );
+        assert_writer_errors(|writer| write_config_check_summary(writer, &report));
     }
 
     // -----------------------------------------------------------------------
-    // print_database_migration_summary — smoke test (no panic)
+    // Database migration summary output and errors
     // -----------------------------------------------------------------------
 
     #[test]
-    fn database_migration_summary_runs() {
+    fn database_migration_summary_preserves_output_and_propagates_errors() {
         let report = DatabaseMigrationReport {
             backend: "postgres".to_owned(),
             command: DatabaseMigrationCommand::Status,
@@ -605,7 +621,22 @@ mod tests {
                 },
             ],
         };
-        print_database_migration_summary(&report);
+        let mut bytes = Vec::new();
+        write_database_migration_summary(&mut bytes, &report).unwrap();
+        assert_eq!(
+            bytes,
+            concat!(
+                "backend: postgres\n",
+                "applied_count: 3\n",
+                "reverted_count: 1\n",
+                "applied_total_count: 7\n",
+                "pending_count: 2\n",
+                "migration: version=v1 name=m1 applied=true applied_at_utc=2026-01-01T00:00:00Z\n",
+                "migration: version=v2 name=m2 applied=false applied_at_utc=-\n",
+            )
+            .as_bytes()
+        );
+        assert_writer_errors(|writer| write_database_migration_summary(writer, &report));
     }
 
     #[test]
@@ -823,7 +854,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn storage_migration_summary_runs() {
+    fn storage_migration_summary_preserves_output_and_propagates_errors() {
         let report = StorageMigrationReport {
             source_backend: "local".to_owned(),
             destination_backend: "s3".to_owned(),
@@ -835,7 +866,24 @@ mod tests {
             already_present_objects: 200,
             copied_bytes: 400_000_000,
         };
-        print_storage_migration_summary(&report);
+        let mut bytes = Vec::new();
+        write_storage_migration_summary(&mut bytes, &report).unwrap();
+        assert_eq!(
+            bytes,
+            concat!(
+                "source_backend: local\n",
+                "destination_backend: s3\n",
+                "prefix: chunks/\n",
+                "dry_run: true\n",
+                "scanned_objects: 1000\n",
+                "scanned_bytes: 500000000\n",
+                "inserted_objects: 800\n",
+                "already_present_objects: 200\n",
+                "copied_bytes: 400000000\n",
+            )
+            .as_bytes()
+        );
+        assert_writer_errors(|writer| write_storage_migration_summary(writer, &report));
     }
 
     // -----------------------------------------------------------------------
@@ -969,45 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn remaining_summary_writers_propagate_write_and_flush_errors() {
-        let config = ConfigCheckReport {
-            status: "ok".to_owned(),
-            server_role: "all".to_owned(),
-            server_frontends: vec!["xet".to_owned()],
-            metadata_backend: "local".to_owned(),
-            object_backend: "local".to_owned(),
-            cache_backend: "memory".to_owned(),
-            auth_enabled: true,
-            provider_tokens_enabled: false,
-        };
-        let database = DatabaseMigrationReport {
-            backend: "postgres".to_owned(),
-            command: DatabaseMigrationCommand::Status,
-            applied_count: 0,
-            reverted_count: 0,
-            applied_total_count: 1,
-            pending_count: 0,
-            migrations: vec![DatabaseMigrationStatusEntry {
-                version: "v1".to_owned(),
-                name: "migration".to_owned(),
-                applied: true,
-                applied_at_utc: None,
-            }],
-        };
-        let storage = StorageMigrationReport {
-            source_backend: "local".to_owned(),
-            destination_backend: "local".to_owned(),
-            prefix: String::new(),
-            dry_run: true,
-            scanned_objects: 0,
-            scanned_bytes: 0,
-            inserted_objects: 0,
-            already_present_objects: 0,
-            copied_bytes: 0,
-        };
-        assert_writer_errors(|writer| write_config_check_summary(writer, &config));
-        assert_writer_errors(|writer| write_database_migration_summary(writer, &database));
-        assert_writer_errors(|writer| write_storage_migration_summary(writer, &storage));
+    fn lifecycle_and_gc_summaries_propagate_write_and_flush_errors() {
         assert_writer_errors(|writer| {
             write_lifecycle_repair_cli_summary(
                 writer,
