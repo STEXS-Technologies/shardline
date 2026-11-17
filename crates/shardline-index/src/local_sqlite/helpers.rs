@@ -340,6 +340,24 @@ pub(crate) fn persist_reliability_event<T: EvidenceEventMetadata>(
     persist_reliability_event_at(transaction, event, u64_to_i64(unix_now_seconds_lossy())?)
 }
 
+/// Persists a baseline plus transition for a new log, or only the appended head
+/// for an existing log. The caller retains ownership of the mutation transaction.
+pub(crate) fn persist_appended_reliability_events<T: EvidenceEventMetadata>(
+    transaction: &Transaction<'_>,
+    events: &[T],
+    was_empty: bool,
+) -> Result<(), LocalIndexStoreError> {
+    let pending = if was_empty {
+        events
+    } else {
+        events.last().map(std::slice::from_ref).unwrap_or_default()
+    };
+    for event in pending {
+        persist_reliability_event(transaction, event)?;
+    }
+    Ok(())
+}
+
 /// Persists one event with an explicitly selected timestamp source.
 ///
 /// The timestamp is kept separate from the typed event identity so adapters
