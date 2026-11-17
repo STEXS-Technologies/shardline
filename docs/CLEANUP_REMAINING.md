@@ -75,11 +75,6 @@ code.
    need measurement before claiming the RFC's 30% contributor critical-path target. Review the sequential 150-minute
    E2E job for reusable compatible artifacts and measured scheduling opportunities;
    retain every required qualification gate.
-5. **Review remaining lifecycle orchestration.** Configuration environment loading
-   has a reviewed disposition below. Continue with lifecycle callers where
-   unnecessary intermediate state can be removed using existing owners. Preserve
-   cancellation, admission and durability boundaries. Only remove branches after
-   showing why supported behavior cannot require them.
 
 ## Reviewed configuration disposition
 
@@ -111,6 +106,38 @@ in `d49752c3` and `ff414cd1`. The latest code-equivalent full contributor gate a
 cases. This disposition closes the environment-loader review, not all server
 configuration or lifecycle work. Further changes need a concrete redundant path
 or unnecessary allocation rather than file size alone.
+
+## Reviewed lifecycle-repair disposition
+
+Reviewed at `418eba45602f02f312481d105ab2ec7577806966`. The repair orchestrator,
+action classification, reachability traversal and interruption hooks are retained
+after the earlier shared mutation-path and clock-wrapper cleanup. This closes
+the lifecycle-repair orchestration review; it does not certify every GC caller.
+
+- Quarantine and webhook actions each select a counter before one shared
+  compare-and-delete path. Deletions must remain conditional so a concurrent
+  replacement survives. Counters and interruption hooks run only after a
+  successful mutation; moving them before deletion would misreport durable work.
+- Active retention holds protect future objects as well as existing objects.
+  Missing object bytes do not authorize hold removal. Expiry, classification
+  precedence, overflow checks and PostgreSQL's database clock remain explicit.
+- Local write barriers and PostgreSQL work-pool ownership have different
+  lifetimes and cleanup contracts. The local-root entry point also deliberately
+  selects Xet compatibility behavior. Combining these entry points would hide
+  those differences behind another abstraction.
+- Reachability must include latest and version records, referenced protocol
+  objects, verified Xorb members and live dedupe-shard mappings. Its 4,096-entry
+  verified-source cache and separate per-record attempt set have different
+  purposes: reuse successful validation across records, but keep missing or
+  failed observations from becoming trusted cache entries. Clearing a full cache
+  trades rereads for bounded cache memory; removing it would increase I/O.
+- Typed mutation interruption hooks exercise durable boundaries. They compile
+  to no-op calls outside tests and remain useful for recovery qualification.
+
+The unchanged implementation is covered by the full contributor checkpoint at
+`99bde68e`, including 46 selected lifecycle-repair tests, and the required
+PostgreSQL/index and PostgreSQL/MinIO checkpoints at `df0d63fd`. No additional
+production abstraction or branch removal was justified by this review.
 
 ## Completion criteria
 
