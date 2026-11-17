@@ -26,9 +26,12 @@
 //! the file/xorb sections are semantically correct; the footer is informational.
 
 use shardline_xet_core::metadata_shard::{
-    file_structs::FileDataSequenceHeader,
-    shard_format::MDBShardFileHeader,
-    xorb_structs::{MAX_XORB_CHUNK_ENTRIES, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+    file_structs::{FileDataSequenceHeader, MDB_DEFAULT_FILE_FLAG},
+    shard_format::{MDB_FILE_INFO_ENTRY_SIZE as SHARD_ENTRY_SIZE, MDBShardFileHeader},
+    xorb_structs::{
+        MAX_XORB_CHUNK_ENTRIES, MDB_DEFAULT_XORB_FLAG, XorbChunkSequenceEntry,
+        XorbChunkSequenceHeader,
+    },
 };
 use xet_core_structures::merklehash::MerkleHash;
 
@@ -47,10 +50,6 @@ const SHARD_FOOTER_VERSION: u64 = 2;
 const SHARD_HEADER_SIZE: u64 = 48;
 /// Serialized footer size (u64 fields; see module docs).
 const SHARD_FOOTER_SIZE: u64 = 200;
-/// Serialized v3 file/xorb entry size (60 data bytes + 4 trailing padding bytes:
-/// each `#[repr(C)]` header/entry has a `u32` field followed by `u64` fields, so
-/// the fork's serializer writes a 64-byte buffer).
-const SHARD_ENTRY_SIZE: usize = 64;
 /// Trailing zero padding appended to each 60-byte entry to reach 64 bytes.
 const SHARD_ENTRY_PADDING: [u8; 4] = [0u8; 4];
 /// V2 shard entry size (48 bytes), for parsing legacy shards.
@@ -59,14 +58,7 @@ const SHARD_V2_ENTRY_SIZE: usize = 48;
 fn bookend() -> MerkleHash {
     MerkleHash::from([0xFFu8; 32])
 }
-/// File entry flag bits. `MDB_DEFAULT_FILE_FLAG` only (no verification /
-/// metadata-ext) for client-built shards.
-const MDB_DEFAULT_FILE_FLAG: u32 = 0;
-/// `MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG` — marks a chunk whose global-dedup
-/// eligibility was already established (imported from a dedup hit).
-pub(crate) const MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG: u32 = 1 << 31;
-/// `MDB_DEFAULT_XORB_FLAG`.
-const MDB_DEFAULT_XORB_FLAG: u32 = 0;
+pub(crate) use shardline_xet_core::metadata_shard::xorb_structs::MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
 
 /// One file-data range (`FileDataSequenceEntry`): a contiguous range of chunks
 /// within a single xorb that maps to a contiguous range of the file.
