@@ -6,7 +6,7 @@ use crate::admission::{BoundedPool, blocking_work_with_permit};
 use futures_util::{StreamExt, stream};
 use shardline_index::{FileRecord, StorageRepresentation, parse_xet_hash_hex};
 use shardline_protocol::ByteRange;
-use shardline_storage::{AsyncObjectStore, ObjectKey};
+use shardline_storage::S3RangeSnapshot;
 use shardline_xet_adapter::{
     AuthenticatedXorbFooter, decode_authenticated_xorb_chunk, validate_serialized_xorb_footer,
 };
@@ -29,8 +29,7 @@ struct Selection {
 }
 
 struct State {
-    store: ServerObjectStore,
-    key: ObjectKey,
+    snapshot: S3RangeSnapshot,
     footer: AuthenticatedXorbFooter,
     selections: std::vec::IntoIter<Selection>,
     pool: BoundedPool,
@@ -74,9 +73,13 @@ pub(super) async fn file_stream(
             .map_err(|error| ServerError::Io(io::Error::other(error)))?,
     );
     let key = crate::xet_adapter::xorb_object_key(&first.hash)?;
-    let Some((trailer, total)) = AsyncObjectStore::read_suffix(&store, &key, 8).await? else {
+    let ServerObjectStore::S3(s3) = &store else {
         return Ok(None);
     };
+    let Some((trailer, snapshot)) = s3.read_suffix_snapshot(&key, 8).await? else {
+        return Ok(None);
+    };
+    let total = snapshot.length();
     let trailer: [u8; 8] = trailer.try_into().map_err(|_length| invalid())?;
     let length = u64::from_le_bytes(trailer)
         .checked_add(8)
@@ -84,16 +87,15 @@ pub(super) async fn file_stream(
     if !(8..=MAX_FOOTER_BYTES).contains(&length) || length > total {
         return Err(invalid());
     }
-    let bytes = AsyncObjectStore::read_range(
-        &store,
-        &key,
-        ByteRange::new(
-            total.checked_sub(length).ok_or_else(invalid)?,
-            total.checked_sub(1).ok_or_else(invalid)?,
+    let bytes = snapshot
+        .read_range(
+            ByteRange::new(
+                total.checked_sub(length).ok_or_else(invalid)?,
+                total.checked_sub(1).ok_or_else(invalid)?,
+            )
+            .map_err(|_range| invalid())?,
         )
-        .map_err(|_range| invalid())?,
-    )
-    .await?;
+        .await?;
     let expected = parse_xet_hash_hex(&first.hash)?;
     let record = record.clone();
     let worker = pool
@@ -112,8 +114,7 @@ pub(super) async fn file_stream(
         return Ok(None);
     };
     let state = State {
-        store,
-        key,
+        snapshot,
         footer,
         selections: selections.into_iter(),
         pool,
@@ -190,7 +191,7 @@ async fn next(mut state: State) -> Result<Option<(Bytes, State)>, ServerError> {
         descriptor.packed_end().checked_sub(1).ok_or_else(invalid)?,
     )
     .map_err(|_range| invalid())?;
-    let packed = AsyncObjectStore::read_range(&state.store, &state.key, range).await?;
+    let packed = state.snapshot.read_range(range).await?;
     let footer = state.footer;
     let worker = state
         .pool

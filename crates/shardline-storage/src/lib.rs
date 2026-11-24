@@ -87,7 +87,7 @@ mod verified_body;
 #[cfg(feature = "s3")]
 pub use s3::{
     BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectReadError,
-    S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
+    S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, S3RangeSnapshot,
 };
 pub use store::ObjectStore;
 pub use verified_body::{VerifiedBodyBuilder, VerifiedObjectBody};

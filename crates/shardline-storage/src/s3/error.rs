@@ -29,6 +29,12 @@ pub enum S3ObjectStoreError {
     /// An existing object for the same key had different bytes.
     #[error("object key already exists with conflicting bytes")]
     ExistingObjectConflict,
+    /// A provider response cannot establish a stable source for range reads.
+    #[error("provider did not supply a strong snapshot identity")]
+    SnapshotIdentityUnavailable,
+    /// A conditional range response did not match the captured source.
+    #[error("provider range response changed snapshot identity or length")]
+    SnapshotIdentityMismatch,
     /// The requested byte range exceeded the stored object length.
     #[error("requested byte range exceeded stored object length")]
     RangeOutOfBounds,

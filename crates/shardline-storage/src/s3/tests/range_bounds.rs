@@ -77,6 +77,85 @@ enum ReadMode {
     Suffix,
 }
 
+#[tokio::test]
+async fn snapshot_ranges_bind_every_get_to_the_original_generation() {
+    // The provider deliberately ignores If-Match in several cases. Client-side
+    // metadata and exact-body validation must still reject the response.
+    for (etag, version, total, returned_range, body, accepted) in [
+        ("original", "v1", 10, "0-2/10", "abc", true),
+        ("changed", "v1", 10, "0-2/10", "abc", false),
+        ("original", "v2", 10, "0-2/10", "abc", false),
+        ("original", "v1", 11, "0-2/11", "abc", false),
+        ("original", "v1", 10, "1-3/10", "abc", false),
+        ("original", "v1", 10, "0-2/10", "ab", false),
+        ("original", "v1", 10, "0-2/10", "abcd", false),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let provider = std::thread::spawn(move || {
+            for step in 0..2 {
+                let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = socket.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                if step == 0 {
+                    assert!(request.contains("range: bytes=-3\r\n"));
+                    write!(socket, "HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 7-9/10\r\nETag: \"original\"\r\nx-amz-version-id: v1\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nConnection: close\r\n\r\nxyz").unwrap();
+                } else {
+                    assert!(request.contains("range: bytes=0-2\r\n"));
+                    assert!(request.contains("if-match: \"original\"\r\n"));
+                    assert!(request.lines().next().unwrap().contains("versionid=v1"));
+                    write!(socket, "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {returned_range}\r\nETag: \"{etag}\"\r\nx-amz-version-id: {version}\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            }
+            Ok::<(), std::io::Error>(())
+        });
+        let store = synchronous_runtime_fixture(format!("http://{address}"));
+        let key = ObjectKey::parse("chunks/snapshot").unwrap();
+        let (suffix, snapshot) = store.read_suffix_snapshot(&key, 3).await.unwrap().unwrap();
+        assert_eq!(suffix, b"xyz");
+        assert_eq!(snapshot.length(), 10);
+        // A rejected local range must not add another provider request.
+        assert!(
+            snapshot
+                .read_range(ByteRange::new(9, 10).unwrap())
+                .await
+                .is_err()
+        );
+        let result = snapshot.read_range(ByteRange::new(0, 2).unwrap()).await;
+        provider.join().unwrap().unwrap();
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "etag={etag}, version={version}, total={total}, range={returned_range}, body={body}"
+        );
+        if accepted {
+            assert_eq!(result.unwrap(), b"abc");
+        }
+    }
+}
+
 async fn exercise(mode: ReadMode) {
     for length in [3_usize, 2, 4] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

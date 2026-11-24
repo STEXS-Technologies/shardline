@@ -37,6 +37,7 @@ mod file_compare;
 mod file_upload;
 mod full_read;
 mod suffix;
+pub use suffix::S3RangeSnapshot;
 pub(super) mod temp_cleanup;
 
 #[cfg(test)]

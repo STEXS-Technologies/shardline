@@ -26,7 +26,7 @@ pub(crate) use operations::{
 
 pub use config::S3ObjectStoreConfig;
 pub use error::{S3ObjectReadError, S3ObjectStoreError};
-pub use operations::S3ObjectStore;
+pub use operations::{S3ObjectStore, S3RangeSnapshot};
 pub use types::{BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter};
 
 pub(crate) use types::{
