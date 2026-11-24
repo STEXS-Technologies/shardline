@@ -343,8 +343,7 @@ impl HubRefBatchArchiveRecordV1 {
         signing_key: &SigningKey,
         key_id: &str,
     ) -> Result<Self, ReliabilityError> {
-        let key_id = KeyId::new(key_id.to_owned())
-            .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
+        let key_id = parse_key_id(key_id)?;
         Self::sign(event, signing_key, key_id)
     }
 
@@ -357,13 +356,9 @@ impl HubRefBatchArchiveRecordV1 {
         signing_key: &SigningKey,
         key_id: KeyId,
     ) -> Result<Self, ReliabilityError> {
-        event.verify_integrity()?;
+        chain::validate_event_domain(&event)?;
         let commitment = build_reliability_merkle_commit_with_previous(&event, None)?;
-        Ok(Self {
-            schema_version: HUB_REF_ARCHIVE_SCHEMA,
-            event,
-            signed_commit: commitment.sign(signing_key, key_id)?,
-        })
+        sign_record(event, &commitment, signing_key, key_id)
     }
 
     /// Verifies the event, signed StateChronicle commitment, and exact binding.
@@ -372,26 +367,15 @@ impl HubRefBatchArchiveRecordV1 {
     /// Returns an error for unsupported format, invalid event data, a bad
     /// signature, or a signed body that does not match the batch event.
     pub fn verify(&self, verifying_key: &VerifyingKey) -> Result<(), ReliabilityError> {
-        if self.schema_version != HUB_REF_ARCHIVE_SCHEMA {
-            return Err(ReliabilityError::Merkle(
-                "unsupported Hub archive record version".into(),
-            ));
-        }
-        self.event.verify_integrity()?;
+        chain::validate_record_schema(self)?;
+        chain::validate_event_domain(&self.event)?;
         let expected = build_reliability_merkle_commit_with_previous(&self.event, None)?;
-        if self.signed_commit.body != expected.body {
-            return Err(ReliabilityError::Merkle(
-                "signed Hub archive commitment does not match its event".into(),
-            ));
-        }
-        let current_signed: statechronicle::domain::signed::Signed<
-            statechronicle::domain::commit::Commit,
-        > = crate::compatibility::protocol_value(&self.signed_commit)?;
-        let protocol_key =
-            statechronicle_ed25519::VerifyingKey::from_bytes(&verifying_key.to_bytes())
-                .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
-        statechronicle::commit::sign::verify_commit(&current_signed, &protocol_key)
-            .map_err(|error| ReliabilityError::Merkle(error.to_string()))
+        chain::verify_record_against(
+            self,
+            &expected,
+            verifying_key,
+            "signed Hub archive commitment does not match its event",
+        )
     }
 
     /// Serializes the versioned record in deterministic struct/vector order.
@@ -404,13 +388,7 @@ impl HubRefBatchArchiveRecordV1 {
         verifying_key: &VerifyingKey,
     ) -> Result<Vec<u8>, ReliabilityError> {
         self.verify(verifying_key)?;
-        let bytes = serde_json::to_vec(self)?;
-        if bytes.len() > MAX_ARCHIVE_RECORD_BYTES {
-            return Err(ReliabilityError::Merkle(
-                "Hub archive record exceeds byte limit".into(),
-            ));
-        }
-        Ok(bytes)
+        chain::encode_record(self)
     }
 
     /// Decodes bounded bytes and authenticates the complete record.
@@ -419,15 +397,27 @@ impl HubRefBatchArchiveRecordV1 {
     /// Returns an error for oversized, malformed, unknown-field, unsupported,
     /// invalid, or unauthenticated records.
     pub fn decode(bytes: &[u8], verifying_key: &VerifyingKey) -> Result<Self, ReliabilityError> {
-        if bytes.len() > MAX_ARCHIVE_RECORD_BYTES {
-            return Err(ReliabilityError::Merkle(
-                "Hub archive record exceeds byte limit".into(),
-            ));
-        }
-        let record: Self = serde_json::from_slice(bytes)?;
+        let record = chain::decode_record(bytes)?;
         record.verify(verifying_key)?;
         Ok(record)
     }
+}
+
+fn parse_key_id(key_id: &str) -> Result<KeyId, ReliabilityError> {
+    KeyId::new(key_id.to_owned()).map_err(|error| ReliabilityError::Merkle(error.to_string()))
+}
+
+fn sign_record(
+    event: HubRefBatchArchiveEvent,
+    commitment: &crate::ReliabilityMerkleCommit,
+    signing_key: &SigningKey,
+    key_id: KeyId,
+) -> Result<HubRefBatchArchiveRecordV1, ReliabilityError> {
+    Ok(HubRefBatchArchiveRecordV1 {
+        schema_version: HUB_REF_ARCHIVE_SCHEMA,
+        event,
+        signed_commit: commitment.sign(signing_key, key_id)?,
+    })
 }
 
 #[cfg(test)]

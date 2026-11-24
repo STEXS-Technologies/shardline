@@ -14,7 +14,7 @@ use crate::{
 
 use super::{
     HUB_REF_ARCHIVE_SCHEMA, HubRefBatchArchiveEvent, HubRefBatchArchiveRecordV1,
-    MAX_ARCHIVE_RECORD_BYTES,
+    MAX_ARCHIVE_RECORD_BYTES, parse_key_id, sign_record,
 };
 
 /// Identity and object-digest pin retained outside the replaceable archive.
@@ -177,17 +177,12 @@ impl HubRefBatchArchiveRecordV1 {
         key_id: &str,
         previous: &HubRefBatchArchiveAnchor,
     ) -> Result<Self, ReliabilityError> {
-        let key_id = statechronicle_domain_compat::intent::KeyId::new(key_id.to_owned())
-            .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
+        let key_id = parse_key_id(key_id)?;
         validate_event_domain(&event)?;
         ensure_domain_and_sequence(&event, previous)?;
         let commitment =
             build_reliability_merkle_commit_with_previous(&event, Some(&previous.commitment))?;
-        Ok(Self {
-            schema_version: HUB_REF_ARCHIVE_SCHEMA,
-            event,
-            signed_commit: commitment.sign(signing_key, key_id)?,
-        })
+        sign_record(event, &commitment, signing_key, key_id)
     }
 
     /// Verifies one batch as the next receipt after `previous`, returning the
@@ -207,12 +202,12 @@ impl HubRefBatchArchiveRecordV1 {
         ensure_domain_and_sequence(&self.event, previous)?;
         let expected =
             build_reliability_merkle_commit_with_previous(&self.event, Some(&previous.commitment))?;
-        if self.signed_commit.body != expected.body {
-            return Err(ReliabilityError::Merkle(
-                "signed Hub archive commitment does not extend its trusted predecessor".into(),
-            ));
-        }
-        verify_signed_commit(&self.signed_commit, verifying_key)?;
+        verify_record_against(
+            self,
+            &expected,
+            verifying_key,
+            "signed Hub archive commitment does not extend its trusted predecessor",
+        )?;
         Ok(anchor_from_record(self, expected))
     }
 
@@ -294,7 +289,9 @@ fn ensure_domain_and_sequence(
     Ok(())
 }
 
-fn validate_event_domain(event: &HubRefBatchArchiveEvent) -> Result<(), ReliabilityError> {
+pub(super) fn validate_event_domain(
+    event: &HubRefBatchArchiveEvent,
+) -> Result<(), ReliabilityError> {
     event.verify_integrity()?;
     if event.sequence == 0
         || event.before.domain_sequence != event.sequence
@@ -309,7 +306,9 @@ fn validate_event_domain(event: &HubRefBatchArchiveEvent) -> Result<(), Reliabil
     Ok(())
 }
 
-fn validate_record_schema(record: &HubRefBatchArchiveRecordV1) -> Result<(), ReliabilityError> {
+pub(super) fn validate_record_schema(
+    record: &HubRefBatchArchiveRecordV1,
+) -> Result<(), ReliabilityError> {
     if record.schema_version != HUB_REF_ARCHIVE_SCHEMA {
         return Err(ReliabilityError::Merkle(
             "unsupported Hub archive record version".into(),
@@ -346,7 +345,21 @@ fn verify_signed_commit(
         .map_err(|error| ReliabilityError::Merkle(error.to_string()))
 }
 
-fn encode_record(record: &HubRefBatchArchiveRecordV1) -> Result<Vec<u8>, ReliabilityError> {
+pub(super) fn verify_record_against(
+    record: &HubRefBatchArchiveRecordV1,
+    expected: &ReliabilityMerkleCommit,
+    verifying_key: &VerifyingKey,
+    mismatch: &'static str,
+) -> Result<(), ReliabilityError> {
+    if record.signed_commit.body != expected.body {
+        return Err(ReliabilityError::Merkle(mismatch.into()));
+    }
+    verify_signed_commit(&record.signed_commit, verifying_key)
+}
+
+pub(super) fn encode_record(
+    record: &HubRefBatchArchiveRecordV1,
+) -> Result<Vec<u8>, ReliabilityError> {
     let bytes = serde_json::to_vec(record)?;
     if bytes.len() > MAX_ARCHIVE_RECORD_BYTES {
         return Err(ReliabilityError::Merkle(
@@ -356,7 +369,7 @@ fn encode_record(record: &HubRefBatchArchiveRecordV1) -> Result<Vec<u8>, Reliabi
     Ok(bytes)
 }
 
-fn decode_record(bytes: &[u8]) -> Result<HubRefBatchArchiveRecordV1, ReliabilityError> {
+pub(super) fn decode_record(bytes: &[u8]) -> Result<HubRefBatchArchiveRecordV1, ReliabilityError> {
     if bytes.len() > MAX_ARCHIVE_RECORD_BYTES {
         return Err(ReliabilityError::Merkle(
             "Hub archive record exceeds byte limit".into(),
