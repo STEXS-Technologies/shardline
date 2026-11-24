@@ -3969,6 +3969,7 @@ dependencies = [
  "shardline-protocol",
  "thiserror",
  "tokio",
+ "url",
 ]
 
 [[package]]
