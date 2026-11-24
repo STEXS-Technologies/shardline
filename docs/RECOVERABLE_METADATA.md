@@ -1,10 +1,10 @@
 # Recoverable metadata design
 
-**Status:** accepted design; the Hub ref SHADOW foundation is integrated, and
-no independent recovery guarantee is enabled. The current candidate still
-uses the R0 backup model. Archive mode defaults to `OFF`; no R1, R2, or R3
-claim is available until the matching manifest, restore path, and release
-evidence are complete.
+**Status:** accepted design; the Hub ref SHADOW foundation and signed
+per-repository ref-state checkpoint path are integrated. No independent
+recovery guarantee is enabled: the current candidate still relies on the R0
+backup model. Archive mode defaults to `OFF`; no R1, R2, or R3 claim is
+available until coverage, restore, and release evidence are complete.
 
 This document records the architecture for the 1.14 migration. It follows
 `SHARDLINE_SIMPLIFICATION_AND_RECOVERABLE_METADATA_RFC.md`, Parts II–V, and
@@ -25,6 +25,11 @@ publication visibility by itself.
 | R1 | Restore covered committed immutable versions and byte exact reads without a metadata backup | Complete version manifests, externally durable receipts, verified payload closure, isolated restore |
 | R2 | Restore certified mutable state such as refs, deletions, holds, and policy identifiers | R1 plus complete mutation coverage, a certified checkpoint, contiguous ordered replay, and restore time policy validation |
 | R3 | Protected success is returned only after its committed mutation receipt is durable outside SQL | R2 plus all writer paths integrated, bounded archive failure behavior, and predecessor writer fencing |
+
+The current checkpoint implementation is one signed snapshot of one
+repository's refs at an archived SQL watermark. It is a useful state baseline,
+but does not certify complete mutable state, immutable-version coverage, or a
+restorable R1/R2 archive.
 
 The existing `index rebuild` repairs derived indexes; it does not create
 authoritative file mappings from a CAS inventory. A manifest describes
@@ -81,13 +86,13 @@ identity. Receipts are stored with conditional create or an equivalently
 verified immutable operation. Restore verifies digest, length, deployment,
 domain, sequence, and authenticated provenance before trusting a record.
 
-Shardline already has a deployment supplied Ed25519 signing path for
-StateChronicle reliability commitments in `shardline-reliability`. The archive
-certificate design should reuse its signing and verification primitives over a
-versioned canonical envelope; the signing and encryption keys must live outside
-the database being recovered. This document does not claim existing SQL
-reliability evidence is externally durable or that an archive signature is
-already emitted. No secrets, raw credentials, or unfiltered customer metadata
+Shardline has a deployment supplied Ed25519 signing path for StateChronicle
+reliability commitments in `shardline-reliability`. Hub ref receipts and
+per-repository ref-state checkpoints now emit signed archive records using
+these primitives. This authenticates those bounded records; it does not make
+the SQL reliability journal externally durable, certify every writer, or
+establish an R1/R2 restore point. Signing keys must live outside the database
+being recovered. No secrets, raw credentials, or unfiltered customer metadata
 belong in archive records. Key rotation must retain verification material until
 all certificates using an old key have expired from retention.
 
@@ -124,6 +129,25 @@ Current coverage is therefore:
 | Hub version publications (NDJSON and Git receive-pack) | Manifest prepared before revision visibility; locator is pinned to the matching committed Hub ref event in the same SQL publication | Focused tests cover manifest serialization, PostgreSQL prepared-manifest atomicity, and receive-pack manifest linkage; destructive restore and payload-closure verification are not implemented | No | None |
 | OCI, S3, LFS, Bazel, provider policy, lifecycle/GC | No | No | No | None |
 
+The signed `HubRefStateCheckpointV1` format and `shardline backup hub-checkpoint`
+operator command add a per-repository current-ref snapshot. The source is read
+from one consistent SQLite or PostgreSQL snapshot and must have equal committed
+and archived watermarks. For a nonzero watermark, the writer verifies the
+SQL-pinned terminal receipt, signs the snapshot, writes an immutable archive
+object, and verifies its readback. The command reports the pinned object key,
+byte length, and BLAKE3 digest only after that verification. It requires Hub
+recovery to already be in SHADOW mode and does not change SQL mode or write SQL
+state.
+
+The checkpoint contains current refs and the receipt watermark for that one
+repository. It does not enumerate the repository catalog, cover deleted
+repositories or other mutation domains, carry immutable-version payload
+closure, verify the complete receipt chain before the terminal receipt, or
+prove freshness by itself. Retain the emitted locator, digest, byte length,
+deployment, repository, and archived sequence outside the replaceable archive;
+the signature alone cannot distinguish the newest checkpoint from an older
+valid one.
+
 ## GC, deletion, and archive retention
 
 Until certified coverage exists, the archive cannot justify deleting payloads.
@@ -151,8 +175,10 @@ The implementation sequence is R1, then R2, then R3:
    for Hub ref batches only.
 4. Add an ordered bounded worker, retries, and idempotence. The SHADOW worker
    is integrated for Hub refs; status and backpressure remain outstanding.
-5. Backfill legacy metadata with a resumable scan and certify inventory
-   completeness while the original database still exists.
+5. Publish signed state-only checkpoints for individual repositories only
+   after their SQL and archive watermarks match. The CLI path is implemented.
+   A resumable catalog backfill and proof of complete inventory are still
+   required before a full R2 baseline can be certified.
 6. Restore to a fresh isolated database, replay contiguous receipts, invoke
    existing rebuild and fsck, then verify actual bytes without consulting the
    source database or its backup.
@@ -181,10 +207,11 @@ enabled. Turning SHADOW off after an outbox event is allowed, but re-enabling
 SHADOW is rejected once history exists; a new certified baseline/epoch is not
 implemented. Hub records have no independent tenant field, so the tenant slot
 uses deployment identity and repository IDs remain opaque. Coverage is limited
-to Hub ref batches and version metadata from NDJSON and Git receive-pack. There
-is no resumable backfill, certified checkpoint, archive inventory/status API, restore reader, or
-destructive restore qualification. These constraints prevent this slice from
-qualifying R1/R2/R3.
+to Hub ref batches and version metadata from NDJSON and Git receive-pack. The
+per-repository signed ref checkpoint is not a catalog backfill or a full-domain
+checkpoint. There is no resumable backfill, complete archive inventory/status
+API, restore reader, or destructive restore qualification. These constraints
+prevent this slice from qualifying R1/R2/R3.
 
 ## Failure cases that must remain fail closed
 
