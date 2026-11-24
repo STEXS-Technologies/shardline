@@ -64,6 +64,7 @@ use crate::{
     config::{
         AuthProviderKind, DeploymentMode, ServerConfigError, env::bounded_pool_size_from_env,
     },
+    hub_recovery_resources::HubRecoveryResources,
     jwks_provider::JwksProvider,
     metrics::MetricsLayer,
     oidc_provider::OidcProvider,
@@ -1160,15 +1161,7 @@ async fn build_hub_state(
                 .config
                 .hub_recovery_runtime()
                 .ok_or_else(|| hub_recovery_config_error("SHADOW runtime config is missing"))?;
-            let archive_store =
-                shardline_server_core::ServerObjectStore::s3(runtime.archive_s3.clone())
-                    .map_err(|error| ServerError::Io(Error::other(error)))?;
-            let signing_seed: [u8; 32] = runtime
-                .signing_key
-                .expose_secret()
-                .try_into()
-                .map_err(|_error| hub_recovery_config_error("signing key must be 32 bytes"))?;
-            let signing_key = ed25519_dalek::SigningKey::from_bytes(&signing_seed);
+            let resources = HubRecoveryResources::from_config(runtime)?;
 
             // Validate local resources before changing the durable mode. The
             // outbox transition itself is transactional and checks deployment
@@ -1182,15 +1175,15 @@ async fn build_hub_state(
                 .map_err(hub_recovery_server_error)?;
             background.register(hub_recovery_worker::spawn(
                 recovery_outbox.clone(),
-                archive_store.clone(),
-                signing_key,
+                resources.archive.clone(),
+                resources.signing_key,
                 runtime.key_id.clone(),
                 background.stopped_flag(),
             ));
             Some(shardline_hub_api::routes::HubArchiveContext {
                 deployment_id: runtime.deployment_id.clone(),
                 resource_domain: "hub".to_owned(),
-                object_store: archive_store,
+                object_store: resources.archive,
             })
         }
         None => {

@@ -447,6 +447,45 @@ fn parse_backup_manifest_requires_output() {
 }
 
 #[test]
+fn parse_backup_hub_checkpoint_requires_repository_selector() {
+    let parsed = super::parse_command(
+        [
+            "shardline",
+            "backup",
+            "hub-checkpoint",
+            "--repository-id",
+            "repo-123",
+            "--root",
+            "/var/lib/shardline",
+        ],
+        true,
+    )
+    .unwrap();
+    let super::ParsedCommand::HubCheckpoint {
+        root,
+        repository_id,
+    } = parsed
+    else {
+        panic!("managed checkpoint command should have its own parsed variant")
+    };
+    assert_eq!(root, Some(PathBuf::from("/var/lib/shardline")));
+    assert_eq!(repository_id, "repo-123");
+
+    let missing_repository = super::parse_command(["shardline", "backup", "hub-checkpoint"], true);
+    assert!(missing_repository.is_err());
+
+    let legacy = CliCommand::parse([
+        "shardline",
+        "backup",
+        "hub-checkpoint",
+        "--repository-id",
+        "repo-123",
+    ]);
+    assert!(legacy.is_err());
+    assert!(legacy.unwrap_err().to_string().contains("shardline::run"));
+}
+
+#[test]
 fn parse_db_migrate_up() {
     let args = vec![
         "shardline".to_owned(),

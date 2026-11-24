@@ -1414,7 +1414,8 @@ mod tests {
         use crate::hub::{HubRefBatchOutcome, HubRefChange};
         use crate::{
             HubRecoveryMode, HubRecoveryOutboxStore, archive_next_hub_ref_event,
-            read_hub_ref_archive_record, read_hub_ref_archive_record_with_previous,
+            put_hub_ref_state_checkpoint, read_hub_ref_archive_record,
+            read_hub_ref_archive_record_with_previous, read_hub_ref_state_checkpoint,
         };
         use ed25519_dalek::{SigningKey, VerifyingKey};
         use shardline_reliability::{HubRefBatchArchiveAnchor, HubRefBatchArchiveCheckpointPin};
@@ -1458,6 +1459,22 @@ mod tests {
                 .unwrap(),
             vec![repo.clone()]
         );
+        assert_eq!(
+            store
+                .hub_repositories_after(None, NonZeroUsize::new(1).unwrap())
+                .await
+                .unwrap(),
+            vec![repo.clone()]
+        );
+        let unarchived_source = store.hub_ref_checkpoint_source(&repo).await.unwrap();
+        assert_eq!(
+            unarchived_source.deployment_id.as_deref(),
+            Some(deployment.as_str())
+        );
+        assert_eq!(unarchived_source.committed_sequence, 1);
+        assert_eq!(unarchived_source.archived_sequence, 0);
+        assert_eq!(unarchived_source.last_archived_receipt_digest, None);
+        assert_eq!(unarchived_source.refs[0].head_sha.as_deref(), Some("next"));
         let signing_key = SigningKey::from_bytes(&[23; 32]);
         let failing_mark = FailArchiveMarkOnce(&store);
         assert!(
@@ -1472,6 +1489,11 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        assert!(
+            put_hub_ref_state_checkpoint(&store, &archive, &repo, &signing_key, "test-key",)
+                .await
+                .is_err()
+        );
         // Retry reuses the immutable object written before the injected crash.
         let object = archive_next_hub_ref_event(&store, &archive, &repo, &signing_key, "test-key")
             .await
@@ -1482,6 +1504,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(record.event.after.refs[0].head_sha.as_deref(), Some("next"));
+        let archived_source = store.hub_ref_checkpoint_source(&repo).await.unwrap();
+        assert_eq!(archived_source.committed_sequence, 1);
+        assert_eq!(archived_source.archived_sequence, 1);
+        assert_eq!(
+            archived_source.last_archived_receipt_digest.as_deref(),
+            Some(object.checksum_blake3())
+        );
+        let corruption_connection = open_hub_connection(store.root()).unwrap();
+        let archived_at: i64 = corruption_connection
+            .query_row(
+                "SELECT archived_at_unix_seconds FROM shardline_hub_recovery_outbox
+                 WHERE repo_id = ?1 AND domain_sequence = 1",
+                [&repo],
+                |row| row.get(0),
+            )
+            .unwrap();
+        corruption_connection
+            .execute(
+                "UPDATE shardline_hub_recovery_outbox
+                 SET archive_digest = NULL, archived_at_unix_seconds = NULL
+                 WHERE repo_id = ?1 AND domain_sequence = 1",
+                [&repo],
+            )
+            .unwrap();
+        assert!(store.hub_ref_checkpoint_source(&repo).await.is_err());
+        corruption_connection
+            .execute(
+                "UPDATE shardline_hub_recovery_outbox
+                 SET archive_digest = ?1, archived_at_unix_seconds = ?2
+                 WHERE repo_id = ?3 AND domain_sequence = 1",
+                rusqlite::params![object.checksum_blake3(), archived_at, &repo],
+            )
+            .unwrap();
         let pin = HubRefBatchArchiveCheckpointPin::new(
             record.event.after.deployment_id.clone(),
             record.event.after.provider_id.clone(),
@@ -1498,6 +1553,20 @@ mod tests {
             object.checksum_blake3(),
         )
         .unwrap();
+        let checkpoint =
+            put_hub_ref_state_checkpoint(&store, &archive, &repo, &signing_key, "test-key")
+                .await
+                .unwrap();
+        assert_eq!(checkpoint.state().archived_sequence, 1);
+        assert_eq!(
+            checkpoint.state().last_archived_receipt_digest.as_deref(),
+            Some(object.checksum_blake3())
+        );
+        let checkpoint_record =
+            read_hub_ref_state_checkpoint(&archive, checkpoint.read_pin(), &verifying_key)
+                .await
+                .unwrap();
+        assert_eq!(checkpoint_record.state, *checkpoint.state());
         assert!(
             store
                 .next_pending_hub_ref_event(&repo)

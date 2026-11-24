@@ -406,6 +406,19 @@ Export an adapter-neutral recovery manifest:
 shardline backup manifest --output ./backup-manifest.json
 ```
 
+Publish a signed Hub state checkpoint for one repository:
+
+```bash
+shardline backup hub-checkpoint --repository-id <HUB_REPOSITORY_ID>
+```
+
+This requires Hub recovery to already be configured in SHADOW mode. The command
+reads one consistent metadata snapshot, requires its committed and archived
+watermarks to match, signs the state, and reports the archive object only after
+read-back verification. Retain the reported BLAKE3 digest outside the replaceable
+archive to pin freshness; the signature alone does not establish that this is the
+latest checkpoint.
+
 Copy immutable objects between storage adapters:
 
 ```bash

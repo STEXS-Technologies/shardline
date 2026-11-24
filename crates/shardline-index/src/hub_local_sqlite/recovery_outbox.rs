@@ -1,8 +1,9 @@
 use super::{LocalIndexStore, open_hub_connection};
-use crate::hub::HubRefChange;
+use crate::hub::{HubRef, HubRefChange};
 use crate::hub_recovery::{
-    MAX_HUB_REF_EVENT_BYTES, build_hub_ref_batch_event, decode_hub_ref_event,
-    validate_mode_transition, validate_requested_mode,
+    MAX_HUB_REF_EVENT_BYTES, MAX_PENDING_REPOSITORY_PAGE, build_hub_ref_batch_event,
+    decode_hub_ref_event, make_checkpoint_source, validate_mode_transition,
+    validate_requested_mode,
 };
 use crate::{HubRecoveryError, HubRecoveryMode, HubRecoveryOutboxItem, HubRecoveryOutboxStore};
 use rusqlite::OptionalExtension;
@@ -157,6 +158,159 @@ impl HubRecoveryOutboxStore for LocalIndexStore {
                 .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(|error| HubRecoveryError::Outbox(error.to_string()))
+        })
+        .await
+    }
+
+    async fn hub_repositories_after(
+        &self,
+        cursor: Option<&str>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<String>, HubRecoveryError> {
+        if limit.get() > MAX_PENDING_REPOSITORY_PAGE {
+            return Err(HubRecoveryError::PageLimitExceeded);
+        }
+        let root = self.root().to_owned();
+        let cursor = cursor.map(ToOwned::to_owned);
+        let limit = i64::try_from(limit.get())
+            .map_err(|_conversion_error| HubRecoveryError::PageLimitExceeded)?;
+        run_outbox_blocking(move || {
+            let conn = open_hub_connection(&root)
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let mut statement = conn
+                .prepare(
+                    "SELECT repo_id FROM shardline_hub_repos
+                     WHERE (?1 IS NULL OR repo_id > ?1) ORDER BY repo_id LIMIT ?2",
+                )
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let rows = statement
+                .query_map(rusqlite::params![cursor, limit], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))
+        })
+        .await
+    }
+
+    async fn hub_ref_checkpoint_source(
+        &self,
+        repository_id: &str,
+    ) -> Result<crate::HubRefCheckpointSource, HubRecoveryError> {
+        let root = self.root().to_owned();
+        let repository_id = repository_id.to_owned();
+        run_outbox_blocking(move || {
+            let mut connection = open_hub_connection(&root)
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let tx = connection
+                .transaction()
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM shardline_hub_repos WHERE repo_id = ?1)",
+                    [&repository_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            if !exists {
+                return Err(HubRecoveryError::Outbox(
+                    "Hub repository does not exist".into(),
+                ));
+            }
+            let ref_limit = shardline_reliability::MAX_HUB_REF_STATE_CHECKPOINT_REFS
+                .checked_add(1)
+                .and_then(|limit| i64::try_from(limit).ok())
+                .ok_or(HubRecoveryError::InvalidCheckpointSource)?;
+            let config: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT mode, deployment_id FROM shardline_hub_recovery_config WHERE singleton_id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let deployment_id = match config {
+                None => None,
+                Some((mode, None)) if mode == "off" => None,
+                Some((mode, Some(deployment))) if mode == "shadow" => Some(deployment),
+                _ => return Err(HubRecoveryError::InvalidCheckpointSource),
+            };
+            let refs = {
+                let mut statement = tx
+                    .prepare(
+                        "SELECT repo_id, ref_name, sha FROM shardline_hub_refs
+                         WHERE repo_id = ?1 ORDER BY ref_name LIMIT ?2",
+                    )
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+                let rows = statement
+                    .query_map(
+                        rusqlite::params![
+                            &repository_id,
+                            ref_limit,
+                        ],
+                        |row| {
+                            Ok(HubRef {
+                                repo_id: row.get(0)?,
+                                ref_name: row.get(1)?,
+                                sha: row.get(2)?,
+                            })
+                        },
+                    )
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?
+            };
+            if refs.len() > shardline_reliability::MAX_HUB_REF_STATE_CHECKPOINT_REFS {
+                return Err(HubRecoveryError::InvalidCheckpointSource);
+            }
+            let evidence_refs = refs
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.repo_id.clone(),
+                        reference.ref_name.clone(),
+                        Some(reference.sha.clone()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            crate::hub_local_sqlite::verify_hub_ref_evidence_batch(&tx, &evidence_refs)
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let sequence = tx
+                .query_row(
+                    "SELECT last_sequence, last_archived_sequence
+                     FROM shardline_hub_recovery_sequences WHERE repo_id = ?1",
+                    [&repository_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?
+                .unwrap_or((0, 0));
+            let digest = if sequence.1 == 0 {
+                None
+            } else {
+                tx.query_row(
+                    "SELECT archive_digest FROM shardline_hub_recovery_outbox
+                     WHERE repo_id = ?1 AND domain_sequence = ?2
+                       AND archived_at_unix_seconds IS NOT NULL",
+                    rusqlite::params![&repository_id, sequence.1],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?
+                .flatten()
+            };
+            let source = make_checkpoint_source(
+                repository_id,
+                deployment_id,
+                refs,
+                sequence.0,
+                sequence.1,
+                digest,
+            )?;
+            tx.commit()
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            Ok(source)
         })
         .await
     }

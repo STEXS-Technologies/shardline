@@ -104,9 +104,10 @@ pub use dedupe::DedupeShardMapping;
 pub use deduplication_domain::DeduplicationDomain;
 pub use hub_recovery::{
     HubRecoveryArchiveObject, HubRecoveryError, HubRecoveryMode, HubRecoveryOutboxItem,
-    HubRecoveryOutboxStore, MAX_PENDING_REPOSITORY_PAGE, archive_next_hub_ref_event,
-    put_hub_ref_archive_record, read_hub_ref_archive_record,
-    read_hub_ref_archive_record_with_previous,
+    HubRecoveryOutboxStore, HubRefCheckpointSource, HubRefStateCheckpointArchiveObject,
+    HubRefStateCheckpointReadPin, MAX_PENDING_REPOSITORY_PAGE, archive_next_hub_ref_event,
+    put_hub_ref_archive_record, put_hub_ref_state_checkpoint, read_hub_ref_archive_record,
+    read_hub_ref_archive_record_with_previous, read_hub_ref_state_checkpoint,
 };
 pub use ids::{FileId, StoredObjectId, XorbId};
 pub use lifecycle::{

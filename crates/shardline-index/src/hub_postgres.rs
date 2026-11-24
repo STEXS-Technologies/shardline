@@ -1651,6 +1651,48 @@ mod tests {
                 message: "prepared batch".into(),
             },
         ];
+        assert!(
+            store
+                .change_refs_atomically_with_prepared_revisions(
+                    repo,
+                    &changes,
+                    std::slice::from_ref(&prepared),
+                    &[],
+                )
+                .is_err()
+        );
+        let extra_sha = "f".repeat(40);
+        let extra_digest = "a".repeat(64);
+        let extra_manifest = HubRefBatchManifestReferenceV1::new(
+            deployment.to_owned(),
+            repo.to_owned(),
+            extra_sha,
+            extra_digest.clone(),
+            format!(
+                "recovery/v1/{}/{}/versions/aa/{extra_digest}",
+                crate::hub_recovery::stable_id_segment(deployment),
+                crate::hub_recovery::stable_id_segment(repo),
+            ),
+        )
+        .unwrap();
+        assert!(
+            store
+                .change_refs_atomically_with_prepared_revisions(
+                    repo,
+                    &changes,
+                    std::slice::from_ref(&prepared),
+                    &[manifest.clone(), extra_manifest],
+                )
+                .is_err()
+        );
+        let sequence_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shardline_hub_recovery_sequences WHERE repo_id = $1)",
+        )
+        .bind(repo)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(!sequence_exists);
         assert_eq!(
             store
                 .change_refs_atomically_with_prepared_revisions(
@@ -1672,6 +1714,18 @@ mod tests {
             .unwrap();
         assert_eq!(item.event.after.refs.len(), 2);
         assert_eq!(item.event.after.manifest_refs, [manifest]);
+        let source = store.hub_ref_checkpoint_source(repo).await.unwrap();
+        assert_eq!(source.deployment_id.as_deref(), Some(deployment));
+        assert_eq!(source.committed_sequence, 1);
+        assert_eq!(source.archived_sequence, 0);
+        assert_eq!(source.refs.len(), 2);
+        assert_eq!(
+            store
+                .hub_repositories_after(None, std::num::NonZeroUsize::new(1).unwrap())
+                .await
+                .unwrap(),
+            vec![repo.to_owned()]
+        );
 
         let conflicting = HubRevision {
             created_at_unix_seconds: prepared.created_at_unix_seconds + 1,

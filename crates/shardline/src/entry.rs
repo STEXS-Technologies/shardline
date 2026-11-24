@@ -14,10 +14,10 @@ use crate::{
     load_runtime_server_config, local_output::write_error_chain, local_path::resolve_root,
     mint_admin_token_for_provider_from_sources, render_completion, render_manpage, report_output,
     run_backup_manifest, run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc,
-    run_health_check, run_hold_list, run_hold_release, run_hold_set, run_index_rebuild,
-    run_ingest_bench, run_lfs_evidence_repair, run_lifecycle_repair, run_local_db_migration,
-    run_providerless_setup, run_repair, run_storage_migration, uninstall_gc_schedule,
-    write_output_bytes,
+    run_health_check, run_hold_list, run_hold_release, run_hold_set, run_hub_ref_state_checkpoint,
+    run_index_rebuild, run_ingest_bench, run_lfs_evidence_repair, run_lifecycle_repair,
+    run_local_db_migration, run_providerless_setup, run_repair, run_storage_migration,
+    uninstall_gc_schedule, write_output_bytes,
 };
 
 pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
@@ -86,6 +86,10 @@ async fn run_inner(args: impl Iterator<Item = OsString>, _supervised: bool) -> E
                 Err(error) => error_chain_status(error.as_ref(), ExitCode::from(2)),
             };
         }
+        Ok(crate::command::ParsedCommand::HubCheckpoint {
+            root,
+            repository_id,
+        }) => return run_hub_checkpoint(root.as_deref(), &repository_id).await,
         Ok(crate::command::ParsedCommand::History(history_args)) => {
             let inspection_subject = if history_args.pending_deletes {
                 "Pending-delete state"
@@ -668,6 +672,26 @@ async fn execute_command(command: Result<CliCommand, crate::CliParseError>) -> E
         },
         Err(error) if error.is_help() => stdout_text(format_args!("{error}")),
         Err(error) => diagnostic_text(format_args!("{error}"), ExitCode::from(2)),
+    }
+}
+
+async fn run_hub_checkpoint(root: Option<&std::path::Path>, repository_id: &str) -> ExitCode {
+    match run_hub_ref_state_checkpoint(root, repository_id).await {
+        Ok(object) => {
+            let state = object.state();
+            let pin = object.read_pin();
+            stdout_text(format_args!(
+                "Hub state checkpoint verified after archive read-back\nrepository_id={}\ndeployment_id={}\ncommitted_sequence={}\narchived_sequence={}\nobject_key={}\nbyte_length={}\nblake3={}\nFreshness requires retaining this digest outside the replaceable archive.\n",
+                pin.repository_id(),
+                pin.deployment_id(),
+                state.committed_sequence,
+                pin.archived_sequence(),
+                pin.key().as_str(),
+                pin.byte_length(),
+                object.checksum_blake3(),
+            ))
+        }
+        Err(error) => error_chain_status(&error, ExitCode::from(2)),
     }
 }
 

@@ -443,6 +443,8 @@ pub(crate) struct BackupCommandArgs {
 pub(crate) enum BackupSubcommand {
     /// Export an adapter-neutral backup manifest.
     Manifest(BackupManifestArgs),
+    /// Publish a signed, read-back-verified Hub state checkpoint for one repository.
+    HubCheckpoint(HubCheckpointArgs),
 }
 
 #[derive(Debug, Args)]
@@ -453,6 +455,16 @@ pub(crate) struct BackupManifestArgs {
     /// Manifest output path.
     #[arg(long)]
     pub(crate) output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HubCheckpointArgs {
+    /// Repository identity from the Hub metadata database.
+    #[arg(long, value_name = "ID")]
+    pub(crate) repository_id: String,
+    /// Override the deployment root for local Hub metadata.
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
 }
 
 // ── Storage migrate ─────────────────────────────────────────────────────

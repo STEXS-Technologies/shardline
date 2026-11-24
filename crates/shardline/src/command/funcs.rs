@@ -16,11 +16,11 @@ use shardline_server::{
 
 use super::cli::{CliCommand, RedactedDbUrl};
 use super::definition::{
-    AdminSubcommand, BackupSubcommand, BenchMode, CliAdminTokenAuthProvider, CliDefinition,
-    CliDefinitionCommand, CliObjectStorageAdapter, CliRepositoryProvider, CliServerFrontend,
-    CliServerRole, CliTokenScope, ConfigSubcommand, DbMigrateSubcommand, DbSubcommand,
-    GcScheduleSubcommand, GcSubcommand, HoldSubcommand, IndexSubcommand, ProviderlessSubcommand,
-    RepairSubcommand, StorageSubcommand,
+    AdminSubcommand, BackupCommandArgs, BackupSubcommand, BenchMode, CliAdminTokenAuthProvider,
+    CliDefinition, CliDefinitionCommand, CliObjectStorageAdapter, CliRepositoryProvider,
+    CliServerFrontend, CliServerRole, CliTokenScope, ConfigSubcommand, DbMigrateSubcommand,
+    DbSubcommand, GcScheduleSubcommand, GcSubcommand, HoldSubcommand, IndexSubcommand,
+    ProviderlessSubcommand, RepairSubcommand, StorageSubcommand,
 };
 use super::error::CliParseError;
 
@@ -28,6 +28,10 @@ pub(crate) enum ParsedCommand {
     Existing(CliCommand),
     RepositoryPolicy(super::definition::AdminRepositoryPolicyArgs),
     History(super::definition::HistoryArgs),
+    HubCheckpoint {
+        root: Option<PathBuf>,
+        repository_id: String,
+    },
     #[cfg(target_os = "linux")]
     Maintenance {
         state_dir: PathBuf,
@@ -63,6 +67,10 @@ impl CliCommand {
             ParsedCommand::RepositoryPolicy(_) => Err(CliParseError::validation(
                 ErrorKind::InvalidSubcommand,
                 "repository policy commands must be dispatched through shardline::run",
+            )),
+            ParsedCommand::HubCheckpoint { .. } => Err(CliParseError::validation(
+                ErrorKind::InvalidSubcommand,
+                "Hub checkpoint commands must be dispatched through shardline::run",
             )),
             #[cfg(target_os = "linux")]
             ParsedCommand::Maintenance { .. } | ParsedCommand::MaintenanceWorker { .. } => {
@@ -119,6 +127,12 @@ where
         CliDefinitionCommand::History(history_args) if managed => {
             ParsedCommand::History(history_args)
         }
+        CliDefinitionCommand::Backup(BackupCommandArgs {
+            command: BackupSubcommand::HubCheckpoint(checkpoint_args),
+        }) if managed => ParsedCommand::HubCheckpoint {
+            root: checkpoint_args.root,
+            repository_id: checkpoint_args.repository_id,
+        },
         #[cfg(target_os = "linux")]
         CliDefinitionCommand::Maintenance(maintenance_args) if managed => {
             ParsedCommand::Maintenance {
@@ -342,6 +356,10 @@ impl TryFrom<CliDefinitionCommand> for CliCommand {
                     root: args.root,
                     output: args.output,
                 }),
+                BackupSubcommand::HubCheckpoint(_) => Err(CliParseError::validation(
+                    ErrorKind::InvalidSubcommand,
+                    "Hub checkpoint commands must be dispatched through shardline::run",
+                )),
             },
             CliDefinitionCommand::Storage(args) => match args.command {
                 StorageSubcommand::Migrate(args) => Ok(Self::StorageMigrate {

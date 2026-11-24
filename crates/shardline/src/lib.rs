@@ -76,7 +76,7 @@ pub use admin::{
 pub use artifact::{
     CliArtifactError, render_completion, render_manpage, render_xet_completion, render_xet_manpage,
 };
-pub use backup::{BackupRuntimeError, run_backup_manifest};
+pub use backup::{BackupRuntimeError, run_backup_manifest, run_hub_ref_state_checkpoint};
 pub use bench::{
     BenchConfig, BenchDeploymentTarget, BenchInventoryScope, BenchReport, BenchRuntimeError,
     BenchScenario, ByteMetrics, ChunkMetrics, IngestBenchReport, InventoryMetrics, LatencyMetrics,

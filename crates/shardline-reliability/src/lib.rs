@@ -12,6 +12,7 @@ mod error;
 mod event;
 mod event_metadata;
 mod hub_ref_archive;
+mod hub_state_checkpoint;
 mod lifecycle_log;
 mod lifecycle_profile;
 mod merkle;
@@ -65,6 +66,9 @@ pub use hub_ref_archive::{
     HubRefBatchArchiveAnchor, HubRefBatchArchiveCheckpointPin, HubRefBatchArchiveEvent,
     HubRefBatchArchiveRecordV1, HubRefBatchHead, HubRefBatchManifestReferenceV1,
     HubRefBatchSnapshot, MAX_HUB_REF_ARCHIVE_RECORD_BYTES, validate_hub_ref_archive_key_id,
+};
+pub use hub_state_checkpoint::{
+    HubRefStateCheckpointRecordV1, HubRefStateCheckpointV1, MAX_HUB_REF_STATE_CHECKPOINT_REFS,
 };
 pub use lifecycle_log::LifecycleEvidenceLog;
 pub use lifecycle_profile::{

@@ -1,10 +1,13 @@
 use super::PostgresIndexStore;
-use crate::hub::HubRefChange;
+use super::verify_hub_ref_evidence_batch;
+use crate::hub::{HubRef, HubRefChange};
 use crate::hub_recovery::{
     HubRecoveryError, HubRecoveryMode, HubRecoveryOutboxItem, HubRecoveryOutboxStore,
-    MAX_HUB_REF_EVENT_BYTES, build_hub_ref_batch_event, decode_hub_ref_event,
-    validate_mode_transition, validate_requested_mode,
+    MAX_HUB_REF_EVENT_BYTES, MAX_PENDING_REPOSITORY_PAGE, build_hub_ref_batch_event,
+    decode_hub_ref_event, make_checkpoint_source, validate_mode_transition,
+    validate_requested_mode,
 };
+use futures_util::TryStreamExt;
 use shardline_reliability::HubRefBatchManifestReferenceV1;
 use sqlx::{Postgres, Row, Transaction};
 
@@ -147,6 +150,154 @@ impl HubRecoveryOutboxStore for PostgresIndexStore {
         .fetch_all(self.pool())
         .await
         .map_err(|error| HubRecoveryError::Outbox(error.to_string()))
+    }
+
+    async fn hub_repositories_after(
+        &self,
+        cursor: Option<&str>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<String>, HubRecoveryError> {
+        if limit.get() > MAX_PENDING_REPOSITORY_PAGE {
+            return Err(HubRecoveryError::PageLimitExceeded);
+        }
+        let limit = i64::try_from(limit.get())
+            .map_err(|_conversion_error| HubRecoveryError::PageLimitExceeded)?;
+        sqlx::query_scalar(
+            "SELECT repo_id FROM shardline_hub_repos
+             WHERE ($1::text IS NULL OR repo_id > $1) ORDER BY repo_id LIMIT $2",
+        )
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))
+    }
+
+    async fn hub_ref_checkpoint_source(
+        &self,
+        repository_id: &str,
+    ) -> Result<crate::HubRefCheckpointSource, HubRecoveryError> {
+        let mut tx = self
+            .pool()
+            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .await
+            .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shardline_hub_repos WHERE repo_id = $1)",
+        )
+        .bind(repository_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+        if !exists {
+            return Err(HubRecoveryError::Outbox(
+                "Hub repository does not exist".into(),
+            ));
+        }
+        let config = sqlx::query(
+            "SELECT mode, deployment_id FROM shardline_hub_recovery_config WHERE singleton_id = 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+        let deployment_id = match config {
+            None => None,
+            Some(row) => {
+                let mode: String = row
+                    .try_get("mode")
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+                let deployment: Option<String> = row
+                    .try_get("deployment_id")
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+                match (mode.as_str(), deployment) {
+                    ("off", None) => None,
+                    ("shadow", Some(deployment)) => Some(deployment),
+                    _ => return Err(HubRecoveryError::InvalidCheckpointSource),
+                }
+            }
+        };
+        let limit = shardline_reliability::MAX_HUB_REF_STATE_CHECKPOINT_REFS
+            .checked_add(1)
+            .and_then(|limit| i64::try_from(limit).ok())
+            .ok_or(HubRecoveryError::InvalidCheckpointSource)?;
+        let mut refs = Vec::new();
+        {
+            let mut rows = sqlx::query(
+                "SELECT repo_id, ref_name, sha FROM shardline_hub_refs
+                 WHERE repo_id = $1 ORDER BY ref_name LIMIT $2",
+            )
+            .bind(repository_id)
+            .bind(limit)
+            .fetch(&mut *tx);
+            while let Some(row) = rows
+                .try_next()
+                .await
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?
+            {
+                refs.push(HubRef {
+                    repo_id: row
+                        .try_get("repo_id")
+                        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?,
+                    ref_name: row
+                        .try_get("ref_name")
+                        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?,
+                    sha: row
+                        .try_get("sha")
+                        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?,
+                });
+            }
+        }
+        if refs.len() > shardline_reliability::MAX_HUB_REF_STATE_CHECKPOINT_REFS {
+            return Err(HubRecoveryError::InvalidCheckpointSource);
+        }
+        verify_hub_ref_evidence_batch(&mut tx, &refs)
+            .await
+            .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+        let sequence = sqlx::query(
+            "SELECT last_sequence, last_archived_sequence
+             FROM shardline_hub_recovery_sequences WHERE repo_id = $1",
+        )
+        .bind(repository_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+        let (committed, archived) = if let Some(row) = sequence {
+            (
+                row.try_get::<i64, _>("last_sequence")
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?,
+                row.try_get::<i64, _>("last_archived_sequence")
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?,
+            )
+        } else {
+            (0, 0)
+        };
+        let digest = if archived == 0 {
+            None
+        } else {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT archive_digest FROM shardline_hub_recovery_outbox
+                 WHERE repo_id = $1 AND domain_sequence = $2
+                   AND archived_at_unix_seconds IS NOT NULL",
+            )
+            .bind(repository_id)
+            .bind(archived)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?
+            .flatten()
+        };
+        let source = make_checkpoint_source(
+            repository_id.to_owned(),
+            deployment_id,
+            refs,
+            committed,
+            archived,
+            digest,
+        )?;
+        tx.commit()
+            .await
+            .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+        Ok(source)
     }
 
     async fn set_hub_recovery_mode(

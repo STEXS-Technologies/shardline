@@ -3,8 +3,10 @@ use std::{
     path::Path,
 };
 
+use shardline_index::HubRefStateCheckpointArchiveObject;
 use shardline_server::{
     BackupManifestReport, ServerConfigError, ServerError,
+    create_hub_ref_state_checkpoint as write_hub_ref_state_checkpoint,
     write_backup_manifest as write_server_backup_manifest,
 };
 use thiserror::Error;
@@ -49,6 +51,19 @@ pub async fn run_backup_manifest(
     };
     output_file.commit()?;
     Ok(report)
+}
+
+/// Publishes one signed Hub state checkpoint using the active recovery archive.
+///
+/// # Errors
+/// Returns [`BackupRuntimeError`] when configuration loading, metadata
+/// certification, signing, object storage, or read-back verification fails.
+pub async fn run_hub_ref_state_checkpoint(
+    root: Option<&Path>,
+    repository_id: &str,
+) -> Result<HubRefStateCheckpointArchiveObject, BackupRuntimeError> {
+    let config = load_server_config(root, None)?;
+    Ok(write_hub_ref_state_checkpoint(&config, repository_id).await?)
 }
 
 #[cfg(test)]

@@ -87,6 +87,8 @@ mod fsck;
 mod fuzz;
 pub(crate) mod gc;
 mod gc_runtime;
+mod hub_checkpoint;
+mod hub_recovery_resources;
 mod hub_secret_upgrade;
 mod ingest_bench;
 mod jwks_provider;
@@ -199,6 +201,7 @@ pub use gc::{
     MINIMUM_GC_RETENTION_SECONDS,
 };
 pub use gc_runtime::{run_gc, run_gc_diagnostics};
+pub use hub_checkpoint::create_hub_ref_state_checkpoint;
 pub use ingest_bench::ingest_without_storage_with_parallelism;
 pub use lifecycle_repair::{
     DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairBoundary, LifecycleRepairOptions,
