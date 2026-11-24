@@ -20,7 +20,7 @@ async fn authenticated_ranges_on_real_minio_preserve_full_reads_and_member_integ
     let raw = services.s3_raw_config(None).unwrap();
     let proxy = S3FaultProxy::start_disarmed(
         raw.endpoint.as_deref().unwrap(),
-        S3ProxyFault::ServiceUnavailableOnce,
+        S3ProxyFault::ConditionalRangePreconditionFailedOnce,
     )
     .unwrap();
     let store = ServerObjectStore::s3(
@@ -147,6 +147,44 @@ async fn authenticated_ranges_on_real_minio_preserve_full_reads_and_member_integ
         "transport bytes still own admission"
     );
     drop(response_bytes);
+    assert_eq!(pool.available_buffer_permits(), 1);
+
+    // A provider 412 on the snapshot-bound footer GET must fail before a
+    // response stream is returned; a later read should work after the one-shot
+    // fault has been consumed.
+    proxy.arm();
+    let before = proxy.get_requests();
+    assert!(
+        crate::download_stream::authenticated_range::serialized_stream(
+            &store,
+            &terms[0].hash,
+            serialized_range,
+            None,
+            pool.clone(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(proxy.fault_was_injected());
+    assert_eq!(pool.available_buffer_permits(), 1);
+    assert_eq!(
+        proxy.get_requests() - before,
+        2,
+        "suffix GET and one conditional footer GET; no selected member GET after 412"
+    );
+    let (_, stream) = crate::download_stream::authenticated_range::serialized_stream(
+        &store,
+        &terms[0].hash,
+        serialized_range,
+        None,
+        pool.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let recovered = stream.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(recovered.concat(), serialized[..4096]);
+    drop(recovered);
     assert_eq!(pool.available_buffer_permits(), 1);
 
     let scope = RepositoryScope::new(
