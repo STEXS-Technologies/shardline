@@ -513,6 +513,11 @@ pub enum ServerConfigError {
         "unknown SHARDLINE_DEPLOYMENT_MODE value '{value}'; expected one of: insecure, authenticated, strict"
     )]
     InvalidDeploymentMode { value: String },
+    /// `SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES` must be explicitly true or false.
+    #[error(
+        "invalid SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES value '{value}'; expected true or false"
+    )]
+    InvalidSelectiveXorbRangeMode { value: String },
     /// Persistent secrets would be stored in plaintext in a production deployment mode.
     #[error(
         "production deployment mode requires at-rest secret encryption, but {surfaces}; \

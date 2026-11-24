@@ -1171,6 +1171,23 @@ impl ServerBackend {
         .await
     }
 
+    /// Attempts an authenticated serialized-byte range read for opt-in transfers.
+    pub(crate) async fn prepare_selective_xorb_range(
+        &self,
+        hash_hex: &str,
+        range: shardline_protocol::ByteRange,
+        coverage: Option<&crate::record_store::XorbRangeCoverage>,
+    ) -> Result<Option<(u64, ServerByteStream)>, ServerError> {
+        crate::download_stream::authenticated_range::serialized_stream(
+            &self.object_store(),
+            hash_hex,
+            range,
+            coverage,
+            self.stream_work_pool().clone(),
+        )
+        .await
+    }
+
     pub(crate) async fn read_dedupe_shard_stream(
         &self,
         hash_hex: &str,

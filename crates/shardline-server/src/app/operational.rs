@@ -313,6 +313,23 @@ pub(super) async fn read_xorb_transfer(
             return Err(ServerError::NotFound);
         }
     }
+    if state.config.selective_serialized_xorb_ranges()
+        && let Some(range) = closed_xorb_transfer_range(&headers)
+        && let Some((total_length, byte_stream)) = state
+            .backend
+            .prepare_selective_xorb_range(&hash, range, coverage.as_ref())
+            .await?
+    {
+        let transfer_bytes = range.len().ok_or(ServerError::Overflow)?;
+        metrics::record_xet_xorb_download(total_length);
+        return Ok(byte_range_stream_response(
+            byte_stream,
+            state.transfer_limiter.clone(),
+            range,
+            total_length,
+            transfer_bytes,
+        ));
+    }
     let verified = state
         .backend
         .prepare_xorb_range(&hash, expected_length)

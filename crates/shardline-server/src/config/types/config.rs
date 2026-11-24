@@ -153,6 +153,7 @@ pub struct ServerConfig {
     pub(crate) s3_signing_identities: Vec<super::S3SigningIdentity>,
     pub(crate) max_request_body_bytes: NonZeroUsize,
     pub(crate) max_xorb_body_bytes: NonZeroUsize,
+    pub(crate) selective_serialized_xorb_ranges: bool,
     pub(crate) shard_metadata_limits: ShardMetadataLimits,
     pub(crate) chunk_size: NonZeroUsize,
     pub(crate) upload_max_in_flight_chunks: NonZeroUsize,
@@ -231,6 +232,7 @@ impl ServerConfig {
             s3_signing_identities: Vec::new(),
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             max_xorb_body_bytes: super::DEFAULT_MAX_XORB_BODY_BYTES,
+            selective_serialized_xorb_ranges: false,
             shard_metadata_limits: DEFAULT_SHARD_METADATA_LIMITS,
             chunk_size,
             upload_max_in_flight_chunks: default_upload_max_in_flight_chunks(),
@@ -359,6 +361,13 @@ impl ServerConfig {
         self.max_xorb_body_bytes
     }
 
+    /// Whether native serialized-Xorb ranges may use authenticated selected-member reads.
+    /// Full-container verification remains the default.
+    #[must_use]
+    pub const fn selective_serialized_xorb_ranges(&self) -> bool {
+        self.selective_serialized_xorb_ranges
+    }
+
     /// Returns the bounded-parser limits for native Xet shard metadata.
     #[must_use]
     pub const fn shard_metadata_limits(&self) -> ShardMetadataLimits {
@@ -481,6 +490,13 @@ impl ServerConfig {
     #[must_use]
     pub const fn with_max_xorb_body_bytes(mut self, limit: NonZeroUsize) -> Self {
         self.max_xorb_body_bytes = limit;
+        self
+    }
+
+    /// Enables the opt-in selected-member native Xorb range path.
+    #[must_use]
+    pub const fn with_selective_serialized_xorb_ranges(mut self, enabled: bool) -> Self {
+        self.selective_serialized_xorb_ranges = enabled;
         self
     }
 

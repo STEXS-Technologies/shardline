@@ -107,6 +107,14 @@ impl TestServer {
         frontends: &[ServerFrontend],
         object_storage: S3ObjectStoreConfig,
     ) -> Self {
+        Self::start_with_s3_config_mode(frontends, object_storage, false).await
+    }
+
+    async fn start_with_s3_config_mode(
+        frontends: &[ServerFrontend],
+        object_storage: S3ObjectStoreConfig,
+        selective_serialized_ranges: bool,
+    ) -> Self {
         let tmp = TempDir::new().unwrap();
         let chunk_size = NonZeroUsize::new(65536).unwrap();
 
@@ -125,7 +133,8 @@ impl TestServer {
         .with_reconstruction_cache_disabled()
         .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())
         .unwrap()
-        .with_object_storage(ObjectStorageAdapter::S3, Some(object_storage));
+        .with_object_storage(ObjectStorageAdapter::S3, Some(object_storage))
+        .with_selective_serialized_xorb_ranges(selective_serialized_ranges);
 
         config.validate_runtime_requirements().unwrap();
 
@@ -178,6 +187,21 @@ impl TestServer {
     }
 }
 
+fn s3_config_through_proxy(
+    raw: shardline_test_support::S3RawConfig,
+    proxy: &S3FaultProxy,
+) -> S3ObjectStoreConfig {
+    S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(Some(proxy.endpoint().to_owned()))
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_s3_xorb_read_is_rejected_before_transfer_bytes_are_exposed() {
     let key_prefix = ensure_minio().await;
@@ -205,15 +229,7 @@ async fn stale_s3_xorb_read_is_rejected_before_transfer_bytes_are_exposed() {
         S3ProxyFault::ReplaceSuccessfulGetBody(Arc::from(stale_xorb.as_ref())),
     )
     .expect("start stale-read proxy");
-    let object_storage = S3ObjectStoreConfig::new(raw.bucket, raw.region)
-        .with_endpoint(Some(proxy.endpoint().to_owned()))
-        .with_credentials(
-            raw.access_key.map(SecretString::new),
-            raw.secret_key.map(SecretString::new),
-            raw.session_token.map(SecretString::new),
-        )
-        .with_key_prefix(raw.key_prefix.as_deref())
-        .with_allow_http(raw.allow_http);
+    let object_storage = s3_config_through_proxy(raw, &proxy);
     let server = TestServer::start_with_s3_config(&[ServerFrontend::Xet], object_storage).await;
     let client = reqwest::Client::new();
     let transfer_url = server.url(&format!("/transfer/xorb/default/{current_hash}"));
@@ -264,6 +280,80 @@ async fn stale_s3_xorb_read_is_rejected_before_transfer_bytes_are_exposed() {
     assert_eq!(recovered.status(), 206);
     let recovered_bytes = recovered.bytes().await.expect("recovered range body");
     assert_eq!(recovered_bytes.as_ref(), &current_xorb[..4096]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opt_in_s3_xorb_range_authenticates_scope_before_provider_payload_reads() {
+    let key_prefix = ensure_minio().await;
+    let raw = MINIO
+        .get()
+        .expect("MinIO initialized")
+        .0
+        .s3_raw_config(Some(key_prefix))
+        .expect("MinIO S3 config");
+    let provider_endpoint = raw.endpoint.clone().expect("MinIO HTTP endpoint");
+    let proxy =
+        S3FaultProxy::start_disarmed(&provider_endpoint, S3ProxyFault::ServiceUnavailableOnce)
+            .expect("start counted provider proxy");
+    let object_storage = s3_config_through_proxy(raw, &proxy);
+    let server =
+        TestServer::start_with_s3_config_mode(&[ServerFrontend::Xet], object_storage, true).await;
+    let client = reqwest::Client::new();
+    let (serialized, hash) = test_fixtures::single_chunk_xorb(&vec![0x31_u8; 64 * 1024]);
+    let transfer_url = server.url(&format!("/transfer/xorb/default/{hash}"));
+    let upload = client
+        .put(&transfer_url)
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .body(serialized.clone())
+        .send()
+        .await
+        .expect("upload Xorb");
+    assert_eq!(upload.status(), 200);
+    let (shard_bytes, _file_id) =
+        test_fixtures::single_file_shard(&[(&vec![0x31_u8; 64 * 1024], &hash)]);
+    let shard = client
+        .post(server.url("/v1/shards"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(shard_bytes)
+        .send()
+        .await
+        .expect("publish repository membership");
+    assert_eq!(shard.status(), 200);
+
+    let before = proxy.get_requests();
+    let response = client
+        .get(&transfer_url)
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Range", "bytes=0-4095")
+        .send()
+        .await
+        .expect("selective Xorb range");
+    assert_eq!(response.status(), 206);
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        &serialized[..4096]
+    );
+    assert!(
+        proxy.get_requests() - before >= 3,
+        "opt-in range should perform suffix, footer, and selected-member GETs"
+    );
+
+    let outsider = server.auth_header_for("outsider", "repo");
+    let before_denied = proxy.get_requests();
+    let denied = client
+        .get(&transfer_url)
+        .header("Authorization", format!("Bearer {outsider}"))
+        .header("Range", "bytes=0-4095")
+        .send()
+        .await
+        .expect("out-of-scope request rejection");
+    assert_eq!(denied.status(), 404);
+    assert_eq!(
+        proxy.get_requests(),
+        before_denied,
+        "scope denial makes no provider GET"
+    );
 }
 
 impl Drop for TestServer {

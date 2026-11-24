@@ -1,6 +1,7 @@
 //! Real provider qualification for authenticated member reads and legacy fallback.
 use super::*;
-use shardline_protocol::SecretString;
+use futures_util::{StreamExt, TryStreamExt};
+use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretString};
 use shardline_storage::S3ObjectStoreConfig;
 use shardline_test_support::{DockerLocalStack, S3FaultProxy, S3ProxyFault};
 
@@ -76,6 +77,159 @@ async fn authenticated_ranges_on_real_minio_preserve_full_reads_and_member_integ
             "range offset={start} logical_bytes=4096 full_backend_bytes={full_bytes} partial_backend_bytes={partial_bytes} full_gets=1 partial_gets=3"
         );
     }
+
+    let key = crate::xet_adapter::xorb_object_key(&terms[0].hash).unwrap();
+    let serialized_length = store.metadata(&key).unwrap().unwrap().length();
+    let serialized = store
+        .read_range(&key, ByteRange::new(0, serialized_length - 1).unwrap())
+        .unwrap();
+    for range in [
+        ByteRange::new(terms[0].packed_end - 1, terms[0].packed_end + 7).unwrap(),
+        ByteRange::new(terms.last().unwrap().packed_end, serialized_length - 1).unwrap(),
+    ] {
+        let (_, stream) = crate::download_stream::authenticated_range::serialized_stream(
+            &store,
+            &terms[0].hash,
+            range,
+            None,
+            ExecutionPools::default_sizes().blocking_io,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+        let observed = chunks.into_iter().flatten().collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            serialized[range.start() as usize..=range.end_inclusive() as usize]
+        );
+    }
+    let serialized_range = ByteRange::new(0, 4095).unwrap();
+    let pool = crate::admission::BoundedPool::new(std::num::NonZeroUsize::MIN);
+    let before = proxy.get_requests();
+    let before_bytes = proxy.get_response_bytes();
+    let (observed_length, mut response) =
+        crate::download_stream::authenticated_range::serialized_stream(
+            &store,
+            &terms[0].hash,
+            serialized_range,
+            None,
+            pool.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed_length, serialized_length);
+    let response_bytes = response.next().await.unwrap().unwrap();
+    assert_eq!(response_bytes.as_ref(), &serialized[..4096]);
+    assert_eq!(
+        pool.available_buffer_permits(),
+        0,
+        "response retains buffer admission"
+    );
+    let serialized_gets = proxy.get_requests() - before;
+    let serialized_backend_bytes = proxy.get_response_bytes() - before_bytes;
+    assert!(
+        serialized_gets >= 3,
+        "suffix, footer, and selected member GETs"
+    );
+    assert!(
+        u64::try_from(serialized_backend_bytes).unwrap() < serialized_length / 10,
+        "4 KiB serialized range read {serialized_backend_bytes} of {serialized_length} source bytes"
+    );
+    eprintln!(
+        "native serialized range bytes=4096 source_bytes={serialized_length} backend_bytes={serialized_backend_bytes} gets={serialized_gets}"
+    );
+    drop(response);
+    assert_eq!(
+        pool.available_buffer_permits(),
+        0,
+        "transport bytes still own admission"
+    );
+    drop(response_bytes);
+    assert_eq!(pool.available_buffer_permits(), 1);
+
+    let scope = RepositoryScope::new(
+        RepositoryProvider::GitHub,
+        "range-layout",
+        "repo",
+        Some("main"),
+    )
+    .unwrap();
+    let mut alternative_record = file(terms.clone());
+    alternative_record.repository_scope = Some(scope.clone());
+    alternative_record.chunks[0].packed_end -= 1;
+    let coverage = crate::record_store::XorbRangeCoverage::from_file_record_members(
+        &alternative_record,
+        &scope,
+        &terms[0].hash,
+    )
+    .unwrap();
+    assert!(coverage.covers(serialized_range));
+    let before = proxy.get_requests();
+    assert!(
+        crate::download_stream::authenticated_range::serialized_stream(
+            &store,
+            &terms[0].hash,
+            serialized_range,
+            Some(&coverage),
+            pool.clone(),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        proxy.get_requests() - before,
+        2,
+        "layout mismatch may read suffix/footer but cannot fetch the selected member"
+    );
+
+    // A tiny range still requires fetching its complete intersecting member.
+    // The opt-in planner must cap those provider bytes before issuing that GET.
+    let mut large_seed = 4_982_731_u64;
+    let oversized_payload: Vec<u8> = (0..8 * 1024 * 1024)
+        .map(|_| {
+            large_seed ^= large_seed << 13;
+            large_seed ^= large_seed >> 7;
+            large_seed ^= large_seed << 17;
+            large_seed as u8
+        })
+        .collect();
+    let oversized_terms = container(&store, &[&oversized_payload]).await;
+    let oversized_member_bytes = oversized_terms[0].packed_end - oversized_terms[0].packed_start;
+    assert!(oversized_member_bytes > 8 * 1024 * 1024);
+    let oversized_key = crate::xet_adapter::xorb_object_key(&oversized_terms[0].hash).unwrap();
+    let oversized_length = store.metadata(&oversized_key).unwrap().unwrap().length();
+    let before = proxy.get_requests();
+    let before_bytes = proxy.get_response_bytes();
+    assert!(
+        crate::download_stream::authenticated_range::serialized_stream(
+            &store,
+            &oversized_terms[0].hash,
+            ByteRange::new(0, 4095).unwrap(),
+            None,
+            pool.clone(),
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "planner falls back when the complete selected member exceeds its packed-byte budget"
+    );
+    assert_eq!(
+        proxy.get_requests() - before,
+        2,
+        "budget rejection must happen before the selected member GET"
+    );
+    assert!(
+        proxy.get_response_bytes() - before_bytes < oversized_member_bytes as usize,
+        "only suffix/footer bytes are read before strict fallback"
+    );
+    assert!(oversized_length > oversized_member_bytes);
+    eprintln!(
+        "oversized member fallback decoded_bytes={} packed_member_bytes={oversized_member_bytes} gets=2",
+        oversized_payload.len()
+    );
+
     qualify_idle_reader(&store, &record, &payload[..4096]).await;
     let reordered = file(vec![terms[63].clone(), terms[0].clone(), terms[63].clone()]);
     // This small logical file intentionally retains the legacy one-GET policy.
@@ -102,6 +256,44 @@ async fn authenticated_ranges_on_real_minio_preserve_full_reads_and_member_integ
             &ObjectIntegrity::new(crate::local_backend::chunk_hash(&encoded), length),
         )
         .unwrap();
+    let (observed_length, stream) = crate::download_stream::authenticated_range::serialized_stream(
+        &store,
+        &terms[0].hash,
+        ByteRange::new(0, 4095).unwrap(),
+        None,
+        pool.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(observed_length, length);
+    let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(
+        chunks.into_iter().flatten().collect::<Vec<_>>(),
+        serialized[..4096]
+    );
+    assert!(
+        crate::download_stream::authenticated_range::serialized_stream(
+            &store,
+            &terms[0].hash,
+            ByteRange::new(tail as u64, tail as u64).unwrap(),
+            None,
+            pool.clone(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::download_stream::prepare_xorb_byte_range(
+            &store,
+            &key,
+            &terms[0].hash,
+            Some(length),
+            pool.clone(),
+        )
+        .await
+        .is_err()
+    );
     assert_eq!(
         collect(&store, &record, Some(ByteRange::new(0, 4095).unwrap()))
             .await
@@ -133,6 +325,17 @@ async fn authenticated_ranges_on_real_minio_preserve_full_reads_and_member_integ
             &ObjectIntegrity::new(crate::local_backend::chunk_hash(&encoded), length),
         )
         .unwrap();
+    assert!(
+        crate::download_stream::authenticated_range::serialized_stream(
+            &store,
+            &terms[0].hash,
+            ByteRange::new(0, 7).unwrap(),
+            None,
+            pool,
+        )
+        .await
+        .is_err()
+    );
     assert!(
         file_record_byte_stream(
             store,

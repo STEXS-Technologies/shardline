@@ -32,6 +32,9 @@ pub struct ServerSection {
     pub root_dir: Option<String>,
     pub max_request_body_bytes: Option<u64>,
     pub max_xorb_body_bytes: Option<u64>,
+    /// Opts native serialized-Xorb ranges into selected-member verification.
+    /// Omitted means strict whole-container verification.
+    pub selective_serialized_xorb_ranges: Option<bool>,
     pub chunk_size: Option<String>,
     pub chunk_size_bytes: Option<u64>,
     pub upload_max_in_flight_chunks: Option<u64>,

@@ -2,6 +2,20 @@
 use super::*;
 use object_store::GetRange;
 
+fn is_strong_entity_tag(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2
+        && bytes.first() == Some(&b'"')
+        && bytes.last() == Some(&b'"')
+        && bytes
+            .get(1..bytes.len().saturating_sub(1))
+            .is_some_and(|opaque| {
+                opaque
+                    .iter()
+                    .all(|byte| matches!(*byte, 0x21 | 0x23..=0x7e | 0x80..=0xff))
+            })
+}
+
 /// A generation-bound source for several authenticated range reads.
 ///
 /// This pins provider identity and length, not content integrity. Callers must
@@ -78,7 +92,7 @@ impl S3ObjectStore {
             .meta
             .e_tag
             .as_ref()
-            .filter(|etag| !etag.is_empty() && !etag.starts_with("W/"))
+            .filter(|etag| is_strong_entity_tag(etag))
             .ok_or(S3ObjectStoreError::SnapshotIdentityUnavailable)?
             .clone();
         let snapshot = S3RangeSnapshot {
@@ -140,5 +154,26 @@ impl S3ObjectStore {
             Err(error) => return Err(S3ObjectStoreError::External(error)),
         };
         Ok(Some(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn strong_entity_tag_requires_a_quoted_non_wildcard_opaque_tag() {
+        for valid in ["\"etag\"", "\"multipart-1-3\"", "\"\""] {
+            assert!(super::is_strong_entity_tag(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "etag",
+            "*",
+            "W/\"weak\"",
+            "\"unterminated",
+            "\"a\"b\"",
+            "\"bad\nvalue\"",
+        ] {
+            assert!(!super::is_strong_entity_tag(invalid), "{invalid:?}");
+        }
     }
 }

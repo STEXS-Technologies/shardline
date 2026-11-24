@@ -72,6 +72,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         ServerConfigError::ZeroMaxRequestBodyBytes,
     )?;
     let max_xorb_body_bytes = max_xorb_body_bytes_from_env(max_request_body_bytes)?;
+    let selective_serialized_xorb_ranges = selective_serialized_xorb_ranges_from_env()?;
     let shard_metadata_limits = ShardMetadataLimits::new(
         load_non_zero_usize_env(
             "SHARDLINE_MAX_SHARD_FILES",
@@ -376,6 +377,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_object_storage(object_storage_adapter, s3_object_store_config)
         .with_max_request_body_bytes(max_request_body_bytes)
         .with_max_xorb_body_bytes(max_xorb_body_bytes)
+        .with_selective_serialized_xorb_ranges(selective_serialized_xorb_ranges)
         .with_shard_metadata_limits(shard_metadata_limits)
         .with_upload_max_in_flight_chunks(upload_max_in_flight_chunks)
         .with_transfer_max_in_flight_chunks(transfer_max_in_flight_chunks)
@@ -593,6 +595,15 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     )?;
 
     Ok(config)
+}
+
+fn selective_serialized_xorb_ranges_from_env() -> Result<bool, ServerConfigError> {
+    match var("SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES") {
+        Err(_) => Ok(false),
+        Ok(value) if value.eq_ignore_ascii_case("true") => Ok(true),
+        Ok(value) if value.eq_ignore_ascii_case("false") => Ok(false),
+        Ok(value) => Err(ServerConfigError::InvalidSelectiveXorbRangeMode { value }),
+    }
 }
 
 /// Loads a bounded pool size, warning and falling back to `default` for zero,
@@ -824,6 +835,10 @@ pub fn load_server_config_from_env_with_toml(
         set_if_unset(
             "SHARDLINE_MAX_XORB_BODY_BYTES",
             srv.max_xorb_body_bytes.map(|v| v.to_string()),
+        );
+        set_if_unset(
+            "SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES",
+            srv.selective_serialized_xorb_ranges.map(|v| v.to_string()),
         );
         set_if_unset(
             "SHARDLINE_CHUNK_SIZE_BYTES",
@@ -1353,6 +1368,22 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             Err(super::ServerConfigError::InvalidDeploymentMode { .. })
         ));
         remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
+    }
+
+    #[test]
+    fn selective_serialized_xorb_ranges_requires_explicit_boolean() {
+        remove_env_var("SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES");
+        assert!(!super::selective_serialized_xorb_ranges_from_env().unwrap());
+        set_env_var("SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES", "true");
+        assert!(super::selective_serialized_xorb_ranges_from_env().unwrap());
+        set_env_var("SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES", "FALSE");
+        assert!(!super::selective_serialized_xorb_ranges_from_env().unwrap());
+        set_env_var("SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES", "yes");
+        assert!(matches!(
+            super::selective_serialized_xorb_ranges_from_env(),
+            Err(super::ServerConfigError::InvalidSelectiveXorbRangeMode { .. })
+        ));
+        remove_env_var("SHARDLINE_SELECTIVE_SERIALIZED_XORB_RANGES");
     }
 
     // ── parse_server_frontends_env ─────────────────────────────────────────

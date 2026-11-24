@@ -167,6 +167,13 @@ fn server_config_new_constructs_with_defaults() {
     assert_eq!(config.server_role, ServerRole::All);
     assert_eq!(config.server_frontends, vec![ServerFrontend::Xet]);
     assert_eq!(config.object_storage_adapter, ObjectStorageAdapter::Local);
+    assert!(!config.selective_serialized_xorb_ranges());
+    assert!(
+        config
+            .clone()
+            .with_selective_serialized_xorb_ranges(true)
+            .selective_serialized_xorb_ranges()
+    );
     assert!(config.s3_object_store_config.is_none());
     assert_eq!(config.chunk_size, NonZeroUsize::new(4096).unwrap());
     assert_eq!(
