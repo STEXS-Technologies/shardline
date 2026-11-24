@@ -130,123 +130,6 @@ async fn test_app_for_frontends_with_role(
 
     for frontend in frontends {
         match frontend {
-            ServerFrontend::Xet => {
-                if state.role.serves_api() {
-                    app = app
-                        .route(
-                            "/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction),
-                        )
-                        .route(
-                            "/v1/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction)
-                                .post(super::reconstruction_routes::batch_reconstruction_post),
-                        )
-                        .route(
-                            "/v1/reconstructions/{file_id}",
-                            get(super::reconstruction_routes::reconstruction),
-                        )
-                        .route(
-                            "/v2/reconstructions/{file_id}",
-                            get(super::reconstruction_routes::reconstruction_v2),
-                        )
-                        .route("/shards", post(super::operational::upload_shard))
-                        .route("/v1/shards", post(super::operational::upload_shard));
-                }
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/chunks/default/{hash}",
-                            get(super::operational::read_chunk),
-                        )
-                        .route(
-                            "/v1/chunks/default-merkledb/{hash}",
-                            get(super::operational::read_chunk),
-                        )
-                        .route(
-                            "/v1/xorbs/default/{hash}",
-                            head(super::operational::head_xorb)
-                                .post(super::operational::upload_xorb),
-                        )
-                        .route(
-                            "/transfer/xorb/{prefix}/{hash}",
-                            get(super::operational::read_xorb_transfer)
-                                .put(super::operational::write_xorb_transfer),
-                        );
-                }
-            }
-            ServerFrontend::Lfs => {
-                if state.role.serves_api() {
-                    app = app.route(
-                        "/v1/lfs/objects/batch",
-                        post(super::protocol_routes::lfs_batch),
-                    );
-                }
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/lfs/objects/{oid}",
-                            get(super::protocol_routes::lfs_get_object)
-                                .head(super::protocol_routes::lfs_head_object)
-                                .put(super::protocol_routes::lfs_put_object)
-                                .patch(super::protocol_routes::lfs_patch_object)
-                                .delete(super::protocol_routes::lfs_delete_object),
-                        )
-                        .route(
-                            "/v1/lfs/objects/{oid}/verify",
-                            post(super::protocol_routes::lfs_verify_object),
-                        );
-                }
-            }
-            ServerFrontend::BazelHttp => {
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/bazel/cache/ac/{hash}",
-                            get(super::protocol_routes::bazel_get_ac)
-                                .put(super::protocol_routes::bazel_put_ac)
-                                .head(super::protocol_routes::bazel_head_ac),
-                        )
-                        .route(
-                            "/v1/bazel/cache/cas/{hash}",
-                            get(super::protocol_routes::bazel_get_cas)
-                                .put(super::protocol_routes::bazel_put_cas)
-                                .head(super::protocol_routes::bazel_head_cas),
-                        )
-                        .route(
-                            "/v1/bazel/{hash}",
-                            get(super::protocol_routes::bazel_get)
-                                .put(super::protocol_routes::bazel_put)
-                                .head(super::protocol_routes::bazel_head),
-                        );
-                }
-            }
-            ServerFrontend::Oci => match role {
-                ServerRole::All => {
-                    app = app
-                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                        .route(
-                            "/v2/{*path}",
-                            axum::routing::any(super::protocol_routes::oci_dispatch),
-                        );
-                }
-                ServerRole::Api => {
-                    app = app
-                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                        .route(
-                            "/v2/{*path}",
-                            axum::routing::any(super::protocol_routes::oci_api_dispatch),
-                        );
-                }
-                ServerRole::Transfer => {
-                    app = app.route(
-                        "/v2/{*path}",
-                        axum::routing::any(super::protocol_routes::oci_transfer_dispatch),
-                    );
-                }
-            },
             ServerFrontend::S3 => {
                 if state.role.serves_api() {
                     app = app
@@ -270,6 +153,12 @@ async fn test_app_for_frontends_with_role(
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path(), None).await);
             }
+            ServerFrontend::Xet
+            | ServerFrontend::Lfs
+            | ServerFrontend::BazelHttp
+            | ServerFrontend::Oci => {
+                app = shared_test_protocol_routes(app, *frontend, state.role);
+            }
         }
     }
 
@@ -285,6 +174,135 @@ async fn test_app_for_frontends_with_role(
     };
 
     (app, tmp)
+}
+
+/// Route setup shared by the plain, authenticated and provider-token fixtures.
+fn shared_test_protocol_routes(
+    mut app: Router<Arc<AppState>>,
+    frontend: ServerFrontend,
+    role: ServerRole,
+) -> Router<Arc<AppState>> {
+    match frontend {
+        ServerFrontend::Xet => {
+            if role.serves_api() {
+                app = app
+                    .route(
+                        "/reconstructions",
+                        get(super::reconstruction_routes::batch_reconstruction),
+                    )
+                    .route(
+                        "/v1/reconstructions",
+                        get(super::reconstruction_routes::batch_reconstruction)
+                            .post(super::reconstruction_routes::batch_reconstruction_post),
+                    )
+                    .route(
+                        "/v1/reconstructions/{file_id}",
+                        get(super::reconstruction_routes::reconstruction),
+                    )
+                    .route(
+                        "/v2/reconstructions/{file_id}",
+                        get(super::reconstruction_routes::reconstruction_v2),
+                    )
+                    .route("/shards", post(super::operational::upload_shard))
+                    .route("/v1/shards", post(super::operational::upload_shard));
+            }
+            if role.serves_transfer() {
+                app = app
+                    .route(
+                        "/v1/chunks/default/{hash}",
+                        get(super::operational::read_chunk),
+                    )
+                    .route(
+                        "/v1/chunks/default-merkledb/{hash}",
+                        get(super::operational::read_chunk),
+                    )
+                    .route(
+                        "/v1/xorbs/default/{hash}",
+                        head(super::operational::head_xorb).post(super::operational::upload_xorb),
+                    )
+                    .route(
+                        "/transfer/xorb/{prefix}/{hash}",
+                        get(super::operational::read_xorb_transfer)
+                            .put(super::operational::write_xorb_transfer),
+                    );
+            }
+        }
+        ServerFrontend::Lfs => {
+            if role.serves_api() {
+                app = app.route(
+                    "/v1/lfs/objects/batch",
+                    post(super::protocol_routes::lfs_batch),
+                );
+            }
+            if role.serves_transfer() {
+                app = app
+                    .route(
+                        "/v1/lfs/objects/{oid}",
+                        get(super::protocol_routes::lfs_get_object)
+                            .head(super::protocol_routes::lfs_head_object)
+                            .put(super::protocol_routes::lfs_put_object)
+                            .patch(super::protocol_routes::lfs_patch_object)
+                            .delete(super::protocol_routes::lfs_delete_object),
+                    )
+                    .route(
+                        "/v1/lfs/objects/{oid}/verify",
+                        post(super::protocol_routes::lfs_verify_object),
+                    );
+            }
+        }
+        ServerFrontend::BazelHttp => {
+            if role.serves_transfer() {
+                app = app
+                    .route(
+                        "/v1/bazel/cache/ac/{hash}",
+                        get(super::protocol_routes::bazel_get_ac)
+                            .put(super::protocol_routes::bazel_put_ac)
+                            .head(super::protocol_routes::bazel_head_ac),
+                    )
+                    .route(
+                        "/v1/bazel/cache/cas/{hash}",
+                        get(super::protocol_routes::bazel_get_cas)
+                            .put(super::protocol_routes::bazel_put_cas)
+                            .head(super::protocol_routes::bazel_head_cas),
+                    )
+                    .route(
+                        "/v1/bazel/{hash}",
+                        get(super::protocol_routes::bazel_get)
+                            .put(super::protocol_routes::bazel_put)
+                            .head(super::protocol_routes::bazel_head),
+                    );
+            }
+        }
+        ServerFrontend::Oci => match role {
+            ServerRole::All => {
+                app = app
+                    .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                    .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                    .route(
+                        "/v2/{*path}",
+                        axum::routing::any(super::protocol_routes::oci_dispatch),
+                    );
+            }
+            ServerRole::Api => {
+                app = app
+                    .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                    .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                    .route(
+                        "/v2/{*path}",
+                        axum::routing::any(super::protocol_routes::oci_api_dispatch),
+                    );
+            }
+            ServerRole::Transfer => {
+                app = app.route(
+                    "/v2/{*path}",
+                    axum::routing::any(super::protocol_routes::oci_transfer_dispatch),
+                );
+            }
+        },
+        // These frontends have fixture-specific routing.
+        ServerFrontend::S3 | ServerFrontend::Hub => {}
+    }
+    app
 }
 
 /// Builds a [`HubState`] backed by a temporary SQLite database for E2E tests.
@@ -383,123 +401,6 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
 
     for frontend in frontends {
         match frontend {
-            ServerFrontend::Xet => {
-                if state.role.serves_api() {
-                    app = app
-                        .route(
-                            "/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction),
-                        )
-                        .route(
-                            "/v1/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction)
-                                .post(super::reconstruction_routes::batch_reconstruction_post),
-                        )
-                        .route(
-                            "/v1/reconstructions/{file_id}",
-                            get(super::reconstruction_routes::reconstruction),
-                        )
-                        .route(
-                            "/v2/reconstructions/{file_id}",
-                            get(super::reconstruction_routes::reconstruction_v2),
-                        )
-                        .route("/shards", post(super::operational::upload_shard))
-                        .route("/v1/shards", post(super::operational::upload_shard));
-                }
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/chunks/default/{hash}",
-                            get(super::operational::read_chunk),
-                        )
-                        .route(
-                            "/v1/chunks/default-merkledb/{hash}",
-                            get(super::operational::read_chunk),
-                        )
-                        .route(
-                            "/v1/xorbs/default/{hash}",
-                            head(super::operational::head_xorb)
-                                .post(super::operational::upload_xorb),
-                        )
-                        .route(
-                            "/transfer/xorb/{prefix}/{hash}",
-                            get(super::operational::read_xorb_transfer)
-                                .put(super::operational::write_xorb_transfer),
-                        );
-                }
-            }
-            ServerFrontend::Lfs => {
-                if state.role.serves_api() {
-                    app = app.route(
-                        "/v1/lfs/objects/batch",
-                        post(super::protocol_routes::lfs_batch),
-                    );
-                }
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/lfs/objects/{oid}",
-                            get(super::protocol_routes::lfs_get_object)
-                                .head(super::protocol_routes::lfs_head_object)
-                                .put(super::protocol_routes::lfs_put_object)
-                                .patch(super::protocol_routes::lfs_patch_object)
-                                .delete(super::protocol_routes::lfs_delete_object),
-                        )
-                        .route(
-                            "/v1/lfs/objects/{oid}/verify",
-                            post(super::protocol_routes::lfs_verify_object),
-                        );
-                }
-            }
-            ServerFrontend::BazelHttp => {
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/bazel/cache/ac/{hash}",
-                            get(super::protocol_routes::bazel_get_ac)
-                                .put(super::protocol_routes::bazel_put_ac)
-                                .head(super::protocol_routes::bazel_head_ac),
-                        )
-                        .route(
-                            "/v1/bazel/cache/cas/{hash}",
-                            get(super::protocol_routes::bazel_get_cas)
-                                .put(super::protocol_routes::bazel_put_cas)
-                                .head(super::protocol_routes::bazel_head_cas),
-                        )
-                        .route(
-                            "/v1/bazel/{hash}",
-                            get(super::protocol_routes::bazel_get)
-                                .put(super::protocol_routes::bazel_put)
-                                .head(super::protocol_routes::bazel_head),
-                        );
-                }
-            }
-            ServerFrontend::Oci => match state.role {
-                ServerRole::All => {
-                    app = app
-                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                        .route(
-                            "/v2/{*path}",
-                            axum::routing::any(super::protocol_routes::oci_dispatch),
-                        );
-                }
-                ServerRole::Api => {
-                    app = app
-                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                        .route(
-                            "/v2/{*path}",
-                            axum::routing::any(super::protocol_routes::oci_api_dispatch),
-                        );
-                }
-                ServerRole::Transfer => {
-                    app = app.route(
-                        "/v2/{*path}",
-                        axum::routing::any(super::protocol_routes::oci_transfer_dispatch),
-                    );
-                }
-            },
             ServerFrontend::S3 => {
                 if state.role.serves_api() {
                     app = app
@@ -526,6 +427,12 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                     .as_ref()
                     .map(|auth| shardline_hub_api::auth::HubAuth::from_arc(auth.provider_arc()));
                 hub_state = Some(build_test_hub_state(tmp.path(), auth).await);
+            }
+            ServerFrontend::Xet
+            | ServerFrontend::Lfs
+            | ServerFrontend::BazelHttp
+            | ServerFrontend::Oci => {
+                app = shared_test_protocol_routes(app, *frontend, state.role);
             }
         }
     }
@@ -662,131 +569,6 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
 
     for frontend in frontends {
         match frontend {
-            ServerFrontend::Xet => {
-                if state.role.serves_api() {
-                    app = app
-                        .route(
-                            "/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction),
-                        )
-                        .route(
-                            "/v1/reconstructions",
-                            get(super::reconstruction_routes::batch_reconstruction)
-                                .post(super::reconstruction_routes::batch_reconstruction_post),
-                        )
-                        .route(
-                            "/v1/reconstructions/{file_id}",
-                            get(super::reconstruction_routes::reconstruction),
-                        )
-                        .route(
-                            "/v2/reconstructions/{file_id}",
-                            get(super::reconstruction_routes::reconstruction_v2),
-                        )
-                        .route("/shards", post(super::operational::upload_shard))
-                        .route("/v1/shards", post(super::operational::upload_shard))
-                        .route(
-                            XET_READ_TOKEN_ROUTE,
-                            get(super::provider_routes::issue_xet_read_token),
-                        )
-                        .route(
-                            XET_WRITE_TOKEN_ROUTE,
-                            get(super::provider_routes::issue_xet_write_token),
-                        );
-                }
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/chunks/default/{hash}",
-                            get(super::operational::read_chunk),
-                        )
-                        .route(
-                            "/v1/chunks/default-merkledb/{hash}",
-                            get(super::operational::read_chunk),
-                        )
-                        .route(
-                            "/v1/xorbs/default/{hash}",
-                            head(super::operational::head_xorb)
-                                .post(super::operational::upload_xorb),
-                        )
-                        .route(
-                            "/transfer/xorb/{prefix}/{hash}",
-                            get(super::operational::read_xorb_transfer)
-                                .put(super::operational::write_xorb_transfer),
-                        );
-                }
-            }
-            ServerFrontend::Lfs => {
-                if state.role.serves_api() {
-                    app = app.route(
-                        "/v1/lfs/objects/batch",
-                        post(super::protocol_routes::lfs_batch),
-                    );
-                }
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/lfs/objects/{oid}",
-                            get(super::protocol_routes::lfs_get_object)
-                                .head(super::protocol_routes::lfs_head_object)
-                                .put(super::protocol_routes::lfs_put_object)
-                                .patch(super::protocol_routes::lfs_patch_object)
-                                .delete(super::protocol_routes::lfs_delete_object),
-                        )
-                        .route(
-                            "/v1/lfs/objects/{oid}/verify",
-                            post(super::protocol_routes::lfs_verify_object),
-                        );
-                }
-            }
-            ServerFrontend::BazelHttp => {
-                if state.role.serves_transfer() {
-                    app = app
-                        .route(
-                            "/v1/bazel/cache/ac/{hash}",
-                            get(super::protocol_routes::bazel_get_ac)
-                                .put(super::protocol_routes::bazel_put_ac)
-                                .head(super::protocol_routes::bazel_head_ac),
-                        )
-                        .route(
-                            "/v1/bazel/cache/cas/{hash}",
-                            get(super::protocol_routes::bazel_get_cas)
-                                .put(super::protocol_routes::bazel_put_cas)
-                                .head(super::protocol_routes::bazel_head_cas),
-                        )
-                        .route(
-                            "/v1/bazel/{hash}",
-                            get(super::protocol_routes::bazel_get)
-                                .put(super::protocol_routes::bazel_put)
-                                .head(super::protocol_routes::bazel_head),
-                        );
-                }
-            }
-            ServerFrontend::Oci => match state.role {
-                ServerRole::All => {
-                    app = app
-                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                        .route(
-                            "/v2/{*path}",
-                            axum::routing::any(super::protocol_routes::oci_dispatch),
-                        );
-                }
-                ServerRole::Api => {
-                    app = app
-                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                        .route(
-                            "/v2/{*path}",
-                            axum::routing::any(super::protocol_routes::oci_api_dispatch),
-                        );
-                }
-                ServerRole::Transfer => {
-                    app = app.route(
-                        "/v2/{*path}",
-                        axum::routing::any(super::protocol_routes::oci_transfer_dispatch),
-                    );
-                }
-            },
             ServerFrontend::S3 => {
                 // S3 routes are registered in a later lane.
             }
@@ -796,6 +578,23 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                     .as_ref()
                     .map(|auth| shardline_hub_api::auth::HubAuth::from_arc(auth.provider_arc()));
                 hub_state = Some(build_test_hub_state(tmp.path(), auth).await);
+            }
+            ServerFrontend::Xet
+            | ServerFrontend::Lfs
+            | ServerFrontend::BazelHttp
+            | ServerFrontend::Oci => {
+                app = shared_test_protocol_routes(app, *frontend, state.role);
+                if *frontend == ServerFrontend::Xet && state.role.serves_api() {
+                    app = app
+                        .route(
+                            XET_READ_TOKEN_ROUTE,
+                            get(super::provider_routes::issue_xet_read_token),
+                        )
+                        .route(
+                            XET_WRITE_TOKEN_ROUTE,
+                            get(super::provider_routes::issue_xet_write_token),
+                        );
+                }
             }
         }
     }
