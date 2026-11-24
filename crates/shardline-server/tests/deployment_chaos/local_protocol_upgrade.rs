@@ -3,6 +3,7 @@
 use super::*;
 use shardline_index::{LocalRecordStore, XetFileIdentity};
 
+mod adjacent_release;
 mod creation_policy;
 mod git_publication;
 mod hub_history;

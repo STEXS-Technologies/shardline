@@ -6,10 +6,12 @@ test "$(uname -s)" = Linux && test "$(uname -m)" = x86_64
 umask 077
 mkdir -p "$1"
 output=$(realpath "$1")
-# Qualify the latest released deployment by default. Older compatibility
-# campaigns can explicitly retain their pinned historical baseline.
+# Historical layout-transition contracts default to 1.12.1. Adjacent-release
+# campaigns must explicitly select their predecessor; never silently substitute
+# a release with different feature or identity semantics.
 version=${SHARDLINE_COMPATIBILITY_BASELINE_VERSION:-1.12.1}
 case "$version" in
+    1.13.0) checksum=204483cbcfe6cd3947d1eab91d6ee9091432c60454f98efd0d74109e9f2c3214 ;;
     1.12.1) checksum=12e82289b9a3152a35a6dacb4aef1b06e2fd76971066cab2ebfcbfb096dff12f ;;
     1.11.3) checksum=c16b8e281bd08f51f24ee482b4808be809e30052a4c5b3df071b665e497209b1 ;;
     *) echo "Unsupported compatibility baseline: $version" >&2; exit 2 ;;

@@ -164,6 +164,10 @@ jobs:
   mixed-version-upgrade:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        campaign: [historical, adjacent]
     steps:
       - name: Checkout with release history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -176,11 +180,19 @@ jobs:
           rust-components: ""
           cargo-tools: cargo-nextest@0.9.123
 
-      - name: Select adjacent released version
+      - name: Select released version and matching contract
         id: adjacent
+        env:
+          CAMPAIGN: ${{ matrix.campaign }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$CAMPAIGN" == historical ]]; then
+            echo 'tag=v1.12.1' >> "$GITHUB_OUTPUT"
+            echo "commit=$(git rev-list -n 1 v1.12.1)" >> "$GITHUB_OUTPUT"
+            echo 'filter=test(drill_deploy_f_real_mixed_version_rollout_and_rollback) | (test(local_protocol_upgrade::) & !test(adjacent_release::))' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           current_tag=""
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             current_tag="${GITHUB_REF_NAME}"
@@ -198,17 +210,20 @@ jobs:
           fi
           echo "tag=${adjacent_tag}" >> "${GITHUB_OUTPUT}"
           echo "commit=$(git rev-list -n 1 "${adjacent_tag}")" >> "${GITHUB_OUTPUT}"
+          echo 'filter=test(drill_deploy_f_adjacent_release_cutover_requires_backup_restore) | test(local_protocol_upgrade::adjacent_release::)' >> "$GITHUB_OUTPUT"
 
-      - name: Build N and tagged N-1 binaries
+      - name: Build candidate and fetch verified released executable
+        id: binaries
         env:
           SHARDLINE_ADJACENT_TAG: ${{ steps.adjacent.outputs.tag }}
         run: |
           cargo build --locked -p shardline
-          git worktree add --detach "$RUNNER_TEMP/shardline-n-minus-one" "$SHARDLINE_ADJACENT_TAG"
-          cargo build --locked \
-            --manifest-path "$RUNNER_TEMP/shardline-n-minus-one/Cargo.toml" \
-            --target-dir "$RUNNER_TEMP/shardline-n-minus-one-target" \
-            -p shardline
+          predecessor=$(SHARDLINE_COMPATIBILITY_BASELINE_VERSION="${SHARDLINE_ADJACENT_TAG#v}" \
+            bash scripts/shardline/fetch_compatibility_baseline.sh "$RUNNER_TEMP/upgrade-predecessor")
+          echo "predecessor=$predecessor" >> "$GITHUB_OUTPUT"
+          mkdir -p reliability-upgrade-results
+          sha256sum target/debug/shardline "$predecessor" > reliability-upgrade-results/binaries.sha256
+          "$predecessor" --version > reliability-upgrade-results/predecessor-version.txt
 
       - name: Start shared Postgres, MinIO, and Redis
         run: |
@@ -225,13 +240,14 @@ jobs:
       - name: Exercise real mixed-version rollout and rollback
         env:
           SHARDLINE_REQUIRE_NATIVE_CLIENTS: "1"
-          SHARDLINE_N_MINUS_ONE_BINARY: ${{ runner.temp }}/shardline-n-minus-one-target/debug/shardline
+          SHARDLINE_N_MINUS_ONE_BINARY: ${{ steps.binaries.outputs.predecessor }}
+          SHARDLINE_UPGRADE_FILTER: ${{ steps.adjacent.outputs.filter }}
         run: |
           set -euo pipefail
           mkdir -p reliability-upgrade-results
           cargo nextest run --locked -p shardline-server --all-features --test deployment_chaos \
             --run-ignored all --test-threads 1 --no-fail-fast \
-            -E 'test(drill_deploy_f_real_mixed_version_rollout_and_rollback) | test(local_protocol_upgrade::)' \
+            -E "$SHARDLINE_UPGRADE_FILTER" \
             --no-capture 2>&1 \
             | tee reliability-upgrade-results/mixed-version-upgrade.log
 
@@ -246,6 +262,7 @@ jobs:
             echo "current_commit=${GITHUB_SHA}"
             echo "n_minus_one_tag=${SHARDLINE_ADJACENT_TAG}"
             echo "n_minus_one_commit=${SHARDLINE_ADJACENT_COMMIT}"
+            echo "campaign=${{ matrix.campaign }}"
             echo "run_id=${GITHUB_RUN_ID}"
             echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
             echo "finished_epoch=$(date +%s)"
@@ -259,7 +276,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: shardline-mixed-version-${{ github.sha }}
+          name: shardline-mixed-version-${{ matrix.campaign }}-${{ github.sha }}
           path: reliability-upgrade-results
           if-no-files-found: error
           retention-days: 90
