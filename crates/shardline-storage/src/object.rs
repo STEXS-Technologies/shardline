@@ -67,6 +67,15 @@ pub struct ObjectIntegrity {
 }
 
 impl ObjectIntegrity {
+    /// Computes the canonical storage integrity metadata for bytes.
+    #[must_use]
+    pub fn for_bytes(bytes: &[u8]) -> Self {
+        Self {
+            hash: chunk_hash(bytes),
+            length: bytes.len() as u64,
+        }
+    }
+
     /// Creates object integrity metadata.
     ///
     /// # Examples

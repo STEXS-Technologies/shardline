@@ -4,6 +4,7 @@ use std::path::Path;
 
 mod creation;
 mod object_location;
+mod recovery_outbox;
 mod ref_batch;
 
 use rusqlite::{Connection, params};
@@ -1095,10 +1096,302 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
+    struct FailArchiveMarkOnce<'store>(&'store LocalIndexStore);
+
+    #[async_trait::async_trait]
+    impl crate::HubRecoveryOutboxStore for FailArchiveMarkOnce<'_> {
+        async fn set_hub_recovery_mode(
+            &self,
+            mode: crate::HubRecoveryMode,
+            deployment_id: Option<&str>,
+        ) -> Result<(), crate::HubRecoveryError> {
+            self.0.set_hub_recovery_mode(mode, deployment_id).await
+        }
+
+        async fn next_pending_hub_ref_event(
+            &self,
+            repository_id: &str,
+        ) -> Result<Option<crate::HubRecoveryOutboxItem>, crate::HubRecoveryError> {
+            self.0.next_pending_hub_ref_event(repository_id).await
+        }
+
+        async fn mark_hub_ref_event_archived(
+            &self,
+            _item: &crate::HubRecoveryOutboxItem,
+            _archive: &crate::HubRecoveryArchiveObject,
+        ) -> Result<(), crate::HubRecoveryError> {
+            Err(crate::HubRecoveryError::Outbox(
+                "injected crash before archive mark".into(),
+            ))
+        }
+    }
+
     #[test]
     fn atomic_ref_batch_contract() {
         let (_storage, store) = make_store();
         crate::hub::ref_batch_tests::contract(&store);
+    }
+
+    #[test]
+    fn hub_shadow_outbox_is_off_by_default_and_appends_with_ref_batch() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+
+        let (_storage, store) = make_store();
+        let repo = "outbox/atomic";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "base", "main", "Initial")
+            .unwrap();
+        store
+            .create_revision(repo, Some("base"), "stable", "stable", "Stable")
+            .unwrap();
+        let connection = open_hub_connection(store.root()).unwrap();
+        let off_result = store.change_refs_atomically(
+            repo,
+            &[HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("base".into()),
+                new_sha: Some("off-update".into()),
+                message: "Off update".into(),
+            }],
+        );
+        assert_eq!(off_result.unwrap(), HubRefBatchOutcome::Applied);
+        let off_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_hub_recovery_outbox",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(off_count, 0);
+        connection
+            .execute(
+                "UPDATE shardline_hub_recovery_config SET mode = 'shadow', deployment_id = 'deploy-a' WHERE singleton_id = 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.change_refs_atomically(repo, &[]).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let no_op_changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("off-update".into()),
+                new_sha: Some("off-update".into()),
+                message: "No-op main".into(),
+            },
+            HubRefChange {
+                ref_name: "stable".into(),
+                expected_sha: Some("stable".into()),
+                new_sha: Some("stable".into()),
+                message: "No-op stable".into(),
+            },
+        ];
+        assert_eq!(
+            store.change_refs_atomically(repo, &no_op_changes).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let no_op_outbox_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_hub_recovery_outbox",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let no_op_sequence_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_hub_recovery_sequences",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((no_op_outbox_count, no_op_sequence_count), (0, 0));
+        let changes = [
+            HubRefChange {
+                ref_name: "feature".into(),
+                expected_sha: None,
+                new_sha: Some("feature-head".into()),
+                message: "Feature".into(),
+            },
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("off-update".into()),
+                new_sha: Some("shadow-update".into()),
+                message: "Main".into(),
+            },
+            HubRefChange {
+                ref_name: "stable".into(),
+                expected_sha: Some("stable".into()),
+                new_sha: Some("stable".into()),
+                message: "No-op stable".into(),
+            },
+        ];
+        assert_eq!(
+            store.change_refs_atomically(repo, &changes).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let outbox: (i64, String, String) = connection
+            .query_row(
+                "SELECT domain_sequence, transaction_id, event_json FROM shardline_hub_recovery_outbox WHERE repo_id = ?1",
+                [repo],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(outbox.0, 1);
+        let event: shardline_reliability::HubRefBatchArchiveEvent =
+            serde_json::from_str(&outbox.2).unwrap();
+        assert_eq!(event.after.refs.len(), 2);
+        assert_eq!(event.after.refs[0].ref_name, "feature");
+        assert_eq!(event.after.refs[1].ref_name, "main");
+        assert_eq!(event.after.deployment_id, "deploy-a");
+        assert_eq!(event.operation.operation_id, outbox.1);
+        event.verify_integrity().unwrap();
+    }
+
+    #[tokio::test]
+    async fn hub_shadow_archive_consumer_verifies_object_before_advancing() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+        use crate::{
+            HubRecoveryMode, HubRecoveryOutboxStore, archive_next_hub_ref_event,
+            read_hub_ref_archive_record,
+        };
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        use shardline_storage::LocalObjectStore;
+
+        let (_storage, store) = make_store();
+        let repo = "outbox/archive";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "base", "main", "Initial")
+            .unwrap();
+        store
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("deploy-archive"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .change_refs_atomically(
+                    repo,
+                    &[HubRefChange {
+                        ref_name: "main".into(),
+                        expected_sha: Some("base".into()),
+                        new_sha: Some("next".into()),
+                        message: "Next".into(),
+                    }],
+                )
+                .unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let archive = LocalObjectStore::new(_storage.path().join("recovery-archive")).unwrap();
+        let signing_key = SigningKey::from_bytes(&[23; 32]);
+        let failing_mark = FailArchiveMarkOnce(&store);
+        assert!(
+            archive_next_hub_ref_event(&failing_mark, &archive, repo, &signing_key, "test-key",)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .next_pending_hub_ref_event(repo)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Retry reuses the immutable object written before the injected crash.
+        let object = archive_next_hub_ref_event(&store, &archive, repo, &signing_key, "test-key")
+            .await
+            .unwrap()
+            .unwrap();
+        let verifying_key = VerifyingKey::from(&signing_key);
+        let record = read_hub_ref_archive_record(&archive, &object, &verifying_key)
+            .await
+            .unwrap();
+        assert_eq!(record.event.after.refs[0].head_sha.as_deref(), Some("next"));
+        assert!(
+            store
+                .next_pending_hub_ref_event(repo)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let connection = open_hub_connection(store.root()).unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_hub_recovery_sequences SET last_sequence = 2 WHERE repo_id = ?1",
+                [repo],
+            )
+            .unwrap();
+        assert!(store.next_pending_hub_ref_event(repo).await.is_err());
+        std::fs::write(archive.path_for_key(object.key()), b"corrupted archive").unwrap();
+        assert!(
+            read_hub_ref_archive_record(&archive, &object, &verifying_key)
+                .await
+                .is_err()
+        );
+        store
+            .set_hub_recovery_mode(HubRecoveryMode::Off, None)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("deploy-archive"))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn hub_shadow_outbox_failure_rolls_back_ref_publication() {
+        use crate::hub::HubRefChange;
+
+        let (_storage, store) = make_store();
+        let repo = "outbox/rollback";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "base", "main", "Initial")
+            .unwrap();
+        let connection = open_hub_connection(store.root()).unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_hub_recovery_config SET mode = 'shadow', deployment_id = 'deploy-rollback' WHERE singleton_id = 1",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_recovery_event BEFORE INSERT ON shardline_hub_recovery_outbox
+                 BEGIN SELECT RAISE(ABORT, 'injected outbox failure'); END;",
+            )
+            .unwrap();
+        let result = store.change_refs_atomically(
+            repo,
+            &[HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("base".into()),
+                new_sha: Some("must-not-publish".into()),
+                message: "Rejected by outbox".into(),
+            }],
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            store.resolve_revision(repo, "main").unwrap().as_deref(),
+            Some("base")
+        );
+        let sequence_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM shardline_hub_recovery_sequences WHERE repo_id = ?1",
+                [repo],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sequence_count, 0);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("local sqlite metadata operation failed")
+        );
     }
 
     #[test]

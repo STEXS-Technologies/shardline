@@ -1,9 +1,10 @@
 use crate::states::EvidenceState;
 use crate::{
-    DigestSnapshot, HubRefSnapshot, OciObjectLifecycleState, OciObjectSnapshot, OciTagSnapshot,
-    OperationIdentity, ProviderLifecycleSnapshot, QuarantineLifecycleState, QuarantineSnapshot,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, S3ObjectSnapshot,
-    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot,
+    DigestSnapshot, HubRefBatchSnapshot, HubRefSnapshot, OciObjectLifecycleState,
+    OciObjectSnapshot, OciTagSnapshot, OperationIdentity, ProviderLifecycleSnapshot,
+    QuarantineLifecycleState, QuarantineSnapshot, RetentionHoldLifecycleState,
+    RetentionHoldSnapshot, S3ObjectSnapshot, WebhookDeliveryLifecycleState,
+    WebhookDeliverySnapshot,
 };
 use serde::Serialize;
 
@@ -152,6 +153,43 @@ pub enum DurableSnapshotV1 {
         processed_at_unix_seconds: u64,
         state: String,
     },
+    HubRefBatch {
+        deployment_id: String,
+        provider_id: String,
+        tenant_id: String,
+        repository_id: String,
+        domain_sequence: u64,
+        transaction_id: String,
+        refs: Vec<DurableHubRefStateV1>,
+    },
+}
+
+/// Frozen ordered ref mutations for one atomic Hub publication batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DurableHubRefStateV1 {
+    pub ref_name: String,
+    pub head_sha: Option<String>,
+}
+
+impl From<&HubRefBatchSnapshot> for DurableSnapshotV1 {
+    fn from(snapshot: &HubRefBatchSnapshot) -> Self {
+        Self::HubRefBatch {
+            deployment_id: snapshot.deployment_id.clone(),
+            provider_id: snapshot.provider_id.clone(),
+            tenant_id: snapshot.tenant_id.clone(),
+            repository_id: snapshot.repository_id.clone(),
+            domain_sequence: snapshot.domain_sequence,
+            transaction_id: snapshot.transaction_id.clone(),
+            refs: snapshot
+                .refs
+                .iter()
+                .map(|state| DurableHubRefStateV1 {
+                    ref_name: state.ref_name.clone(),
+                    head_sha: state.head_sha.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 pub trait DurableSnapshotV1Encoding {
@@ -174,6 +212,12 @@ impl DurableSnapshotV1Encoding for HubRefSnapshot {
             ref_name: self.ref_name.clone(),
             head_sha: self.head_sha.clone(),
         }
+    }
+}
+
+impl DurableSnapshotV1Encoding for HubRefBatchSnapshot {
+    fn durable_snapshot_v1(&self) -> DurableSnapshotV1 {
+        self.into()
     }
 }
 

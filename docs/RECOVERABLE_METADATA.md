@@ -1,9 +1,10 @@
 # Recoverable metadata design
 
-**Status:** migration design; no independent recovery guarantee is enabled.
-The current candidate still uses the R0 backup model. Archive mode is intended
-to default to `OFF`; no R1, R2, or R3 claim is available until the matching
-archive writer, verifier, restore path, and release evidence are complete.
+**Status:** accepted design; the Hub ref SHADOW foundation is integrated, and
+no independent recovery guarantee is enabled. The current candidate still
+uses the R0 backup model. Archive mode defaults to `OFF`; no R1, R2, or R3
+claim is available until the matching manifest, restore path, and release
+evidence are complete.
 
 This document records the architecture for the 1.14 migration. It follows
 `SHARDLINE_SIMPLIFICATION_AND_RECOVERABLE_METADATA_RFC.md`, Parts II–V, and
@@ -119,7 +120,7 @@ Current coverage is therefore:
 
 | Domain | Outbox transaction | External receipt | Restore verified | Claim |
 |---|---:|---:|---:|---|
-| Hub refs | Private implementation prototype; not yet integrated into candidate tree | SQLite consumer prototype tested; PostgreSQL qualification pending | No | None |
+| Hub ref batches | SQLite/PostgreSQL same-transaction outbox, OFF by default; SHADOW only | SQLite LocalObjectStore verified record and actual PostgreSQL outbox/order tests | No | None |
 | OCI, S3, LFS, Bazel, provider policy, lifecycle/GC | No | No | No | None |
 
 ## GC, deletion, and archive retention
@@ -163,16 +164,17 @@ matching destructive restore and release gates pass. Existing installations
 remain on R0 until these gates are met. The released schema history and
 checksums are immutable; new behavior uses forward additive migrations.
 
-The private Hub prototype is an ordered SQL outbox plus a single-event signed
-record format. It is not yet accepted or integrated into the candidate tree.
-The record signature does not include a cryptographic predecessor link, and
-archive ordering is not certified independently of SQL. Its sequence only
-orders mutations observed while SHADOW is continuously enabled. The prototype
-rejects re-enabling SHADOW after an OFF interval with existing outbox history;
-a new certified baseline/epoch is not implemented. Hub records currently have
-no independent tenant field, so the prototype scopes the tenant slot to
-deployment identity and keeps repository IDs opaque. These constraints prevent
-this slice from qualifying R1/R2.
+The accepted Hub foundation is an ordered SQL outbox plus a single-event signed
+record format. The record signature does not include a cryptographic
+predecessor link, and archive ordering is not certified independently of SQL.
+Its sequence only orders mutations observed while SHADOW is continuously
+enabled. Turning SHADOW off after an outbox event is allowed, but re-enabling
+SHADOW is rejected once history exists; a new certified baseline/epoch is not
+implemented. Hub records currently have no independent tenant field, so the
+tenant slot uses deployment identity and repository IDs remain opaque. These
+constraints prevent this slice from qualifying R1/R2. The implementation
+contains a single-event drain helper, not a scheduled worker, coverage report,
+or restore reader that can enumerate archived records after database loss.
 
 ## Failure cases that must remain fail closed
 

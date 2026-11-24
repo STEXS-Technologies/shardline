@@ -21,6 +21,7 @@ pub(super) fn apply(
         if repository.is_none() {
             return Ok(HubRefBatchOutcome::Conflict);
         }
+        let mut recovery_changes = Vec::with_capacity(changes.len());
         for change in changes {
             let name = canonical_ref_name(&change.ref_name);
             let current: Option<String> = sqlx::query_scalar(
@@ -32,6 +33,9 @@ pub(super) fn apply(
             .await?;
             if current != change.expected_sha {
                 return Ok(HubRefBatchOutcome::Conflict);
+            }
+            if current != change.new_sha {
+                recovery_changes.push(change.clone());
             }
             let before = HubRefSnapshot::new(repo_id, name, current.clone())?;
             let after = HubRefSnapshot::new(repo_id, name, change.new_sha.clone())?;
@@ -68,6 +72,7 @@ pub(super) fn apply(
             }
             persist_hub_ref_evidence(&mut tx, &evidence).await?;
         }
+        super::recovery_outbox::append_ref_batch(&mut tx, repo_id, &recovery_changes).await?;
         tx.commit().await?;
         Ok(HubRefBatchOutcome::Applied)
     })

@@ -65,6 +65,7 @@ mod deduplication_domain;
 pub mod hub;
 mod hub_local_sqlite;
 mod hub_postgres;
+mod hub_recovery;
 mod ids;
 mod lfs_locks;
 mod lifecycle;
@@ -97,6 +98,11 @@ pub use xet_xorb::{MAX_XET_DESCRIPTOR_CHUNKS, XetXorbChunk, XetXorbDescriptor};
 
 pub use dedupe::DedupeShardMapping;
 pub use deduplication_domain::DeduplicationDomain;
+pub use hub_recovery::{
+    HubRecoveryArchiveObject, HubRecoveryError, HubRecoveryMode, HubRecoveryOutboxItem,
+    HubRecoveryOutboxStore, archive_next_hub_ref_event, put_hub_ref_archive_record,
+    read_hub_ref_archive_record,
+};
 pub use ids::{FileId, StoredObjectId, XorbId};
 pub use lifecycle::{
     ProviderRepositoryState, QuarantineCandidate, QuarantineCandidateError, RetentionHold,

@@ -63,7 +63,7 @@ use shardline_reliability::{
 
 use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
 
-pub(super) async fn run_blocking_store<T: Send + 'static>(
+pub(crate) async fn run_blocking_store<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, LocalIndexStoreError> + Send + 'static,
 ) -> Result<T, LocalIndexStoreError> {
     tokio::task::spawn_blocking(work)

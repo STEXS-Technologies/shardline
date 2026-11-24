@@ -11,6 +11,7 @@ mod durable;
 mod error;
 mod event;
 mod event_metadata;
+mod hub_ref_archive;
 mod lifecycle_log;
 mod lifecycle_profile;
 mod merkle;
@@ -60,6 +61,9 @@ pub use event::{
     verify_upload_lifecycle_head,
 };
 pub use event_metadata::{EvidenceEventMetadata, events_after_sequence};
+pub use hub_ref_archive::{
+    HubRefBatchArchiveEvent, HubRefBatchArchiveRecordV1, HubRefBatchHead, HubRefBatchSnapshot,
+};
 pub use lifecycle_log::LifecycleEvidenceLog;
 pub use lifecycle_profile::{
     LifecycleCommand, ResumableLifecycleProfile, UploadLifecycleProfile, native_lifecycle_registry,

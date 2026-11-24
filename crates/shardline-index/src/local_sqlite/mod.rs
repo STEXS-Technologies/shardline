@@ -3,6 +3,7 @@ mod constants;
 mod error;
 mod frontend_schema;
 mod helpers;
+pub(crate) use helpers::run_blocking_store;
 mod index_store;
 mod lfs_locks;
 #[cfg(test)]

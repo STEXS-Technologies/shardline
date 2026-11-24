@@ -21,6 +21,7 @@ pub(super) fn apply(
         if !exists {
             return Ok(HubRefBatchOutcome::Conflict);
         }
+        let mut recovery_changes = Vec::with_capacity(changes.len());
         for change in changes {
             let name = canonical_ref_name(&change.ref_name);
             let current: Option<String> = tx
@@ -32,6 +33,9 @@ pub(super) fn apply(
                 .optional()?;
             if current != change.expected_sha {
                 return Ok(HubRefBatchOutcome::Conflict);
+            }
+            if current != change.new_sha {
+                recovery_changes.push(change.clone());
             }
             let before = hub_ref_snapshot(repo_id, name, current.clone())?;
             let after = hub_ref_snapshot(repo_id, name, change.new_sha.clone())?;
@@ -67,6 +71,7 @@ pub(super) fn apply(
                 persist_reliability_event(&tx, event)?;
             }
         }
+        super::recovery_outbox::append_ref_batch(&tx, repo_id, &recovery_changes)?;
         tx.commit()?;
         Ok(HubRefBatchOutcome::Applied)
     })

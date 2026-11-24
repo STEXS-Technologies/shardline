@@ -3,6 +3,7 @@ use crate::store::escape_like;
 mod creation;
 mod file_write;
 mod object_location;
+mod recovery_outbox;
 mod ref_batch;
 
 use futures_util::TryStreamExt;
@@ -1345,6 +1346,136 @@ mod tests {
             .expect("configured PostgreSQL fixture must connect");
         let store = make_store(pool);
         crate::hub::ref_batch_tests::contract(&store);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_shadow_outbox_is_domain_ordered() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+        use crate::{HubRecoveryMode, HubRecoveryOutboxStore, put_hub_ref_archive_record};
+        use ed25519_dalek::SigningKey;
+        use shardline_storage::LocalObjectStore;
+        if std::env::var_os("DATABASE_URL").is_none() {
+            eprintln!("skipping Postgres outbox test: no DATABASE_URL");
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool);
+        let repo = "recovery/pg-order";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "base", "main", "Initial")
+            .unwrap();
+        store
+            .create_revision(repo, Some("base"), "stable", "stable", "Stable")
+            .unwrap();
+        store
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("pg-deployment"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.change_refs_atomically(repo, &[]).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let no_op_changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("base".into()),
+                new_sha: Some("base".into()),
+                message: "No-op main".into(),
+            },
+            HubRefChange {
+                ref_name: "stable".into(),
+                expected_sha: Some("stable".into()),
+                new_sha: Some("stable".into()),
+                message: "No-op stable".into(),
+            },
+        ];
+        assert_eq!(
+            store.change_refs_atomically(repo, &no_op_changes).unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let no_op_outbox_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_hub_recovery_outbox WHERE repo_id = $1",
+        )
+        .bind(repo)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        let no_op_sequence_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_hub_recovery_sequences WHERE repo_id = $1",
+        )
+        .bind(repo)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!((no_op_outbox_count, no_op_sequence_count), (0, 0));
+        for (expected_sha, new_sha) in [("base", "one"), ("one", "two")] {
+            assert_eq!(
+                store
+                    .change_refs_atomically(
+                        repo,
+                        &[HubRefChange {
+                            ref_name: "main".into(),
+                            expected_sha: Some(expected_sha.into()),
+                            new_sha: Some(new_sha.into()),
+                            message: new_sha.into(),
+                        }],
+                    )
+                    .unwrap(),
+                HubRefBatchOutcome::Applied
+            );
+        }
+        let first = store
+            .next_pending_hub_ref_event(repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.domain_sequence, 1);
+        let archive_root = shardline_test_support::TempStorage::new();
+        let archive = LocalObjectStore::new(archive_root.path().join("archive")).unwrap();
+        let signing_key = SigningKey::from_bytes(&[31; 32]);
+        let archived_first =
+            put_hub_ref_archive_record(&archive, first.event.clone(), &signing_key, "pg-test-key")
+                .await
+                .unwrap();
+        let mut out_of_order = first.clone();
+        out_of_order.domain_sequence = 2;
+        assert!(
+            store
+                .mark_hub_ref_event_archived(&out_of_order, &archived_first)
+                .await
+                .is_err()
+        );
+        store
+            .mark_hub_ref_event_archived(&first, &archived_first)
+            .await
+            .unwrap();
+        let second = store
+            .next_pending_hub_ref_event(repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.domain_sequence, 2);
+        assert_eq!(second.event.after.refs[0].head_sha.as_deref(), Some("two"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn postgres_outbox_adapter_is_async_runtime_safe() {
+        use crate::{HubRecoveryMode, HubRecoveryOutboxStore};
+        if std::env::var_os("DATABASE_URL").is_none() {
+            eprintln!("skipping Postgres async outbox test: no DATABASE_URL");
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool);
+        store
+            .set_hub_recovery_mode(HubRecoveryMode::Off, None)
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
