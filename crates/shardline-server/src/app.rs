@@ -1548,3 +1548,6 @@ mod e2e_tests;
 
 #[cfg(test)]
 mod metadata_routes_tests;
+
+#[cfg(all(test, feature = "docker"))]
+mod hub_recovery_e2e;
