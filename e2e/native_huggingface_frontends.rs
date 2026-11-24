@@ -42,6 +42,19 @@ async fn native_huggingface_cli_flows_with_hub_and_xet() -> Result<(), TestError
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires disposable Docker PostgreSQL and MinIO plus real hf/hf_xet clients"]
 async fn native_huggingface_cli_flows_with_split_roles_postgres_minio() -> Result<(), TestError> {
+    exercise_split_roles_postgres_minio(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires disposable Docker PostgreSQL and MinIO plus real hf/hf_xet clients"]
+async fn native_huggingface_cli_flows_with_selective_split_roles_postgres_minio()
+-> Result<(), TestError> {
+    exercise_split_roles_postgres_minio(true).await
+}
+
+async fn exercise_split_roles_postgres_minio(
+    selective_serialized_ranges: bool,
+) -> Result<(), TestError> {
     assert!(
         command_available("hf"),
         "split-role qualification requires hf"
@@ -55,10 +68,12 @@ async fn native_huggingface_cli_flows_with_split_roles_postgres_minio() -> Resul
     assert!(services.s3_raw_config(None).is_some());
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let public = format!("http://{}", listener.local_addr()?);
-    let mut runtime = start_runtime_with_roles(
+    let mut runtime = start_runtime_with_roles_and_range_mode(
         &[ServerFrontend::Hub, ServerFrontend::Xet, ServerFrontend::S3],
         Some(services),
         Some(&public),
+        true,
+        selective_serialized_ranges,
         true,
     )
     .await?;
@@ -67,13 +82,26 @@ async fn native_huggingface_cli_flows_with_split_roles_postgres_minio() -> Resul
         native_huggingface_proxy::start_observing_ranges(listener, &runtime.base_url, transfer);
     runtime.base_url = public;
     exercise_huggingface_cli_flows(&runtime).await?;
+    let observed_ranges = observations
+        .lock()
+        .map_err(|_| "range observations poisoned")?;
+    let selective_responses = observed_ranges
+        .iter()
+        .filter(|(path, status)| {
+            path.starts_with("/transfer/xorb/") && *status == reqwest::StatusCode::PARTIAL_CONTENT
+        })
+        .count();
+    eprintln!(
+        "{} stock hf path observations: partial_xorb_responses={selective_responses} total_observations={}",
+        if selective_serialized_ranges {
+            "selective"
+        } else {
+            "strict"
+        },
+        observed_ranges.len()
+    );
     assert!(
-        observations
-            .lock()
-            .map_err(|_| "range observations poisoned")?
-            .iter()
-            .any(|(path, status)| path.starts_with("/transfer/xorb/")
-                && *status == reqwest::StatusCode::PARTIAL_CONTENT),
+        selective_responses > 0,
         "native download must traverse the Shardline transfer role"
     );
     Ok(())

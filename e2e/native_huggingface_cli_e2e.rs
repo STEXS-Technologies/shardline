@@ -57,6 +57,8 @@ struct HubRuntime {
     dataset_token: String,
     postgres_url: Option<String>,
     maintenance_config: ServerConfig,
+    selective_serialized_ranges: bool,
+    s3_proxy: Option<shardline_test_support::S3FaultProxy>,
     _storage: tempfile::TempDir,
     server: JoinHandle<Result<(), ServerError>>,
     transfer: Option<(String, JoinHandle<Result<(), ServerError>>)>,
@@ -414,6 +416,14 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
     let large_download = working.path().join("large-download");
     let reconstructions_before =
         read_metric_counter(runtime, "shardline_reconstruction_requests_total").await?;
+    let xorb_gets_before = runtime
+        .s3_proxy
+        .as_ref()
+        .map_or(0, shardline_test_support::S3FaultProxy::xorb_get_requests);
+    let xorb_response_lengths_before = runtime
+        .s3_proxy
+        .as_ref()
+        .map_or(0, |proxy| proxy.xorb_get_response_lengths().len());
     run_hf(
         runtime,
         client_home.path(),
@@ -430,6 +440,38 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
             "quiet",
         ],
     )?;
+    if runtime.s3_proxy.is_some() {
+        let proxy = runtime
+            .s3_proxy
+            .as_ref()
+            .ok_or("S3 qualification requires the counting proxy")?;
+        let xorb_gets = proxy.xorb_get_requests() - xorb_gets_before;
+        let response_lengths = proxy.xorb_get_response_lengths();
+        let response_lengths = &response_lengths[xorb_response_lengths_before..];
+        let backend_xorb_bytes: usize = response_lengths.iter().sum();
+        eprintln!(
+            "{} stock hf download: backend_xorb_gets={xorb_gets} backend_xorb_bytes={backend_xorb_bytes} response_lengths={response_lengths:?} logical_bytes={}",
+            if runtime.selective_serialized_ranges {
+                "selective"
+            } else {
+                "strict"
+            },
+            large_content.len()
+        );
+        assert!(xorb_gets > 0 && backend_xorb_bytes > 0);
+        if runtime.selective_serialized_ranges {
+            assert!(
+                xorb_gets >= 3 && response_lengths.first() == Some(&8),
+                "selective provider traffic must include the serialized-Xorb suffix probe and later reads"
+            );
+        } else {
+            assert_eq!(
+                xorb_gets, 1,
+                "strict provider traffic should fetch the serialized Xorb as one complete object"
+            );
+            assert_eq!(response_lengths.len(), 1);
+        }
+    }
     assert_eq!(read(large_download.join("large-model.bin"))?, large_content);
     assert!(
         read_metric_counter(runtime, "shardline_reconstruction_requests_total").await?
@@ -1125,6 +1167,18 @@ async fn start_runtime_with_roles(
     public_base: Option<&str>,
     split: bool,
 ) -> Result<HubRuntime, TestError> {
+    start_runtime_with_roles_and_range_mode(frontends, services, public_base, split, false, false)
+        .await
+}
+
+async fn start_runtime_with_roles_and_range_mode(
+    frontends: &[ServerFrontend],
+    services: Option<shardline_test_support::DockerLocalStack>,
+    public_base: Option<&str>,
+    split: bool,
+    selective_serialized_ranges: bool,
+    observe_s3: bool,
+) -> Result<HubRuntime, TestError> {
     let storage = tempfile::tempdir()?;
     let hub_root = storage.path().join("hub");
     create_dir_all(&hub_root)?;
@@ -1157,6 +1211,7 @@ async fn start_runtime_with_roles(
         .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
         .with_server_frontends(frontends.iter().copied())?
         .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
+        .with_selective_serialized_xorb_ranges(selective_serialized_ranges)
         .with_provider_runtime(
             provider_config.clone(),
             b"test-api-key-16bytes".to_vec(),
@@ -1166,6 +1221,7 @@ async fn start_runtime_with_roles(
     };
     let mut config = build_config(address)?;
     let mut remote_object_config = None;
+    let mut s3_proxy = None;
     let postgres_url = services.as_ref().and_then(|stack| stack.postgres_url());
     if let Some(url) = &postgres_url {
         let pool = sqlx::PgPool::connect(url).await?;
@@ -1176,8 +1232,22 @@ async fn start_runtime_with_roles(
     if let Some(stack) = services.as_ref() {
         let prefix = stack.unique_s3_key_prefix("native-hf-cli");
         if let Some(raw) = stack.s3_raw_config(Some(&prefix)) {
+            let endpoint = raw.endpoint.clone();
+            let proxy = if observe_s3 {
+                Some(shardline_test_support::S3FaultProxy::start_disarmed(
+                    endpoint.as_deref().ok_or("MinIO endpoint missing")?,
+                    shardline_test_support::S3ProxyFault::ServiceUnavailableOnce,
+                )?)
+            } else {
+                None
+            };
             let object_config = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
-                .with_endpoint(raw.endpoint)
+                .with_endpoint(
+                    proxy
+                        .as_ref()
+                        .map(|proxy| proxy.endpoint().to_owned())
+                        .or(endpoint),
+                )
                 .with_credentials(
                     raw.access_key.map(shardline_protocol::SecretString::new),
                     raw.secret_key.map(shardline_protocol::SecretString::new),
@@ -1190,6 +1260,7 @@ async fn start_runtime_with_roles(
                 Some(object_config.clone()),
             );
             remote_object_config = Some(object_config);
+            s3_proxy = proxy;
         }
     }
     if split {
@@ -1263,6 +1334,8 @@ async fn start_runtime_with_roles(
         _storage: storage,
         server,
         transfer,
+        selective_serialized_ranges,
+        s3_proxy,
         _services: services,
     })
 }
@@ -1701,6 +1774,7 @@ fn run_hf<const N: usize>(
     home: &Path,
     arguments: [&str; N],
 ) -> Result<Output, TestError> {
+    let command_name = arguments.first().copied().unwrap_or("<empty>");
     let output = native_output(
         Command::new("hf")
             .args(arguments)
@@ -1711,7 +1785,10 @@ fn run_hf<const N: usize>(
             .env("HF_HUB_VERBOSITY", "debug")
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost"),
-    )?;
+    )
+    .map_err(|error| {
+        ServerE2eInvariantError::new(format!("stock hf command {command_name} failed: {error}"))
+    })?;
     if output.status.success() {
         return Ok(output);
     }
@@ -1734,11 +1811,24 @@ fn path_as_str(path: &Path) -> Result<&str, TestError> {
 }
 
 fn command_available(program: &str) -> bool {
-    let available = shardline_test_support::native_client_output(
+    let result = shardline_test_support::native_client_output(
         Command::new(program).arg("--version"),
         std::time::Duration::from_secs(10),
-    )
-    .is_ok_and(|output| output.status.success());
+    );
+    let available = match result {
+        Ok(output) => {
+            if program == "hf" && !output.status.success() {
+                eprintln!("hf availability probe exited with {}", output.status);
+            }
+            output.status.success()
+        }
+        Err(error) => {
+            if program == "hf" {
+                eprintln!("hf availability probe failed: {error}");
+            }
+            false
+        }
+    };
     native_client_policy::require_available(program, available)
 }
 
