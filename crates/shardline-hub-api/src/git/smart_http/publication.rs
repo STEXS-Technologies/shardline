@@ -1,6 +1,9 @@
 //! Prepare verified, durable Git metadata before authoritative ref publication.
 
-use shardline_index::hub::{HubFileEntry, HubRevision};
+use shardline_index::{
+    HubRefBatchManifestReferenceV1, HubTreeVersionManifestV1,
+    hub::{HubFileEntry, HubRevision},
+};
 use shardline_server_core::AuthorizedRepository;
 
 use super::{
@@ -16,6 +19,7 @@ fn failure(error: impl std::fmt::Display) -> HubApiError {
 pub(crate) struct PreparedPublication {
     pub(crate) revision: HubRevision,
     pub(crate) public_id: String,
+    pub(crate) manifest_ref: Option<HubRefBatchManifestReferenceV1>,
 }
 
 pub(crate) async fn prepare_publication(
@@ -27,6 +31,7 @@ pub(crate) async fn prepare_publication(
     let permit = IDENTITY_ADMISSION.acquire().await.map_err(failure)?;
     let state = state.clone();
     let auth = auth.clone();
+    let recovery_archive = state.recovery_archive.clone();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let prepared = prepare_sync(&state, revision, &files, &auth)?;
@@ -36,7 +41,34 @@ pub(crate) async fn prepare_publication(
             .store
             .store_files(&prepared.revision.sha, &files)
             .map_err(failure)?;
-        Ok(prepared)
+        let manifest_ref = if let Some(archive) = recovery_archive {
+            let manifest = HubTreeVersionManifestV1::new(
+                archive.deployment_id.clone(),
+                archive.resource_domain.clone(),
+                prepared.revision.clone(),
+                prepared.public_id.clone(),
+                files,
+            )
+            .map_err(failure)?;
+            let locator = manifest.store(&archive.object_store).map_err(failure)?;
+            Some(
+                HubRefBatchManifestReferenceV1::new(
+                    archive.deployment_id,
+                    prepared.revision.repo_id.clone(),
+                    prepared.revision.sha.clone(),
+                    locator.digest,
+                    locator.key.as_str().to_owned(),
+                )
+                .map_err(failure)?,
+            )
+        } else {
+            None
+        };
+        Ok(PreparedPublication {
+            revision: prepared.revision,
+            public_id: prepared.public_id,
+            manifest_ref,
+        })
     })
     .await
     .map_err(failure)?
@@ -93,6 +125,7 @@ fn prepare_sync(
     Ok(PreparedPublication {
         revision,
         public_id,
+        manifest_ref: None,
     })
 }
 
@@ -101,6 +134,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use shardline_index::hub::{HubRefUpdateOutcome, HubRepoType};
+    use shardline_server_core::AuthorizedRepository;
     use shardline_storage::ObjectStore;
 
     #[test]
@@ -166,6 +200,110 @@ mod tests {
         assert_eq!(
             public_commit_id_sync(&state, repo, &revision.sha, &auth).unwrap(),
             first.public_id
+        );
+    }
+
+    #[tokio::test]
+    async fn shadow_preparation_archives_hub_manifest_before_revision_visibility() {
+        use shardline_index::{HubRecoveryMode, HubRecoveryOutboxStore, LocalIndexStore};
+
+        let root = tempfile::tempdir().unwrap();
+        let local_store = LocalIndexStore::new(root.path().to_path_buf()).unwrap();
+        local_store
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("deployment-test"))
+            .await
+            .unwrap();
+        let object_store =
+            shardline_server_core::ServerObjectStore::local(root.path().join("lfs")).unwrap();
+        let mut state = HubState {
+            store: shardline_index::hub::BoxedHubStore::from_store(local_store.clone()),
+            object_store,
+            recovery_archive: None,
+            auth: None,
+            http_client: None,
+            webhook_secret_cipher: None,
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
+        };
+        let repo = "alice/shadow-manifest";
+        let auth = AuthorizedRepository::anonymous_full_access();
+        state
+            .store
+            .create_repo(HubRepoType::Model, repo, false)
+            .unwrap();
+        let parent = state.store.resolve_revision(repo, "main").unwrap().unwrap();
+        let archive_store =
+            shardline_server_core::ServerObjectStore::local(root.path().join("recovery-archive"))
+                .unwrap();
+        state.recovery_archive = Some(crate::routes::HubArchiveContext {
+            deployment_id: "deployment-test".to_owned(),
+            resource_domain: "hub".to_owned(),
+            object_store: archive_store.clone(),
+        });
+        let revision = HubRevision {
+            repo_id: repo.to_owned(),
+            ref_name: "main".to_owned(),
+            sha: "a".repeat(64),
+            parent_sha: Some(parent.clone()),
+            message: Some("multiline\ncommit message".to_owned()),
+            created_at_unix_seconds: 1_700_000_123,
+        };
+        let files = Vec::new();
+
+        let prepared = prepare_publication(&state, revision, files.clone(), &auth)
+            .await
+            .unwrap();
+        let manifest = HubTreeVersionManifestV1::new(
+            "deployment-test",
+            "hub",
+            prepared.revision.clone(),
+            prepared.public_id.clone(),
+            files,
+        )
+        .unwrap();
+        let (_, key, _) = manifest.storage_identity().unwrap();
+        assert!(archive_store.contains(&key).unwrap());
+        assert_eq!(
+            state
+                .store
+                .resolve_revision(repo, "main")
+                .unwrap()
+                .as_deref(),
+            Some(parent.as_str()),
+            "prepared archive metadata must not publish the revision"
+        );
+        let manifest_ref = prepared.manifest_ref.unwrap();
+        assert_eq!(manifest_ref.deployment_id(), "deployment-test");
+        assert_eq!(manifest_ref.repository_id(), repo);
+        assert_eq!(manifest_ref.revision_sha(), prepared.revision.sha);
+        assert_eq!(
+            manifest_ref.digest_blake3(),
+            manifest.storage_identity().unwrap().0
+        );
+        assert_eq!(manifest_ref.object_key(), key.as_str());
+
+        assert!(matches!(
+            state
+                .store
+                .publish_prepared_revision_with_manifests(
+                    &prepared.revision,
+                    std::slice::from_ref(&manifest_ref),
+                )
+                .unwrap(),
+            HubRefUpdateOutcome::Updated(_)
+        ));
+        let pending = local_store
+            .next_pending_hub_ref_event(repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.event.after.manifest_refs, vec![manifest_ref]);
+        assert_eq!(
+            state
+                .store
+                .resolve_revision(repo, "main")
+                .unwrap()
+                .as_deref(),
+            Some(prepared.revision.sha.as_str())
         );
     }
 

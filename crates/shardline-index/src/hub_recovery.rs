@@ -11,13 +11,13 @@ use shardline_protocol::ByteRange;
 use shardline_reliability::{
     HubRefBatchArchiveAnchor, HubRefBatchArchiveCheckpointPin, HubRefBatchArchiveEvent,
     HubRefBatchArchiveRecordV1, HubRefBatchHead, HubRefBatchManifestReferenceV1,
-    HubRefBatchSnapshot, ReliabilityError, SnapshotEvidenceEvent,
+    HubRefBatchSnapshot, MAX_HUB_REF_ARCHIVE_RECORD_BYTES, ReliabilityError, SnapshotEvidenceEvent,
 };
 use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey};
 use std::num::NonZeroUsize;
 use thiserror::Error;
 
-pub(crate) const MAX_HUB_REF_EVENT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_HUB_REF_EVENT_BYTES: usize = MAX_HUB_REF_ARCHIVE_RECORD_BYTES;
 pub const MAX_PENDING_REPOSITORY_PAGE: usize = 256;
 
 pub(crate) fn stable_id_segment(id: &str) -> String {
@@ -450,7 +450,7 @@ async fn read_verified_hub_archive_bytes<S: AsyncObjectStore>(
     if expected_length.is_some_and(|expected| expected != byte_length) || byte_length == 0 {
         return Err(HubRecoveryError::IntegrityMismatch);
     }
-    if byte_length > 8 * 1024 * 1024 {
+    if byte_length > MAX_HUB_REF_ARCHIVE_RECORD_BYTES as u64 {
         return Err(HubRecoveryError::RecordTooLarge);
     }
     let last_byte = byte_length
@@ -474,7 +474,6 @@ async fn read_previous_archive_anchor<S: AsyncObjectStore>(
     item: &HubRecoveryOutboxItem,
     verifying_key: &VerifyingKey,
 ) -> Result<Option<HubRefBatchArchiveAnchor>, HubRecoveryError> {
-    item.verify_identity()?;
     let Some(checksum) = item.previous_archive_digest_blake3.as_deref() else {
         return Ok(None);
     };

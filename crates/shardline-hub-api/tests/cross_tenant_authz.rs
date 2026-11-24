@@ -82,6 +82,7 @@ fn build_state() -> (TempDir, HubState) {
     let state = HubState {
         store: boxed,
         object_store,
+        recovery_archive: None,
         auth: Some(shardline_hub_api::auth::HubAuth::new(Box::new(
             RepoTokenProvider,
         ))),

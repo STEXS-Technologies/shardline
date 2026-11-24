@@ -12,6 +12,7 @@ fn router(root: &std::path::Path, store: BoxedHubStore) -> Router {
         HubState {
             store,
             object_store: ServerObjectStore::local(root.join("objects")).unwrap(),
+            recovery_archive: None,
             auth: None,
             http_client: None,
             webhook_secret_cipher: None,

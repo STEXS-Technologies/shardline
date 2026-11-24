@@ -151,7 +151,8 @@ pub(crate) fn prefix_successor(prefix: &str) -> Option<String> {
 }
 
 /// A Hub revision record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HubRevision {
     pub repo_id: String,
     pub ref_name: String,

@@ -196,6 +196,7 @@ async fn hub_request_limits_reject_oversized_json_and_commit_lines() {
     let state = HubState {
         store: boxed,
         object_store,
+        recovery_archive: None,
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,

@@ -1,6 +1,7 @@
 mod admin_api;
 mod background_tasks;
 mod delta;
+mod hub_recovery_worker;
 mod hub_xet_download;
 pub use background_tasks::RouterBackgroundTasks;
 mod metadata_routes;
@@ -572,7 +573,7 @@ async fn router_with_housekeeping_guard(
     for frontend in state.config.server_frontends() {
         match frontend {
             ServerFrontend::Hub => {
-                hub_state = Some(build_hub_state(&state, task_tracker.clone(), background)?);
+                hub_state = Some(build_hub_state(&state, task_tracker.clone(), background).await?);
                 if role.serves_api() {
                     app = protocol_routes::register_hub_lock_routes(app, state.clone());
                 }
@@ -1091,7 +1092,7 @@ pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: us
     configured_limit.get().min(endpoint_limit)
 }
 
-fn build_hub_state(
+async fn build_hub_state(
     app_state: &AppState,
     task_tracker: Arc<crate::task_tracking::EmbeddedTaskTracker>,
     background: &mut RouterBackgroundTasks,
@@ -1105,39 +1106,106 @@ fn build_hub_state(
     // Postgres Hub requests use their own pool on the configured database.
     // This is not the startup metadata pool or a maintenance ownership session.
     let root_dir = app_state.config.root_dir();
-    let store: shardline_index::hub::BoxedHubStore =
-        app_state.config.index_postgres_url().map_or_else(
-            || -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
-                let hub_root = root_dir.join("hub");
-                if let Err(e) = fs::create_dir_all(&hub_root) {
-                    tracing::warn!("failed to create hub directory: {e}");
-                }
-                let sqlite_store = shardline_index::LocalIndexStore::new(hub_root.clone())
-                    .map_err(|e| ServerError::Io(Error::other(e)))?;
-                // Ensure hub-specific tables exist
-                if let Err(e) = shardline_index::hub::ensure_hub_tables(&hub_root) {
-                    tracing::warn!("failed to create hub tables: {e}");
-                }
-                let native_records =
-                    shardline_index::LocalRecordStore::open(root_dir.to_path_buf());
-                Ok(
-                    shardline_index::hub::BoxedHubStore::from_store(sqlite_store)
-                        .with_xet_identity_lookup(move |scope, sha256| {
-                            native_records
-                                .xet_file_identity(scope, sha256)
-                                .map_err(|error| Box::new(error) as _)
-                        }),
+    let (store, recovery_outbox): (
+        shardline_index::hub::BoxedHubStore,
+        Arc<dyn shardline_index::HubRecoveryOutboxStore>,
+    ) = match app_state.config.index_postgres_url() {
+        None => {
+            let hub_root = root_dir.join("hub");
+            if let Err(e) = fs::create_dir_all(&hub_root) {
+                tracing::warn!("failed to create hub directory: {e}");
+            }
+            let sqlite_store = shardline_index::LocalIndexStore::new(hub_root.clone())
+                .map_err(|e| ServerError::Io(Error::other(e)))?;
+            // Ensure hub-specific tables exist
+            if let Err(e) = shardline_index::hub::ensure_hub_tables(&hub_root) {
+                tracing::warn!("failed to create hub tables: {e}");
+            }
+            let native_records = shardline_index::LocalRecordStore::open(root_dir.to_path_buf());
+            let recovery_outbox: Arc<dyn shardline_index::HubRecoveryOutboxStore> =
+                Arc::new(sqlite_store.clone());
+            let store = shardline_index::hub::BoxedHubStore::from_store(sqlite_store)
+                .with_xet_identity_lookup(move |scope, sha256| {
+                    native_records
+                        .xet_file_identity(scope, sha256)
+                        .map_err(|error| Box::new(error) as _)
+                });
+            (store, recovery_outbox)
+        }
+        Some(pg_url) => {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(16)
+                .connect_lazy(pg_url)
+                .map_err(|e| ServerError::Io(Error::other(e)))?;
+            let pg_store = shardline_index::PostgresIndexStore::new(pool);
+            let recovery_outbox: Arc<dyn shardline_index::HubRecoveryOutboxStore> =
+                Arc::new(pg_store.clone());
+            (
+                shardline_index::hub::BoxedHubStore::from_store(pg_store),
+                recovery_outbox,
+            )
+        }
+    };
+
+    let recovery_archive = match app_state.config.hub_recovery_mode() {
+        Some(shardline_index::HubRecoveryMode::Off) => {
+            recovery_outbox
+                .set_hub_recovery_mode(shardline_index::HubRecoveryMode::Off, None)
+                .await
+                .map_err(hub_recovery_server_error)?;
+            None
+        }
+        Some(shardline_index::HubRecoveryMode::Shadow) => {
+            let runtime = app_state
+                .config
+                .hub_recovery_runtime()
+                .ok_or_else(|| hub_recovery_config_error("SHADOW runtime config is missing"))?;
+            let archive_store =
+                shardline_server_core::ServerObjectStore::s3(runtime.archive_s3.clone())
+                    .map_err(|error| ServerError::Io(Error::other(error)))?;
+            let signing_seed: [u8; 32] = runtime
+                .signing_key
+                .expose_secret()
+                .try_into()
+                .map_err(|_error| hub_recovery_config_error("signing key must be 32 bytes"))?;
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&signing_seed);
+
+            // Validate local resources before changing the durable mode. The
+            // outbox transition itself is transactional and checks deployment
+            // identity continuity before the worker is admitted.
+            recovery_outbox
+                .set_hub_recovery_mode(
+                    shardline_index::HubRecoveryMode::Shadow,
+                    Some(&runtime.deployment_id),
                 )
-            },
-            |pg_url| -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
-                let pool = sqlx::postgres::PgPoolOptions::new()
-                    .max_connections(16)
-                    .connect_lazy(pg_url)
-                    .map_err(|e| ServerError::Io(Error::other(e)))?;
-                let pg_store = shardline_index::PostgresIndexStore::new(pool);
-                Ok(shardline_index::hub::BoxedHubStore::from_store(pg_store))
-            },
-        )?;
+                .await
+                .map_err(hub_recovery_server_error)?;
+            background.register(hub_recovery_worker::spawn(
+                recovery_outbox.clone(),
+                archive_store.clone(),
+                signing_key,
+                runtime.key_id.clone(),
+                background.stopped_flag(),
+            ));
+            Some(shardline_hub_api::routes::HubArchiveContext {
+                deployment_id: runtime.deployment_id.clone(),
+                resource_domain: "hub".to_owned(),
+                object_store: archive_store,
+            })
+        }
+        None => {
+            let (mode, _deployment_id) = recovery_outbox
+                .hub_recovery_mode()
+                .await
+                .map_err(hub_recovery_server_error)?;
+            if mode == shardline_index::HubRecoveryMode::Shadow {
+                return Err(hub_recovery_config_error(
+                    "database Hub recovery mode is SHADOW but this replica has no recovery configuration",
+                ));
+            }
+            None
+        }
+    };
 
     // Build an HTTP client for outbound webhook delivery.
     let http_client = build_webhook_delivery_client();
@@ -1186,11 +1254,20 @@ fn build_hub_state(
     Ok(shardline_hub_api::routes::HubState {
         store,
         object_store: app_state.backend.object_store(),
+        recovery_archive,
         auth: hub_auth,
         http_client,
         webhook_secret_cipher,
         public_base_url: app_state.config.public_base_url().to_owned(),
     })
+}
+
+fn hub_recovery_config_error(message: &str) -> ServerError {
+    ServerError::Config(ServerConfigError::ConfigFileError(message.to_owned()))
+}
+
+fn hub_recovery_server_error(error: shardline_index::HubRecoveryError) -> ServerError {
+    ServerError::Io(Error::other(error))
 }
 
 fn endpoint_body_limit(

@@ -143,6 +143,79 @@ pub(super) fn load_s3_object_store_config_from_env()
     })
 }
 
+/// Loads the separate Hub recovery archive target through the same bounded S3
+/// builder as payload storage, but from its own namespace and credentials.
+pub(super) fn load_hub_recovery_archive_s3_config() -> Result<S3ObjectStoreConfig, ServerConfigError>
+{
+    let bucket = var("SHARDLINE_HUB_RECOVERY_S3_BUCKET")
+        .map_err(|_error| recovery_config_error("Hub recovery archive S3 bucket is required"));
+    let inputs = PendingS3ObjectStoreConfig {
+        region: var("SHARDLINE_HUB_RECOVERY_S3_REGION")
+            .unwrap_or_else(|_error| "us-east-1".to_owned()),
+        endpoint: var("SHARDLINE_HUB_RECOVERY_S3_ENDPOINT").ok(),
+        key_prefix: var("SHARDLINE_HUB_RECOVERY_S3_KEY_PREFIX").ok(),
+        allow_http: parse_env_bool("SHARDLINE_HUB_RECOVERY_S3_ALLOW_HTTP")
+            .map_err(|_error| recovery_config_error("invalid Hub recovery archive allow_http")),
+        virtual_hosted_style_request: parse_env_bool(
+            "SHARDLINE_HUB_RECOVERY_S3_VIRTUAL_HOSTED_STYLE_REQUEST",
+        )
+        .map_err(|_error| {
+            recovery_config_error("invalid Hub recovery archive virtual-hosted-style flag")
+        }),
+    };
+    configure_s3_object_store_config(bucket, inputs, || {
+        Ok((
+            optional_s3_secret_env_or_file(
+                "SHARDLINE_HUB_RECOVERY_S3_ACCESS_KEY_ID",
+                "SHARDLINE_HUB_RECOVERY_S3_ACCESS_KEY_ID_FILE",
+            )?,
+            optional_s3_secret_env_or_file(
+                "SHARDLINE_HUB_RECOVERY_S3_SECRET_ACCESS_KEY",
+                "SHARDLINE_HUB_RECOVERY_S3_SECRET_ACCESS_KEY_FILE",
+            )?,
+            optional_s3_secret_env_or_file(
+                "SHARDLINE_HUB_RECOVERY_S3_SESSION_TOKEN",
+                "SHARDLINE_HUB_RECOVERY_S3_SESSION_TOKEN_FILE",
+            )?,
+        ))
+    })
+    .map_err(|error| recovery_config_error(&error.to_string()))
+}
+
+/// Reads the external Ed25519 seed as binary bytes without accepting inline
+/// environment values. A final newline byte is part of the seed, not framing.
+pub(super) fn load_hub_recovery_signing_key_from_file(
+    path: &Path,
+) -> Result<SecretBytes, ServerConfigError> {
+    const KEY_BYTES: u64 = 32;
+    let key = read_secret_file_bytes(
+        path,
+        KEY_BYTES,
+        false,
+        |error| recovery_config_error(&format!("Hub recovery signing-key file: {error}")),
+        |observed, maximum| {
+            recovery_config_error(&format!(
+                "Hub recovery signing-key file has {observed} bytes; maximum is {maximum}"
+            ))
+        },
+        |expected, observed| {
+            recovery_config_error(&format!(
+                "Hub recovery signing-key file changed while reading ({expected} to {observed} bytes)"
+            ))
+        },
+    )?;
+    if key.len() != 32 {
+        return Err(recovery_config_error(
+            "Hub recovery signing key must contain exactly 32 bytes",
+        ));
+    }
+    Ok(key)
+}
+
+pub(super) fn recovery_config_error(message: &str) -> ServerConfigError {
+    ServerConfigError::ConfigFileError(message.to_owned())
+}
+
 fn optional_s3_secret_env_or_file(
     env_name: &'static str,
     file_env_name: &'static str,

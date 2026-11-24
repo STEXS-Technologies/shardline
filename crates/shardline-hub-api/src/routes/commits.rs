@@ -322,7 +322,19 @@ async fn try_apply_commit_to_ref(
     .await?;
     // Every payload read, Git limit check and archive write has succeeded.
     // Only the existing metadata/evidence transaction may now advance the ref.
-    match state.store.publish_prepared_revision(&prepared.revision)? {
+    let publication = if let Some(manifest_ref) = &prepared.manifest_ref {
+        state.store.publish_prepared_revision_with_manifests(
+            &prepared.revision,
+            std::slice::from_ref(manifest_ref),
+        )?
+    } else if state.recovery_archive.is_some() {
+        return Err(HubApiError::CasError(
+            "Hub SHADOW publication is missing its immutable manifest reference".to_owned(),
+        ));
+    } else {
+        state.store.publish_prepared_revision(&prepared.revision)?
+    };
+    match publication {
         HubRefUpdateOutcome::Updated(_) => {}
         HubRefUpdateOutcome::Conflict => {
             return Ok(None);

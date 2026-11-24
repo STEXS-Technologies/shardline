@@ -12,6 +12,7 @@ pub use enums::*;
 pub use error::*;
 pub use hooks::*;
 pub use s3_signing::S3SigningIdentity;
+pub use shardline_index::HubRecoveryMode;
 
 #[cfg(test)]
 mod tests;

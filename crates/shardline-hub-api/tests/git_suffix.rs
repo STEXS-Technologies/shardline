@@ -157,6 +157,7 @@ async fn snapshot_contract(
         HubState {
             store,
             object_store: objects,
+            recovery_archive: None,
             auth: Some(HubAuth::new(Box::new(
                 LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap(),
             ))),
@@ -522,6 +523,7 @@ async fn head_and_lfs_preserve_git_suffix_aliases_literal_names_and_scope() {
         HubState {
             store,
             object_store: ServerObjectStore::local(root.path().join("objects")).unwrap(),
+            recovery_archive: None,
             auth: Some(HubAuth::new(Box::new(
                 LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap(),
             ))),

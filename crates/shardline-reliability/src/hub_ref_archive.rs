@@ -14,7 +14,9 @@ use crate::{
 };
 
 const HUB_REF_ARCHIVE_SCHEMA: u16 = 1;
-const MAX_ARCHIVE_RECORD_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum serialized size accepted for a signed Hub ref archive record.
+pub const MAX_HUB_REF_ARCHIVE_RECORD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ARCHIVE_RECORD_BYTES: usize = MAX_HUB_REF_ARCHIVE_RECORD_BYTES;
 const MAX_REFS_PER_BATCH: usize = 100_000;
 
 /// Validates an archive signing key ID using StateChronicle's canonical parser.

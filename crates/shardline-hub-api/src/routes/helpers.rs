@@ -545,6 +545,7 @@ mod tests {
         let state = HubState {
             store: boxed,
             object_store,
+            recovery_archive: None,
             auth: Some(HubAuth::new(Box::new(ScopedProvider { ns, repo }))),
             http_client: None,
             webhook_secret_cipher: None,

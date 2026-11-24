@@ -466,6 +466,7 @@ pub(super) fn make_hub_state() -> (tempfile::TempDir, HubState) {
     let state = HubState {
         store: boxed,
         object_store,
+        recovery_archive: None,
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,

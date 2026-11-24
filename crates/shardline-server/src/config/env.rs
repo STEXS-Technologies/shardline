@@ -10,7 +10,9 @@ use super::environment::var;
 use super::file::ShardlineTomlConfig;
 use super::secrets::{
     configure_provider_runtime_from_paths, ensure_secret_size_within_limit,
+    load_hub_recovery_archive_s3_config, load_hub_recovery_signing_key_from_file,
     load_redis_tls_config_from_env, load_s3_object_store_config_from_env, read_secret_file_bytes,
+    recovery_config_error,
 };
 use super::{
     AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
@@ -594,7 +596,77 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         provider_ttl_seconds,
     )?;
 
+    config = configure_hub_recovery_from_env(config)?;
+
     Ok(config)
+}
+
+fn configure_hub_recovery_from_env(
+    config: ServerConfig,
+) -> Result<ServerConfig, ServerConfigError> {
+    let mode = match var("SHARDLINE_HUB_RECOVERY_MODE") {
+        Ok(value) => parse_hub_recovery_mode(&value)?,
+        Err(_) => return Ok(config),
+    };
+    if mode == super::HubRecoveryMode::Off {
+        return Ok(config.with_hub_recovery(mode, None));
+    }
+
+    let deployment_id = var("SHARDLINE_HUB_RECOVERY_DEPLOYMENT_ID")
+        .map_err(|_error| recovery_config_error("Hub recovery deployment_id is required"))?;
+    if deployment_id.is_empty()
+        || deployment_id.len() > 256
+        || deployment_id.chars().any(char::is_control)
+    {
+        return Err(recovery_config_error("invalid Hub recovery deployment_id"));
+    }
+    let key_id = var("SHARDLINE_HUB_RECOVERY_KEY_ID")
+        .map_err(|_error| recovery_config_error("Hub recovery key_id is required"))?;
+    shardline_reliability::validate_hub_ref_archive_key_id(&key_id)
+        .map_err(|_error| recovery_config_error("invalid Hub recovery key_id"))?;
+    let key_path = var("SHARDLINE_HUB_RECOVERY_SIGNING_KEY_FILE")
+        .map_err(|_error| recovery_config_error("Hub recovery signing_key_path is required"))?;
+    let signing_key = load_hub_recovery_signing_key_from_file(Path::new(&key_path))?;
+    let archive_adapter = ObjectStorageAdapter::parse(
+        &var("SHARDLINE_HUB_RECOVERY_OBJECT_STORAGE_ADAPTER")
+            .map_err(|_error| recovery_config_error("Hub recovery archive adapter is required"))?,
+    )?;
+    if archive_adapter != ObjectStorageAdapter::S3 {
+        return Err(recovery_config_error(
+            "Hub recovery archive requires a separately configured S3 target",
+        ));
+    }
+    let archive_s3 = load_hub_recovery_archive_s3_config()?;
+    if config
+        .s3_object_store_config()
+        .is_some_and(|payload| payload.overlaps_object_namespace(&archive_s3))
+    {
+        return Err(recovery_config_error(
+            "Hub recovery archive target overlaps the payload S3 namespace",
+        ));
+    }
+
+    Ok(config.with_hub_recovery(
+        mode,
+        Some(super::types::config::HubRecoveryRuntimeConfig {
+            deployment_id,
+            key_id,
+            signing_key,
+            archive_s3,
+        }),
+    ))
+}
+
+fn parse_hub_recovery_mode(value: &str) -> Result<super::HubRecoveryMode, ServerConfigError> {
+    if value.trim().eq_ignore_ascii_case("off") {
+        Ok(super::HubRecoveryMode::Off)
+    } else if value.trim().eq_ignore_ascii_case("shadow") {
+        Ok(super::HubRecoveryMode::Shadow)
+    } else {
+        Err(recovery_config_error(
+            "invalid Hub recovery mode; expected off or shadow",
+        ))
+    }
 }
 
 fn selective_serialized_xorb_ranges_from_env() -> Result<bool, ServerConfigError> {
@@ -950,6 +1022,43 @@ pub fn load_server_config_from_env_with_toml(
         }
     }
 
+    if let Some(hub) = toml
+        .recovery
+        .as_ref()
+        .and_then(|recovery| recovery.hub.as_ref())
+    {
+        set_if_unset("SHARDLINE_HUB_RECOVERY_MODE", hub.mode.clone());
+        set_if_unset(
+            "SHARDLINE_HUB_RECOVERY_DEPLOYMENT_ID",
+            hub.deployment_id.clone(),
+        );
+        set_if_unset("SHARDLINE_HUB_RECOVERY_KEY_ID", hub.key_id.clone());
+        set_if_unset(
+            "SHARDLINE_HUB_RECOVERY_SIGNING_KEY_FILE",
+            hub.signing_key_path.clone(),
+        );
+        if let Some(archive) = &hub.archive {
+            set_if_unset(
+                "SHARDLINE_HUB_RECOVERY_OBJECT_STORAGE_ADAPTER",
+                archive.adapter.clone(),
+            );
+            if let Some(s3) = &archive.s3 {
+                set_if_unset("SHARDLINE_HUB_RECOVERY_S3_ENDPOINT", s3.endpoint.clone());
+                set_if_unset("SHARDLINE_HUB_RECOVERY_S3_REGION", s3.region.clone());
+                set_if_unset("SHARDLINE_HUB_RECOVERY_S3_BUCKET", s3.bucket.clone());
+                set_if_unset("SHARDLINE_HUB_RECOVERY_S3_KEY_PREFIX", s3.prefix.clone());
+                set_if_unset(
+                    "SHARDLINE_HUB_RECOVERY_S3_ALLOW_HTTP",
+                    s3.allow_http.map(|value| value.to_string()),
+                );
+                set_if_unset(
+                    "SHARDLINE_HUB_RECOVERY_S3_VIRTUAL_HOSTED_STYLE_REQUEST",
+                    s3.virtual_hosted_style.map(|value| value.to_string()),
+                );
+            }
+        }
+    }
+
     // Apply TOML values to the process environment for keys not already set.
     if !buf.is_empty() {
         #[cfg(test)]
@@ -1209,6 +1318,154 @@ mod tests {
 
     fn remove_env_var(key: &str) {
         super::super::environment::remove_test_var(key);
+    }
+
+    fn clear_hub_recovery_env() {
+        for key in [
+            "SHARDLINE_HUB_RECOVERY_MODE",
+            "SHARDLINE_HUB_RECOVERY_DEPLOYMENT_ID",
+            "SHARDLINE_HUB_RECOVERY_KEY_ID",
+            "SHARDLINE_HUB_RECOVERY_SIGNING_KEY_FILE",
+            "SHARDLINE_HUB_RECOVERY_OBJECT_STORAGE_ADAPTER",
+            "SHARDLINE_HUB_RECOVERY_S3_BUCKET",
+            "SHARDLINE_HUB_RECOVERY_S3_REGION",
+            "SHARDLINE_HUB_RECOVERY_S3_ENDPOINT",
+            "SHARDLINE_HUB_RECOVERY_S3_KEY_PREFIX",
+            "SHARDLINE_HUB_RECOVERY_S3_ALLOW_HTTP",
+            "SHARDLINE_HUB_RECOVERY_S3_VIRTUAL_HOSTED_STYLE_REQUEST",
+            "SHARDLINE_HUB_RECOVERY_S3_ACCESS_KEY_ID",
+            "SHARDLINE_HUB_RECOVERY_S3_ACCESS_KEY_ID_FILE",
+            "SHARDLINE_HUB_RECOVERY_S3_SECRET_ACCESS_KEY",
+            "SHARDLINE_HUB_RECOVERY_S3_SECRET_ACCESS_KEY_FILE",
+            "SHARDLINE_HUB_RECOVERY_S3_SESSION_TOKEN",
+            "SHARDLINE_HUB_RECOVERY_S3_SESSION_TOKEN_FILE",
+            "SHARDLINE_S3_BUCKET",
+            "SHARDLINE_S3_ENDPOINT",
+            "SHARDLINE_S3_KEY_PREFIX",
+            "SHARDLINE_OBJECT_STORAGE_ADAPTER",
+        ] {
+            remove_env_var(key);
+        }
+    }
+
+    #[test]
+    fn hub_recovery_configuration_is_absent_by_default_and_off_is_explicit() {
+        clear_hub_recovery_env();
+        assert_eq!(
+            super::load_server_config_from_env()
+                .unwrap()
+                .hub_recovery_mode(),
+            None
+        );
+
+        set_env_var("SHARDLINE_HUB_RECOVERY_MODE", "off");
+        let config = super::load_server_config_from_env().unwrap();
+        assert_eq!(
+            config.hub_recovery_mode(),
+            Some(super::super::HubRecoveryMode::Off)
+        );
+        assert!(config.hub_recovery_runtime().is_none());
+
+        set_env_var("SHARDLINE_HUB_RECOVERY_MODE", "archive");
+        assert!(matches!(
+            super::load_server_config_from_env(),
+            Err(ServerConfigError::ConfigFileError(_))
+        ));
+        clear_hub_recovery_env();
+    }
+
+    #[test]
+    fn hub_recovery_shadow_loads_toml_with_external_key_and_separate_archive() {
+        use std::io::Write;
+
+        clear_hub_recovery_env();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        let mut key_bytes = [7; 32];
+        key_bytes[31] = b'\n';
+        key_file.write_all(&key_bytes).unwrap();
+        key_file.flush().unwrap();
+        let document = toml::from_str::<super::ShardlineTomlConfig>(&format!(
+            r#"
+[recovery.hub]
+mode = "shadow"
+deployment_id = "prod-eu1"
+key_id = "hub-archive-key-2026-01"
+signing_key_path = {:?}
+[recovery.hub.archive]
+adapter = "s3"
+[recovery.hub.archive.s3]
+bucket = "archive-bucket"
+region = "us-east-1"
+endpoint = "https://archive.example.test"
+prefix = "hub-recovery"
+"#,
+            key_file.path().to_str().unwrap(),
+        ))
+        .unwrap();
+
+        let config = super::load_server_config_from_env_with_toml(&document).unwrap();
+        assert_eq!(
+            config.hub_recovery_mode(),
+            Some(super::super::HubRecoveryMode::Shadow)
+        );
+        let runtime = config.hub_recovery_runtime().unwrap();
+        assert_eq!(runtime.deployment_id, "prod-eu1");
+        assert_eq!(runtime.key_id, "hub-archive-key-2026-01");
+        assert_eq!(runtime.signing_key.len(), 32);
+        assert_eq!(runtime.signing_key.expose_secret(), &key_bytes);
+        assert_eq!(runtime.archive_s3.bucket(), "archive-bucket");
+        assert_eq!(runtime.archive_s3.key_prefix(), Some("hub-recovery"));
+
+        clear_hub_recovery_env();
+    }
+
+    #[test]
+    fn hub_recovery_shadow_requires_key_material_and_rejects_overlapping_payload_namespace() {
+        clear_hub_recovery_env();
+        set_env_var("SHARDLINE_HUB_RECOVERY_MODE", "shadow");
+        set_env_var("SHARDLINE_HUB_RECOVERY_DEPLOYMENT_ID", "prod");
+        set_env_var("SHARDLINE_HUB_RECOVERY_KEY_ID", "");
+        assert!(matches!(
+            super::load_server_config_from_env(),
+            Err(ServerConfigError::ConfigFileError(_))
+        ));
+
+        set_env_var("SHARDLINE_HUB_RECOVERY_KEY_ID", "key-1");
+        assert!(matches!(
+            super::load_server_config_from_env(),
+            Err(ServerConfigError::ConfigFileError(_))
+        ));
+
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        key_file.write_all(&[9; 32]).unwrap();
+        key_file.flush().unwrap();
+        for (name, value) in [
+            ("SHARDLINE_HUB_RECOVERY_DEPLOYMENT_ID", "prod"),
+            ("SHARDLINE_HUB_RECOVERY_KEY_ID", "key-1"),
+            (
+                "SHARDLINE_HUB_RECOVERY_SIGNING_KEY_FILE",
+                key_file.path().to_str().unwrap(),
+            ),
+            ("SHARDLINE_HUB_RECOVERY_OBJECT_STORAGE_ADAPTER", "s3"),
+            ("SHARDLINE_HUB_RECOVERY_S3_BUCKET", "shared"),
+            (
+                "SHARDLINE_HUB_RECOVERY_S3_ENDPOINT",
+                "https://s3.example.test",
+            ),
+            ("SHARDLINE_HUB_RECOVERY_S3_KEY_PREFIX", "payload/archive"),
+            ("SHARDLINE_OBJECT_STORAGE_ADAPTER", "s3"),
+            ("SHARDLINE_S3_BUCKET", "shared"),
+            ("SHARDLINE_S3_ENDPOINT", "https://s3.example.test/"),
+            ("SHARDLINE_S3_KEY_PREFIX", "payload"),
+        ] {
+            set_env_var(name, value);
+        }
+        assert!(matches!(
+            super::load_server_config_from_env(),
+            Err(ServerConfigError::ConfigFileError(_))
+        ));
+        clear_hub_recovery_env();
     }
 
     #[test]

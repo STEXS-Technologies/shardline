@@ -8,7 +8,9 @@ use axum::{
     middleware,
     routing::get,
 };
-use shardline_index::ProviderRepositoryState;
+use shardline_index::{
+    HubRecoveryMode, HubRecoveryOutboxStore, LocalIndexStore, ProviderRepositoryState,
+};
 use shardline_protocol::RepositoryProvider;
 use tempfile::TempDir;
 use tokio::{net::TcpListener, sync::oneshot, time::timeout};
@@ -243,6 +245,90 @@ async fn build_test_router(frontends: &[ServerFrontend], role: ServerRole) -> (R
 
     let app = router(config).await;
     (app.unwrap(), tmp)
+}
+
+#[tokio::test]
+async fn hub_startup_preserves_active_shadow_without_config_and_requires_explicit_off() {
+    let tmp = TempDir::new().unwrap();
+    let hub_root = tmp.path().join("hub");
+    std::fs::create_dir_all(&hub_root).unwrap();
+    let outbox = LocalIndexStore::new(hub_root).unwrap();
+    outbox
+        .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("prod-eu1"))
+        .await
+        .unwrap();
+
+    let base_config = || {
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            NonZeroUsize::new(65536).unwrap(),
+        )
+        .with_server_frontends(vec![ServerFrontend::Hub])
+        .unwrap()
+        .with_server_role(ServerRole::All)
+        .with_deployment_mode(crate::DeploymentMode::Insecure)
+        .with_token_signing_key(vec![0; 32])
+        .unwrap()
+    };
+
+    let missing_config = super::router(base_config()).await;
+    assert!(matches!(
+        missing_config,
+        Err(ServerError::Config(ServerConfigError::ConfigFileError(_)))
+    ));
+    assert_eq!(
+        outbox.hub_recovery_mode().await.unwrap(),
+        (HubRecoveryMode::Shadow, Some("prod-eu1".to_owned()))
+    );
+
+    let explicit_off = base_config().with_hub_recovery(HubRecoveryMode::Off, None);
+    let app = super::router(explicit_off).await.unwrap();
+    drop(app);
+    assert_eq!(
+        outbox.hub_recovery_mode().await.unwrap(),
+        (HubRecoveryMode::Off, None)
+    );
+}
+
+#[tokio::test]
+async fn explicit_hub_shadow_builds_separate_archive_and_drainer() {
+    let tmp = TempDir::new().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_server_frontends(vec![ServerFrontend::Hub])
+    .unwrap()
+    .with_server_role(ServerRole::All)
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
+    .with_token_signing_key(vec![0; 32])
+    .unwrap()
+    .with_hub_recovery(
+        HubRecoveryMode::Shadow,
+        Some(crate::config::HubRecoveryRuntimeConfig {
+            deployment_id: "test-deployment".to_owned(),
+            key_id: "test-key".to_owned(),
+            signing_key: shardline_protocol::SecretBytes::new(vec![7; 32]),
+            archive_s3: shardline_storage::S3ObjectStoreConfig::new(
+                "archive-bucket".to_owned(),
+                "us-east-1".to_owned(),
+            )
+            .with_key_prefix(Some("hub-ref-events")),
+        }),
+    );
+
+    let (_app, background) = super::router_with_background_tasks(config).await.unwrap();
+    background.shutdown().await.unwrap();
+
+    let outbox = LocalIndexStore::new(tmp.path().join("hub")).unwrap();
+    assert_eq!(
+        outbox.hub_recovery_mode().await.unwrap(),
+        (HubRecoveryMode::Shadow, Some("test-deployment".to_owned()))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

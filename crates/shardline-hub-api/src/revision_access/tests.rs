@@ -18,6 +18,7 @@ fn state(root: &std::path::Path) -> HubState {
     HubState {
         store: BoxedHubStore::from_store(LocalIndexStore::new(root.join("metadata")).unwrap()),
         object_store: ServerObjectStore::local(root.join("objects")).unwrap(),
+        recovery_archive: None,
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,

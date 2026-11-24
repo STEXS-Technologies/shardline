@@ -13,6 +13,7 @@ use shardline_storage::S3ObjectStoreConfig;
 use tracing;
 
 use super::super::secrets::ensure_secret_size_within_limit;
+use super::HubRecoveryMode;
 use super::defaults::{
     CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
     DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
@@ -95,6 +96,28 @@ pub use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
 /// Bounded-parser limits for native Xet shard metadata.
 pub use shardline_server_core::ShardMetadataLimits;
 
+/// Validated Hub recovery signing and archive-store material. Secrets remain
+/// redacted and the separate S3 config is never substituted with payload storage.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct HubRecoveryRuntimeConfig {
+    pub(crate) deployment_id: String,
+    pub(crate) key_id: String,
+    pub(crate) signing_key: SecretBytes,
+    pub(crate) archive_s3: S3ObjectStoreConfig,
+}
+
+impl std::fmt::Debug for HubRecoveryRuntimeConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HubRecoveryRuntimeConfig")
+            .field("deployment_id", &self.deployment_id)
+            .field("key_id", &self.key_id)
+            .field("signing_key", &"<redacted>")
+            .field("archive_s3", &self.archive_s3)
+            .finish()
+    }
+}
+
 /// Validated bearer token for the read-only administration boundary.
 ///
 /// The SHA-256 digest is precomputed once at construction so per-request
@@ -150,6 +173,8 @@ pub struct ServerConfig {
     pub(crate) root_dir: PathBuf,
     pub(crate) object_storage_adapter: ObjectStorageAdapter,
     pub(crate) s3_object_store_config: Option<S3ObjectStoreConfig>,
+    pub(crate) hub_recovery_mode: Option<HubRecoveryMode>,
+    pub(crate) hub_recovery_runtime: Option<HubRecoveryRuntimeConfig>,
     pub(crate) s3_signing_identities: Vec<super::S3SigningIdentity>,
     pub(crate) max_request_body_bytes: NonZeroUsize,
     pub(crate) max_xorb_body_bytes: NonZeroUsize,
@@ -229,6 +254,8 @@ impl ServerConfig {
             root_dir,
             object_storage_adapter: ObjectStorageAdapter::Local,
             s3_object_store_config: None,
+            hub_recovery_mode: None,
+            hub_recovery_runtime: None,
             s3_signing_identities: Vec::new(),
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             max_xorb_body_bytes: super::DEFAULT_MAX_XORB_BODY_BYTES,
@@ -347,6 +374,29 @@ impl ServerConfig {
     #[must_use]
     pub const fn s3_object_store_config(&self) -> Option<&S3ObjectStoreConfig> {
         self.s3_object_store_config.as_ref()
+    }
+
+    /// Returns explicitly configured Hub recovery mode. `None` means this
+    /// replica must preserve the database's existing mode.
+    #[must_use]
+    pub const fn hub_recovery_mode(&self) -> Option<HubRecoveryMode> {
+        self.hub_recovery_mode
+    }
+
+    /// Returns validated SHADOW signing and archive target configuration.
+    #[must_use]
+    pub(crate) const fn hub_recovery_runtime(&self) -> Option<&HubRecoveryRuntimeConfig> {
+        self.hub_recovery_runtime.as_ref()
+    }
+
+    pub(crate) fn with_hub_recovery(
+        mut self,
+        mode: HubRecoveryMode,
+        runtime: Option<HubRecoveryRuntimeConfig>,
+    ) -> Self {
+        self.hub_recovery_mode = Some(mode);
+        self.hub_recovery_runtime = runtime;
+        self
     }
 
     /// Returns the maximum request body size accepted by body-buffering extractors.

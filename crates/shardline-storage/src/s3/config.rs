@@ -93,6 +93,45 @@ impl S3ObjectStoreConfig {
     pub fn key_prefix(&self) -> Option<&str> {
         self.key_prefix.as_deref()
     }
+
+    /// Returns whether two configurations can address overlapping keys in
+    /// the same apparent S3 namespace. Credentials are deliberately ignored.
+    /// Custom endpoint aliases and provider-specific region aliases cannot be
+    /// proven equivalent here; this is a conservative configuration guard,
+    /// not an object-store identity attestation.
+    #[must_use]
+    pub fn overlaps_object_namespace(&self, other: &Self) -> bool {
+        if self.bucket != other.bucket || !same_endpoint(&self.endpoint, &other.endpoint) {
+            return false;
+        }
+        prefixes_overlap(self.key_prefix.as_deref(), other.key_prefix.as_deref())
+    }
+}
+
+fn same_endpoint(left: &Option<String>, right: &Option<String>) -> bool {
+    match (left.as_deref(), right.as_deref()) {
+        (None, None) => true,
+        (Some(left), Some(right)) => match (url::Url::parse(left), url::Url::parse(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            // Invalid endpoint configuration cannot establish independent
+            // namespaces; the storage constructor will report the parse error.
+            _ => true,
+        },
+        _ => false,
+    }
+}
+
+fn prefixes_overlap(left: Option<&str>, right: Option<&str>) -> bool {
+    let (Some(left), Some(right)) = (left, right) else {
+        return true;
+    };
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 impl fmt::Debug for S3ObjectStoreConfig {

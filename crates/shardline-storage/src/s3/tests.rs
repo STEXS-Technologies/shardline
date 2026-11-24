@@ -1807,6 +1807,33 @@ fn s3_config_clone_and_eq() {
     assert_eq!(a, b);
 }
 
+#[test]
+fn s3_object_namespaces_detect_overlapping_prefix_boundaries() {
+    let config = |prefix: Option<&str>| {
+        S3ObjectStoreConfig::new("archive".to_owned(), "us-east-1".to_owned())
+            .with_endpoint(Some("https://objects.example.test/".to_owned()))
+            .with_key_prefix(prefix)
+    };
+
+    assert!(config(Some("hub")).overlaps_object_namespace(&config(Some("hub/refs"))));
+    assert!(config(None).overlaps_object_namespace(&config(Some("hub"))));
+    assert!(!config(Some("hub")).overlaps_object_namespace(&config(Some("hub-other"))));
+    assert!(
+        !config(Some("hub")).overlaps_object_namespace(
+            &S3ObjectStoreConfig::new("different".to_owned(), "us-east-1".to_owned())
+                .with_endpoint(Some("https://objects.example.test".to_owned()))
+                .with_key_prefix(Some("hub")),
+        )
+    );
+    assert!(
+        !config(Some("hub")).overlaps_object_namespace(
+            &S3ObjectStoreConfig::new("archive".to_owned(), "us-east-1".to_owned())
+                .with_endpoint(Some("https://other.example.test".to_owned()))
+                .with_key_prefix(Some("hub")),
+        )
+    );
+}
+
 // ── metadata_from_external with prefix and without ────────────────────
 
 #[test]

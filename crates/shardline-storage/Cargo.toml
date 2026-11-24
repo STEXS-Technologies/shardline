@@ -15,7 +15,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["s3"]
-s3 = ["dep:object_store", "object_store/aws", "dep:http"]
+s3 = ["dep:object_store", "object_store/aws", "dep:http", "dep:url"]
 test-fault-injection = []
 
 [dependencies]
@@ -29,6 +29,7 @@ object_store = { workspace = true, default-features = false, optional = true }
 shardline-protocol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+url = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

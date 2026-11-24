@@ -20,6 +20,28 @@ pub struct ShardlineTomlConfig {
     pub cache: Option<CacheSection>,
     #[serde(default)]
     pub auth: Option<AuthSection>,
+    #[serde(default)]
+    pub recovery: Option<RecoverySection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverySection {
+    #[serde(default)]
+    pub hub: Option<HubRecoverySection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HubRecoverySection {
+    pub mode: Option<String>,
+    pub deployment_id: Option<String>,
+    pub key_id: Option<String>,
+    /// Path to the external Ed25519 recovery signing key. Key material is not
+    /// accepted inline in TOML or as an environment value.
+    pub signing_key_path: Option<String>,
+    /// The archive target uses the same typed adapter schema as payload storage.
+    pub archive: Option<StorageSection>,
 }
 
 #[derive(Debug, Deserialize)]

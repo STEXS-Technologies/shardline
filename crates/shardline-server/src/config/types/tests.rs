@@ -19,6 +19,13 @@ fn test_config() -> ServerConfig {
     )
 }
 
+#[test]
+fn hub_recovery_is_not_implicitly_configured_by_programmatic_defaults() {
+    let config = test_config();
+    assert_eq!(config.hub_recovery_mode(), None);
+    assert!(config.hub_recovery_runtime().is_none());
+}
+
 fn ephemeral_bind_config() -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),

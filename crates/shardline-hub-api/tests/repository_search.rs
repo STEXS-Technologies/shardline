@@ -16,6 +16,7 @@ fn app(store: BoxedHubStore, root: &Path) -> Router {
         HubState {
             store,
             object_store: ServerObjectStore::local(root.join("objects")).unwrap(),
+            recovery_archive: None,
             auth: Some(HubAuth::new(Box::new(LocalHmacProvider::new(KEY).unwrap()))),
             http_client: None,
             webhook_secret_cipher: None,

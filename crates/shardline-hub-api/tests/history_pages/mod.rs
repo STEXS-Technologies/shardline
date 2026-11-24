@@ -26,6 +26,7 @@ async fn default_history_page_stops_at_one_hundred_commits() {
         HubState {
             store,
             object_store: ServerObjectStore::local(root.path().join("objects")).unwrap(),
+            recovery_archive: None,
             auth: None,
             public_base_url: "http://localhost".to_owned(),
             http_client: None,
@@ -92,6 +93,7 @@ async fn history_pages_keep_immutable_ancestry_and_authorization() {
     let state = HubState {
         store: store.clone(),
         object_store: ServerObjectStore::local(root.path().join("objects")).unwrap(),
+        recovery_archive: None,
         auth: Some(HubAuth::new(Box::new(
             LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap(),
         ))),

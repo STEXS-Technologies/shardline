@@ -302,6 +302,7 @@ async fn build_test_hub_state(
     shardline_hub_api::routes::HubState {
         store: boxed,
         object_store,
+        recovery_archive: None,
         auth,
         http_client: None,
         webhook_secret_cipher: None,

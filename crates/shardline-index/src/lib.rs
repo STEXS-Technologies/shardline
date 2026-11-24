@@ -78,6 +78,10 @@ mod oci_tags;
 pub use oci_referrers::OciManifestSubject;
 mod postgres;
 mod provider;
+mod version_manifest;
+pub use version_manifest::{
+    FileVersionManifestV1, HubTreeVersionManifestV1, ManifestLocator, VersionManifestError,
+};
 mod provider_evidence;
 mod reconstruction;
 mod record;

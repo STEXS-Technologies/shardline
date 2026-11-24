@@ -47,7 +47,7 @@ pub(crate) use self::refs::*;
 pub(crate) use self::repos::*;
 pub(crate) use self::resolve::*;
 pub use self::router::{router, router_with_dataset_query};
-pub use self::state::HubState;
+pub use self::state::{HubArchiveContext, HubState};
 pub(crate) use self::tokens::*;
 #[cfg(test)]
 pub(crate) use self::tree::*;

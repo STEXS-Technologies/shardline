@@ -64,7 +64,7 @@ pub use event_metadata::{EvidenceEventMetadata, events_after_sequence};
 pub use hub_ref_archive::{
     HubRefBatchArchiveAnchor, HubRefBatchArchiveCheckpointPin, HubRefBatchArchiveEvent,
     HubRefBatchArchiveRecordV1, HubRefBatchHead, HubRefBatchManifestReferenceV1,
-    HubRefBatchSnapshot, validate_hub_ref_archive_key_id,
+    HubRefBatchSnapshot, MAX_HUB_REF_ARCHIVE_RECORD_BYTES, validate_hub_ref_archive_key_id,
 };
 pub use lifecycle_log::LifecycleEvidenceLog;
 pub use lifecycle_profile::{

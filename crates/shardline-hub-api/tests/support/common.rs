@@ -27,6 +27,7 @@ impl HubTestContext {
         let state = HubState {
             store,
             object_store,
+            recovery_archive: None,
             auth: None,
             http_client: None,
             webhook_secret_cipher: None,
