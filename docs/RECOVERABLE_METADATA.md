@@ -120,7 +120,8 @@ Current coverage is therefore:
 
 | Domain | Outbox transaction | External receipt | Restore verified | Claim |
 |---|---:|---:|---:|---|
-| Hub ref batches | SQLite/PostgreSQL same-transaction outbox, OFF by default; SHADOW only | SQLite LocalObjectStore verified record and actual PostgreSQL outbox/order tests | No | None |
+| Hub ref batches | SQLite/PostgreSQL same-transaction outbox, OFF by default; SHADOW only | Linked signed receipts are verified against a trusted genesis or predecessor; the worker verifies external readback before marking the exact event archived. SQLite/PG outbox tests and receipt-chain tests pass. | No | None |
+| NDJSON Hub versions | Manifest prepared before revision visibility; locator is pinned to the matching committed Hub ref event in the same SQL publication | Manifest serialization/storage identity and outbox linkage have focused tests; destructive restore and payload-closure verification are not implemented | No | None |
 | OCI, S3, LFS, Bazel, provider policy, lifecycle/GC | No | No | No | None |
 
 ## GC, deletion, and archive retention
@@ -143,10 +144,13 @@ The implementation sequence is R1, then R2, then R3:
 1. Freeze this authority model, recovery formats, trust boundaries, and explicit
    domain coverage.
 2. Add immutable manifests based on actual verified Shardline publication
-   records and verify storage readback.
+   records and verify storage readback. The initial implementation covers
+   NDJSON Hub publications only; other publication paths remain uncovered.
 3. Add additive SQLite and PostgreSQL outbox migrations and insert a domain
-   sequenced event in the owner publication transaction.
-4. Add an ordered bounded worker, retries, idempotence, status, and backpressure.
+   sequenced event in the owner publication transaction. This is implemented
+   for Hub ref batches only.
+4. Add an ordered bounded worker, retries, and idempotence. The SHADOW worker
+   is integrated for Hub refs; status and backpressure remain outstanding.
 5. Backfill legacy metadata with a resumable scan and certify inventory
    completeness while the original database still exists.
 6. Restore to a fresh isolated database, replay contiguous receipts, invoke
@@ -164,17 +168,23 @@ matching destructive restore and release gates pass. Existing installations
 remain on R0 until these gates are met. The released schema history and
 checksums are immutable; new behavior uses forward additive migrations.
 
-The accepted Hub foundation is an ordered SQL outbox plus a single-event signed
-record format. The record signature does not include a cryptographic
-predecessor link, and archive ordering is not certified independently of SQL.
-Its sequence only orders mutations observed while SHADOW is continuously
+The integrated Hub slice uses an ordered SQL outbox, signed linked receipts, a
+bounded background worker, and immutable version manifests for NDJSON
+publications. The worker pages a bounded set of pending repositories, handles
+one next event per repository per pass, verifies archive bytes and predecessor
+identity, and marks an event only after verification. This is SHADOW evidence
+capture: an SQL commit can still precede its archive receipt, so normal
+publication acknowledgments remain backup dependent.
+
+The sequence orders only mutations observed while SHADOW remains continuously
 enabled. Turning SHADOW off after an outbox event is allowed, but re-enabling
 SHADOW is rejected once history exists; a new certified baseline/epoch is not
-implemented. Hub records currently have no independent tenant field, so the
-tenant slot uses deployment identity and repository IDs remain opaque. These
-constraints prevent this slice from qualifying R1/R2. The implementation
-contains a single-event drain helper, not a scheduled worker, coverage report,
-or restore reader that can enumerate archived records after database loss.
+implemented. Hub records have no independent tenant field, so the tenant slot
+uses deployment identity and repository IDs remain opaque. Coverage is limited
+to Hub ref batches and NDJSON version metadata. There is no resumable backfill,
+certified checkpoint, archive inventory/status API, restore reader, or
+destructive restore qualification. These constraints prevent this slice from
+qualifying R1/R2/R3.
 
 ## Failure cases that must remain fail closed
 
