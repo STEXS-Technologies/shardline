@@ -14,8 +14,8 @@ use shardline_protocol::SecretString;
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefChange,
-        HubRefCreateOutcome, HubRefPublicationMode, HubRefUpdateOutcome, HubRepo,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefBatchOutcome,
+        HubRefChange, HubRefCreateOutcome, HubRefPublicationMode, HubRefUpdateOutcome, HubRepo,
         HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage, HubTreePageEntry,
         HubTreePageOptions, HubWebhook, HubWebhookCreateOutcome, canonical_ref_name,
         hub_tree_requires_recovery,
@@ -540,44 +540,21 @@ impl HubStore for PostgresIndexStore {
         if ref_name == "main" || ref_name == "HEAD" {
             return Err(PostgresMetadataStoreError::RecordNotFound);
         }
-        let pool = self.pool().clone();
-
-        block_on_async(async {
-            let mut tx = pool.begin().await?;
-            // Match publication's repository lock so deletion cannot interleave
-            // between an updater's expected-head check and ref publication.
-            let locked_repo: Option<String> = sqlx::query_scalar(
-                "SELECT repo_id FROM shardline_hub_repos WHERE repo_id = $1 FOR UPDATE",
-            )
-            .bind(&repo_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if locked_repo.is_none() {
-                return Err(PostgresMetadataStoreError::RecordNotFound);
+        let change = HubRefChange {
+            ref_name,
+            expected_sha: Some(expected_sha),
+            new_sha: None,
+            message: String::new(),
+        };
+        match ref_batch::apply(self, &repo_id, &[change])? {
+            HubRefBatchOutcome::Applied => Ok(()),
+            HubRefBatchOutcome::Conflict => Err(PostgresMetadataStoreError::RecordNotFound),
+            HubRefBatchOutcome::Unsupported => {
+                Err(PostgresMetadataStoreError::ReliabilityEventConflict(
+                    "atomic ref deletion is unsupported".to_owned(),
+                ))
             }
-            let result = sqlx::query(
-                "DELETE FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = $2 AND sha = $3",
-            )
-            .bind(&repo_id)
-            .bind(&ref_name)
-            .bind(&expected_sha)
-            .execute(&mut *tx)
-            .await?;
-            if result.rows_affected() != 1 {
-                return Err(PostgresMetadataStoreError::RecordNotFound);
-            }
-            let before = HubRefSnapshot::new(&repo_id, &ref_name, Some(expected_sha.clone()))?;
-            let after = HubRefSnapshot::new(&repo_id, &ref_name, None)?;
-            let evidence = verify_and_append_snapshot_transition(
-                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, Some(expected_sha)).await?,
-                before,
-                after,
-            )?
-            .0;
-            persist_hub_ref_evidence(&mut tx, &evidence).await?;
-            tx.commit().await?;
-            Ok(())
-        })
+        }
     }
 
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
@@ -2064,6 +2041,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pg_delete_ref_preserves_commit_history_and_rejects_stale_delete() {
+        use crate::{HubRecoveryMode, HubRecoveryOutboxStore};
+
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
             return;
@@ -2095,8 +2074,24 @@ mod tests {
         );
 
         store
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("delete-test-deployment"))
+            .await
+            .unwrap();
+
+        store
             .delete_ref(repo_id, "refs/heads/feature", "feature-sha")
             .unwrap();
+        let item = store
+            .next_pending_hub_ref_event(repo_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.domain_sequence, 1);
+        assert_eq!(
+            item.event.before.refs[0].head_sha.as_deref(),
+            Some("feature-sha")
+        );
+        assert_eq!(item.event.after.refs[0].head_sha, None);
         assert_eq!(store.resolve_revision(repo_id, "feature").unwrap(), None);
         assert_eq!(
             store
@@ -2105,6 +2100,18 @@ mod tests {
                 .as_deref(),
             Some("feature-sha"),
             "deleting a ref must not remove the commit"
+        );
+        assert!(store.delete_ref(repo_id, "feature", "feature-sha").is_err());
+        let last_sequence: i64 = sqlx::query_scalar(
+            "SELECT last_sequence FROM shardline_hub_recovery_sequences WHERE repo_id = $1",
+        )
+        .bind(repo_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            last_sequence, 1,
+            "stale delete must not allocate a sequence"
         );
         assert!(store.delete_ref(repo_id, "main", initial_sha).is_err());
     }

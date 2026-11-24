@@ -12,8 +12,8 @@ use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefChange,
-        HubRefCreateOutcome, HubRefPublicationMode, HubRefUpdateOutcome, HubRepo,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefBatchOutcome,
+        HubRefChange, HubRefCreateOutcome, HubRefPublicationMode, HubRefUpdateOutcome, HubRepo,
         HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage, HubTreePageEntry,
         HubTreePageOptions, HubWebhook, HubWebhookCreateOutcome, canonical_ref_name,
         hub_tree_requires_recovery,
@@ -459,35 +459,20 @@ impl HubStore for LocalIndexStore {
             )
             .into());
         }
-        let root = self.root().to_owned();
-        let repo_id = repo_id.to_owned();
-        let ref_name = ref_name.to_owned();
-        let expected_sha = expected_sha.to_owned();
-        retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection(&root)?;
-            let tx = conn.transaction()?;
-            let changed = tx.execute(
-                "DELETE FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2 AND sha = ?3",
-                params![repo_id, ref_name, expected_sha],
-            )?;
-            if changed != 1 {
-                return Err(rusqlite::Error::QueryReturnedNoRows.into());
-            }
-            let before = hub_ref_snapshot(&repo_id, &ref_name, Some(expected_sha.clone()))?;
-            let after = hub_ref_snapshot(&repo_id, &ref_name, None)?;
-            let (stored_evidence, evidence_was_missing) =
-                current_hub_ref_evidence(&tx, &repo_id, &ref_name, Some(expected_sha.clone()))?;
-            let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
-            if evidence_was_missing {
-                for event in evidence.events() {
-                    persist_reliability_event(&tx, event)?;
-                }
-            } else if let Some(event) = evidence.events().last() {
-                persist_reliability_event(&tx, event)?;
-            }
-            tx.commit()?;
-            Ok(())
-        })
+        let change = HubRefChange {
+            ref_name: ref_name.to_owned(),
+            expected_sha: Some(expected_sha.to_owned()),
+            new_sha: None,
+            message: String::new(),
+        };
+        match ref_batch::apply(self, repo_id, &[change])? {
+            HubRefBatchOutcome::Applied => Ok(()),
+            HubRefBatchOutcome::Conflict => Err(rusqlite::Error::QueryReturnedNoRows.into()),
+            HubRefBatchOutcome::Unsupported => Err(rusqlite::Error::InvalidParameterName(
+                "atomic ref deletion is unsupported".to_owned(),
+            )
+            .into()),
+        }
     }
 
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
@@ -2394,6 +2379,13 @@ mod tests {
                 "feature commit",
             )
             .unwrap();
+        let connection = open_hub_connection(store.root()).unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_hub_recovery_config SET mode = 'shadow', deployment_id = 'delete-test-deployment' WHERE singleton_id = 1",
+                [],
+            )
+            .unwrap();
 
         assert_eq!(
             store
@@ -2412,6 +2404,37 @@ mod tests {
         store
             .delete_ref("org/model", "refs/heads/feature", "feature-sha")
             .unwrap();
+
+        let event_json: String = connection
+            .query_row(
+                "SELECT event_json FROM shardline_hub_recovery_outbox WHERE repo_id = ?1 AND domain_sequence = 1",
+                ["org/model"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event: shardline_reliability::HubRefBatchArchiveEvent =
+            serde_json::from_str(&event_json).unwrap();
+        assert_eq!(
+            event.before.refs[0].head_sha.as_deref(),
+            Some("feature-sha")
+        );
+        assert_eq!(event.after.refs[0].head_sha, None);
+        assert!(
+            store
+                .delete_ref("org/model", "feature", "feature-sha")
+                .is_err()
+        );
+        let last_sequence: i64 = connection
+            .query_row(
+                "SELECT last_sequence FROM shardline_hub_recovery_sequences WHERE repo_id = ?1",
+                ["org/model"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            last_sequence, 1,
+            "stale delete must not allocate a sequence"
+        );
 
         assert_eq!(
             store.resolve_revision("org/model", "feature").unwrap(),
