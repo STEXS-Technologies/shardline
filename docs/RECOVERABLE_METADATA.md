@@ -121,7 +121,7 @@ Current coverage is therefore:
 | Domain | Outbox transaction | External receipt | Restore verified | Claim |
 |---|---:|---:|---:|---|
 | Hub ref batches | SQLite/PostgreSQL same-transaction outbox, OFF by default; SHADOW only | Linked signed receipts are verified against a trusted genesis or predecessor; the worker verifies external readback before marking the exact event archived. SQLite/PG outbox tests and receipt-chain tests pass. | No | None |
-| NDJSON Hub versions | Manifest prepared before revision visibility; locator is pinned to the matching committed Hub ref event in the same SQL publication | Manifest serialization/storage identity and outbox linkage have focused tests; destructive restore and payload-closure verification are not implemented | No | None |
+| Hub version publications (NDJSON and Git receive-pack) | Manifest prepared before revision visibility; locator is pinned to the matching committed Hub ref event in the same SQL publication | Focused tests cover manifest serialization, PostgreSQL prepared-manifest atomicity, and receive-pack manifest linkage; destructive restore and payload-closure verification are not implemented | No | None |
 | OCI, S3, LFS, Bazel, provider policy, lifecycle/GC | No | No | No | None |
 
 ## GC, deletion, and archive retention
@@ -181,8 +181,8 @@ enabled. Turning SHADOW off after an outbox event is allowed, but re-enabling
 SHADOW is rejected once history exists; a new certified baseline/epoch is not
 implemented. Hub records have no independent tenant field, so the tenant slot
 uses deployment identity and repository IDs remain opaque. Coverage is limited
-to Hub ref batches and NDJSON version metadata. There is no resumable backfill,
-certified checkpoint, archive inventory/status API, restore reader, or
+to Hub ref batches and version metadata from NDJSON and Git receive-pack. There
+is no resumable backfill, certified checkpoint, archive inventory/status API, restore reader, or
 destructive restore qualification. These constraints prevent this slice from
 qualifying R1/R2/R3.
 
