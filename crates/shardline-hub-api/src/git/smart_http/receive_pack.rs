@@ -376,17 +376,19 @@ fn store_push_objects(
     if let Some(manifest) = &prepared.shadow_manifest {
         match state
             .store
-            .publish_prepared_revision_with_manifests(
-                &manifest.revision,
+            .change_refs_atomically_with_prepared_revisions(
+                repo_id,
+                std::slice::from_ref(&prepared.change),
+                std::slice::from_ref(&manifest.revision),
                 std::slice::from_ref(&manifest.reference),
             )
             .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
         {
-            HubRefUpdateOutcome::Updated(_) => Ok(()),
-            HubRefUpdateOutcome::Conflict => Err(SmartHttpError::NonFastForward(
+            HubRefBatchOutcome::Applied => Ok(()),
+            HubRefBatchOutcome::Conflict => Err(SmartHttpError::NonFastForward(
                 "ref is missing or no longer matches expected head".to_owned(),
             )),
-            HubRefUpdateOutcome::Unsupported => Err(SmartHttpError::CreateRevision(
+            HubRefBatchOutcome::Unsupported => Err(SmartHttpError::CreateRevision(
                 "atomic ref update is unsupported by this store".to_owned(),
             )),
         }
@@ -620,7 +622,7 @@ fn prepare_push_objects(
                     .as_secs();
                 HubRevision {
                     repo_id: repo_id.to_owned(),
-                    ref_name: ref_name.to_owned(),
+                    ref_name: canonical_ref_name(ref_name).to_owned(),
                     sha: new_sha.to_owned(),
                     parent_sha: parent.map(str::to_owned),
                     message: Some(message),
