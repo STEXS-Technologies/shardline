@@ -12,10 +12,11 @@ use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
-        HubRefPublicationMode, HubRefUpdateOutcome, HubRepo, HubRepoSearchOptions, HubRepoType,
-        HubRevision, HubStore, HubTreePage, HubTreePageEntry, HubTreePageOptions, HubWebhook,
-        HubWebhookCreateOutcome, canonical_ref_name, hub_tree_requires_recovery,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefChange,
+        HubRefCreateOutcome, HubRefPublicationMode, HubRefUpdateOutcome, HubRepo,
+        HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage, HubTreePageEntry,
+        HubTreePageOptions, HubWebhook, HubWebhookCreateOutcome, canonical_ref_name,
+        hub_tree_requires_recovery,
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
@@ -153,6 +154,14 @@ impl HubStore for LocalIndexStore {
         changes: &[crate::hub::HubRefChange],
     ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
         ref_batch::apply(self, repo_id, changes)
+    }
+    fn change_refs_atomically_with_manifests(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        manifests: &[shardline_reliability::HubRefBatchManifestReferenceV1],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply_with_manifests(self, repo_id, changes, manifests)
     }
     type Error = LocalIndexStoreError;
 
@@ -322,6 +331,13 @@ impl HubStore for LocalIndexStore {
         &self,
         revision: &HubRevision,
     ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        self.publish_prepared_revision_with_manifests(revision, &[])
+    }
+    fn publish_prepared_revision_with_manifests(
+        &self,
+        revision: &HubRevision,
+        manifests: &[shardline_reliability::HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
         self.publish_hub_revision_at(
             &revision.repo_id,
             revision.parent_sha.as_deref(),
@@ -330,6 +346,7 @@ impl HubStore for LocalIndexStore {
             revision.message.as_deref().unwrap_or(""),
             HubRefPublicationMode::UpdateOnly,
             Some(revision),
+            manifests,
         )
         .map(HubRefCreateOutcome::into_update)
     }
@@ -965,7 +982,16 @@ impl LocalIndexStore {
         message: &str,
         mode: HubRefPublicationMode,
     ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
-        self.publish_hub_revision_at(repo_id, parent_sha, new_sha, ref_name, message, mode, None)
+        self.publish_hub_revision_at(
+            repo_id,
+            parent_sha,
+            new_sha,
+            ref_name,
+            message,
+            mode,
+            None,
+            &[],
+        )
     }
 
     #[allow(
@@ -981,6 +1007,7 @@ impl LocalIndexStore {
         message: &str,
         mode: HubRefPublicationMode,
         prepared: Option<&HubRevision>,
+        manifest_refs: &[shardline_reliability::HubRefBatchManifestReferenceV1],
     ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
         let ref_name = canonical_ref_name(ref_name);
         let root = self.root().to_owned();
@@ -989,6 +1016,7 @@ impl LocalIndexStore {
         let new_sha = new_sha.to_owned();
         let ref_name = ref_name.to_owned();
         let message = message.to_owned();
+        let manifest_refs = manifest_refs.to_vec();
         retry_sqlite_busy(|| {
             let mut conn = open_hub_connection(&root)?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1059,6 +1087,17 @@ impl LocalIndexStore {
             } else if let Some(event) = evidence.events().last() {
                 persist_reliability_event(&tx, event)?;
             }
+            recovery_outbox::append_ref_batch(
+                &tx,
+                &repo_id,
+                &[HubRefChange {
+                    ref_name: ref_name.clone(),
+                    expected_sha: parent_sha.clone(),
+                    new_sha: Some(new_sha.clone()),
+                    message: message.clone(),
+                }],
+                &manifest_refs,
+            )?;
 
             let revision = tx.query_row(
                 "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
@@ -1254,25 +1293,32 @@ mod tests {
         use crate::hub::{HubRefBatchOutcome, HubRefChange};
         use crate::{
             HubRecoveryMode, HubRecoveryOutboxStore, archive_next_hub_ref_event,
-            read_hub_ref_archive_record,
+            read_hub_ref_archive_record, read_hub_ref_archive_record_with_previous,
         };
         use ed25519_dalek::{SigningKey, VerifyingKey};
+        use shardline_reliability::{HubRefBatchArchiveAnchor, HubRefBatchArchiveCheckpointPin};
         use shardline_storage::LocalObjectStore;
+        use std::num::NonZeroUsize;
 
         let (_storage, store) = make_store();
-        let repo = "outbox/archive";
-        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        let repo = format!("r{}", "x".repeat(1023));
+        let deployment = "d".repeat(256);
+        store.create_repo(HubRepoType::Model, &repo, false).unwrap();
         store
-            .create_revision(repo, None, "base", "main", "Initial")
+            .create_revision(&repo, None, "base", "main", "Initial")
             .unwrap();
         store
-            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("deploy-archive"))
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some(&deployment))
             .await
             .unwrap();
         assert_eq!(
+            store.hub_recovery_mode().await.unwrap(),
+            (HubRecoveryMode::Shadow, Some(deployment.clone()))
+        );
+        assert_eq!(
             store
                 .change_refs_atomically(
-                    repo,
+                    &repo,
                     &[HubRefChange {
                         ref_name: "main".into(),
                         expected_sha: Some("base".into()),
@@ -1284,22 +1330,29 @@ mod tests {
             HubRefBatchOutcome::Applied
         );
         let archive = LocalObjectStore::new(_storage.path().join("recovery-archive")).unwrap();
+        assert_eq!(
+            store
+                .pending_hub_ref_repositories_after(None, NonZeroUsize::new(1).unwrap())
+                .await
+                .unwrap(),
+            vec![repo.clone()]
+        );
         let signing_key = SigningKey::from_bytes(&[23; 32]);
         let failing_mark = FailArchiveMarkOnce(&store);
         assert!(
-            archive_next_hub_ref_event(&failing_mark, &archive, repo, &signing_key, "test-key",)
+            archive_next_hub_ref_event(&failing_mark, &archive, &repo, &signing_key, "test-key",)
                 .await
                 .is_err()
         );
         assert!(
             store
-                .next_pending_hub_ref_event(repo)
+                .next_pending_hub_ref_event(&repo)
                 .await
                 .unwrap()
                 .is_some()
         );
         // Retry reuses the immutable object written before the injected crash.
-        let object = archive_next_hub_ref_event(&store, &archive, repo, &signing_key, "test-key")
+        let object = archive_next_hub_ref_event(&store, &archive, &repo, &signing_key, "test-key")
             .await
             .unwrap()
             .unwrap();
@@ -1308,21 +1361,147 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(record.event.after.refs[0].head_sha.as_deref(), Some("next"));
+        let pin = HubRefBatchArchiveCheckpointPin::new(
+            record.event.after.deployment_id.clone(),
+            record.event.after.provider_id.clone(),
+            record.event.after.tenant_id.clone(),
+            record.event.after.repository_id.clone(),
+            record.event.sequence,
+            object.checksum_blake3().to_owned(),
+        )
+        .unwrap();
+        let anchor = HubRefBatchArchiveAnchor::from_pinned_record(
+            &record,
+            &verifying_key,
+            &pin,
+            object.checksum_blake3(),
+        )
+        .unwrap();
         assert!(
             store
-                .next_pending_hub_ref_event(repo)
+                .next_pending_hub_ref_event(&repo)
                 .await
                 .unwrap()
                 .is_none()
         );
+        assert_eq!(
+            store
+                .change_refs_atomically(
+                    &repo,
+                    &[HubRefChange {
+                        ref_name: "main".into(),
+                        expected_sha: Some("next".into()),
+                        new_sha: Some("chained".into()),
+                        message: "Chained publication".into(),
+                    }],
+                )
+                .unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let chained_object =
+            archive_next_hub_ref_event(&store, &archive, &repo, &signing_key, "test-key")
+                .await
+                .unwrap()
+                .unwrap();
+        let chained_record = read_hub_ref_archive_record_with_previous(
+            &archive,
+            &chained_object,
+            &verifying_key,
+            &anchor,
+        )
+        .await
+        .unwrap();
+        assert_eq!(chained_record.event.sequence, 2);
+        assert_eq!(
+            chained_record.event.after.refs[0].head_sha.as_deref(),
+            Some("chained")
+        );
+        let chained_pin = HubRefBatchArchiveCheckpointPin::new(
+            chained_record.event.after.deployment_id.clone(),
+            chained_record.event.after.provider_id.clone(),
+            chained_record.event.after.tenant_id.clone(),
+            chained_record.event.after.repository_id.clone(),
+            chained_record.event.sequence,
+            chained_object.checksum_blake3().to_owned(),
+        )
+        .unwrap();
+        let chained_anchor = HubRefBatchArchiveAnchor::from_pinned_record(
+            &chained_record,
+            &verifying_key,
+            &chained_pin,
+            chained_object.checksum_blake3(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .change_refs_atomically(
+                    &repo,
+                    &[HubRefChange {
+                        ref_name: "main".into(),
+                        expected_sha: Some("chained".into()),
+                        new_sha: Some("third".into()),
+                        message: "Third publication".into(),
+                    }],
+                )
+                .unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let chained_path = archive.path_for_key(chained_object.key());
+        let chained_bytes = std::fs::read(&chained_path).unwrap();
+        std::fs::remove_file(&chained_path).unwrap();
+        assert!(
+            archive_next_hub_ref_event(&store, &archive, &repo, &signing_key, "test-key")
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .next_pending_hub_ref_event(&repo)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        std::fs::write(&chained_path, chained_bytes).unwrap();
+        let third_object =
+            archive_next_hub_ref_event(&store, &archive, &repo, &signing_key, "test-key")
+                .await
+                .unwrap()
+                .unwrap();
+        let third_record = read_hub_ref_archive_record_with_previous(
+            &archive,
+            &third_object,
+            &verifying_key,
+            &chained_anchor,
+        )
+        .await
+        .unwrap();
+        assert_eq!(third_record.event.sequence, 3);
+        assert_eq!(
+            third_record.event.after.refs[0].head_sha.as_deref(),
+            Some("third")
+        );
+        assert!(
+            store
+                .next_pending_hub_ref_event(&repo)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .pending_hub_ref_repositories_after(None, NonZeroUsize::new(1).unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let connection = open_hub_connection(store.root()).unwrap();
         connection
             .execute(
-                "UPDATE shardline_hub_recovery_sequences SET last_sequence = 2 WHERE repo_id = ?1",
-                [repo],
+                "UPDATE shardline_hub_recovery_sequences SET last_sequence = 4 WHERE repo_id = ?1",
+                [&repo],
             )
             .unwrap();
-        assert!(store.next_pending_hub_ref_event(repo).await.is_err());
+        assert!(store.next_pending_hub_ref_event(&repo).await.is_err());
         std::fs::write(archive.path_for_key(object.key()), b"corrupted archive").unwrap();
         assert!(
             read_hub_ref_archive_record(&archive, &object, &verifying_key)
@@ -1338,6 +1517,85 @@ mod tests {
                 .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("deploy-archive"))
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_revision_and_manifest_reference_commit_atomically() {
+        use crate::{HubRecoveryMode, HubRecoveryOutboxStore};
+        use shardline_reliability::HubRefBatchManifestReferenceV1;
+
+        let (_storage, store) = make_store();
+        let repo = "outbox/prepared-manifest";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "base", "main", "Initial")
+            .unwrap();
+        let prepared = HubRevision {
+            repo_id: repo.to_owned(),
+            ref_name: "main".to_owned(),
+            sha: "b".repeat(40),
+            parent_sha: Some("base".to_owned()),
+            message: Some("prepared publication".to_owned()),
+            created_at_unix_seconds: 1234,
+        };
+        let digest = "a".repeat(64);
+        let manifest = HubRefBatchManifestReferenceV1::new(
+            "deploy-manifest".to_owned(),
+            repo.to_owned(),
+            prepared.sha.clone(),
+            digest.clone(),
+            format!(
+                "recovery/v1/{}/{}/versions/aa/{digest}",
+                crate::hub_recovery::stable_id_segment("deploy-manifest"),
+                crate::hub_recovery::stable_id_segment(repo),
+            ),
+        )
+        .unwrap();
+
+        // A route cannot publish a manifest ref while the authoritative mode is OFF.
+        assert!(
+            store
+                .publish_prepared_revision_with_manifests(
+                    &prepared,
+                    std::slice::from_ref(&manifest)
+                )
+                .is_err()
+        );
+        let connection = open_hub_connection(store.root()).unwrap();
+        let head: String = connection
+            .query_row(
+                "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = 'main'",
+                [repo],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(head, "base");
+
+        store
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("deploy-manifest"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .publish_prepared_revision_with_manifests(
+                    &prepared,
+                    std::slice::from_ref(&manifest)
+                )
+                .unwrap(),
+            HubRefUpdateOutcome::Updated(_)
+        ));
+        let revision = store.get_revision(repo, &prepared.sha).unwrap().unwrap();
+        assert!(revision.matches_prepared(&prepared));
+        let pending = store
+            .next_pending_hub_ref_event(repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.event.after.manifest_refs, vec![manifest]);
+        assert_eq!(
+            pending.event.after.refs[0].head_sha.as_deref(),
+            Some(prepared.sha.as_str())
         );
     }
 

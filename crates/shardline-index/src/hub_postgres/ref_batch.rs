@@ -7,6 +7,15 @@ pub(super) fn apply(
     repo_id: &str,
     changes: &[HubRefChange],
 ) -> Result<HubRefBatchOutcome, PostgresMetadataStoreError> {
+    apply_with_manifests(store, repo_id, changes, &[])
+}
+
+pub(super) fn apply_with_manifests(
+    store: &PostgresIndexStore,
+    repo_id: &str,
+    changes: &[HubRefChange],
+    manifests: &[shardline_reliability::HubRefBatchManifestReferenceV1],
+) -> Result<HubRefBatchOutcome, PostgresMetadataStoreError> {
     if !valid_ref_batch(changes) {
         return Ok(HubRefBatchOutcome::Conflict);
     }
@@ -72,7 +81,8 @@ pub(super) fn apply(
             }
             persist_hub_ref_evidence(&mut tx, &evidence).await?;
         }
-        super::recovery_outbox::append_ref_batch(&mut tx, repo_id, &recovery_changes).await?;
+        super::recovery_outbox::append_ref_batch(&mut tx, repo_id, &recovery_changes, manifests)
+            .await?;
         tx.commit().await?;
         Ok(HubRefBatchOutcome::Applied)
     })

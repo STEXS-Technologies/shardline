@@ -1,5 +1,9 @@
 //! Signed, atomic Hub reference batch evidence for external recovery archives.
 
+mod chain;
+
+pub use chain::{HubRefBatchArchiveAnchor, HubRefBatchArchiveCheckpointPin};
+
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use statechronicle_domain_compat::{commit::Commit, intent::KeyId, signed::Signed};
@@ -13,12 +17,123 @@ const HUB_REF_ARCHIVE_SCHEMA: u16 = 1;
 const MAX_ARCHIVE_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REFS_PER_BATCH: usize = 100_000;
 
+/// Validates an archive signing key ID using StateChronicle's canonical parser.
+///
+/// # Errors
+/// Returns the existing reliability error when StateChronicle rejects the ID.
+pub fn validate_hub_ref_archive_key_id(key_id: &str) -> Result<(), ReliabilityError> {
+    KeyId::new(key_id.to_owned())
+        .map(|_key_id| ())
+        .map_err(|error| ReliabilityError::Merkle(error.to_string()))
+}
+
 /// The resulting head of one ref in a Hub batch transition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HubRefBatchHead {
     pub ref_name: String,
     pub head_sha: Option<String>,
+}
+
+/// Verified immutable version manifest bound to the exact published revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HubRefBatchManifestReferenceV1 {
+    pub deployment_id: String,
+    pub repository_id: String,
+    pub revision_sha: String,
+    pub digest_blake3: String,
+    pub object_key: String,
+}
+
+impl HubRefBatchManifestReferenceV1 {
+    /// Constructs a revision-bound manifest locator.
+    ///
+    /// # Errors
+    /// Returns an error when identity, digest, revision, or object key is invalid.
+    pub fn new(
+        deployment_id: String,
+        repository_id: String,
+        revision_sha: String,
+        digest_blake3: String,
+        object_key: String,
+    ) -> Result<Self, ReliabilityError> {
+        let value = Self {
+            deployment_id,
+            repository_id,
+            revision_sha,
+            digest_blake3,
+            object_key,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    #[must_use]
+    pub fn revision_sha(&self) -> &str {
+        &self.revision_sha
+    }
+    #[must_use]
+    pub fn deployment_id(&self) -> &str {
+        &self.deployment_id
+    }
+    #[must_use]
+    pub fn repository_id(&self) -> &str {
+        &self.repository_id
+    }
+    #[must_use]
+    pub fn digest_blake3(&self) -> &str {
+        &self.digest_blake3
+    }
+    #[must_use]
+    pub fn object_key(&self) -> &str {
+        &self.object_key
+    }
+
+    fn validate(&self) -> Result<(), ReliabilityError> {
+        let key_parts = self.object_key.split('/').collect::<Vec<_>>();
+        if !matches!(self.revision_sha.len(), 40 | 64)
+            || !self
+                .revision_sha
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.digest_blake3.len() != 64
+            || !self
+                .digest_blake3
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || self.object_key.is_empty()
+            || self.object_key.len() > 4096
+            || self.object_key.chars().any(char::is_control)
+            || key_parts.len() != 7
+            || key_parts.first() != Some(&"recovery")
+            || key_parts.get(1) != Some(&"v1")
+            || key_parts.get(4) != Some(&"versions")
+            || !key_parts.get(2).is_some_and(|part| {
+                part.len() == 64
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            || !key_parts.get(3).is_some_and(|part| {
+                part.len() == 64
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            || key_parts.get(5).copied() != Some(&self.digest_blake3[..2])
+            || key_parts.get(6).copied() != Some(self.digest_blake3.as_str())
+            || self.deployment_id.is_empty()
+            || self.deployment_id.len() > 256
+            || self.deployment_id.chars().any(char::is_control)
+            || self.repository_id.is_empty()
+            || self.repository_id.len() > 1024
+            || self.repository_id.chars().any(char::is_control)
+        {
+            return Err(ReliabilityError::OperationMismatch);
+        }
+        Ok(())
+    }
 }
 
 /// Materialized before or after state for one atomic ref publication batch.
@@ -33,6 +148,9 @@ pub struct HubRefBatchSnapshot {
     pub transaction_id: String,
     /// Sorted by canonical ref name; the vector's order is part of the encoding.
     pub refs: Vec<HubRefBatchHead>,
+    /// Sorted unique manifest locators for revisions published by this batch.
+    #[serde(default)]
+    pub manifest_refs: Vec<HubRefBatchManifestReferenceV1>,
 }
 
 impl HubRefBatchSnapshot {
@@ -50,6 +168,36 @@ impl HubRefBatchSnapshot {
         transaction_id: impl Into<String>,
         refs: Vec<HubRefBatchHead>,
     ) -> Result<Self, ReliabilityError> {
+        Self::new_with_manifest_refs(
+            deployment_id,
+            provider_id,
+            tenant_id,
+            repository_id,
+            domain_sequence,
+            transaction_id,
+            refs,
+            Vec::new(),
+        )
+    }
+
+    /// Constructs a validated snapshot including revision-bound manifests.
+    ///
+    /// # Errors
+    /// Returns an error for invalid domain identity, ref ordering, or manifest binding.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "extends the existing fixed snapshot constructor with its manifest list"
+    )]
+    pub fn new_with_manifest_refs(
+        deployment_id: impl Into<String>,
+        provider_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+        repository_id: impl Into<String>,
+        domain_sequence: u64,
+        transaction_id: impl Into<String>,
+        refs: Vec<HubRefBatchHead>,
+        manifest_refs: Vec<HubRefBatchManifestReferenceV1>,
+    ) -> Result<Self, ReliabilityError> {
         let snapshot = Self {
             deployment_id: deployment_id.into(),
             provider_id: provider_id.into(),
@@ -58,6 +206,7 @@ impl HubRefBatchSnapshot {
             domain_sequence,
             transaction_id: transaction_id.into(),
             refs,
+            manifest_refs,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -81,6 +230,9 @@ impl HubRefBatchSnapshot {
         if self.refs.is_empty() || self.refs.len() > MAX_REFS_PER_BATCH {
             return Err(ReliabilityError::EmptyField("refs"));
         }
+        if self.manifest_refs.len() > MAX_REFS_PER_BATCH {
+            return Err(ReliabilityError::OperationMismatch);
+        }
         let mut previous: Option<&str> = None;
         for entry in &self.refs {
             if entry.ref_name.is_empty()
@@ -95,6 +247,27 @@ impl HubRefBatchSnapshot {
             }
             previous = Some(&entry.ref_name);
         }
+        let mut previous_revision: Option<&str> = None;
+        for manifest in &self.manifest_refs {
+            manifest.validate()?;
+            if previous_revision.is_some_and(|last| last >= manifest.revision_sha.as_str())
+                || !self
+                    .refs
+                    .iter()
+                    .any(|head| head.head_sha.as_deref() == Some(&manifest.revision_sha))
+                || manifest.deployment_id != self.deployment_id
+                || manifest.repository_id != self.repository_id
+                || !manifest.object_key.ends_with(&format!(
+                    "/versions/{}/{}",
+                    &manifest.digest_blake3[..2],
+                    manifest.digest_blake3
+                ))
+                || !manifest.object_key.starts_with("recovery/v1/")
+            {
+                return Err(ReliabilityError::OperationMismatch);
+            }
+            previous_revision = Some(&manifest.revision_sha);
+        }
         Ok(())
     }
 
@@ -105,6 +278,7 @@ impl HubRefBatchSnapshot {
             && self.repository_id == after.repository_id
             && self.domain_sequence == after.domain_sequence
             && self.transaction_id == after.transaction_id
+            && self.manifest_refs.is_empty()
             && self.refs.len() == after.refs.len()
             && self
                 .refs
@@ -351,5 +525,105 @@ mod tests {
         let (before, after) = snapshots();
         assert!(before.validate_evidence_transition(&after).is_ok());
         assert!(after.validate_evidence_transition(&after).is_err());
+    }
+
+    #[test]
+    fn manifest_reference_is_revision_domain_and_locator_bound() {
+        let digest = "a".repeat(64);
+        let valid_locator = || {
+            HubRefBatchManifestReferenceV1::new(
+                "deploy-a".into(),
+                "org/repo".into(),
+                "b".repeat(40),
+                digest.clone(),
+                format!(
+                    "recovery/v1/{}/{}/versions/aa/{digest}",
+                    "c".repeat(64),
+                    "d".repeat(64)
+                ),
+            )
+            .unwrap()
+        };
+        let valid = valid_locator();
+        assert!(
+            HubRefBatchManifestReferenceV1::new(
+                "deploy-a".into(),
+                "org/repo".into(),
+                "not-a-revision".into(),
+                digest.clone(),
+                valid.object_key.clone(),
+            )
+            .is_err()
+        );
+        assert!(
+            HubRefBatchManifestReferenceV1::new(
+                "deploy-a".into(),
+                "org/repo".into(),
+                "b".repeat(40),
+                digest.clone(),
+                format!("recovery/v1/../../versions/aa/{digest}"),
+            )
+            .is_err()
+        );
+
+        let refs = vec![HubRefBatchHead {
+            ref_name: "main".into(),
+            head_sha: Some("b".repeat(40)),
+        }];
+        assert!(
+            HubRefBatchSnapshot::new_with_manifest_refs(
+                "deploy-a",
+                "shardline-hub",
+                "deploy-a",
+                "org/repo",
+                1,
+                "tx",
+                refs.clone(),
+                vec![valid.clone()],
+            )
+            .is_ok()
+        );
+        let wrong_domain = HubRefBatchManifestReferenceV1::new(
+            "deploy-b".into(),
+            "org/repo".into(),
+            "b".repeat(40),
+            digest.clone(),
+            valid.object_key.clone(),
+        )
+        .unwrap();
+        assert!(
+            HubRefBatchSnapshot::new_with_manifest_refs(
+                "deploy-a",
+                "shardline-hub",
+                "deploy-a",
+                "org/repo",
+                1,
+                "tx",
+                refs.clone(),
+                vec![wrong_domain],
+            )
+            .is_err()
+        );
+        let wrong_revision = HubRefBatchManifestReferenceV1::new(
+            "deploy-a".into(),
+            "org/repo".into(),
+            "e".repeat(40),
+            digest,
+            valid.object_key,
+        )
+        .unwrap();
+        assert!(
+            HubRefBatchSnapshot::new_with_manifest_refs(
+                "deploy-a",
+                "shardline-hub",
+                "deploy-a",
+                "org/repo",
+                1,
+                "tx",
+                refs,
+                vec![wrong_revision],
+            )
+            .is_err()
+        );
     }
 }

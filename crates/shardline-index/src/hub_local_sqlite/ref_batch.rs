@@ -7,6 +7,15 @@ pub(super) fn apply(
     repo_id: &str,
     changes: &[HubRefChange],
 ) -> Result<HubRefBatchOutcome, LocalIndexStoreError> {
+    apply_with_manifests(store, repo_id, changes, &[])
+}
+
+pub(super) fn apply_with_manifests(
+    store: &LocalIndexStore,
+    repo_id: &str,
+    changes: &[HubRefChange],
+    manifests: &[shardline_reliability::HubRefBatchManifestReferenceV1],
+) -> Result<HubRefBatchOutcome, LocalIndexStoreError> {
     if !valid_ref_batch(changes) {
         return Ok(HubRefBatchOutcome::Conflict);
     }
@@ -71,7 +80,7 @@ pub(super) fn apply(
                 persist_reliability_event(&tx, event)?;
             }
         }
-        super::recovery_outbox::append_ref_batch(&tx, repo_id, &recovery_changes)?;
+        super::recovery_outbox::append_ref_batch(&tx, repo_id, &recovery_changes, manifests)?;
         tx.commit()?;
         Ok(HubRefBatchOutcome::Applied)
     })

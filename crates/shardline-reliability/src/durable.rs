@@ -1,10 +1,10 @@
 use crate::states::EvidenceState;
 use crate::{
-    DigestSnapshot, HubRefBatchSnapshot, HubRefSnapshot, OciObjectLifecycleState,
-    OciObjectSnapshot, OciTagSnapshot, OperationIdentity, ProviderLifecycleSnapshot,
-    QuarantineLifecycleState, QuarantineSnapshot, RetentionHoldLifecycleState,
-    RetentionHoldSnapshot, S3ObjectSnapshot, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot,
+    DigestSnapshot, HubRefBatchManifestReferenceV1, HubRefBatchSnapshot, HubRefSnapshot,
+    OciObjectLifecycleState, OciObjectSnapshot, OciTagSnapshot, OperationIdentity,
+    ProviderLifecycleSnapshot, QuarantineLifecycleState, QuarantineSnapshot,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, S3ObjectSnapshot,
+    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot,
 };
 use serde::Serialize;
 
@@ -161,6 +161,7 @@ pub enum DurableSnapshotV1 {
         domain_sequence: u64,
         transaction_id: String,
         refs: Vec<DurableHubRefStateV1>,
+        manifest_refs: Vec<DurableHubManifestReferenceV1>,
     },
 }
 
@@ -169,6 +170,28 @@ pub enum DurableSnapshotV1 {
 pub struct DurableHubRefStateV1 {
     pub ref_name: String,
     pub head_sha: Option<String>,
+}
+
+/// Frozen immutable version locator bound to a published Hub revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DurableHubManifestReferenceV1 {
+    pub deployment_id: String,
+    pub repository_id: String,
+    pub revision_sha: String,
+    pub digest_blake3: String,
+    pub object_key: String,
+}
+
+impl From<&HubRefBatchManifestReferenceV1> for DurableHubManifestReferenceV1 {
+    fn from(reference: &HubRefBatchManifestReferenceV1) -> Self {
+        Self {
+            deployment_id: reference.deployment_id.clone(),
+            repository_id: reference.repository_id.clone(),
+            revision_sha: reference.revision_sha.clone(),
+            digest_blake3: reference.digest_blake3.clone(),
+            object_key: reference.object_key.clone(),
+        }
+    }
 }
 
 impl From<&HubRefBatchSnapshot> for DurableSnapshotV1 {
@@ -188,6 +211,7 @@ impl From<&HubRefBatchSnapshot> for DurableSnapshotV1 {
                     head_sha: state.head_sha.clone(),
                 })
                 .collect(),
+            manifest_refs: snapshot.manifest_refs.iter().map(Into::into).collect(),
         }
     }
 }

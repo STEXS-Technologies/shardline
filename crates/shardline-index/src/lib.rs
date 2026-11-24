@@ -100,8 +100,9 @@ pub use dedupe::DedupeShardMapping;
 pub use deduplication_domain::DeduplicationDomain;
 pub use hub_recovery::{
     HubRecoveryArchiveObject, HubRecoveryError, HubRecoveryMode, HubRecoveryOutboxItem,
-    HubRecoveryOutboxStore, archive_next_hub_ref_event, put_hub_ref_archive_record,
-    read_hub_ref_archive_record,
+    HubRecoveryOutboxStore, MAX_PENDING_REPOSITORY_PAGE, archive_next_hub_ref_event,
+    put_hub_ref_archive_record, read_hub_ref_archive_record,
+    read_hub_ref_archive_record_with_previous,
 };
 pub use ids::{FileId, StoredObjectId, XorbId};
 pub use lifecycle::{
@@ -143,6 +144,7 @@ pub use resumable_snapshot::resumable_state_digest;
 pub use s3_objects::{
     S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, S3PublishCondition, s3_prefix_successor,
 };
+pub use shardline_reliability::HubRefBatchManifestReferenceV1;
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,

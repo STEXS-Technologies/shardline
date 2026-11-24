@@ -1,4 +1,5 @@
 use shardline_protocol::SecretString;
+use shardline_reliability::HubRefBatchManifestReferenceV1;
 use std::sync::Arc;
 
 /// Type-erased failure returned by [`BoxedHubStore`].
@@ -520,6 +521,24 @@ pub trait HubStore: Send + Sync {
         let _ = (repo_id, changes);
         Ok(HubRefBatchOutcome::Unsupported)
     }
+    /// Atomically commits ref changes and revision-bound manifest locators.
+    /// Nonempty locators fail closed unless the adapter persists them in its
+    /// publication transaction.
+    ///
+    /// # Errors
+    /// Returns an error on storage or integrity failure, rolling back all refs.
+    fn change_refs_atomically_with_manifests(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefBatchOutcome, Self::Error> {
+        if manifests.is_empty() {
+            self.change_refs_atomically(repo_id, changes)
+        } else {
+            Ok(HubRefBatchOutcome::Unsupported)
+        }
+    }
     /// Adapter-specific error type.
     type Error: std::fmt::Display + Send + Sync + 'static;
 
@@ -614,6 +633,22 @@ pub trait HubStore: Send + Sync {
     ) -> Result<HubRefUpdateOutcome, Self::Error> {
         let _ = revision;
         Ok(HubRefUpdateOutcome::Unsupported)
+    }
+    /// Publishes one prepared immutable revision and its archive locator in
+    /// the same ref/outbox transaction. Nonempty locators fail closed by default.
+    ///
+    /// # Errors
+    /// Returns an error on storage or immutable-metadata failure.
+    fn publish_prepared_revision_with_manifests(
+        &self,
+        revision: &HubRevision,
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        if manifests.is_empty() {
+            self.publish_prepared_revision(revision)
+        } else {
+            Ok(HubRefUpdateOutcome::Unsupported)
+        }
     }
     /// Atomically updates an existing ref only when its current SHA equals `expected_sha`.
     ///
@@ -988,6 +1023,19 @@ impl BoxedHubStore {
     ) -> Result<HubRefBatchOutcome, HubStoreError> {
         self.inner.change_refs_atomically(repo_id, changes)
     }
+    /// Atomically applies conditional refs with their immutable manifest locators.
+    ///
+    /// # Errors
+    /// Returns an error on storage or integrity failure.
+    pub fn change_refs_atomically_with_manifests(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefBatchOutcome, HubStoreError> {
+        self.inner
+            .change_refs_atomically_with_manifests(repo_id, changes, manifests)
+    }
     /// Reads one immutable, repository-scoped revision without listing history.
     ///
     /// # Errors
@@ -1111,6 +1159,18 @@ impl BoxedHubStore {
         revision: &HubRevision,
     ) -> Result<HubRefUpdateOutcome, HubStoreError> {
         self.inner.publish_prepared_revision(revision)
+    }
+    /// Publishes a prepared revision together with revision-bound archive locators.
+    ///
+    /// # Errors
+    /// Returns an error on storage or immutable-metadata failure.
+    pub fn publish_prepared_revision_with_manifests(
+        &self,
+        revision: &HubRevision,
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefUpdateOutcome, HubStoreError> {
+        self.inner
+            .publish_prepared_revision_with_manifests(revision, manifests)
     }
 
     /// Atomically updates an existing ref at exactly `expected_sha`.
@@ -1433,6 +1493,15 @@ impl<T: HubStore> HubStore for ErasedAdapter<T> {
     ) -> Result<HubRefBatchOutcome, HubStoreError> {
         T::change_refs_atomically(&self.store, repo_id, changes).map_err(self.erase_error)
     }
+    fn change_refs_atomically_with_manifests(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefBatchOutcome, HubStoreError> {
+        T::change_refs_atomically_with_manifests(&self.store, repo_id, changes, manifests)
+            .map_err(self.erase_error)
+    }
     fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, HubStoreError> {
         T::get_revision(&self.store, repo_id, sha).map_err(self.erase_error)
     }
@@ -1489,6 +1558,14 @@ impl<T: HubStore> HubStore for ErasedAdapter<T> {
         revision: &HubRevision,
     ) -> Result<HubRefUpdateOutcome, HubStoreError> {
         T::publish_prepared_revision(&self.store, revision).map_err(self.erase_error)
+    }
+    fn publish_prepared_revision_with_manifests(
+        &self,
+        revision: &HubRevision,
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefUpdateOutcome, HubStoreError> {
+        T::publish_prepared_revision_with_manifests(&self.store, revision, manifests)
+            .map_err(self.erase_error)
     }
     fn update_revision_if_current(
         &self,

@@ -3,8 +3,9 @@ use crate::hub::HubRefChange;
 use crate::hub_recovery::{
     HubRecoveryError, HubRecoveryMode, HubRecoveryOutboxItem, HubRecoveryOutboxStore,
     MAX_HUB_REF_EVENT_BYTES, build_hub_ref_batch_event, decode_hub_ref_event,
-    validate_mode_transition,
+    validate_mode_transition, validate_requested_mode,
 };
+use shardline_reliability::HubRefBatchManifestReferenceV1;
 use sqlx::{Postgres, Row, Transaction};
 
 /// Appends a complete ref batch using the publication transaction's repository
@@ -13,18 +14,36 @@ pub(super) async fn append_ref_batch(
     tx: &mut Transaction<'_, Postgres>,
     repository_id: &str,
     changes: &[HubRefChange],
+    manifest_refs: &[HubRefBatchManifestReferenceV1],
 ) -> Result<(), sqlx::Error> {
-    if changes.is_empty() {
+    if changes.is_empty() && manifest_refs.is_empty() {
         return Ok(());
     }
     let config = sqlx::query(
         "SELECT mode, deployment_id FROM shardline_hub_recovery_config WHERE singleton_id = 1 FOR SHARE",
     )
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
+    let Some(config) = config else {
+        // The production migration inserts the singleton OFF row. Isolated
+        // schema fixtures copy table definitions without rows, so absence has
+        // the same safe semantics as the read-only mode API: OFF. Manifest
+        // references still require an authoritative SHADOW config row.
+        if manifest_refs.is_empty() {
+            return Ok(());
+        }
+        return Err(sqlx::Error::Protocol(
+            "manifest references require authoritative SHADOW mode".into(),
+        ));
+    };
     let mode: String = config.try_get("mode")?;
-    if mode == HubRecoveryMode::Off.as_str() {
+    if mode == HubRecoveryMode::Off.as_str() && manifest_refs.is_empty() {
         return Ok(());
+    }
+    if mode == HubRecoveryMode::Off.as_str() {
+        return Err(sqlx::Error::Protocol(
+            "manifest references require authoritative SHADOW mode".into(),
+        ));
     }
     if mode != HubRecoveryMode::Shadow.as_str() {
         return Err(sqlx::Error::Protocol("invalid Hub recovery mode".into()));
@@ -43,16 +62,14 @@ pub(super) async fn append_ref_batch(
     .await?;
     let sequence = u64::try_from(sequence)
         .map_err(|_conversion_error| sqlx::Error::Protocol("Hub sequence was negative".into()))?;
-    let transaction_id = format!(
-        "hub-ref:{}:{sequence}",
-        hex::encode(repository_id.as_bytes())
-    );
+    let transaction_id = crate::hub_recovery::hub_ref_transaction_id(repository_id, sequence);
     let event = build_hub_ref_batch_event(
         &deployment_id,
         repository_id,
         sequence,
         &transaction_id,
         changes,
+        manifest_refs,
     )
     .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
     let event_json =
@@ -81,27 +98,63 @@ pub(super) async fn append_ref_batch(
 
 #[async_trait::async_trait]
 impl HubRecoveryOutboxStore for PostgresIndexStore {
+    async fn hub_recovery_mode(
+        &self,
+    ) -> Result<(HubRecoveryMode, Option<String>), HubRecoveryError> {
+        let row = sqlx::query(
+            "SELECT mode, deployment_id FROM shardline_hub_recovery_config WHERE singleton_id = 1",
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+        match row {
+            None => Ok((HubRecoveryMode::Off, None)),
+            Some(row) => {
+                let mode: String = row
+                    .try_get("mode")
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+                let deployment: Option<String> = row
+                    .try_get("deployment_id")
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+                match (mode.as_str(), deployment) {
+                    ("off", None) => Ok((HubRecoveryMode::Off, None)),
+                    ("shadow", Some(deployment)) => Ok((HubRecoveryMode::Shadow, Some(deployment))),
+                    _ => Err(HubRecoveryError::Outbox(
+                        "stored Hub recovery mode is invalid".into(),
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn pending_hub_ref_repositories_after(
+        &self,
+        cursor: Option<&str>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<String>, HubRecoveryError> {
+        if limit.get() > crate::hub_recovery::MAX_PENDING_REPOSITORY_PAGE {
+            return Err(HubRecoveryError::PageLimitExceeded);
+        }
+        let limit = i64::try_from(limit.get())
+            .map_err(|_conversion_error| HubRecoveryError::PageLimitExceeded)?;
+        sqlx::query_scalar(
+            "SELECT repo_id FROM shardline_hub_recovery_sequences
+             WHERE last_sequence > last_archived_sequence AND ($1::text IS NULL OR repo_id > $1)
+             ORDER BY repo_id LIMIT $2",
+        )
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|error| HubRecoveryError::Outbox(error.to_string()))
+    }
+
     async fn set_hub_recovery_mode(
         &self,
         mode: HubRecoveryMode,
         deployment_id: Option<&str>,
     ) -> Result<(), HubRecoveryError> {
-        let deployment_id = match (mode, deployment_id) {
-            (HubRecoveryMode::Off, None) => None,
-            (HubRecoveryMode::Shadow, Some(value))
-                if !value.is_empty()
-                    && value.len() <= 256
-                    && !value.chars().any(char::is_control) =>
-            {
-                Some(value)
-            }
-            _ => {
-                return Err(HubRecoveryError::Outbox(
-                    "shadow mode requires a valid stable deployment ID; OFF takes no ID".into(),
-                ));
-            }
-        };
-        let deployment_id = deployment_id.map(ToOwned::to_owned);
+        let deployment_id = validate_requested_mode(mode, deployment_id)?;
         let result = async {
             let mut tx = self.pool().begin().await?;
             sqlx::query(
@@ -166,6 +219,25 @@ impl HubRecoveryOutboxStore for PostgresIndexStore {
             let expected = archived_sequence
                 .checked_add(1)
                 .ok_or_else(|| sqlx::Error::Protocol("Hub sequence overflow".into()))?;
+            let previous_archive_digest = if expected == 1 {
+                None
+            } else {
+                let previous_sequence = expected
+                    .checked_sub(1)
+                    .ok_or_else(|| sqlx::Error::Protocol("Hub sequence underflow".into()))?;
+                let digest = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT archive_digest FROM shardline_hub_recovery_outbox
+                     WHERE repo_id = $1 AND domain_sequence = $2
+                       AND archived_at_unix_seconds IS NOT NULL",
+                )
+                .bind(repository_id)
+                .bind(previous_sequence)
+                .fetch_optional(self.pool())
+                .await?
+                .flatten()
+                .ok_or_else(|| sqlx::Error::Protocol("Hub archive predecessor is missing".into()))?;
+                Some(digest)
+            };
             let row = sqlx::query(
                 "SELECT transaction_id, event_json::text AS event_json FROM shardline_hub_recovery_outbox
                  WHERE repo_id = $1 AND domain_sequence = $2 AND archived_at_unix_seconds IS NULL",
@@ -180,7 +252,7 @@ impl HubRecoveryOutboxStore for PostgresIndexStore {
             if event_json.len() > MAX_HUB_REF_EVENT_BYTES {
                 return Err(sqlx::Error::Protocol("Hub outbox event exceeds byte limit".into()));
             }
-            decode_hub_ref_event(repository_id, expected, transaction_id, &event_json)
+            decode_hub_ref_event(repository_id, expected, transaction_id, &event_json, previous_archive_digest)
                 .map(Some)
                 .map_err(|error| sqlx::Error::Protocol(error.to_string()))
         }

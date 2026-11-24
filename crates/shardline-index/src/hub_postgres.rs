@@ -14,10 +14,11 @@ use shardline_protocol::SecretString;
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
-        HubRefPublicationMode, HubRefUpdateOutcome, HubRepo, HubRepoSearchOptions, HubRepoType,
-        HubRevision, HubStore, HubTreePage, HubTreePageEntry, HubTreePageOptions, HubWebhook,
-        HubWebhookCreateOutcome, canonical_ref_name, hub_tree_requires_recovery,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefChange,
+        HubRefCreateOutcome, HubRefPublicationMode, HubRefUpdateOutcome, HubRepo,
+        HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage, HubTreePageEntry,
+        HubTreePageOptions, HubWebhook, HubWebhookCreateOutcome, canonical_ref_name,
+        hub_tree_requires_recovery,
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
@@ -223,6 +224,14 @@ impl HubStore for PostgresIndexStore {
     ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
         ref_batch::apply(self, repo_id, changes)
     }
+    fn change_refs_atomically_with_manifests(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        manifests: &[shardline_reliability::HubRefBatchManifestReferenceV1],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply_with_manifests(self, repo_id, changes, manifests)
+    }
     type Error = PostgresMetadataStoreError;
 
     fn create_repo(
@@ -408,6 +417,13 @@ impl HubStore for PostgresIndexStore {
         &self,
         revision: &HubRevision,
     ) -> Result<HubRefUpdateOutcome, Self::Error> {
+        self.publish_prepared_revision_with_manifests(revision, &[])
+    }
+    fn publish_prepared_revision_with_manifests(
+        &self,
+        revision: &HubRevision,
+        manifests: &[shardline_reliability::HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefUpdateOutcome, Self::Error> {
         self.publish_hub_revision_at(
             &revision.repo_id,
             revision.parent_sha.as_deref(),
@@ -416,6 +432,7 @@ impl HubStore for PostgresIndexStore {
             revision.message.as_deref().unwrap_or(""),
             HubRefPublicationMode::UpdateOnly,
             Some(revision),
+            manifests,
         )
         .map(HubRefCreateOutcome::into_update)
     }
@@ -1152,7 +1169,16 @@ impl PostgresIndexStore {
         message: &str,
         mode: HubRefPublicationMode,
     ) -> Result<HubRefCreateOutcome, PostgresMetadataStoreError> {
-        self.publish_hub_revision_at(repo_id, parent_sha, new_sha, ref_name, message, mode, None)
+        self.publish_hub_revision_at(
+            repo_id,
+            parent_sha,
+            new_sha,
+            ref_name,
+            message,
+            mode,
+            None,
+            &[],
+        )
     }
 
     #[allow(
@@ -1168,6 +1194,7 @@ impl PostgresIndexStore {
         message: &str,
         mode: HubRefPublicationMode,
         prepared: Option<&HubRevision>,
+        manifest_refs: &[shardline_reliability::HubRefBatchManifestReferenceV1],
     ) -> Result<HubRefCreateOutcome, PostgresMetadataStoreError> {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
@@ -1178,6 +1205,7 @@ impl PostgresIndexStore {
         let prepared_timestamp = prepared
             .map(|r| u64_to_i64(r.created_at_unix_seconds))
             .transpose()?;
+        let manifest_refs = manifest_refs.to_vec();
 
         block_on_async(async {
             let mut tx = pool.begin().await?;
@@ -1275,6 +1303,18 @@ impl PostgresIndexStore {
             )?
             .0;
             persist_hub_ref_evidence(&mut tx, &evidence).await?;
+            recovery_outbox::append_ref_batch(
+                &mut tx,
+                &repo_id,
+                &[HubRefChange {
+                    ref_name: ref_name.clone(),
+                    expected_sha: parent_sha.clone(),
+                    new_sha: Some(new_sha.clone()),
+                    message: message.clone(),
+                }],
+                &manifest_refs,
+            )
+            .await?;
 
             let row = sqlx::query(
                 "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
@@ -1459,6 +1499,87 @@ mod tests {
             .unwrap();
         assert_eq!(second.domain_sequence, 2);
         assert_eq!(second.event.after.refs[0].head_sha.as_deref(), Some("two"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_prepared_manifest_reference_is_atomic() {
+        use crate::{HubRecoveryMode, HubRecoveryOutboxStore};
+        use shardline_reliability::HubRefBatchManifestReferenceV1;
+        if std::env::var_os("DATABASE_URL").is_none() {
+            eprintln!("skipping PostgreSQL prepared-manifest test: no DATABASE_URL");
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool);
+        let repo = "recovery/pg-prepared-manifest";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "base", "main", "Initial")
+            .unwrap();
+        let prepared = HubRevision {
+            repo_id: repo.to_owned(),
+            ref_name: "main".to_owned(),
+            sha: "b".repeat(40),
+            parent_sha: Some("base".to_owned()),
+            message: Some("prepared".to_owned()),
+            created_at_unix_seconds: 1234,
+        };
+        let digest = "a".repeat(64);
+        let manifest = HubRefBatchManifestReferenceV1::new(
+            "pg-manifest-deployment".into(),
+            repo.into(),
+            prepared.sha.clone(),
+            digest.clone(),
+            format!(
+                "recovery/v1/{}/{}/versions/aa/{digest}",
+                crate::hub_recovery::stable_id_segment("pg-manifest-deployment"),
+                crate::hub_recovery::stable_id_segment(repo)
+            ),
+        )
+        .unwrap();
+        assert!(
+            store
+                .publish_prepared_revision_with_manifests(
+                    &prepared,
+                    std::slice::from_ref(&manifest)
+                )
+                .is_err()
+        );
+        let head: String = sqlx::query_scalar(
+            "SELECT sha FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = 'main'",
+        )
+        .bind(repo)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(head, "base");
+        store
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some("pg-manifest-deployment"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .publish_prepared_revision_with_manifests(
+                    &prepared,
+                    std::slice::from_ref(&manifest)
+                )
+                .unwrap(),
+            HubRefUpdateOutcome::Updated(_)
+        ));
+        let revision = store.get_revision(repo, &prepared.sha).unwrap().unwrap();
+        assert!(revision.matches_prepared(&prepared));
+        let item = store
+            .next_pending_hub_ref_event(repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.event.after.manifest_refs, vec![manifest]);
+        assert_eq!(
+            item.event.after.refs[0].head_sha.as_deref(),
+            Some(prepared.sha.as_str())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

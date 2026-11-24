@@ -9,13 +9,39 @@ use async_trait::async_trait;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use shardline_protocol::ByteRange;
 use shardline_reliability::{
-    HubRefBatchArchiveEvent, HubRefBatchArchiveRecordV1, HubRefBatchHead, HubRefBatchSnapshot,
-    ReliabilityError, SnapshotEvidenceEvent,
+    HubRefBatchArchiveAnchor, HubRefBatchArchiveCheckpointPin, HubRefBatchArchiveEvent,
+    HubRefBatchArchiveRecordV1, HubRefBatchHead, HubRefBatchManifestReferenceV1,
+    HubRefBatchSnapshot, ReliabilityError, SnapshotEvidenceEvent,
 };
 use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey};
+use std::num::NonZeroUsize;
 use thiserror::Error;
 
 pub(crate) const MAX_HUB_REF_EVENT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_PENDING_REPOSITORY_PAGE: usize = 256;
+
+pub(crate) fn stable_id_segment(id: &str) -> String {
+    ObjectIntegrity::for_bytes(id.as_bytes())
+        .hash()
+        .hex_string()
+}
+
+pub(crate) fn hub_ref_transaction_id(repository_id: &str, sequence: u64) -> String {
+    format!("hub-ref:{}:{sequence}", stable_id_segment(repository_id))
+}
+
+fn hub_ref_archive_key(
+    deployment_id: &str,
+    repository_id: &str,
+    sequence: u64,
+    checksum: &str,
+) -> Result<ObjectKey, HubRecoveryError> {
+    Ok(ObjectKey::parse(&format!(
+        "recovery/v1/{}/hub/{}/{sequence:020}-{checksum}.json",
+        stable_id_segment(deployment_id),
+        stable_id_segment(repository_id),
+    ))?)
+}
 
 /// The Hub-only recovery mode currently supported by the schema.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -69,12 +95,31 @@ pub(crate) fn validate_mode_transition(
     }
 }
 
+pub(crate) fn validate_requested_mode(
+    mode: HubRecoveryMode,
+    deployment_id: Option<&str>,
+) -> Result<Option<String>, HubRecoveryError> {
+    match (mode, deployment_id) {
+        (HubRecoveryMode::Off, None) => Ok(None),
+        (HubRecoveryMode::Shadow, Some(value))
+            if !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control) =>
+        {
+            Ok(Some(value.to_owned()))
+        }
+        _ => Err(HubRecoveryError::Outbox(
+            "shadow mode requires a valid stable deployment ID; OFF takes no ID".into(),
+        )),
+    }
+}
+
 /// One typed batch read from the committed SQL outbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubRecoveryOutboxItem {
     pub repository_id: String,
     pub domain_sequence: u64,
     pub transaction_id: String,
+    /// Receipt checksum of the immediately preceding committed event, if any.
+    pub previous_archive_digest_blake3: Option<String>,
     pub event: HubRefBatchArchiveEvent,
 }
 
@@ -85,6 +130,19 @@ impl HubRecoveryOutboxItem {
             || self.transaction_id != self.event.operation.operation_id
         {
             return Err(HubRecoveryError::OutboxEventMismatch);
+        }
+        if (self.domain_sequence == 1) != self.previous_archive_digest_blake3.is_none()
+            || self
+                .previous_archive_digest_blake3
+                .as_ref()
+                .is_some_and(|digest| {
+                    digest.len() != 64
+                        || !digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+        {
+            return Err(HubRecoveryError::SequenceGap);
         }
         Ok(())
     }
@@ -113,12 +171,34 @@ pub enum HubRecoveryError {
     SequenceGap,
     #[error("Hub recovery archive record exceeds its size bound")]
     RecordTooLarge,
+    #[error("Hub pending repository page limit exceeds its fixed bound")]
+    PageLimitExceeded,
 }
 
 /// Adapter boundary for the existing SQL outbox. Each call owns a short SQL
 /// transaction; implementations must not hold SQL locks during archive I/O.
 #[async_trait]
 pub trait HubRecoveryOutboxStore: Send + Sync {
+    /// Reads authoritative mode and deployment identity without modifying config.
+    async fn hub_recovery_mode(
+        &self,
+    ) -> Result<(HubRecoveryMode, Option<String>), HubRecoveryError> {
+        Err(HubRecoveryError::Outbox(
+            "recovery mode read is unsupported".into(),
+        ))
+    }
+
+    /// Returns an ordered, bounded keyset page of repositories with pending events.
+    async fn pending_hub_ref_repositories_after(
+        &self,
+        cursor: Option<&str>,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<String>, HubRecoveryError> {
+        let _ = (cursor, limit);
+        Err(HubRecoveryError::Outbox(
+            "pending repository paging is unsupported".into(),
+        ))
+    }
     /// Enables/disables the Hub shadow outbox. SHADOW requires a stable external
     /// deployment identity; OFF clears it and emits no events.
     ///
@@ -159,6 +239,7 @@ pub(crate) fn build_hub_ref_batch_event(
     domain_sequence: u64,
     transaction_id: &str,
     changes: &[HubRefChange],
+    manifest_refs: &[HubRefBatchManifestReferenceV1],
 ) -> Result<HubRefBatchArchiveEvent, HubRecoveryError> {
     // Hub has no independent tenant metadata. Use deployment as its tenant
     // scope and preserve the repository ID as an opaque value.
@@ -190,7 +271,9 @@ pub(crate) fn build_hub_ref_batch_event(
         transaction_id,
         before,
     )?;
-    let after = HubRefBatchSnapshot::new(
+    let mut manifest_refs = manifest_refs.to_vec();
+    manifest_refs.sort_by(|left, right| left.revision_sha.cmp(&right.revision_sha));
+    let after = HubRefBatchSnapshot::new_with_manifest_refs(
         deployment_id,
         "shardline-hub",
         tenant_id,
@@ -198,6 +281,7 @@ pub(crate) fn build_hub_ref_batch_event(
         domain_sequence,
         transaction_id,
         after,
+        manifest_refs,
     )?;
     Ok(SnapshotEvidenceEvent::new(domain_sequence, before, after)?)
 }
@@ -231,8 +315,9 @@ impl HubRecoveryArchiveObject {
     }
 }
 
-/// Writes and reads back a signed StateChronicle record for one committed Hub
-/// batch. The SQL transaction has already committed before this function runs.
+/// Writes and reads back the genesis StateChronicle record for one committed
+/// Hub batch (sequence one). Later receipts must use the predecessor-aware
+/// outbox consumer. The SQL transaction has already committed before this runs.
 ///
 /// # Errors
 /// Returns an error if signing, immutable storage, readback, or record
@@ -243,19 +328,42 @@ pub async fn put_hub_ref_archive_record<S: AsyncObjectStore>(
     signing_key: &SigningKey,
     key_id: &str,
 ) -> Result<HubRecoveryArchiveObject, HubRecoveryError> {
+    put_hub_ref_archive_record_inner(store, event, signing_key, key_id, None).await
+}
+
+async fn put_hub_ref_archive_record_inner<S: AsyncObjectStore>(
+    store: &S,
+    event: HubRefBatchArchiveEvent,
+    signing_key: &SigningKey,
+    key_id: &str,
+    previous: Option<&HubRefBatchArchiveAnchor>,
+) -> Result<HubRecoveryArchiveObject, HubRecoveryError> {
+    if previous.is_none() && event.sequence != 1 {
+        return Err(HubRecoveryError::SequenceGap);
+    }
     let verifying_key = VerifyingKey::from(signing_key);
-    let record = HubRefBatchArchiveRecordV1::sign_with_key_id(event, signing_key, key_id)?;
-    let bytes = record.canonical_bytes(&verifying_key)?;
+    let record = match previous {
+        Some(previous) => HubRefBatchArchiveRecordV1::sign_with_previous_with_key_id(
+            event,
+            signing_key,
+            key_id,
+            previous,
+        )?,
+        None => HubRefBatchArchiveRecordV1::sign_with_key_id(event, signing_key, key_id)?,
+    };
+    let bytes = match previous {
+        Some(previous) => record.canonical_bytes_with_previous(&verifying_key, previous)?,
+        None => record.canonical_bytes(&verifying_key)?,
+    };
     let integrity = ObjectIntegrity::for_bytes(&bytes);
     let checksum = integrity.hash().hex_string();
     let event_state = &record.event.after;
-    let key = ObjectKey::parse(&format!(
-        "recovery/v1/{}/hub/{}/{:020}-{}.json",
-        hex::encode(event_state.deployment_id.as_bytes()),
-        hex::encode(event_state.repository_id.as_bytes()),
+    let key = hub_ref_archive_key(
+        &event_state.deployment_id,
+        &event_state.repository_id,
         event_state.domain_sequence,
-        checksum,
-    ))?;
+        &checksum,
+    )?;
     store
         .put_if_absent(&key, ObjectBody::from_slice(&bytes), &integrity)
         .await
@@ -267,51 +375,132 @@ pub async fn put_hub_ref_archive_record<S: AsyncObjectStore>(
         byte_length: integrity.length(),
         event: record.event.clone(),
     };
-    let verified = read_hub_ref_archive_record(store, &object, &verifying_key).await?;
+    let verified =
+        read_hub_ref_archive_record_inner(store, &object, &verifying_key, previous).await?;
     if verified.event != object.event {
         return Err(HubRecoveryError::IntegrityMismatch);
     }
     Ok(object)
 }
 
-/// Reads and authenticates a previously stored Hub batch archive object.
+/// Reads and authenticates a genesis Hub receipt (sequence one).
 ///
 /// # Errors
 /// Returns an error if storage, length, byte integrity, format, event digest,
-/// or StateChronicle signature verification fails.
+/// or StateChronicle signature verification fails. Later records require the
+/// predecessor-aware reader.
 pub async fn read_hub_ref_archive_record<S: AsyncObjectStore>(
     store: &S,
     object: &HubRecoveryArchiveObject,
     verifying_key: &VerifyingKey,
 ) -> Result<HubRefBatchArchiveRecordV1, HubRecoveryError> {
+    read_hub_ref_archive_record_inner(store, object, verifying_key, None).await
+}
+
+/// Reads and verifies a Hub archive receipt against its signed predecessor.
+///
+/// # Errors
+/// Returns storage, checksum, format, signature, domain, or sequence errors.
+pub async fn read_hub_ref_archive_record_with_previous<S: AsyncObjectStore>(
+    store: &S,
+    object: &HubRecoveryArchiveObject,
+    verifying_key: &VerifyingKey,
+    previous: &HubRefBatchArchiveAnchor,
+) -> Result<HubRefBatchArchiveRecordV1, HubRecoveryError> {
+    read_hub_ref_archive_record_inner(store, object, verifying_key, Some(previous)).await
+}
+
+async fn read_hub_ref_archive_record_inner<S: AsyncObjectStore>(
+    store: &S,
+    object: &HubRecoveryArchiveObject,
+    verifying_key: &VerifyingKey,
+    previous: Option<&HubRefBatchArchiveAnchor>,
+) -> Result<HubRefBatchArchiveRecordV1, HubRecoveryError> {
+    let bytes = read_verified_hub_archive_bytes(
+        store,
+        &object.key,
+        &object.checksum_blake3,
+        Some(object.byte_length),
+    )
+    .await?;
+    let record = match previous {
+        Some(previous) => {
+            HubRefBatchArchiveRecordV1::decode_with_previous(&bytes, verifying_key, previous)?.0
+        }
+        None => HubRefBatchArchiveRecordV1::decode(&bytes, verifying_key)?,
+    };
+    if previous.is_none() && record.event.sequence != 1 {
+        return Err(HubRecoveryError::SequenceGap);
+    }
+    Ok(record)
+}
+
+async fn read_verified_hub_archive_bytes<S: AsyncObjectStore>(
+    store: &S,
+    key: &ObjectKey,
+    expected_checksum: &str,
+    expected_length: Option<u64>,
+) -> Result<Vec<u8>, HubRecoveryError> {
     let metadata = store
-        .metadata(&object.key)
+        .metadata(key)
         .await
         .map_err(|error| HubRecoveryError::Storage(error.to_string()))?
         .ok_or(HubRecoveryError::MissingObject)?;
-    if metadata.length() != object.byte_length || object.byte_length == 0 {
+    let byte_length = metadata.length();
+    if expected_length.is_some_and(|expected| expected != byte_length) || byte_length == 0 {
         return Err(HubRecoveryError::IntegrityMismatch);
     }
-    if object.byte_length > 8 * 1024 * 1024 {
+    if byte_length > 8 * 1024 * 1024 {
         return Err(HubRecoveryError::RecordTooLarge);
     }
-    let last_byte = object
-        .byte_length
+    let last_byte = byte_length
         .checked_sub(1)
         .ok_or(HubRecoveryError::IntegrityMismatch)?;
     let range = ByteRange::new(0, last_byte)
         .map_err(|_conversion_error| HubRecoveryError::IntegrityMismatch)?;
     let bytes = store
-        .read_range(&object.key, range)
+        .read_range(key, range)
         .await
         .map_err(|error| HubRecoveryError::Storage(error.to_string()))?;
     let integrity = ObjectIntegrity::for_bytes(&bytes);
-    if integrity.length() != object.byte_length
-        || integrity.hash().hex_string() != object.checksum_blake3
-    {
+    if integrity.length() != byte_length || integrity.hash().hex_string() != expected_checksum {
         return Err(HubRecoveryError::IntegrityMismatch);
     }
-    Ok(HubRefBatchArchiveRecordV1::decode(&bytes, verifying_key)?)
+    Ok(bytes)
+}
+
+async fn read_previous_archive_anchor<S: AsyncObjectStore>(
+    store: &S,
+    item: &HubRecoveryOutboxItem,
+    verifying_key: &VerifyingKey,
+) -> Result<Option<HubRefBatchArchiveAnchor>, HubRecoveryError> {
+    item.verify_identity()?;
+    let Some(checksum) = item.previous_archive_digest_blake3.as_deref() else {
+        return Ok(None);
+    };
+    let previous_sequence = item
+        .domain_sequence
+        .checked_sub(1)
+        .ok_or(HubRecoveryError::SequenceGap)?;
+    let state = &item.event.after;
+    let key = hub_ref_archive_key(
+        &state.deployment_id,
+        &state.repository_id,
+        previous_sequence,
+        checksum,
+    )?;
+    let bytes = read_verified_hub_archive_bytes(store, &key, checksum, None).await?;
+    let pin = HubRefBatchArchiveCheckpointPin::new(
+        state.deployment_id.clone(),
+        state.provider_id.clone(),
+        state.tenant_id.clone(),
+        state.repository_id.clone(),
+        previous_sequence,
+        checksum.to_owned(),
+    )?;
+    let (_record, anchor) =
+        HubRefBatchArchiveRecordV1::decode_pinned_anchor(&bytes, verifying_key, &pin, checksum)?;
+    Ok(Some(anchor))
 }
 
 /// Archives the next SQL outbox item and advances its archived watermark only
@@ -328,15 +517,23 @@ pub async fn archive_next_hub_ref_event<O, S>(
     key_id: &str,
 ) -> Result<Option<HubRecoveryArchiveObject>, HubRecoveryError>
 where
-    O: HubRecoveryOutboxStore,
+    O: HubRecoveryOutboxStore + ?Sized,
     S: AsyncObjectStore,
 {
     let Some(item) = outbox.next_pending_hub_ref_event(repository_id).await? else {
         return Ok(None);
     };
     item.verify_identity()?;
-    let object =
-        put_hub_ref_archive_record(archive, item.event.clone(), signing_key, key_id).await?;
+    let verifying_key = VerifyingKey::from(signing_key);
+    let previous = read_previous_archive_anchor(archive, &item, &verifying_key).await?;
+    let object = put_hub_ref_archive_record_inner(
+        archive,
+        item.event.clone(),
+        signing_key,
+        key_id,
+        previous.as_ref(),
+    )
+    .await?;
     if object.event != item.event {
         return Err(HubRecoveryError::OutboxEventMismatch);
     }
@@ -350,6 +547,7 @@ pub(crate) fn decode_hub_ref_event(
     sequence: i64,
     transaction_id: String,
     event_json: &str,
+    previous_archive_digest_blake3: Option<String>,
 ) -> Result<HubRecoveryOutboxItem, HubRecoveryError> {
     if event_json.len() > MAX_HUB_REF_EVENT_BYTES {
         return Err(HubRecoveryError::RecordTooLarge);
@@ -368,6 +566,7 @@ pub(crate) fn decode_hub_ref_event(
         repository_id: repository_id.to_owned(),
         domain_sequence: parsed_sequence,
         transaction_id,
+        previous_archive_digest_blake3,
         event,
     })
 }

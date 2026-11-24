@@ -2,10 +2,11 @@ use super::{LocalIndexStore, open_hub_connection};
 use crate::hub::HubRefChange;
 use crate::hub_recovery::{
     MAX_HUB_REF_EVENT_BYTES, build_hub_ref_batch_event, decode_hub_ref_event,
-    validate_mode_transition,
+    validate_mode_transition, validate_requested_mode,
 };
 use crate::{HubRecoveryError, HubRecoveryMode, HubRecoveryOutboxItem, HubRecoveryOutboxStore};
 use rusqlite::OptionalExtension;
+use shardline_reliability::HubRefBatchManifestReferenceV1;
 
 async fn run_outbox_blocking<T, F>(work: F) -> Result<T, HubRecoveryError>
 where
@@ -29,8 +30,9 @@ pub(super) fn append_ref_batch(
     tx: &rusqlite::Transaction<'_>,
     repository_id: &str,
     changes: &[HubRefChange],
+    manifest_refs: &[HubRefBatchManifestReferenceV1],
 ) -> Result<(), crate::LocalIndexStoreError> {
-    if changes.is_empty() {
+    if changes.is_empty() && manifest_refs.is_empty() {
         return Ok(());
     }
     let config: (String, Option<String>) = tx.query_row(
@@ -38,8 +40,15 @@ pub(super) fn append_ref_batch(
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if config.0 == HubRecoveryMode::Off.as_str() {
+    if config.0 == HubRecoveryMode::Off.as_str() && manifest_refs.is_empty() {
         return Ok(());
+    }
+    if config.0 == HubRecoveryMode::Off.as_str() {
+        return Err(crate::LocalIndexStoreError::Sqlite(
+            rusqlite::Error::InvalidParameterName(
+                "manifest references require authoritative SHADOW mode".to_owned(),
+            ),
+        ));
     }
     if config.0 != HubRecoveryMode::Shadow.as_str() {
         return Err(crate::LocalIndexStoreError::Sqlite(
@@ -64,16 +73,15 @@ pub(super) fn append_ref_batch(
     })?;
     // The scoped sequence is the stable transaction identity: retrying a
     // rolled-back SQL transaction reuses the same identity and sequence.
-    let transaction_id = format!(
-        "hub-ref:{}:{domain_sequence}",
-        hex::encode(repository_id.as_bytes())
-    );
+    let transaction_id =
+        crate::hub_recovery::hub_ref_transaction_id(repository_id, domain_sequence);
     let event = build_hub_ref_batch_event(
         &deployment_id,
         repository_id,
         domain_sequence,
         &transaction_id,
         changes,
+        manifest_refs,
     )
     .map_err(|error| {
         crate::LocalIndexStoreError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(
@@ -101,28 +109,65 @@ pub(super) fn append_ref_batch(
 
 #[async_trait::async_trait]
 impl HubRecoveryOutboxStore for LocalIndexStore {
+    async fn hub_recovery_mode(
+        &self,
+    ) -> Result<(HubRecoveryMode, Option<String>), HubRecoveryError> {
+        let root = self.root().to_owned();
+        run_outbox_blocking(move || {
+            let conn = open_hub_connection(&root).map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let row: Option<(String, Option<String>)> = conn.query_row(
+                "SELECT mode, deployment_id FROM shardline_hub_recovery_config WHERE singleton_id = 1",
+                [], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            match row {
+                None => Ok((HubRecoveryMode::Off, None)),
+                Some((mode, deployment)) if mode == "off" && deployment.is_none() => Ok((HubRecoveryMode::Off, None)),
+                Some((mode, deployment)) if mode == "shadow" && deployment.is_some() => Ok((HubRecoveryMode::Shadow, deployment)),
+                _ => Err(HubRecoveryError::Outbox("stored Hub recovery mode is invalid".into())),
+            }
+        }).await
+    }
+
+    async fn pending_hub_ref_repositories_after(
+        &self,
+        cursor: Option<&str>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<String>, HubRecoveryError> {
+        if limit.get() > crate::hub_recovery::MAX_PENDING_REPOSITORY_PAGE {
+            return Err(HubRecoveryError::PageLimitExceeded);
+        }
+        let root = self.root().to_owned();
+        let cursor = cursor.map(ToOwned::to_owned);
+        let limit = i64::try_from(limit.get())
+            .map_err(|_conversion_error| HubRecoveryError::PageLimitExceeded)?;
+        run_outbox_blocking(move || {
+            let conn = open_hub_connection(&root)
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let mut statement = conn
+                .prepare(
+                    "SELECT s.repo_id FROM shardline_hub_recovery_sequences s
+                 WHERE s.last_sequence > s.last_archived_sequence AND (?1 IS NULL OR s.repo_id > ?1)
+                 ORDER BY s.repo_id LIMIT ?2",
+                )
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            let rows = statement
+                .query_map(rusqlite::params![cursor, limit], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| HubRecoveryError::Outbox(error.to_string()))
+        })
+        .await
+    }
+
     async fn set_hub_recovery_mode(
         &self,
         mode: HubRecoveryMode,
         deployment_id: Option<&str>,
     ) -> Result<(), HubRecoveryError> {
-        let deployment_id = match (mode, deployment_id) {
-            (HubRecoveryMode::Off, None) => None,
-            (HubRecoveryMode::Shadow, Some(value))
-                if !value.is_empty()
-                    && value.len() <= 256
-                    && !value.chars().any(char::is_control) =>
-            {
-                Some(value)
-            }
-            _ => {
-                return Err(HubRecoveryError::Outbox(
-                    "shadow mode requires a valid stable deployment ID; OFF takes no ID".into(),
-                ));
-            }
-        };
+        let deployment_id = validate_requested_mode(mode, deployment_id)?;
         let root = self.root().to_owned();
-        let deployment_id = deployment_id.map(ToOwned::to_owned);
         run_outbox_blocking(move || {
             let mut connection = open_hub_connection(&root)
                 .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?;
@@ -191,6 +236,26 @@ impl HubRecoveryOutboxStore for LocalIndexStore {
             let expected = archived_sequence
                 .checked_add(1)
                 .ok_or(HubRecoveryError::SequenceGap)?;
+            let previous_archive_digest = if expected == 1 {
+                None
+            } else {
+                let previous_sequence = expected
+                    .checked_sub(1)
+                    .ok_or(HubRecoveryError::SequenceGap)?;
+                connection
+                    .query_row(
+                        "SELECT archive_digest FROM shardline_hub_recovery_outbox
+                         WHERE repo_id = ?1 AND domain_sequence = ?2
+                           AND archived_at_unix_seconds IS NOT NULL",
+                        rusqlite::params![&repository_id, previous_sequence],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?
+                    .flatten()
+                    .ok_or(HubRecoveryError::SequenceGap)
+                    .map(Some)?
+            };
             let row = connection
                 .query_row(
                     "SELECT transaction_id, event_json FROM shardline_hub_recovery_outbox
@@ -202,7 +267,14 @@ impl HubRecoveryOutboxStore for LocalIndexStore {
                 .optional()
                 .map_err(|error| HubRecoveryError::Outbox(error.to_string()))?
                 .ok_or(HubRecoveryError::SequenceGap)?;
-            decode_hub_ref_event(&repository_id, expected, row.0, &row.1).map(Some)
+            decode_hub_ref_event(
+                &repository_id,
+                expected,
+                row.0,
+                &row.1,
+                previous_archive_digest,
+            )
+            .map(Some)
         })
         .await
     }
