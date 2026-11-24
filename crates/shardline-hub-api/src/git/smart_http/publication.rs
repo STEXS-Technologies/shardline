@@ -1,7 +1,7 @@
 //! Prepare verified, durable Git metadata before authoritative ref publication.
 
 use shardline_index::{
-    HubRefBatchManifestReferenceV1, HubTreeVersionManifestV1,
+    HubRefBatchManifestReferenceV1,
     hub::{HubFileEntry, HubRevision},
 };
 use shardline_server_core::AuthorizedRepository;
@@ -42,24 +42,10 @@ pub(crate) async fn prepare_publication(
             .store_files(&prepared.revision.sha, &files)
             .map_err(failure)?;
         let manifest_ref = if let Some(archive) = recovery_archive {
-            let manifest = HubTreeVersionManifestV1::new(
-                archive.deployment_id.clone(),
-                archive.resource_domain.clone(),
-                prepared.revision.clone(),
-                prepared.public_id.clone(),
-                files,
-            )
-            .map_err(failure)?;
-            let locator = manifest.store(&archive.object_store).map_err(failure)?;
             Some(
-                HubRefBatchManifestReferenceV1::new(
-                    archive.deployment_id,
-                    prepared.revision.repo_id.clone(),
-                    prepared.revision.sha.clone(),
-                    locator.digest,
-                    locator.key.as_str().to_owned(),
-                )
-                .map_err(failure)?,
+                archive
+                    .store_revision_manifest(&prepared.revision, &prepared.public_id, files)
+                    .map_err(failure)?,
             )
         } else {
             None
@@ -133,6 +119,7 @@ fn prepare_sync(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use shardline_index::HubTreeVersionManifestV1;
     use shardline_index::hub::{HubRefUpdateOutcome, HubRepoType};
     use shardline_server_core::AuthorizedRepository;
     use shardline_storage::ObjectStore;

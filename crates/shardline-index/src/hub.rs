@@ -300,6 +300,77 @@ pub(crate) fn valid_ref_batch(changes: &[HubRefChange]) -> bool {
         })
 }
 
+pub(crate) struct PreparedHubRevisionBatch<'change> {
+    revisions_by_sha: std::collections::HashMap<&'change str, &'change HubRevision>,
+    first_change_by_sha: std::collections::HashMap<&'change str, &'change HubRefChange>,
+}
+
+impl<'change> PreparedHubRevisionBatch<'change> {
+    pub(crate) fn new(
+        repository_id: &str,
+        changes: &'change [HubRefChange],
+        revisions: &'change [HubRevision],
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Option<Self> {
+        let mut first_change_by_sha = std::collections::HashMap::new();
+        for change in changes {
+            if change.expected_sha != change.new_sha
+                && let Some(sha) = change.new_sha.as_deref()
+            {
+                first_change_by_sha.entry(sha).or_insert(change);
+            }
+        }
+        let mut revisions_by_sha = std::collections::HashMap::new();
+        for revision in revisions {
+            if revision.repo_id != repository_id
+                || revision.sha.is_empty()
+                || revisions_by_sha
+                    .insert(revision.sha.as_str(), revision)
+                    .is_some()
+            {
+                return None;
+            }
+        }
+        let manifest_shas = manifests
+            .iter()
+            .map(HubRefBatchManifestReferenceV1::revision_sha)
+            .collect::<std::collections::HashSet<_>>();
+        if manifest_shas.len() != manifests.len()
+            || revisions_by_sha.len() != first_change_by_sha.len()
+            || revisions_by_sha.len() != manifest_shas.len()
+            || revisions_by_sha
+                .keys()
+                .any(|sha| !first_change_by_sha.contains_key(sha) || !manifest_shas.contains(sha))
+        {
+            return None;
+        }
+        Some(Self {
+            revisions_by_sha,
+            first_change_by_sha,
+        })
+    }
+
+    pub(crate) fn revision(&self, sha: &str) -> Option<&'change HubRevision> {
+        self.revisions_by_sha.get(sha).copied()
+    }
+
+    pub(crate) fn first_change(&self, sha: &str) -> Option<&'change HubRefChange> {
+        self.first_change_by_sha.get(sha).copied()
+    }
+}
+
+pub(crate) fn prepared_revision_matches_first_change(
+    repository_id: &str,
+    change: &HubRefChange,
+    revision: &HubRevision,
+) -> bool {
+    revision.repo_id == repository_id
+        && revision.sha == change.new_sha.as_deref().unwrap_or_default()
+        && canonical_ref_name(&revision.ref_name) == canonical_ref_name(&change.ref_name)
+        && revision.parent_sha == change.expected_sha
+        && revision.message.as_deref().unwrap_or("") == change.message
+}
+
 /// A Hub file entry within a commit tree.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -536,6 +607,29 @@ pub trait HubStore: Send + Sync {
     ) -> Result<HubRefBatchOutcome, Self::Error> {
         if manifests.is_empty() {
             self.change_refs_atomically(repo_id, changes)
+        } else {
+            Ok(HubRefBatchOutcome::Unsupported)
+        }
+    }
+    /// Atomically commits conditional ref changes, prepared revision metadata,
+    /// and revision-bound manifest locators in one transaction.
+    ///
+    /// `prepared_revisions` contains exactly one persisted metadata record for
+    /// each distinct newly referenced SHA. Existing revision metadata must
+    /// match exactly; first-time metadata must match the first corresponding
+    /// changed ref. This preserves timestamps prepared by protocol code.
+    ///
+    /// # Errors
+    /// Returns an error on storage, metadata mismatch, or integrity failure.
+    fn change_refs_atomically_with_prepared_revisions(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        prepared_revisions: &[HubRevision],
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefBatchOutcome, Self::Error> {
+        if prepared_revisions.is_empty() && manifests.is_empty() {
+            self.change_refs_atomically_with_manifests(repo_id, changes, manifests)
         } else {
             Ok(HubRefBatchOutcome::Unsupported)
         }
@@ -1037,6 +1131,24 @@ impl BoxedHubStore {
         self.inner
             .change_refs_atomically_with_manifests(repo_id, changes, manifests)
     }
+    /// Atomically publishes prepared revisions, refs, and manifest locators.
+    ///
+    /// # Errors
+    /// Returns an error on storage or prepared metadata mismatch.
+    pub fn change_refs_atomically_with_prepared_revisions(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        prepared_revisions: &[HubRevision],
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefBatchOutcome, HubStoreError> {
+        self.inner.change_refs_atomically_with_prepared_revisions(
+            repo_id,
+            changes,
+            prepared_revisions,
+            manifests,
+        )
+    }
     /// Reads one immutable, repository-scoped revision without listing history.
     ///
     /// # Errors
@@ -1502,6 +1614,22 @@ impl<T: HubStore> HubStore for ErasedAdapter<T> {
     ) -> Result<HubRefBatchOutcome, HubStoreError> {
         T::change_refs_atomically_with_manifests(&self.store, repo_id, changes, manifests)
             .map_err(self.erase_error)
+    }
+    fn change_refs_atomically_with_prepared_revisions(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        prepared_revisions: &[HubRevision],
+        manifests: &[HubRefBatchManifestReferenceV1],
+    ) -> Result<HubRefBatchOutcome, HubStoreError> {
+        T::change_refs_atomically_with_prepared_revisions(
+            &self.store,
+            repo_id,
+            changes,
+            prepared_revisions,
+            manifests,
+        )
+        .map_err(self.erase_error)
     }
     fn get_revision(&self, repo_id: &str, sha: &str) -> Result<Option<HubRevision>, HubStoreError> {
         T::get_revision(&self.store, repo_id, sha).map_err(self.erase_error)

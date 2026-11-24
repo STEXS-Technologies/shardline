@@ -19,9 +19,10 @@ use crate::{
     error::HubApiError,
     routes::{HubState, lfs_object_key, require_repository_binding},
 };
+use shardline_index::HubRefBatchManifestReferenceV1;
 use shardline_index::hub::{
     HubFileEntry, HubRefBatchOutcome, HubRefChange, HubRefCreateOutcome, HubRefUpdateOutcome,
-    canonical_ref_name,
+    HubRevision, canonical_ref_name,
 };
 use shardline_protocol::{ShardlineHash, TokenScope};
 use shardline_server_core::AuthorizedRepository;
@@ -40,6 +41,27 @@ struct PushObjects<'object> {
     git: HashMap<[u8; 20], &'object GitObject>,
     lfs: HashMap<String, &'object GitObject>,
     inline: HashMap<String, &'object GitObject>,
+}
+
+/// Fully prepared metadata for one pushed ref. In SHADOW, the immutable
+/// manifest and exact revision metadata are ready before the SQL publication.
+struct PreparedPushRef {
+    change: HubRefChange,
+    shadow_manifest: Option<PreparedRevisionManifest>,
+}
+
+#[derive(Clone)]
+struct PreparedRevisionManifest {
+    revision: HubRevision,
+    reference: HubRefBatchManifestReferenceV1,
+}
+
+struct PushPreparationInputs<'inputs, 'objects> {
+    state: &'inputs HubState,
+    repo_id: &'inputs str,
+    objects: &'inputs PushObjects<'objects>,
+    auth: &'inputs AuthorizedRepository,
+    prepared_shadow_versions: &'inputs mut HashMap<String, PreparedRevisionManifest>,
 }
 
 impl<'object> PushObjects<'object> {
@@ -193,6 +215,9 @@ pub async fn receive_pack(
     };
     let mut results = Vec::new();
     let mut changes = Vec::new();
+    let mut prepared_manifests = Vec::new();
+    let mut prepared_revision_shas = std::collections::HashSet::new();
+    let mut prepared_shadow_versions: HashMap<String, PreparedRevisionManifest> = HashMap::new();
 
     for (old_sha, new_sha, refname) in &updates {
         // Multiple Hub revisions may project to the same Git commit. Resolve
@@ -209,25 +234,34 @@ pub async fn receive_pack(
                 if resolved_old == "0000000000000000000000000000000000000000" {
                     Err(SmartHttpError::CannotDeleteNonExistentRef)
                 } else {
-                    Ok(HubRefChange {
-                        ref_name: refname.clone(),
-                        expected_sha: Some(resolved_old),
-                        new_sha: None,
-                        message: String::new(),
+                    Ok(PreparedPushRef {
+                        change: HubRefChange {
+                            ref_name: refname.clone(),
+                            expected_sha: Some(resolved_old),
+                            new_sha: None,
+                            message: String::new(),
+                        },
+                        shadow_manifest: None,
                     })
                 }
             } else {
-                prepare_push_objects(
-                    &state,
-                    &repo_id,
-                    &resolved_old,
-                    new_sha,
-                    refname,
-                    &indexed,
-                    &capability,
-                )
+                let mut inputs = PushPreparationInputs {
+                    state: &state,
+                    repo_id: &repo_id,
+                    objects: &indexed,
+                    auth: &capability,
+                    prepared_shadow_versions: &mut prepared_shadow_versions,
+                };
+                prepare_push_objects(&mut inputs, &resolved_old, new_sha, refname)
             };
-            prepared.map(|change| changes.push(change))
+            prepared.map(|prepared| {
+                if let Some(manifest) = prepared.shadow_manifest
+                    && prepared_revision_shas.insert(manifest.revision.sha.clone())
+                {
+                    prepared_manifests.push(manifest);
+                }
+                changes.push(prepared.change);
+            })
         } else if new_sha == "0000000000000000000000000000000000000000" {
             delete_push_ref(&state, &repo_id, &resolved_old, refname)
         } else {
@@ -251,30 +285,60 @@ pub async fn receive_pack(
         let failure = if results.iter().any(|(_, ok, _)| !ok) {
             Some("atomic push preparation failed".to_owned())
         } else {
-            let store = state.store.clone();
-            let repository = repo_id.clone();
-            // Retain the same admission slot if the HTTP waiter disappears
-            // while the database transaction is still completing.
-            let publication = tokio::task::spawn_blocking(move || {
-                let _admission = _admission;
-                store.change_refs_atomically(&repository, &changes)
-            })
-            .await;
-            match publication {
-                Ok(Ok(HubRefBatchOutcome::Applied)) => None,
-                Ok(Ok(HubRefBatchOutcome::Conflict)) => {
-                    Some("atomic push failed: ref conflict or protected ref".to_owned())
-                }
-                Ok(Ok(HubRefBatchOutcome::Unsupported)) => {
-                    Some("atomic pushes are unsupported by this store".to_owned())
-                }
-                Ok(Err(error)) => {
-                    tracing::warn!("atomic Git publication failed: {error}");
-                    Some("atomic push storage failure".to_owned())
-                }
-                Err(error) => {
-                    tracing::warn!("atomic Git worker failed: {error}");
-                    Some("atomic push worker failure".to_owned())
+            let expected_manifest_count = changes
+                .iter()
+                .filter(|change| change.expected_sha.as_deref() != change.new_sha.as_deref())
+                .filter_map(|change| change.new_sha.as_deref())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            if state.recovery_archive.is_some()
+                && prepared_manifests.len() != expected_manifest_count
+            {
+                Some("Hub SHADOW push is missing prepared manifest metadata".to_owned())
+            } else {
+                let prepared_revisions: Vec<_> = prepared_manifests
+                    .iter()
+                    .map(|prepared| prepared.revision.clone())
+                    .collect();
+                let manifest_refs: Vec<_> = prepared_manifests
+                    .iter()
+                    .map(|prepared| prepared.reference.clone())
+                    .collect();
+                let store = state.store.clone();
+                let repository = repo_id.clone();
+                let recovery_archive_enabled = state.recovery_archive.is_some();
+                // Retain the same admission slot if the HTTP waiter disappears
+                // while the database transaction is still completing.
+                let publication = tokio::task::spawn_blocking(move || {
+                    let _admission = _admission;
+                    if recovery_archive_enabled {
+                        store.change_refs_atomically_with_prepared_revisions(
+                            &repository,
+                            &changes,
+                            &prepared_revisions,
+                            &manifest_refs,
+                        )
+                    } else {
+                        store.change_refs_atomically(&repository, &changes)
+                    }
+                })
+                .await;
+                match publication {
+                    Ok(Ok(HubRefBatchOutcome::Applied)) => None,
+                    Ok(Ok(HubRefBatchOutcome::Conflict)) => {
+                        Some("atomic push failed: ref conflict or protected ref".to_owned())
+                    }
+                    Ok(Ok(HubRefBatchOutcome::Unsupported)) => {
+                        Some("atomic pushes are unsupported by this store".to_owned())
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!("atomic Git publication failed: {error}");
+                        Some("atomic push storage failure".to_owned())
+                    }
+                    Err(error) => {
+                        tracing::warn!("atomic Git worker failed: {error}");
+                        Some("atomic push worker failure".to_owned())
+                    }
                 }
             }
         };
@@ -300,19 +364,54 @@ fn store_push_objects(
     objects: &PushObjects<'_>,
     auth: &AuthorizedRepository,
 ) -> Result<(), SmartHttpError> {
-    let change = prepare_push_objects(state, repo_id, old_sha, new_sha, ref_name, objects, auth)?;
-    publish_push_ref(state, repo_id, &change)
+    let mut prepared_shadow_versions = HashMap::new();
+    let mut inputs = PushPreparationInputs {
+        state,
+        repo_id,
+        objects,
+        auth,
+        prepared_shadow_versions: &mut prepared_shadow_versions,
+    };
+    let prepared = prepare_push_objects(&mut inputs, old_sha, new_sha, ref_name)?;
+    if let Some(manifest) = &prepared.shadow_manifest {
+        match state
+            .store
+            .publish_prepared_revision_with_manifests(
+                &manifest.revision,
+                std::slice::from_ref(&manifest.reference),
+            )
+            .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
+        {
+            HubRefUpdateOutcome::Updated(_) => Ok(()),
+            HubRefUpdateOutcome::Conflict => Err(SmartHttpError::NonFastForward(
+                "ref is missing or no longer matches expected head".to_owned(),
+            )),
+            HubRefUpdateOutcome::Unsupported => Err(SmartHttpError::CreateRevision(
+                "atomic ref update is unsupported by this store".to_owned(),
+            )),
+        }
+    } else if state.recovery_archive.is_some()
+        && prepared.change.expected_sha.as_deref() != prepared.change.new_sha.as_deref()
+    {
+        Err(SmartHttpError::CreateRevision(
+            "Hub SHADOW publication is missing prepared manifest metadata".to_owned(),
+        ))
+    } else {
+        publish_push_ref(state, repo_id, &prepared.change)
+    }
 }
 
 fn prepare_push_objects(
-    state: &HubState,
-    repo_id: &str,
+    inputs: &mut PushPreparationInputs<'_, '_>,
     old_sha: &str,
     new_sha: &str,
     ref_name: &str,
-    objects: &PushObjects<'_>,
-    auth: &AuthorizedRepository,
-) -> Result<HubRefChange, SmartHttpError> {
+) -> Result<PreparedPushRef, SmartHttpError> {
+    let state = inputs.state;
+    let repo_id = inputs.repo_id;
+    let objects = inputs.objects;
+    let auth = inputs.auth;
+    let prepared_shadow_versions = &mut *inputs.prepared_shadow_versions;
     // Find the commit object for new_sha.
     let new_sha_bytes =
         hex::decode(new_sha).map_err(|e| SmartHttpError::InvalidCommitShaHex(e.to_string()))?;
@@ -494,11 +593,58 @@ fn prepare_push_objects(
     super::projection::archive_objects(state, repo_id, new_sha, objects.all, auth)
         .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
-    Ok(HubRefChange {
+    let change = HubRefChange {
         ref_name: ref_name.to_owned(),
         expected_sha: parent.map(str::to_owned),
         new_sha: Some(new_sha.to_owned()),
-        message,
+        message: message.clone(),
+    };
+    let shadow_manifest = if let Some(archive) = state
+        .recovery_archive
+        .as_ref()
+        .filter(|_| parent != Some(new_sha))
+    {
+        let prepared = if let Some(prepared) = prepared_shadow_versions.get(new_sha) {
+            prepared.clone()
+        } else {
+            let revision = if let Some(existing) = state
+                .store
+                .get_revision(repo_id, new_sha)
+                .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
+            {
+                existing
+            } else {
+                let created_at_unix_seconds = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
+                    .as_secs();
+                HubRevision {
+                    repo_id: repo_id.to_owned(),
+                    ref_name: ref_name.to_owned(),
+                    sha: new_sha.to_owned(),
+                    parent_sha: parent.map(str::to_owned),
+                    message: Some(message),
+                    created_at_unix_seconds,
+                }
+            };
+            let reference = archive
+                .store_revision_manifest(&revision, new_sha, files)
+                .map_err(SmartHttpError::StoreFiles)?;
+            let prepared = PreparedRevisionManifest {
+                revision,
+                reference,
+            };
+            prepared_shadow_versions.insert(new_sha.to_owned(), prepared.clone());
+            prepared
+        };
+        Some(prepared)
+    } else {
+        None
+    };
+
+    Ok(PreparedPushRef {
+        change,
+        shadow_manifest,
     })
 }
 

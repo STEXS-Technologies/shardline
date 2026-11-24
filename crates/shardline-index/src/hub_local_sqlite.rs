@@ -163,6 +163,15 @@ impl HubStore for LocalIndexStore {
     ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
         ref_batch::apply_with_manifests(self, repo_id, changes, manifests)
     }
+    fn change_refs_atomically_with_prepared_revisions(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        revisions: &[HubRevision],
+        manifests: &[shardline_reliability::HubRefBatchManifestReferenceV1],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply_with_prepared_revisions(self, repo_id, changes, revisions, manifests)
+    }
     type Error = LocalIndexStoreError;
 
     fn create_repo(
@@ -1286,6 +1295,118 @@ mod tests {
         assert_eq!(event.after.deployment_id, "deploy-a");
         assert_eq!(event.operation.operation_id, outbox.1);
         event.verify_integrity().unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_ref_batch_preserves_revision_metadata_and_duplicate_sha_refs() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange, HubRevision};
+        use crate::{HubRecoveryMode, HubRecoveryOutboxStore};
+        use shardline_reliability::HubRefBatchManifestReferenceV1;
+
+        let (_storage, store) = make_store();
+        let repo = "prepared-batch/repo";
+        let deployment = "prepared-batch-deploy";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "base", "main", "Initial")
+            .unwrap();
+        store
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some(deployment))
+            .await
+            .unwrap();
+
+        let sha = "a".repeat(40);
+        let revision = HubRevision {
+            repo_id: repo.to_owned(),
+            ref_name: "main".to_owned(),
+            sha: sha.clone(),
+            parent_sha: Some("base".to_owned()),
+            message: Some("prepared batch".to_owned()),
+            created_at_unix_seconds: 1234,
+        };
+        let digest = "b".repeat(64);
+        let manifest = HubRefBatchManifestReferenceV1::new(
+            deployment.to_owned(),
+            repo.to_owned(),
+            sha.clone(),
+            digest.clone(),
+            format!(
+                "recovery/v1/{}/{}/versions/bb/{digest}",
+                crate::hub_recovery::stable_id_segment(deployment),
+                crate::hub_recovery::stable_id_segment(repo),
+            ),
+        )
+        .unwrap();
+        let changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("base".into()),
+                new_sha: Some(sha.clone()),
+                message: "prepared batch".into(),
+            },
+            HubRefChange {
+                ref_name: "refs/heads/feature".into(),
+                expected_sha: None,
+                new_sha: Some(sha.clone()),
+                message: "prepared batch".into(),
+            },
+        ];
+        assert_eq!(
+            store
+                .change_refs_atomically_with_prepared_revisions(
+                    repo,
+                    &changes,
+                    std::slice::from_ref(&revision),
+                    std::slice::from_ref(&manifest),
+                )
+                .unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let stored = store.get_revision(repo, &sha).unwrap().unwrap();
+        assert!(stored.matches_prepared(&revision));
+        let refs = store.list_refs_bounded(repo, 10).unwrap().unwrap();
+        assert_eq!(refs.len(), 2);
+        let connection = open_hub_connection(store.root()).unwrap();
+        let event_json: String = connection
+            .query_row(
+                "SELECT event_json FROM shardline_hub_recovery_outbox
+                 WHERE repo_id = ?1 AND domain_sequence = 1",
+                [repo],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event: shardline_reliability::HubRefBatchArchiveEvent =
+            serde_json::from_str(&event_json).unwrap();
+        assert_eq!(event.after.refs.len(), 2);
+        assert_eq!(event.after.manifest_refs, [manifest]);
+
+        let conflicting = HubRevision {
+            created_at_unix_seconds: revision.created_at_unix_seconds + 1,
+            ..revision
+        };
+        assert!(
+            store
+                .change_refs_atomically_with_prepared_revisions(
+                    repo,
+                    &[HubRefChange {
+                        ref_name: "stable".into(),
+                        expected_sha: None,
+                        new_sha: Some(sha),
+                        message: "prepared batch".into(),
+                    }],
+                    &[conflicting],
+                    &[],
+                )
+                .is_err()
+        );
+        let sequence: i64 = connection
+            .query_row(
+                "SELECT last_sequence FROM shardline_hub_recovery_sequences WHERE repo_id = ?1",
+                [repo],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sequence, 1);
     }
 
     #[tokio::test]

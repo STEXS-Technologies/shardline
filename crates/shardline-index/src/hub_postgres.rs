@@ -232,6 +232,15 @@ impl HubStore for PostgresIndexStore {
     ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
         ref_batch::apply_with_manifests(self, repo_id, changes, manifests)
     }
+    fn change_refs_atomically_with_prepared_revisions(
+        &self,
+        repo_id: &str,
+        changes: &[HubRefChange],
+        revisions: &[HubRevision],
+        manifests: &[shardline_reliability::HubRefBatchManifestReferenceV1],
+    ) -> Result<crate::hub::HubRefBatchOutcome, Self::Error> {
+        ref_batch::apply_with_prepared_revisions(self, repo_id, changes, revisions, manifests)
+    }
     type Error = PostgresMetadataStoreError;
 
     fn create_repo(
@@ -1580,6 +1589,117 @@ mod tests {
             item.event.after.refs[0].head_sha.as_deref(),
             Some(prepared.sha.as_str())
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_prepared_ref_batch_preserves_timestamp_and_duplicate_sha_heads() {
+        use crate::hub::{HubRefBatchOutcome, HubRefChange};
+        use crate::{HubRecoveryMode, HubRecoveryOutboxStore};
+        use shardline_reliability::HubRefBatchManifestReferenceV1;
+        if std::env::var_os("DATABASE_URL").is_none() {
+            eprintln!("skipping PostgreSQL prepared ref batch test: no DATABASE_URL");
+            return;
+        }
+        let pool = connect_postgres()
+            .await
+            .expect("configured PostgreSQL fixture must connect");
+        let store = make_store(pool);
+        let repo = "recovery/pg-prepared-ref-batch";
+        let deployment = "pg-prepared-ref-batch-deployment";
+        store.create_repo(HubRepoType::Model, repo, false).unwrap();
+        store
+            .create_revision(repo, None, "base", "main", "Initial")
+            .unwrap();
+        store
+            .set_hub_recovery_mode(HubRecoveryMode::Shadow, Some(deployment))
+            .await
+            .unwrap();
+
+        let sha = "e".repeat(40);
+        let prepared = HubRevision {
+            repo_id: repo.to_owned(),
+            ref_name: "main".to_owned(),
+            sha: sha.clone(),
+            parent_sha: Some("base".to_owned()),
+            message: Some("prepared batch".to_owned()),
+            created_at_unix_seconds: 1234,
+        };
+        let digest = "f".repeat(64);
+        let manifest = HubRefBatchManifestReferenceV1::new(
+            deployment.to_owned(),
+            repo.to_owned(),
+            sha.clone(),
+            digest.clone(),
+            format!(
+                "recovery/v1/{}/{}/versions/ff/{digest}",
+                crate::hub_recovery::stable_id_segment(deployment),
+                crate::hub_recovery::stable_id_segment(repo),
+            ),
+        )
+        .unwrap();
+        let changes = [
+            HubRefChange {
+                ref_name: "main".into(),
+                expected_sha: Some("base".into()),
+                new_sha: Some(sha.clone()),
+                message: "prepared batch".into(),
+            },
+            HubRefChange {
+                ref_name: "refs/heads/feature".into(),
+                expected_sha: None,
+                new_sha: Some(sha.clone()),
+                message: "prepared batch".into(),
+            },
+        ];
+        assert_eq!(
+            store
+                .change_refs_atomically_with_prepared_revisions(
+                    repo,
+                    &changes,
+                    std::slice::from_ref(&prepared),
+                    std::slice::from_ref(&manifest),
+                )
+                .unwrap(),
+            HubRefBatchOutcome::Applied
+        );
+        let revision = store.get_revision(repo, &sha).unwrap().unwrap();
+        assert!(revision.matches_prepared(&prepared));
+        assert_eq!(store.list_refs(repo).unwrap().len(), 2);
+        let item = store
+            .next_pending_hub_ref_event(repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.event.after.refs.len(), 2);
+        assert_eq!(item.event.after.manifest_refs, [manifest]);
+
+        let conflicting = HubRevision {
+            created_at_unix_seconds: prepared.created_at_unix_seconds + 1,
+            ..prepared
+        };
+        assert!(
+            store
+                .change_refs_atomically_with_prepared_revisions(
+                    repo,
+                    &[HubRefChange {
+                        ref_name: "stable".into(),
+                        expected_sha: None,
+                        new_sha: Some(sha.clone()),
+                        message: "prepared batch".into(),
+                    }],
+                    &[conflicting],
+                    &[],
+                )
+                .is_err()
+        );
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT last_sequence FROM shardline_hub_recovery_sequences WHERE repo_id = $1",
+        )
+        .bind(repo)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(sequence, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
